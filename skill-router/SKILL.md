@@ -76,7 +76,11 @@ python D:\Skills\skill-router\ops.py backup    # git 备份状态（backup now �
 - **自动保持最新**：`wire_guard` 每轮顺带调 `git_backup.py`，**10 分钟去抖 + 只在真有改动时**提交推送，
   推完回读 `ls-remote` 核对 SHA。日志 `D:\AI-Tool-State\git-backup\backup.log`。
 - **`.gitattributes` 设 `* -text`**：本库文件编码是混合的（有 BOM、有 CRLF、有 LF），
-  备份必须字节一致，禁止 git 顺手规范化。
+  备份必须字节一致，禁止 git 顺手规范化。**必须在第一次 `git add` 之前就位**——
+  2026-11-15 实测踩过：首次 add 早于该文件，79 个文件被 CRLF→LF 入库，
+  补属性后 `git rm -r --cached .` 并没真正清空索引，靠 `git add --renormalize .` 才修好。
+- **备份的验收标准是「从远端克隆回来逐文件 sha256 一致」，不是「push 返回 0」。**
+  复核脚本 `G:\AIrenwu\_audit\verify_restore.py`（4 个远端各浅克隆一次全量比对）。
 - **7 个技能按许可排除在远端之外**（`.gitignore` 按目录排除，本地仍可用）：
   `docx`/`pdf`/`pptx`/`xlsx`（Anthropic 专有，明文禁止在 Services 外保留副本、禁止转移第三方）、
   `reverse-trace`/`reverse-wechat-miniapp`（无 LICENSE，PROVENANCE 限定仅本机自用）、
