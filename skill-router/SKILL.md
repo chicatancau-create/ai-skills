@@ -63,7 +63,28 @@ python D:\Skills\skill-router\ops.py restart   # 重启 headroom
 python D:\Skills\skill-router\ops.py wire      # 重新接线（守护会自动做，一般不用手跑）
 python D:\Skills\skill-router\ops.py unwire    # 回滚到 cc-switch 直连
 python D:\Skills\skill-router\ops.py skills    # 重建索引 + doctor
+python D:\Skills\skill-router\ops.py backup    # git 备份状态（backup now 立刻提交并推两个远端）
 ```
+
+### 技能库备份：两个 git 远端，不做本地备份
+
+| 库 | 本地 | GitHub | GitCode |
+| --- | --- | --- | --- |
+| 统一技能库 | `D:\Skills`（就地 `git init`，零复制） | `chicatancau-create/ai-skills`（private） | `zhoumoyukuai/ai-skills`（private） |
+| Qoder 工具箱 | `D:\QoderToolkit` | `chicatancau-create/qoder-toolkit`（private） | `zhoumoyukuai/qoder-toolkit`（private） |
+
+- **自动保持最新**：`wire_guard` 每轮顺带调 `git_backup.py`，**10 分钟去抖 + 只在真有改动时**提交推送，
+  推完回读 `ls-remote` 核对 SHA。日志 `D:\AI-Tool-State\git-backup\backup.log`。
+- **`.gitattributes` 设 `* -text`**：本库文件编码是混合的（有 BOM、有 CRLF、有 LF），
+  备份必须字节一致，禁止 git 顺手规范化。
+- **7 个技能按许可排除在远端之外**（`.gitignore` 按目录排除，本地仍可用）：
+  `docx`/`pdf`/`pptx`/`xlsx`（Anthropic 专有，明文禁止在 Services 外保留副本、禁止转移第三方）、
+  `reverse-trace`/`reverse-wechat-miniapp`（无 LICENSE，PROVENANCE 限定仅本机自用）、
+  `webapp-building`（泄露的 Kimi 技能，上游明示无任何使用许可）。QoderToolkit 另排除 `web-kimi`。
+  **私有仓库不能解决这一条**——上传到托管平台本身就是「转移给第三方」。依据见 `BACKUP_SCOPE.md`。
+- `git_backup.py` 提交前会**再查一遍暂存路径**，命中排除目录就拒绝提交并 reset，不靠 `.gitignore` 单点。
+- 恢复：`git clone <远端> D:\Skills` → `wire_agents.py --apply` → `router.py sync` → `ops.py wire`。
+  headroom 的常驻代理与 261MB 模型缓存不在仓库里，需另跑 `seed_kompress.py` 与 `headroom install apply`。
 
 ### 两个常驻守护（登录即起，20 秒一轮，不用管）
 
@@ -149,7 +170,7 @@ headroom install apply --preset persistent-task --runtime python --scope user \
 - **报错/超时/乱码/命令失败先查 `local-ai-handbook`**，这台机器基本都踩过并记了。
 - 逆向类技能（`spider-king`、`wechat-miniapp-reverse`）**只对已授权目标使用**。
 
-## 技能索引（50 个）
+## 技能索引（53 个）
 
 格式：`技能名` — 用途 → 目录（目录与技能名不同时才标出）
 
@@ -183,9 +204,11 @@ headroom install apply --preset persistent-task --runtime python --scope user \
 - `ios-application-dev` — iOS（UIKit/SnapKit/SwiftUI/HIG）
 
 ### 前端设计
-- `webapp-building` — Kimi 前端设计与实现默认入口（复杂 UI/状态）
-- `impeccable` — 高质量界面/海报/落地页，避免 AI 通用感
-- `web-taste` — 网页审美评审与改造 → `D:\QoderToolkit\web-taste`
+- `landing-page-design` — **动态网页落地页**：滚动揭示/逐词点亮/动效曲线/转化结构（MIT，elayadesign）
+- `figma-designer` — Figma 设计稿/组件库/设计变量（**需 Figma MCP，本机未装，只能给建议**）
+- `impeccable` — 高质量界面/海报/落地页，避免 AI 通用感（Apache-2.0）
+- `web-taste` — 网页审美评审与改造 → `D:\QoderToolkit\web-taste`（MIT）
+- `webapp-building` — Kimi 前端流程与 shadcn 脚手架参考 → **泄露内容，仅本机学习，禁止对外交付**
 
 ### 搜索 / 外部服务
 - `web-search` — Brave 网页搜索 → `brave-web-search`
@@ -199,6 +222,7 @@ headroom install apply --preset persistent-task --runtime python --scope user \
 - `xd-authoring` — 生成/修改 Adobe XD .xd 与交互
 - `vision-tool` — 本地视觉：看图/识字/对比图/分析截图
 - `obsidian-vault-validation` — Obsidian 学习库结构改动后校验
+- `diagnose-windows-sandbox-acl` — DSH 沙箱「拒绝访问/读不到/写不了」时查并修 ACL
 
 ### 技能自身 / 流程
 - `requirement-translator` — 模糊口语需求 → 结构化可执行规格 → `barry-liu-888-requirement-translator`

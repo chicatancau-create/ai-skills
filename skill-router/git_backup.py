@@ -15,7 +15,12 @@ import subprocess
 import sys
 import time
 
-sys.stdout.reconfigure(errors="replace")
+for _s in (sys.stdout, sys.stderr):
+    if _s is not None:
+        try:
+            _s.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
 GIT = r"D:\Git\cmd\git.exe"
 REPOS = [(r"D:\Skills", "ai-skills"), (r"D:\QoderToolkit", "qoder-toolkit")]
 REMOTES = ["origin", "gitcode"]
@@ -33,7 +38,11 @@ env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
 def log(msg):
     os.makedirs(STATE, exist_ok=True)
     line = "%s %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg)
-    print(line)
+    if sys.stdout is not None:
+        try:
+            print(line)
+        except (OSError, ValueError):
+            pass
     try:
         with open(LOG, "a", encoding="utf-8") as f:
             f.write(line + "\n")
