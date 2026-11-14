@@ -205,6 +205,16 @@ def tick(apply_):
                 out.append("shield: " + a)
         except Exception as e:
             out.append("shield: error %s: %s" % (type(e).__name__, e))
+        # The git remotes are the real backup (user: no local backups).  Keep them
+        # current.  Internally debounced to one attempt per 10 min and only when
+        # the tree actually changed, so this is a no-op on most ticks.
+        try:
+            import git_backup
+            for p, n in git_backup.REPOS:
+                if git_backup.sync(p, n):
+                    out.append("backup: %s pushed" % n)
+        except Exception as e:
+            out.append("backup: error %s: %s" % (type(e).__name__, e))
     return out
 
 

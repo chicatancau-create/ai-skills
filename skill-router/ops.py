@@ -238,6 +238,14 @@ def cmd_shield(snap=False):
     print(run([PY, s, "--status"], 120))
 
 
+def cmd_backup(now=False):
+    """The git remotes (GitHub + GitCode) are the backup - no local copies.
+    Shows whether both remotes hold the current HEAD; `backup now` commits and
+    pushes immediately.  The guard also does this automatically every 10 min."""
+    s = os.path.join(os.path.dirname(ROUTER), "git_backup.py")
+    print(run([PY, s, "now" if now else "status"], 1800))
+
+
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
     if cmd == "status":
@@ -250,6 +258,8 @@ def main():
         cmd_guard("--fix" in sys.argv or "--once" in sys.argv)
     elif cmd == "shield":
         cmd_shield("--snapshot" in sys.argv)
+    elif cmd == "backup":
+        cmd_backup("now" in sys.argv)
     elif cmd == "skills":
         cmd_skills()
     elif cmd in ("start", "stop", "restart"):
