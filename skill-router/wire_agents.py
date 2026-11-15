@@ -32,7 +32,8 @@ def mkjunction(src, dst):
     say(f"  JUNCTION {src} -> {dst}")
     if not APPLY: return True
     r = subprocess.run(["cmd", "/c", "mklink", "/J", src, dst],
-                       capture_output=True, text=True, encoding="gbk", errors="replace")
+                       capture_output=True, text=True, encoding="gbk", errors="replace",
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     if r.returncode != 0:
         say("    ERR", ((r.stdout or "") + (r.stderr or "")).strip()); return False
     return True

@@ -310,7 +310,8 @@ def cmd_cat(name):
 
 def junction(src, dst):
     r = subprocess.run(["cmd", "/c", "mklink", "/J", src, dst],
-                       capture_output=True, text=True, encoding="gbk", errors="replace")
+                       capture_output=True, text=True, encoding="gbk", errors="replace",
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     return r.returncode == 0, (r.stdout or "") + (r.stderr or "")
 
 

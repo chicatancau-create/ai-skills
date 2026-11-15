@@ -80,7 +80,8 @@ def http(url, t=8):
 
 def run(cmd, t=180):
     p = subprocess.run(cmd, capture_output=True, text=True, timeout=t,
-                       encoding="utf-8", errors="replace")
+                       encoding="utf-8", errors="replace",
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     return (p.stdout or "") + (p.stderr or "")
 
 
@@ -213,7 +214,8 @@ def cmd_guard(fix=False):
              "Get-CimInstance Win32_Process -Filter \"Name='pythonw.exe'\" | "
              "Where-Object { $_.CommandLine -like '*wire_guard*' } | "
              "Select-Object -ExpandProperty ProcessId"],
-            capture_output=True, text=True, timeout=60)
+            capture_output=True, text=True, timeout=60,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         pids = (out.stdout or "").strip()
         print("watchdog process: %s" % (pids if pids else "NOT RUNNING (logon entry will start it; "
                                                         "or run: pythonw wire_guard.py --watch)"))

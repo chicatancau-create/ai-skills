@@ -132,7 +132,8 @@ def tick(verbose=True):
                     actions.append("WINDOW %s cleanup failed: %s" % (name, e))
                     continue
             r = subprocess.run(["cmd", "/c", "mklink", "/J", link, tgt],
-                               capture_output=True, text=True, timeout=60)
+                               capture_output=True, text=True, timeout=60,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             if r.returncode == 0:
                 actions.append("WINDOW rebuilt junction %s" % name)
             else:

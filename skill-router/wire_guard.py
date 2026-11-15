@@ -132,7 +132,8 @@ def maybe_start_headroom():
     _last_start = now
     log("headroom unhealthy -> asking the supervisor to start it")
     try:
-        subprocess.run([HR, "install", "start"], capture_output=True, text=True, timeout=180)
+        subprocess.run([HR, "install", "start"], capture_output=True, text=True, timeout=180,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except Exception as e:
         log("start attempt failed: %s" % e)
 

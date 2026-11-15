@@ -22,6 +22,9 @@ for _s in (sys.stdout, sys.stderr):
         except (AttributeError, ValueError):
             pass
 GIT = r"D:\Git\cmd\git.exe"
+# 子进程一律不创建控制台窗口：本模块由无窗口的 pythonw 调用，
+# 不隐藏时每个 git 命令都会闪一个黑色 cmd 窗口（开机时会连弹数个）。
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 REPOS = [(r"D:\Skills", "ai-skills"), (r"D:\QoderToolkit", "qoder-toolkit")]
 REMOTES = ["origin", "gitcode"]
 STATE = r"D:\AI-Tool-State\git-backup"
@@ -53,7 +56,8 @@ def log(msg):
 def git(args, cwd, timeout=1800):
     try:
         r = subprocess.run([GIT] + args, cwd=cwd, capture_output=True, text=True,
-                           timeout=timeout, env=env, encoding="utf-8", errors="replace")
+                           timeout=timeout, env=env, encoding="utf-8", errors="replace",
+                           creationflags=NO_WINDOW)
         return r.returncode, (r.stdout or "").strip(), (r.stderr or "").strip()
     except subprocess.TimeoutExpired:
         return 124, "", "timeout after %ds" % timeout
