@@ -66,6 +66,8 @@ description: 本机（这台 Windows）《AI本地使用手册》（E:\本地AI�
 | gh api 探活报 404「仓库不见了」、或 422 缺 name | `踩坑-ghapi带-f默认POST致探活404误判仓库已删.md` |
 | GitHub 大包推送报 curl 56 / 中途被重置，ls-remote 却正常 | `踩坑-GitHub大包推送被重置需分块推送.md` |
 | 设了 VSLANG=1033 但 `cl.exe` 仍输出中文诊断 | `踩坑-VSLANG1033未把MSVC诊断切成英文.md`（`verified`：本机只装中文 2052 语言包、无 1033 资源，VSLANG 只在已装语言间切换；真修复是装英文语言包） |
+| 脚本导出 Excel 区域 PNG 是空白（几 KB）、或报 `Unable to find type [System.Drawing.Image]` | `踩坑-Excel区域贴Chart导出空白PNG改用剪贴板或PPT导出.md` |
+| 表格中文标点跑行首、KOC/DOU+/18–35 被折行切碎 | `踩坑-Office不守中文禁则且PPT二次折行切词需预断行.md` |
 
 **工程规范与安全**（`03-通用/04-工程规范与安全/`）
 
