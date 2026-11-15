@@ -37,13 +37,14 @@ description: 本机（这台 Windows）《AI本地使用手册》（E:\本地AI�
 
 ### 当前正文记录与症状索引
 
-`03-通用` 下已有正文的记录（`01-前端`/`02-后端` 目前只有分类 README）。新增记录后**必须**同步本表。
+`03-通用` 与 `02-后端` 下已有正文的记录（`01-前端` 目前只有分类 README）。新增记录后**必须**同步本表。
 
 **调试与验证**（`03-通用/03-调试与验证/`）
 
 | 症状 / 场景 | 记录 |
 |---|---|
 | 内联命令里 `$_`、`$变量`、反斜杠被吞，报错词风马牛不相及 | `踩坑-Bash内联传参吞PowerShell变量与反斜杠.md` |
+| 文本里的 Windows 路径"少了反斜杠"、内容莫名断行、肉眼正常但 grep 不中；文件疑似含不可见控制字符 | `踩坑-Bash内联传参吞PowerShell变量与反斜杠.md`（2026-11-15 追加节：反斜杠被压单后 Python 按八进制转义消费 `\202`/`\01`/`\02`、`\n` 当换行 → 静默写出 U+0082/U+0001/U+0002；只有 `repr()` 或按码点正则能发现；**修复用的正确字符串同样会被吃**，改文件须备份 + 匹配数断言 + 写盘后复检） |
 | 写文件被拒（`[sandbox: file access denied]` / 拒绝访问），或改写带 BOM 的文件后 BOM 丢失 | `03-通用/03-调试与验证/踩坑-沙箱只放行工作区致写E盘被拒且write会抹掉源码BOM.md`（`verified`：BOM 丢失与沙箱拒写均已实测；拒写不限 E 盘，工作区外一律拒；2026-11-13 由收件箱移入正式分类） |
 | 某域名直连一律超时、走代理秒回 | `踩坑-虚拟网卡空metric抢走默认路由致域名假超时.md` |
 | 当前是哪块网卡抢了默认路由 | `规则-默认路由抢占网卡已换为RadminVPN.md` |
@@ -59,7 +60,10 @@ description: 本机（这台 Windows）《AI本地使用手册》（E:\本地AI�
 | 唤醒后没人拉起应用（收尾被休眠冻结、唤醒广播丢失） | `踩坑-休眠冻结收尾致唤醒广播丢失须主动补唤醒.md` |
 | 唤醒后代理软件在跑但全机没代理（ProxyEnable 没自动开回） | `踩坑-代理软件重启后不自动恢复系统代理开关唤醒须补开.md` |
 | 关机被取消后桌面没代理/应用没了（收尾已提前做） | `踩坑-关机被取消WM_ENDSESSION为假须还原已做的收尾.md` |
-| 测试触发真实收尾动作，把系统代理关了/真杀了进程 | `踩坑-测试触发真实收尾动作关掉系统代理.md` |
+| 测试触发真实收尾动作，把系统代理关了/真杀了进程；或 e2e 脚本把用户真实窗口挪了 | `踩坑-测试触发真实收尾动作关掉系统代理.md` |
+| 测试断言"日志 mtime/大小不变"偶发失败，其实什么都没坏 | `踩坑-断言活文件mtime大小不变必假失败.md` |
+| CTest 全绿但构建树里仍有 LastTestsFailed.log，按它判当前红绿 | `踩坑-CTest全绿后LastTestsFailed残留致红绿误判.md`（`verified`：成功运行不清该文件;判本轮只认 stdout 与 LastTest.log mtime） |
+| grep 审查报「未实现/无白名单/死组件/行数少一」，回源码却发现都做了 | `踩坑-静态审查grep四类误报与hex无表头清单统计口径.md`（`verified`：camelCase、前导斜杠、组件自身 id、hex 无表头四类误报） |
 | 居中/留白数字假不对称，差 8px/16px 这种干净小数 | `踩坑-可见框与真实矩形差8px致留白数字假不对称.md` |
 | 杀软「断网修复」清零系统代理；判代理端口别加 -State Listen | `踩坑-杀软断网修复清零系统代理且StateListen过滤假报端口死.md` |
 | GitCode/AtomGit 令牌是否有效（存了≠有效），要零副作用活验 | `规则-GitCode令牌只读活验用api-v5用户端点.md` |
@@ -68,19 +72,47 @@ description: 本机（这台 Windows）《AI本地使用手册》（E:\本地AI�
 | 设了 VSLANG=1033 但 `cl.exe` 仍输出中文诊断 | `踩坑-VSLANG1033未把MSVC诊断切成英文.md`（`verified`：本机只装中文 2052 语言包、无 1033 资源，VSLANG 只在已装语言间切换；真修复是装英文语言包） |
 | 脚本导出 Excel 区域 PNG 是空白（几 KB）、或报 `Unable to find type [System.Drawing.Image]` | `踩坑-Excel区域贴Chart导出空白PNG改用剪贴板或PPT导出.md` |
 | 表格中文标点跑行首、KOC/DOU+/18–35 被折行切碎 | `踩坑-Office不守中文禁则且PPT二次折行切词需预断行.md` |
+| 强杀 FlClash 后全机断网、端口不监听 | `踩坑-FlClash强杀后停未运行不自动起核心且系统代理悬空致全机断网.md` |
+| 热点上开 DoH 后解析反而 27–32s | `踩坑-DoH在UDP受限手机热点反而劣化须回退DHCP.md` |
+| 手机正常电脑断、Wi-Fi 约 6s 硬断 | `踩坑-MediaTek WLAN扩展mtkwlex卸载重载致Wi-Fi硬断手机正常电脑断.md` |
+| 导出 QQ 群成员成班级名单 | `规则-QQ群成员名单用无障碍树加滚动采集并拆姓名手机号.md` |
+| npm 报 E404、包名在等宽字体里分不清 `mysq12`/`mysql2`、报错域名与配置的镜像不一致 | `踩坑-npm报404包名肉眼难辨mysq12与mysql2须读debug日志.md`（`verified`：判据只认 `npm-cache\_logs\*-debug-0.log` 的 `http fetch GET 404` 行；一条 install 里一个包 404 会让整条回滚） |
+| WebView2/Tauri/Pake 壳应用点了「下载」全盘找不到文件 | `踩坑-壳应用点下载找不到文件先查WebView2的History下载表与真实Downloads目录.md`（`verified`：`downloads` 表 0 行＝从未下载；本机真实 Downloads 是 `G:\NDM下载`，`C:\Users\Admin\Downloads` 不存在） |
+| 按截图目视坐标裁原图裁到全黑/无关区域 | `踩坑-Read显示图是缩放版按显示坐标裁原图必裁错.md`（`verified`：Read 显示层等比缩放，定位先像素扫描再裁、最后目视） |
+| `powercfg /list` 只显 2 个方案、注册表里却堆了十几个；或按 `REG_SZ` 读 `FriendlyName` 全空 | `踩坑-电源计划被驱动更新工具复制成同名方案且FriendlyName是REG_EXPAND_SZ.md`（`verified`：判重复要比 `powercfg -query` 归一化后的哈希不是名字；`powercfg -delete` 非提权可用；名字叫 Overlay 不代表是 overlay 方案） |
+| Git Bash 里 `cmdkey /list` 只打印用法、像命令坏了 | `踩坑-GitBash调cmdkey的list被MSYS改写成路径.md`（`verified`：`/list` 被 MSYS 当绝对路径改写，加 `MSYS_NO_PATHCONV=1` 或写 `//list` 即恢复） |
+| ppt-master 门禁报 bounds 溢出，或 final gate 全绿但 PowerPoint 仍裁字 | `踩坑-ppt-master出片需预留bounds且导出后必须COM导PNG目视.md`（`verified`：按检查器实际文字外框扩区；名义到 720 仍可能被 COM 渲染裁底，必须逐页导 PNG 复核） |
+| 所有 workflow 一起 failure，但 job 里 0 个 step、2 秒结束、日志 404 | `踩坑-GitHubActions计费阻断表现为job零step两秒结束.md`（`verified`：`enabled:true` 不代表能跑；真因只在 check-run annotations 的付款文案；判据看 `steps` 数与 `runner_name`，结论只能写「本机通过、云端未验证」） |
+| 设了 `HTTPS_PROXY` 但 git 仍连不上，报错 `via 127.0.0.1` 不显示端口 | `踩坑-git按URL写死代理端口端口漂移后env覆盖不了.md`（`verified`：`http.<url>.proxy` 优先级高于环境变量；用 `-c ...proxy=<实测端口>` 覆盖、空值=直连；`--unset-all` 不清 global；TLS EOF 加 `-c http.version=HTTP/2`） |
 
+| `encoding/json` 不吃 BOM，日志出现 `invalid character 'ï'` 就是特征码；本机因此长出幽灵重复项、开机恢复一直失效。去掉 BOM 才暴露第二层 `cannot unmarshal string into Record.display_name` ⇒ 判据是「这条日志不再出现」，不是「文案变了」。给 Go 的配置不能有 BOM，给 PowerShell 5.1 的 .ps1 必须带 BOM，方向相反 | `踩坑-PowerShell写配置带UTF8BOM让Go程序静默读不到并一层掩盖一层.md` |
+| 面板显存数据源取不到时显示 `--`/0%（＝无数据≠用量 0）；任务管理器表头那个 0% 是**网络**列。只认两条：进程命令行有没有 `-ngl`；`Get-Counter '\GPU Process Memory(*)\Local Usage'` 按 PID 取值。利用率要在生成中采样 | `踩坑-应用面板显存0%与任务管理器无GPU列-判走没走GPU的两条硬判据.md` |
+| `clocks_throttle_reasons=0x400`(SW Power Cap) 而温度仅 52℃；只在**同一时段做 A/B**（实测新件 29.4@106W vs 原件 15.4@73W）。`BatteryStatus=2` 与 `PowerAC=True` 会同时出现 | `踩坑-笔记本功耗封顶让同一配置吞吐差十倍-tok每秒不能当基线.md` |
+| 新版 Codex 删 `wire_api="chat"`；宿主网关有 `/v1/responses` 却**吞掉 tools**，且 `/v1/completions` 回 200 空 body；转发 SSE 不逐块 flush 会让客户端报 stream disconnected（首块 6.5s vs 0.29s）；`requires_openai_auth=true` 把 key 送去 api.openai.com；`env_key` 只认环境变量；真 500 源于模板要求 system 消息唯一且在首位 | `踩坑-Codex接本地OpenAI兼容网关的六道关-协议tools被吞SSE不flush与system消息顺序.md` |
 **工程规范与安全**（`03-通用/04-工程规范与安全/`）
 
 | 症状 / 场景 | 记录 |
 |---|---|
 | `.ps1` 含中文报假语法错、乱码 | `踩坑-PowerShell5.1读无BOM的UTF8脚本中文变乱码.md` |
 | `Get-Content` 回显 UTF-8 中文乱码、疑似文件写坏 | `踩坑-GetContent默认按代码页解码致UTF8中文回显乱码.md` |
+| `Get-Content x -Raw \| python` 报 JSON 语法错（缺逗号/非法控制字符），文件本身合法 | `踩坑-pwsh管道喂python把UTF8中文重编码致JSON假错.md` |
 | 桌面 .cmd 提权、`choice` 默认键、判管理员 | `踩坑-cmd入口脚本判管理员与choice默认键取值.md` |
 | 单实例 mutex 静默失效 | `踩坑-CreateMutexW后未紧邻读GetLastError致单实例守卫静默失效.md` |
 | AtomGit 与 GitHub 差异、国内推送 | `规则-AtomGit与GitHub差异与国内推送判据.md` |
 | 等比缩放结果"再算一次会变"、轮询反复调整、1px 抖动 | `踩坑-缩放结果二次取整不收敛致反复SetWindowPos.md` |
 | 口语需求（"上下也要留白"）写成阈值规则、注释与代码公式不一致 | `规则-规则类改动先写死判定式并核对注释与代码一致.md` |
+| 隔几天想回滚注册表/文件改动，却发现 `.reg` 备份与取证日志连同 TEMP 一起没了 | `踩坑-回退备份与取证放TEMP会被更新重启清空且日志会滚存.md`（`verified`：11-11 14:37 WU servicing 后 TEMP 15.21→0.08 GiB、19 份 `.reg` 全灭；StorageSense 计划任务 `LastTaskResult=267011` 证明不是它干的；`WindowsUpdateClient/Operational` 日志几天内滚存，判据要当场抄成文本） |
+| 一个"某应用窗口/内容太窄"的修复想写成通用形状规则，却击穿了既有的形变/比例硬约束 | `规则-通用加宽规则击穿形变硬约束须按应用名单制.md` |
 | 提交混入空文件、云端项目不全、该不该忽略 uploads 等「产物」 | `踩坑-提交前审查两坑-全暂存区混入空文件与课程样例误判.md` |
+| ctypes 建窗口/托盘返回 NULL 且 GetLastError=0 | `踩坑-ctypes窗口过程在CreateWindowExW内同步回调字段未初始化致静默NULL.md`（`verified`：WNDPROC 同步回调早于字段初始化；状态先初始化再创建） |
+| 归档/清理前判断 `.bak`、旧脚本是否真是垃圾 | `规则-清理归档前先反查三类引用.md`（`verified`：先查计划任务/Run、脚本/文档引用、回滚点；三类都不命中才删） |
+| 公开仓库跑敏感正则命中一堆手机号/私钥，怕真泄露 | `踩坑-公开仓库敏感扫描误报分诊-哈希子串演示号与脱敏夹具.md`（`verified`：哈希子串/演示号/脱敏坏输入夹具;分诊后才报泄露） |
+| 令牌化收口后截图配对出现差异，无法归因重构还是改色 | `规则-视觉中性重构先等值替换再改色.md`（`verified`：令牌值先等于原字面量保零视觉差，改色另作视觉决策） |
+| 清理会话产物时发现交付件与最新导出件页数/大小/MD5 不同 | `规则-清理会话垃圾前先比对交付件与导出原件.md`（`verified`：用户可后续编辑交付件；旧导出件不能反向覆盖，空白页只报告不自动删） |
+| bat 内嵌 PS 探针注释被当命令、`'/b' 不是命令`、`$pid` 只读 | `04-工程规范与安全/踩坑-bat内嵌PowerShell探针的marker与readkey空路径及pid只读.md` |
+| 批量替换只改了几处，`git diff` 却报整文件重写 | `踩坑-Python文本模式批量改写把CRLF静默转LF致diff暴涨.md`（`verified`：文本模式**读**时已折叠 CRLF，`newline=''` 不会恢复；一律 `rb`/`wb`，还原要逐文件参照 HEAD 原行尾） |
+| 采集器写完才发现 robots 禁了搜索页；或 curl 拿到的 HTML 里没有正文 | `踩坑-牛客robots禁search采集只能走sitemap且正文须渲染.md`（`verified`：`Disallow:/search`，合规入口是公布的 sitemap；SPA 外壳仅 6 KB，正文须 headless 渲染；两层抓取 + 匹配三道闸） |
+| 要把私有仓库转公开，担心历史/路径/证据哈希 | `规则-仓库公开前脱敏须扫全历史且改证据要重签哈希清单.md`（`verified`：扫 `git rev-list --all`；代码默认值不改；改证据必须重签 manifest；历史留痕让用户拍板；生效判据是匿名 API 200） |
 
 **AI 协作与提示词**（`03-通用/02-AI协作与提示词/`）
 
@@ -89,6 +121,16 @@ description: 本机（这台 Windows）《AI本地使用手册》（E:\本地AI�
 | **技能放哪、何时被识别、如何实现「默认调用」** | `规则-WorkBuddy技能发现机制与本地技能安装位置.md` |
 | 本手册如何接入 DSH，做到每次任务默认查（2026-10-19） | `规则-本地手册接入DSH成为默认前置与写Markdown的编码坑.md` |
 | 逆向技能/工具箱在哪、能不能用 | `规则-技能库已收录逆向技能只放指针.md`、`规则-逆向工具箱清单与后端选型决策表-MCP.md` |
+| 换了 Qoder 版本就「失忆」、两个客户端记忆是否共用 | `规则-国内版与国际版Qoder两套记忆目录完全独立只能单向拷入并校验.md`（`verified`：`.qoder` 与 `.qoder-cn` 无共享无联接；搬运用 `cp -n` + 手工合并索引 + `diff -rq` 复核；**别用 mklink /J**） |
+| 审查方与执行方共仓，发现写在对话里执行方看不到；续接后沿用旧现状 | `规则-多AI同仓审查交接三件套与续接先核时钟.md`（`verified`：发现文档+必读指针+处置建议；已闭标✅;续接先核 date/HEAD/行数） |
+| Qoder 浏览器 Agent 里 evaluate 恒返回 null、自绘单选点不动、标签页突然消失 | `经验-Qoder浏览器Agent的evaluate恒null与自绘单选要点label.md`（`verified`：读 DOM 用 `domSnapshot()`；自绘单选点 `label:has(input[value=...])`；调试器断开后重建 agent 新开页；写操作要刷新回读 + 独立验证） |
+
+**后端**（`02-后端/`）
+
+| 症状 / 场景 | 记录 |
+|---|---|
+| 代码里写了路由，浏览器/接口仍 404 `Cannot GET /` | `02-后端/02-API与接口设计/踩坑-Express改了代码浏览器仍404先查未保存缓冲与旧进程.md`（`verified`：编辑器缓冲没落盘 + 端口上是旧进程；判据是 curl 真实响应体 + `Win32_Process` 的 CreationDate，本机别用 `-State Listen`） |
+| `SyntaxError: await is only valid in async functions and the top level bodies of modules` | `02-后端/01-架构与项目结构/踩坑-CommonJS目录下js顶层await报SyntaxError.md`（`verified`：目录 package.json `"type":"commonjs"`；包 async IIFE，别整体改 `"module"`） |
 
 ## 本机环境速查（来自 `~/.dsh/AGENTS.md`，细节查正文）
 
