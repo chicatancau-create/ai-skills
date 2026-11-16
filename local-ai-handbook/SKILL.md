@@ -93,6 +93,7 @@ description: 本机（这台 Windows）《AI本地使用手册》（G:\AIrenwu\�
 | WebView2/Tauri/Pake 壳应用点了「下载」全盘找不到文件 | `踩坑-壳应用点下载找不到文件先查WebView2的History下载表与真实Downloads目录.md`（`verified`：`downloads` 表 0 行＝从未下载；本机真实 Downloads 是 `G:\NDM下载`，`C:\Users\Admin\Downloads` 不存在） |
 | 按截图目视坐标裁原图裁到全黑/无关区域 | `踩坑-Read显示图是缩放版按显示坐标裁原图必裁错.md`（`verified`：Read 显示层等比缩放，定位先像素扫描再裁、最后目视） |
 | venv 报 `did not find executable` / `Failed to import encodings` | `踩坑-venv的base解释器被清空致整个venv静默报废.md`（`verified`：查 pyvenv.cfg home 完整性；旧诊断有时效；dev 依赖用 uv pip 补） |
+| 命令行 hvigor 报 `00303217 Invalid value of 'DEVECO_SDK_HOME'`；或 BUILD SUCCESSFUL 却 exit 1 | `踩坑-DevEco命令行hvigor两坑-缺SDK环境变量报00303217与unsigned警告致假exit1.md`（`verified`：补 DEVECO_SDK_HOME/hwsdk.dir；红绿只认 stdout 的 SUCCESSFUL/ERROR 行，不认退出码） |
 
 **前端**（`01-前端/07-表单与交互/`）
 
