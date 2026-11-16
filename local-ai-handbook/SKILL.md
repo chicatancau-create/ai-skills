@@ -73,6 +73,7 @@ description: 本机（这台 Windows）《AI本地使用手册》（E:\本地AI�
 | 脚本导出 Excel 区域 PNG 是空白（几 KB）、或报 `Unable to find type [System.Drawing.Image]` | `踩坑-Excel区域贴Chart导出空白PNG改用剪贴板或PPT导出.md` |
 | 表格中文标点跑行首、KOC/DOU+/18–35 被折行切碎 | `踩坑-Office不守中文禁则且PPT二次折行切词需预断行.md` |
 | 强杀 FlClash 后全机断网、端口不监听 | `踩坑-FlClash强杀后停未运行不自动起核心且系统代理悬空致全机断网.md` |
+| Postman「Something went wrong」崩溃屏、网络恢复后仍不复活 | `踩坑-Postman启动瞬间云端断网致崩溃屏且网络自愈后不自恢复须重启.md` |
 | 热点上开 DoH 后解析反而 27–32s | `踩坑-DoH在UDP受限手机热点反而劣化须回退DHCP.md` |
 | 手机正常电脑断、Wi-Fi 约 6s 硬断 | `踩坑-MediaTek WLAN扩展mtkwlex卸载重载致Wi-Fi硬断手机正常电脑断.md` |
 | 导出 QQ 群成员成班级名单 | `规则-QQ群成员名单用无障碍树加滚动采集并拆姓名手机号.md` |
