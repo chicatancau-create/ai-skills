@@ -80,6 +80,7 @@ description: 本机（这台 Windows）《AI本地使用手册》（E:\本地AI�
 | npm 报 E404、包名在等宽字体里分不清 `mysq12`/`mysql2`、报错域名与配置的镜像不一致 | `踩坑-npm报404包名肉眼难辨mysq12与mysql2须读debug日志.md`（`verified`：判据只认 `npm-cache\_logs\*-debug-0.log` 的 `http fetch GET 404` 行；一条 install 里一个包 404 会让整条回滚） |
 | WebView2/Tauri/Pake 壳应用点了「下载」全盘找不到文件 | `踩坑-壳应用点下载找不到文件先查WebView2的History下载表与真实Downloads目录.md`（`verified`：`downloads` 表 0 行＝从未下载；本机真实 Downloads 是 `G:\NDM下载`，`C:\Users\Admin\Downloads` 不存在） |
 | 按截图目视坐标裁原图裁到全黑/无关区域 | `踩坑-Read显示图是缩放版按显示坐标裁原图必裁错.md`（`verified`：Read 显示层等比缩放，定位先像素扫描再裁、最后目视） |
+| venv 报 `did not find executable` / `Failed to import encodings` | `踩坑-venv的base解释器被清空致整个venv静默报废.md`（`verified`：查 pyvenv.cfg home 完整性；旧诊断有时效；dev 依赖用 uv pip 补） |
 | `powercfg /list` 只显 2 个方案、注册表里却堆了十几个；或按 `REG_SZ` 读 `FriendlyName` 全空 | `踩坑-电源计划被驱动更新工具复制成同名方案且FriendlyName是REG_EXPAND_SZ.md`（`verified`：判重复要比 `powercfg -query` 归一化后的哈希不是名字；`powercfg -delete` 非提权可用；名字叫 Overlay 不代表是 overlay 方案） |
 | Git Bash 里 `cmdkey /list` 只打印用法、像命令坏了 | `踩坑-GitBash调cmdkey的list被MSYS改写成路径.md`（`verified`：`/list` 被 MSYS 当绝对路径改写，加 `MSYS_NO_PATHCONV=1` 或写 `//list` 即恢复） |
 | ppt-master 门禁报 bounds 溢出，或 final gate 全绿但 PowerPoint 仍裁字 | `踩坑-ppt-master出片需预留bounds且导出后必须COM导PNG目视.md`（`verified`：按检查器实际文字外框扩区；名义到 720 仍可能被 COM 渲染裁底，必须逐页导 PNG 复核） |
