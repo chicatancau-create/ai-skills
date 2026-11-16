@@ -105,7 +105,7 @@
 | --- | --- |
 | `diagnose-windows-sandbox-acl` | Use on Windows for unexpected DSH sandbox access denials: workspace writes or listing fail, or an ordinarily r |
 | `headroom` | Use when a Python or TypeScript app sends large tool outputs, logs, JSON, search results or long chat history  |
-| `local-ai-handbook` | 本机（这台 Windows）《AI本地使用手册》（E:\本地AI使用手册）的**默认前置知识库**。每次任务开始前先检索、任务结束前判断是否回写；任务里出现报错、超时、编码乱码、命令失败、排版异常、插件/技能问题、AI  |
+| `local-ai-handbook` | 本机（这台 Windows）《AI本地使用手册》（G:\AIrenwu\本地AI使用手册）的**默认前置知识库**。每次任务开始前先检索、任务结束前判断是否回写；任务里出现报错、超时、编码乱码、命令失败、排版异常、插件/技能问题、AI  |
 | `obsidian-vault-validation` | Validate an Obsidian learning vault after structural or routing edits. Use when changing README links,分册 bound |
 | `self-improving-agent` | Captures learnings, errors, and corrections to enable continuous improvement. Use when: (1) A command or opera |
 | `skill-creator` | Guide for creating effective skills. This skill should be used when users want to create a new skill (or updat |

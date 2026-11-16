@@ -20,7 +20,7 @@
 | `fs-scaffold` | 项目脚手架与工程化初始化(阶段1)。技术栈确定后初始化项目、配置 TypeScript、ESLint、Prettier、Git 规范、环境变 |
 | `fs-security` | 安全审查与加固(阶段6)。审查认证授权漏洞、注入攻击、XSS/CSRF/SSRF、密钥管理、依赖漏洞、数据隐私合规时使用。按当前 OWASP |
 | `fs-testing` | 测试规范(阶段5)。编写单元测试、组件测试、集成测试、E2E 测试、测试数据管理、覆盖率门禁时使用。优先采用仓库已有测试栈；新依赖按当前官方 |
-| `local-ai-handbook` | 本机（这台 Windows）《AI本地使用手册》（E:\本地AI使用手册）的**默认前置知识库**。每次任务开始前先检索、任务结束前判断是否 |
+| `local-ai-handbook` | 本机（这台 Windows）《AI本地使用手册》（G:\AIrenwu\本地AI使用手册）的**默认前置知识库**。每次任务开始前先检索、任务结束前判断是否 |
 | `obsidian-vault-validation` | Validate an Obsidian learning vault after structural or routing edits. |
 | `skill-router` | 本机技能总路由，默认必开。Use at the START of EVERY task on this machine, before de |
 | `vision-tool` | 本地视觉能力(看图/识别图片/分析截图)。当需要理解图片内容、识别图中文字、对比多张图片、分析截图时使用。连接本机牧羊人(Herdsman  |
