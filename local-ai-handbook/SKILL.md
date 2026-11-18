@@ -97,7 +97,7 @@ description: 本机（这台 Windows）《AI本地使用手册》（G:\AIrenwu\�
 | 安卓模拟器里游戏启动即崩、ApkStart 报「缺少设备原生库…会自动切换兼容镜像重试」 | `99-收件箱/踩坑-易盾加固游戏在非白名单安卓模拟器必崩且缺原生库文案是误判.md`（`needs-review`：真栈 `com.netease.nis.wrapper.MyJni.load` 的 `UnsatisfiedLinkError` 且**无 dlopen/linker 错**＝易盾反作弊白名单拒绝，非缺库；白名单只放行 MuMu/雷电，换镜像/改翻译层/伪装属性/假 MuMu 包名均无效，硬特征 hypervisor CPUID/ranchu 改不动） |
 
 | uni-app H5 下拉刷新判「指示器已停止」用 display/height 恒真；或刷新后分页请求旧页码跳中间页 | `踩坑-uni-appH5刷新指示器绝对定位隐藏与reload未重置pageIndex致分页取证误判.md`（`verified`：uni-page-refresh 绝对定位移出视口，判 rect.bottom>0；reload() 不重置 this.pageIndex → 刷新后触底请求旧索引+1；取证抓 postData 序列，null=预检 OPTIONS） |
-| 怀疑「装了两个相同程序」（开始菜单/任务栏出现新旧名两个入口），或应用自更新后改名留旧入口 | `踩坑-TraeCN自更新改名留旧快捷方式致开始菜单两个Trae实为同一程序.md`（`verified`：Trae CN 3.4.20 自更新 TraeCode CN→TRAE CN 新增 lnk 不删旧，两 lnk TargetPath 同指一个 exe；判重看进程 Path/卸载注册表/lnk TargetPath 三清单，不看图标数；清理删重复 lnk、保留用户固定/可见的那个（改 lnk 文件名会坏开始菜单磁贴）；本机已执行：删新留旧） |
+| 怀疑「装了两个相同程序」（开始菜单/任务栏出现新旧名两个入口），或应用自更新后改名留旧入口；或想改 Trae CN 默认启动 IDE/Agent 模式 | `踩坑-TraeCN自更新改名留旧快捷方式致开始菜单两个Trae实为同一程序.md`（`verified`：Trae CN 3.4.20 自更新 TraeCode CN→TRAE CN 新增 lnk 不删旧，两 lnk TargetPath 同指一个 exe；判重看进程 Path/卸载注册表/lnk TargetPath 三清单，不看图标数；清理删重复 lnk、保留用户固定/可见的那个（改 lnk 文件名会坏开始菜单磁贴，用户要改名先告知重固定）；默认启动模式用设置 window.startupWindowType=agent/ide，非 CLI 参数；本机已执行：删新留旧→改名 TRAE CN→默认 agent） |
 
 **前端**（`01-前端/07-表单与交互/`）
 
