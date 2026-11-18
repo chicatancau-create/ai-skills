@@ -94,6 +94,7 @@ description: 本机（这台 Windows）《AI本地使用手册》（G:\AIrenwu\�
 | 按截图目视坐标裁原图裁到全黑/无关区域 | `踩坑-Read显示图是缩放版按显示坐标裁原图必裁错.md`（`verified`：Read 显示层等比缩放，定位先像素扫描再裁、最后目视） |
 | venv 报 `did not find executable` / `Failed to import encodings` | `踩坑-venv的base解释器被清空致整个venv静默报废.md`（`verified`：查 pyvenv.cfg home 完整性；旧诊断有时效；dev 依赖用 uv pip 补） |
 | 命令行 hvigor 报 `00303217 Invalid value of 'DEVECO_SDK_HOME'`；或 BUILD SUCCESSFUL 却 exit 1 | `踩坑-DevEco命令行hvigor两坑-缺SDK环境变量报00303217与unsigned警告致假exit1.md`（`verified`：补 DEVECO_SDK_HOME/hwsdk.dir；红绿只认 stdout 的 SUCCESSFUL/ERROR 行，不认退出码） |
+| 安卓模拟器里游戏启动即崩、ApkStart 报「缺少设备原生库…会自动切换兼容镜像重试」 | `99-收件箱/踩坑-易盾加固游戏在非白名单安卓模拟器必崩且缺原生库文案是误判.md`（`needs-review`：真栈 `com.netease.nis.wrapper.MyJni.load` 的 `UnsatisfiedLinkError` 且**无 dlopen/linker 错**＝易盾反作弊白名单拒绝，非缺库；白名单只放行 MuMu/雷电，换镜像/改翻译层/伪装属性/假 MuMu 包名均无效，硬特征 hypervisor CPUID/ranchu 改不动） |
 
 **前端**（`01-前端/07-表单与交互/`）
 
