@@ -96,6 +96,8 @@ description: 本机（这台 Windows）《AI本地使用手册》（G:\AIrenwu\�
 | 命令行 hvigor 报 `00303217 Invalid value of 'DEVECO_SDK_HOME'`；或 BUILD SUCCESSFUL 却 exit 1 | `踩坑-DevEco命令行hvigor两坑-缺SDK环境变量报00303217与unsigned警告致假exit1.md`（`verified`：补 DEVECO_SDK_HOME/hwsdk.dir；红绿只认 stdout 的 SUCCESSFUL/ERROR 行，不认退出码） |
 | 安卓模拟器里游戏启动即崩、ApkStart 报「缺少设备原生库…会自动切换兼容镜像重试」 | `99-收件箱/踩坑-易盾加固游戏在非白名单安卓模拟器必崩且缺原生库文案是误判.md`（`needs-review`：真栈 `com.netease.nis.wrapper.MyJni.load` 的 `UnsatisfiedLinkError` 且**无 dlopen/linker 错**＝易盾反作弊白名单拒绝，非缺库；白名单只放行 MuMu/雷电，换镜像/改翻译层/伪装属性/假 MuMu 包名均无效，硬特征 hypervisor CPUID/ranchu 改不动） |
 
+| uni-app H5 下拉刷新判「指示器已停止」用 display/height 恒真；或刷新后分页请求旧页码跳中间页 | `踩坑-uni-appH5刷新指示器绝对定位隐藏与reload未重置pageIndex致分页取证误判.md`（`verified`：uni-page-refresh 绝对定位移出视口，判 rect.bottom>0；reload() 不重置 this.pageIndex → 刷新后触底请求旧索引+1；取证抓 postData 序列，null=预检 OPTIONS） |
+
 **前端**（`01-前端/07-表单与交互/`）
 
 | 症状 / 场景 | 记录 |
@@ -155,6 +157,7 @@ description: 本机（这台 Windows）《AI本地使用手册》（G:\AIrenwu\�
 |---|---|
 | 代码里写了路由，浏览器/接口仍 404 `Cannot GET /` | `02-后端/02-API与接口设计/踩坑-Express改了代码浏览器仍404先查未保存缓冲与旧进程.md`（`verified`：编辑器缓冲没落盘 + 端口上是旧进程；判据是 curl 真实响应体 + `Win32_Process` 的 CreationDate，本机别用 `-State Listen`） |
 | `SyntaxError: await is only valid in async functions and the top level bodies of modules` | `02-后端/01-架构与项目结构/踩坑-CommonJS目录下js顶层await报SyntaxError.md`（`verified`：目录 package.json `"type":"commonjs"`；包 async IIFE，别整体改 `"module"`） |
+| Spring Boot jar 连 MySQL8 启动失败 `Public Key Retrieval is not allowed`（mysqld 重启后首连、useSSL=false） | `02-后端/04-数据库与ORM/踩坑-MySQL8重启后JDBC首连报PublicKeyRetrievalNotAllowed须allowPublicKeyRetrieval.md`（`verified`：caching_sha2 缓存空需取 RSA 公钥；JDBC URL 加 `allowPublicKeyRetrieval=true` 即好，A/B 实测） |
 
 ## 本机环境速查（来自 `~/.dsh/AGENTS.md`，细节查正文）
 
