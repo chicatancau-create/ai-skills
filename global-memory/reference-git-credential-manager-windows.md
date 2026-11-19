@@ -126,3 +126,28 @@ git over HTTPS 用 PAT 当密码、用户名就是 `@` 后面那个 handle。
 
 相关：[[feedback-api-key-handling]]、[[reference-git-push-needs-local-proxy]]、[[project-dsh-agent-teams-deploy]]、
 [[reference-git-nonascii-path-quoting]]
+
+---
+
+## 国内版补充（2026-11-19 并入）
+
+> 来源：Qoder 国内版 `C:\Users\Admin\.qoder-cn\memory\reference-git-credential-manager-windows.md`（本地修改日期 2026-11-05），国际版没有的内容，逐字保留；只追加，不改写上文。
+
+**2026-11-05 复测（国内远端到底用哪个平台）**
+
+- **国内平台是 GitCode（gitcode.com），不是 atomgit/gitee。** Windows 凭据管理器里有
+  `LegacyGeneric:target=git:https://gitcode.com`，用户名 `zhoujinwei`、密码是 24 字符 PAT；
+  同一时刻 `cmdkey /list` 里 **atomgit.com 与 gitee.com 都没有凭据**（`git credential fill` 回
+  `Cannot prompt`）。AtomGit/Gitee 那两条 provider 配置是空挂的。
+- **我上一轮说的「cmdkey 全量输出里没有任何 `git:` 目标」是错的**，错因有两个：①`cmdkey /list` 在
+  Git Bash 里要被 MSYS 改写参数（`/list` → 路径），得写 `MSYS_NO_PATHCONV=1 cmdkey /list`，否则只拿到
+  usage 文本；②输出是 **GBK**，`grep` 直接读会当成二进制截断。两条都踩了才误判成「没有凭据」。
+- `C:\Users\Admin\.gkeys\atomgit.txt` 里那对（username 12 字符 `zhoumoyukuai`／token 24 字符）是**显示名 + 另一把令牌**，
+  对 `api.gitcode.com/api/v5/user` 四种下发方式一律 401 → 要么过期要么本就配错，别再试。真正能用的是凭据管理器里那把。
+- **GitCode v5 API 认查询串不认头**：`GET /api/v5/user?private_token=<pat>` → 200（login 是 `zhoumoyukuai`，
+  与 HTTPS 用户名 `zhoujinwei` 不同名！）；把同一个值放 `private_token` 请求头 → **401**。
+  建仓库用 `POST /api/v5/user/repos?access_token=<pat>`，body `{"name","path","description","private":true,"auto_init":false}`，
+  返回体里核对 `private/visibility` 再推。`/api/v5/projects`、`/api/v5/namespaces`、`/api/v1/*` 全是 `404 Route Not Found`。
+- GitHub 那个 OAuth 令牌（`gho_`，scopes `gist,read:org,repo,workflow`）**能 PATCH/改名自有仓库，但不能删仓库**：
+  `DELETE /repos/{o}/{r}` 回 403 `Must have admin rights`（实为缺 `delete_repo` scope，不是真没管理员权）。
+  **另外：仓库名里的中文会被静默替换**（`全栈…` → `-`，`zzz-误建…` → `zzz--`），所以远端仓库名一律用 ASCII。

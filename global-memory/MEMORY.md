@@ -122,3 +122,11 @@
 - [reference-bilibili-open-api-read](reference-bilibili-open-api-read.md) — B站公开接口匿名读数据的实测边界：card/view/reply/弹幕 XML 可用，space arc/search 与 seasons 被客户端指纹拦；封面 CDN 要 UA+Referer；影视飓风 mid=946974（8019627 是别人）。
 - [reference-ppt-master-workflow](reference-ppt-master-workflow.md) — D:\QoderToolkit\ppt-master 在本机出可编辑 PPTX 的实测边界：init 默认落 D:\projects、live preview 缺 flask、import-sources 会把源 PPTX 图片灌进 images/、SVG bounds 与 class 的硬规则、原生表格 row_heights 含表头、锁里一资源一行、python-pptx 不递归、PowerPoint COM 逐页导 PNG 才算目视验收。
 - [reference-sqlite-wal-checkpoint-on-close](reference-sqlite-wal-checkpoint-on-close.md) — Opening a WAL-mode SQLite file read-write — even just to COUNT rows — silently checkpoints and deletes -wal/-shm on last-connection close, so "measure without mutating" needs mode=ro or a copy.
+- [判断题要先给结论](feedback-commit-to-verdict.md) — 问「几个/哪个好」时要数字，不要条件分支；「是否达标」要按维度给百分比并写明对标口径；结尾抛反问会被无视并原样重问
+- [禁止拿 C 盘 Temp 当暂存区](feedback-no-c-drive-scratch.md) — 一切数据（含采集中间产物、下载包、临时脚本）只落工作区或用户指定位置；本机运行时产物约定位置是 `D:\AI-Tool-State`。
+- [截图查找习惯](feedback-screenshot-pixpin.md) — **先看消息里的「附件引用」绝对路径**（`.qoder-cn\tmp\<工作区>\images\`），没有才去 Pictures\PixPin_*.png 按时间找
+- [本机取 GitHub 公开仓库的通路](reference-github-mirror-from-this-box.md) — codeload 直连可用、7897 代理与 github.com 网页域不通、git 走 schannel 与代理握手失败；压缩包静默截断的判据。
+- [Obsidian 表格里的链接竖线](reference-obsidian-wiki-link-table-pipe.md) — 表格内 `[[A|B]]` 必须写 `\|` 否则列数错乱；校验脚本用 `chr(92)` 数竖线，别用 lookbehind 正则。
+- [主流性与 JD 检索源](reference-tech-jd-and-trend-sources.md) — SO/Octoverse/TIOBE/OWASP 官方口径可用；公司招聘 SPA 站 WebSearch 搜不到，要拿第三方转载 JD；WebFetch 失败≠死链。
+- [WebGL 页面怎么取证](reference-webgl-page-verification.md) — 连接器 tab 挂起 rAF；自起 headless Edge + CDP；PNG 大小判不了黑屏；importmap 不支持 fallback 数组且失败被负缓存；反向 smoothstep 吐 NaN 会毒死 Bloom
+- [Windows 长路径扫描盲区](reference-windows-longpath-scan.md) — 不带 `\\?\` 的 os.walk 会静默漏掉 >260 字符条目；「超限 0／文件不存在／全绿」结论一律不可信，展平要留 md5 映射。

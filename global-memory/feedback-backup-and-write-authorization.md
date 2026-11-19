@@ -18,3 +18,15 @@ When a task touches files outside the repo or could discard work, ask once up fr
 **How to apply:** any time a task involves moving/deleting directories, `git reset/clean`, migrating data stores, or writing outside the working dirs. Ask the scope + backup-location questions in one batch, then don't re-ask for routine in-repo edits.
 
 Related: [[feedback-vault-engineering-rules]], [[feedback-rigor-audit]], [[user-role]]
+
+---
+
+## 国内版补充（2026-11-19 并入）
+
+> 来源：Qoder 国内版 `C:\Users\Admin\.qoder-cn\memory\feedback-backup-and-write-authorization.md`（本地修改日期 2026-11-05），国际版没有的内容，逐字保留；只追加，不改写上文。
+
+- **Versioned work: no backup copies at all.** On 2026-11-05 the user said 「以后就不要备份了，直接上传到 Git 仓库就行」 for `E:\OBsidian\全栈工程师学习计划` (now Git-backed; 改名待执行 → 全栈工程师学习资料库). So: commit + push before a risky move, keep the tree clean, roll back with `git restore --source=<sha>`; do not create `.workbuddy/backups`, `<date>-backup`, or sibling `*-recover` copies, and delete pre-existing backup dirs once their content is in a commit. Per-file pre-write copies remain only for trees that are *not* under Git and for irreversible deletions.
+- **Backups of non-versioned work go outside the project directory**, not into an existing in-project `.backups/` (e.g. `E:\CodeWeave-recovery\<date>-<milestone>\`). Reason: an in-project backup is damaged by the very migration it protects against.
+- **Writes to an unversioned external vault are allowed only per-file**: take a pre-write copy and work in a short maintenance window. Never bulk-rewrite the vault to satisfy a task.
+**Why:** the user's standing ask is strict adherence to the engineering files with no drift — and those files now say history lives in Git commits. Backup dirs became the thing being cleaned up, not the thing being maintained.
+**How to apply:** any time a task involves moving/deleting directories, `git reset/clean`, migrating data stores, or writing outside the working dirs. Check `git status` first: a clean tree *is* the safety net for versioned paths. Ask scope questions in one batch for unversioned data, then don't re-ask for routine in-repo edits.

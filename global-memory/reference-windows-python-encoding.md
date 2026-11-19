@@ -129,3 +129,21 @@ Windows 版 python 的 stdout 是 **CRLF**，所以 `for p in $(python -c "…pr
 
 ⇒ 冒烟脚本优先用 ASCII 字段；必须发中文 JSON 时，把 payload 写成 **UTF-8 文件**再用
 `curl --data-binary @payload.json`，或把请求放进应用内测试。别把这类 400 误判成接口或校验逻辑错误。
+
+---
+
+## 国内版补充（2026-11-19 并入）
+
+> 来源：Qoder 国内版 `C:\Users\Admin\.qoder-cn\memory\reference-windows-python-encoding.md`（本地修改日期 2026-11-04），国际版没有的内容，逐字保留；只追加，不改写上文。
+
+**反斜杠在正则里同样会被吞（2026-11-04 连踩两次，浪费两个校验回合）**：
+- `re.split(r'(?<!\\)\|', s)` 落到 Python 变成 `(?<!\)\|` → `re.PatternError: missing ), unterminated subpattern at position 0`；
+- 判断「前一个字符不是反斜杠」写 `if prev != '\\'` 会变成 `'\'` → `SyntaxError: unterminated string literal`。
+- **`shutil.rmtree(path, ignore_errors=True)` 在 Windows 上会静默删失败**，于是下一轮重跑时报
+  `fatal: destination path '...' already exists`，看起来像网络/克隆问题，其实是上一轮的残留（`--filter=blob:none`
+  的半截 `.git` 目录里有只读 pack 文件）。正解：给 `rmtree` 传 `onerror` 回调里 `os.chmod(p, stat.S_IWRITE)` 再重试删除，
+  或者干脆每次用全新目录名；**删完必须 `os.path.exists` 复查并打印**，别信 `ignore_errors`。
+- **Edit 工具的 `old_string` 无法匹配文件里字面的 `\uXXXX`**：工具参数走 JSON，我写的 `\u5168` 会被解码成真实字符「全」，
+  而文件里存的是那 6 个字面字符，于是 `0 occurrences found`（用 Bash 打印出来的行看起来一模一样，很容易误判成空格/缩进问题）。
+  遇到这种行**别用 Edit 匹配**，改用 Python 按行号整行替换：`lines[2] = 'WORK = "..."\n'`，替换完立刻 `py_compile` 验证。
+- 顺带：`- <<'PY'` 里我写的 `\\u5168` 会变成 `\u5168` 落进 python 源码，而 raw 字符串不解码它 —— 拼中文路径就直接写中文字符或正斜杠。

@@ -99,3 +99,15 @@ MTK BootROM 强解覆盖天玑1200 及以下并当众收回，他对我自我纠
 **别把常规 secret/PII 扫描说成“敏感”**：2026-11-08 他看到材料里出现“敏感”直接发火——「我让你整理代码数据…你搁这跟我敏感啥」。他要的是整理学习资料/代码数据，不是内容审查。⇒ 工程检查里的“敏感元数据检查”必须说明是查 token/密码/私钥/个人信息误提交；对学习资料本身不要套“敏感/政治”框架。
 
 Related: [[feedback-vault-engineering-rules]], [[feedback-version-currency]], [[feedback-rigor-audit]], [[feedback-plain-language-first]], [[project-vault-work-environment]]
+
+---
+
+## 国内版补充（2026-11-19 并入）
+
+> 来源：Qoder 国内版 `C:\Users\Admin\.qoder-cn\memory\user-role.md`（本地修改日期 2026-11-04），国际版没有的内容，逐字保留；只追加，不改写上文。
+
+**学习目标已锚定具体公司，不是「学会就行」**：2026-11-04 他先要「完全达标、完美要求」，随后指定「按字节跳动这家公司的标准去制定计划的优化建议」。
+⇒ 谈他的学习/求职计划时，默认要**按目标公司的 JD 拆维度对标**并给数字（如前端 85% / 后端 65% / AI 60%），
+同时讲清口径来源（官方调查 vs 第三方转载 JD）；泛泛说「主流、够用」会被当成没答。
+他会连续追问把标准抬高（通用企业 → 具体大厂），所以上一轮的「已闭环」结论不能直接复用到下一轮。
+相关：[[feedback-commit-to-verdict]]、[[reference-tech-jd-and-trend-sources]]、[[project-fullstack-plan-byte-benchmark]]。

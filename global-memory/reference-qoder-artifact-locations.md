@@ -48,3 +48,20 @@ Recover dir convention for this kind of sweep: copy → verify sha256 per file �
 （日志本身仍有 1597 条），只能用 `Win32_QuickFixEngineering` 反证更新装过。
 盘点工具：`G:\AIrenwu\脚本库\09_机器体检与垃圾扫描\agent_artifacts.py`（11-15 实测 TEMP 1.06 GiB/3743 f、
 shell-snapshots 仅 23 个文件，与上面 10-03 的旧数字相比已换了一批）。
+
+---
+
+## 国内版补充（2026-11-19 并入）
+
+> 来源：Qoder 国内版 `C:\Users\Admin\.qoder-cn\memory\reference-qoder-artifact-locations.md`（本地修改日期 2026-11-04），国际版没有的内容，逐字保留；只追加，不改写上文。
+
+> **【2026-11-04 更正】** 本页描述的是「应用和我历史上确实写过哪里」，其中「一次性脚本放 `%LOCALAPPDATA%\Temp`」
+> **已不再是可接受的做法** —— 用户当场否掉把我新建的采集暂存目录放 C 盘，要求数据（含中间产物）只落工作区或他指定的位置，
+> 见 [[feedback-no-c-drive-scratch]]。新建的 `.py` / 下载包 / 解压暂存一律改放工作区 `<目录>\_采集暂存\` 并在用完后自删。
+> 已经存在的应用运行时目录（下面列的 `.qoder\...`）不属于「我放的东西」，照旧不要动。
+**列进程只能走 PowerShell（2026-11-04）：** `wmic` 在这台 Windows 28000 上已经没了（子进程直接 `FileNotFoundError`），
+用 `powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"name='python.exe'\" | Select-Object ProcessId,CommandLine | Format-List"`。
+**后台任务的 ID 会随上下文压缩失效：** 2026-11-04 一个 `run_in_background` 批次在会话 turn 边界之后
+`TaskStop` 报 `No task found with ID`，但进程仍在跑并继续写盘。别当成「已经停了」，按上面 PowerShell 拿 PID +
+核对 CommandLine（确认是自己起的那条命令，见 [[feedback-destructive-file-ops]]）再 `taskkill //PID <n> //F`，
+然后立刻查它已写出的产物有没有被污染。

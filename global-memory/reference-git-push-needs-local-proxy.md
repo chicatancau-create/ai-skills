@@ -96,3 +96,22 @@ git config --global http.https://github.com.proxy http://127.0.0.1:7897
 判断顺序：先看 `git push` 是否打出 `old..new -> main`，再用 `gh run view <id> --json jobs` 看每个 job 的
 `conclusion`，不要用“命令没报错”当 CI 通过。
 
+
+---
+
+## 国内版补充（2026-11-19 并入）
+
+> 来源：Qoder 国内版 `C:\Users\Admin\.qoder-cn\memory\reference-git-push-needs-local-proxy.md`（本地修改日期 2026-11-05），国际版没有的内容，逐字保留；只追加，不改写上文。
+> 注意：下文端口 7897 是 2026-11-05 当时值；本机代理端口会漂（见上文 2026-11-15 节，实测 7890），以先读 ProxyServer 与 gitconfig 为准。
+
+**2026-11-05 补充：代理也会是坏的那一条路，别把它当默认**
+
+同一分钟内实测：走 7897 `git push` 报 `TLS connect error: error:0A000126 SSL routines::unexpected eof`，
+`curl -x 127.0.0.1:7897 https://api.github.com/zen` 回 **HTTP 000**（5 s 超时）；而**不带代理直连**
+`curl https://github.com/<owner>/<repo>/info/refs?service=git-upload-pack` 回 **401 = 端点可达、只是要鉴权**，
+随后 `git -c http.sslBackend=openssl -c credential.interactive=false push origin main` 一次成功。
+所以顺序是：**两条路各试一次再判网络**，而不是「GitHub 必须走 7897」。
+`netstat -ano | grep -c 127.0.0.1:7897` 只证明端口有人听，证明不了出口能通（代理节点挂了照样在 LISTENING）。
+加 `credential.interactive=false` 让它在拿不到凭据时快速失败，而不是弹 GCM 窗挂住。
+私有仓库匿名 `info/refs` 回 401 属正常，**不能当「仓库不存在」或「网络断了」的证据**。
+国内站（GitCode/AtomGit）反过来：直连就通，别挂代理。

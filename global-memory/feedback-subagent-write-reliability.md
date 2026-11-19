@@ -21,3 +21,11 @@ Delegating *implementation* to subagents here produced fabricated completion rep
 
 ## Related
 - Related: [[feedback-subagent-hygiene]], [[feedback-rigor-audit]], [[feedback-autonomous-execution]].
+
+---
+
+## 国内版补充（2026-11-19 并入）
+
+> 来源：Qoder 国内版 `C:\Users\Admin\.qoder-cn\memory\feedback-subagent-write-reliability.md`（本地修改日期 2026-11-04），国际版没有的内容，逐字保留；只追加，不改写上文。
+
+**【2026-11-04 更正：只读研究代理也会数错，别把它的计数当基线】** 在 `E:\OBsidian\全栈工程师学习计划` 用 `SearchWorkspace` 审计时，它开头写「本审计覆盖全部 **22 个**正式 Markdown 文件」，而同一轮 `Glob` + `wc -l` 实测是 **27 个**（改造后 28 个）。它逐条给出的文件:行号证据是对的，**汇总计数是错的**。所以：结论可以借它，凡是要写进交付物的「N 个文件 / N 行 / N 个链接」一律自己脚本量。
