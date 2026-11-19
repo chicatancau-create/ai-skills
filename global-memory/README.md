@@ -5,9 +5,18 @@
 
 ## 这是什么
 
-- 2026-11-19 从 Qoder 国际版全局记忆 `C:\Users\Admin\.qoder\memory`（junction→`D:\DevCache\.qoder\memory`）单向导入：118 个 .md（117 条记忆 + MEMORY.md 索引），逐文件 sha256 双端校验。
+- 2026-11-19 从 Qoder 国际版全局记忆 `C:\Users\Admin\.qoder\memory`（junction→`D:\DevCache\.qoder\memory`）单向导入 118 个 .md（117 条记忆 + MEMORY.md 索引），再并入国内版 `.qoder-cn` 独有的 8 条 → **共 125 条记忆 + MEMORY.md 索引**，逐文件 sha256 双端校验。
 - 源索引漏掉的 5 条已在本库 MEMORY.md 补全：feedback-subagent-write-reliability、reference-android-root-without-unlock、reference-bilibili-open-api-read、reference-ppt-master-workflow、reference-sqlite-wal-checkpoint-on-close。**源库只读，未改动。**
 - 实体在 D 盘，随 `D:\Skills` 技能库自动双远端私有备份（GitHub chicatancau-create/ai-skills + GitCode zhoumoyukuai/ai-skills）。
+
+## 国内版并集与冲突处理（2026-11-19）
+
+- 国内版 `C:\Users\Admin\.qoder-cn\memory`（77 文件）已单向 cp -n 补齐到 126 文件（49 拷贝，0 覆盖），索引手工合并（国际版修正基底 + 8 条国内独有行），orphan=0；旧索引备份 `MEMORY.md.bak-20261119`。
+- 30 个同名不同内容文件已逐个 diff 分诊（证据 `cn_conflicts_analysis.json` / `cn_plus_only.txt`）：
+  - 23 个国际版更新、5 个同时间戳但国内版是子集 → 共享库保留更丰富的国际版；国内版旧副本按手册 no-clobber 不覆盖。
+  - 8 个文件里「国内版独有且共享库确实缺失」的实质内容（2026-11-04/11-05 用户更正与复测）已以**带日期附录**逐字追加进共享库对应文件（feedback-backup-and-write-authorization、feedback-toolkit-is-tools-only、feedback-subagent-write-reliability、reference-git-credential-manager-windows、reference-git-push-needs-local-proxy、reference-qoder-artifact-locations、reference-windows-python-encoding、user-role），原文未动（前缀字节断言通过）。
+  - 其余独有行是 frontmatter/相关链接噪声或已被国际版吸收 → 不并入。
+- 刷新脚本只导入国际版新增；国内版后续新增需人工 diff 后按同样纪律并入。
 
 ## 怎么用（所有 AI）
 
@@ -50,4 +59,10 @@ C:\Users\Admin\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\python\python.
 
 ## 证据
 
-导入报告 + 全量 sha256 manifest：`G:\AIrenwu\01_任务归档\2026-11-19_导入Qoder全局记忆\02_证据日志\import_report.json`
+目录：`G:\AIrenwu\01_任务归档\2026-11-19_导入Qoder全局记忆\02_证据日志\`
+
+- `import_report.json` — 国际版导入 + 全量 sha256 manifest
+- `cn_sync_report.json` — 国内版 cp -n 同步 + 索引合并
+- `cn_unique_merge_report.json` — 8 条国内独有并入共享库
+- `cn_conflicts_analysis.json` / `cn_plus_only.txt` / `cn_unique_lines.txt` — 30 冲突分诊与独有行取证
+- `cn_addenda_report.json` — 8 个文件的带日期附录追加（前后字节数、原文未动断言）

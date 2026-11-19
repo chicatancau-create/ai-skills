@@ -151,6 +151,7 @@ description: 本机（这台 Windows）《AI本地使用手册》（G:\AIrenwu\�
 | 换了 Qoder 版本就「失忆」、两个客户端记忆是否共用 | `规则-国内版与国际版Qoder两套记忆目录完全独立只能单向拷入并校验.md`（`verified`：`.qoder` 与 `.qoder-cn` 无共享无联接；搬运用 `cp -n` + 手工合并索引 + `diff -rq` 复核；**别用 mklink /J**） |
 | 审查方与执行方共仓，发现写在对话里执行方看不到；续接后沿用旧现状 | `规则-多AI同仓审查交接三件套与续接先核时钟.md`（`verified`：发现文档+必读指针+处置建议；已闭标✅;续接先核 date/HEAD/行数） |
 | Qoder 浏览器 Agent 里 evaluate 恒返回 null、自绘单选点不动、标签页突然消失 | `经验-Qoder浏览器Agent的evaluate恒null与自绘单选要点label.md`（`verified`：读 DOM 用 `domSnapshot()`；自绘单选点 `label:has(input[value=...])`；调试器断开后重建 agent 新开页；写操作要刷新回读 + 独立验证） |
+| 换了 Agent 就「失忆」、要让所有 AI 共用一份全局记忆、记忆该放哪 | `规则-全机AI共享全局记忆存D盘Skills库并接线各Agent.md`（`verified`：实体 `D:\Skills\global-memory\`；接线走各 Agent 全局指令文件不是技能目录；单向 cp -n + sha256 + 索引合并 + orphan 检查；同名冲突 diff 三分类、独有内容带日期附录追加；禁 junction 实时共用） |
 
 **后端**（`02-后端/`）
 
