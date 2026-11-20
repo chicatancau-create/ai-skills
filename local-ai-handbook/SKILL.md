@@ -58,6 +58,7 @@ description: 本机（这台 Windows）《AI本地使用手册》（G:\AIrenwu\�
 | 内联命令里 `$_`、`$变量`、反斜杠被吞，报错词风马牛不相及 | `踩坑-Bash内联传参吞PowerShell变量与反斜杠.md` |
 | 文本里的 Windows 路径"少了反斜杠"、内容莫名断行、肉眼正常但 grep 不中；文件疑似含不可见控制字符 | `踩坑-Bash内联传参吞PowerShell变量与反斜杠.md`（2026-11-15 追加节：反斜杠被压单后 Python 按八进制转义消费 `\202`/`\01`/`\02`、`\n` 当换行 → 静默写出 U+0082/U+0001/U+0002；只有 `repr()` 或按码点正则能发现；**修复用的正确字符串同样会被吃**，改文件须备份 + 匹配数断言 + 写盘后复检） |
 | 写文件被拒（`[sandbox: file access denied]` / 拒绝访问），或改写带 BOM 的文件后 BOM 丢失 | `03-通用/03-调试与验证/踩坑-沙箱只放行工作区致写E盘被拒且write会抹掉源码BOM.md`（`verified`：BOM 丢失与沙箱拒写均已实测；拒写不限 E 盘，工作区外一律拒；2026-11-13 由收件箱移入正式分类） |
+| 写 OpenRevo（Tauri 宿主）插件页：iframe 里显示的是宿主主界面、`fetch('相对路径')` 报 `Unexpected token '<'`；插件面板整片白底浅字「惨白」；宿主日志刷 `[ERROR] [CONFIG] ... expected value at line 1 column 1` 并停止保存配置 | `03-通用/03-调试与验证/OpenRevo插件页开发三条硬规矩.md`（`verified`：2026-11-20 实机 OpenRevo v0.9.8 复现+修复+验证；三条根因＝未知相对路径兜底回宿主根路由、插件 tab 是独立 WebView2 不继承宿主皮肤、`Set-Content -Encoding UTF8` 写出 BOM 让 Rust serde 拒绝解析。对策＝子页面 base64 内嵌走 iframe `srcdoc`、`html,body` 给实色深底、config 一律用 Python utf-8 无 BOM 读写） |
 | 某域名直连一律超时、走代理秒回 | `踩坑-虚拟网卡空metric抢走默认路由致域名假超时.md` |
 | 当前是哪块网卡抢了默认路由 | `规则-默认路由抢占网卡已换为RadminVPN.md` |
 | 面板「连接失败 / 耗时 1ms」 | `踩坑-AI面板连接失败耗时1ms是没填密钥而非网络.md` |
