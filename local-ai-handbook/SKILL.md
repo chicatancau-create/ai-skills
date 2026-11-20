@@ -100,7 +100,7 @@ description: 本机（这台 Windows）《AI本地使用手册》（G:\AIrenwu\�
 
 | uni-app H5 下拉刷新判「指示器已停止」用 display/height 恒真；或刷新后分页请求旧页码跳中间页 | `踩坑-uni-appH5刷新指示器绝对定位隐藏与reload未重置pageIndex致分页取证误判.md`（`verified`：uni-page-refresh 绝对定位移出视口，判 rect.bottom>0；reload() 不重置 this.pageIndex → 刷新后触底请求旧索引+1；取证抓 postData 序列，null=预检 OPTIONS） |
 | 怀疑「装了两个相同程序」（开始菜单/任务栏出现新旧名两个入口），或应用自更新后改名留旧入口；或想改 Trae CN 默认启动 IDE/Agent 模式 | `踩坑-TraeCN自更新改名留旧快捷方式致开始菜单两个Trae实为同一程序.md`（`verified`：Trae CN 3.4.20 自更新 TraeCode CN→TRAE CN 新增 lnk 不删旧，两 lnk TargetPath 同指一个 exe；判重看进程 Path/卸载注册表/lnk TargetPath 三清单，不看图标数；清理删重复 lnk、保留用户固定/可见的那个（改 lnk 文件名会坏开始菜单磁贴，用户要改名先告知重固定）；默认启动模式用设置 window.startupWindowType=agent/ide，非 CLI 参数；本机已执行：删新留旧→改名 TRAE CN→默认 agent） |
-| 要让 AI/脚本剪 CapCut（国际版）视频、生成草稿、加离线字幕；或 pip 装 vosk 挂起不动 | `03-通用/03-调试与验证/经验-CapCut国际版草稿自动化-pycapcut建草稿与vosk离线字幕.md`（`verified`：pycapcut 0.0.4 建草稿文件级断言通过；vosk small-cn + SAPI TTS 自测逐字命中；装库用自带 3.12 别用 3.15；GUI 目视待补） |
+| 要让 AI/脚本剪 CapCut（国际版）视频、生成草稿、加离线字幕；或 pip 装 vosk 挂起不动 | `03-通用/03-调试与验证/经验-CapCut国际版草稿自动化-pycapcut建草稿与vosk离线字幕.md`（`verified`：pycapcut 0.0.4 建草稿文件级断言通过；vosk small-cn + SAPI TTS 自测逐字命中；装库用自带 3.12 别用 3.15；CapCut 首页识别已过，时间线待补） |
 
 **前端**（`01-前端/07-表单与交互/`）
 
