@@ -124,6 +124,17 @@ OPENAI_TARGET_API_URL=http://127.0.0.1:15721/v1
 HEADROOM_OFFLINE=1
 ```
 
+**2026-11-20 修正：这三个变量（连同其他 `HEADROOM_*`）不要再写进用户级注册表环境变量。**
+全局同名变量会被 DeepSeek Harness 判定为「系统环境变量冲突」并弹窗告警（它按 `ANTHROPIC_*` / `OPENAI_*` 前缀扫注册表）。
+现在只在 headroom 自己的启动链里注入，共三处，改配置请改这三处：
+
+- `C:\Users\Admin\.headroom\deploy\default\run-headroom.ps1`
+- `C:\Users\Admin\.headroom\deploy\default\ensure-headroom.ps1`
+- `C:\Users\Admin\.headroom\deploy\default\manifest.json` → `base_env`（健康检查重启代理时生效）
+
+手工起代理请走 `C:\Users\Admin\.headroom\deploy\default\run-headroom.cmd`，不要直接 `headroom proxy`，
+否则上游会退回 api.anthropic.com。
+
 Agent 侧只改一处：`ANTHROPIC_BASE_URL` / `base_url` 从 `15721` 改成 `8787`。
 **不要**让 headroom 直接接管供应商路由，那会绕过 cc-switch 的模型映射。
 
