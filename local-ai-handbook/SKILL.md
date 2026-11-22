@@ -142,6 +142,7 @@ description: 本机（这台 Windows）《AI本地使用手册》（G:\AIrenwu\�
 | 令牌化收口后截图配对出现差异，无法归因重构还是改色 | `规则-视觉中性重构先等值替换再改色.md`（`verified`：令牌值先等于原字面量保零视觉差，改色另作视觉决策） |
 | 清理会话产物时发现交付件与最新导出件页数/大小/MD5 不同 | `规则-清理会话垃圾前先比对交付件与导出原件.md`（`verified`：用户可后续编辑交付件；旧导出件不能反向覆盖，空白页只报告不自动删） |
 | bat 内嵌 PS 探针注释被当命令、`'/b' 不是命令`、`$pid` 只读 | `04-工程规范与安全/踩坑-bat内嵌PowerShell探针的marker与readkey空路径及pid只读.md` |
+| 模型该放哪 / 新下载模型落点 / 模型路径散落任务目录 | `04-工程规范与安全/规则-AI模型统一存放D盘Models目录.md` |
 | 批量替换只改了几处，`git diff` 却报整文件重写 | `踩坑-Python文本模式批量改写把CRLF静默转LF致diff暴涨.md`（`verified`：文本模式**读**时已折叠 CRLF，`newline=''` 不会恢复；一律 `rb`/`wb`，还原要逐文件参照 HEAD 原行尾） |
 | 采集器写完才发现 robots 禁了搜索页；或 curl 拿到的 HTML 里没有正文 | `踩坑-牛客robots禁search采集只能走sitemap且正文须渲染.md`（`verified`：`Disallow:/search`，合规入口是公布的 sitemap；SPA 外壳仅 6 KB，正文须 headless 渲染；两层抓取 + 匹配三道闸） |
 | 要把私有仓库转公开，担心历史/路径/证据哈希 | `规则-仓库公开前脱敏须扫全历史且改证据要重签哈希清单.md`（`verified`：扫 `git rev-list --all`；代码默认值不改；改证据必须重签 manifest；历史留痕让用户拍板；生效判据是匿名 API 200） |
