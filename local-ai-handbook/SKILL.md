@@ -220,3 +220,5 @@ description: 本机（这台 Windows）《AI本地使用手册》（G:\AIrenwu\�
 - ❌ 因为手册里有类似经验就跳过当前复现 → 易变项必须实测复核。
 - ❌ 回写前逐次请示 → 用户 2026-10-13 已授权**完工自动回写**，汇报写了什么、写到哪里即可；把握不足写收件箱。
 - ❌ 还按 `E:\本地AI使用手册` 找手册 → 2026-11-16 已迁入 `G:\AIrenwu\本地AI使用手册`，E 盘不存在。
+| 想给子代理单独指定模型，配了 `modelSelection` 却不生效；或子代理报 `without a recorded model-selection policy, explicit selection is limited to the parent route` | `03-通用/03-调试与验证/经验-DSH装插件与删provider的四个动作点.md`「2026-11-22 再补」第①②条 |
+| 改了插件源码（如 memsearch `client.js` 关横条），插件一升级就被还原 | 同上文件「2026-11-22 再补」第④条；脚本在 `E:\fullstack-code\tools\dsh-post-upgrade-repatch\` |
