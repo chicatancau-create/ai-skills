@@ -131,3 +131,5 @@
 - [WebGL 页面怎么取证](reference-webgl-page-verification.md) — 连接器 tab 挂起 rAF；自起 headless Edge + CDP；PNG 大小判不了黑屏；importmap 不支持 fallback 数组且失败被负缓存；反向 smoothstep 吐 NaN 会毒死 Bloom
 - [Windows 长路径扫描盲区](reference-windows-longpath-scan.md) — 不带 `\\?\` 的 os.walk 会静默漏掉 >260 字符条目；「超限 0／文件不存在／全绿」结论一律不可信，展平要留 md5 映射。
 - [AI 模型统一存放 D:\Models](rule-models-store-in-d-models.md) — 用户 m01482 规定：一切模型权重只放/只从 D:\Models 加载，zip 归 _archives；脚本默认路径已改并验证。
+- [vlog 剪辑偏好：平淡是唯一目标](feedback-vlog-plain-edit-preferences.md) — 时长不优化；切点进静音锚点、上调语气说完；停顿两侧不淡化；字幕逐字原话稀疏；交付后清场。
+- [工作区不留视频](rule-workspace-no-videos.md) — 成品/缓存落 D:\AI-Tool-State，工作区只留图文证据；交付确认后清；CapCut 草稿依赖媒体例外不可删。
