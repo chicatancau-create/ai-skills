@@ -160,6 +160,8 @@ description: 本机（这台 Windows）《AI本地使用手册》（G:\AIrenwu\�
 | 手册/任务区路径对不上、还按 E 盘找手册、回写逐次请示、全局「先查手册」触发失效 | `规则-任务区与手册一体化联动.md`（`verified`：2026-11-16 手册迁入 `G:\AIrenwu\本地AI使用手册`；回写按 2026-10-13 授权自动执行；`~/.dsh/AGENTS.md` 第〇节曾缺失已重建；技能经 skill-router 按需读） |
 | 任务区根目录该放什么、脚本/证据/产物往哪归 | `规则-工作区大纲与归类铁律.md`（2026-11-16 更新为根 7 类：手册是第 7 类；脚本库 10 分类） |
 | 要摸透/调整 PowerToys 功能、脚本启停模块或改热键；安装根调 Settings CLI 报 CommandNotFoundException | `03-通用/04-工程规范与安全/经验-PowerToys功能配置速查与CLI-DSC自动化入口.md`（`verified`：CLI 在 WinUI3Apps 子目录、DSC get 实测与配置一致；38 模块清单在任务归档报告；Junction 真源在 D、提权须 RunAs） |
+| **DSH 会话老是「本轮运行失败」**、报 `Tool call "xxx": Unexpected non-whitespace character after JSON at position N`、`Received arguments` 里两个 JSON 对象粘在一起 | `03-通用/03-调试与验证/踩坑-上游中转把并行工具调用粘进同一tool_use参数致整轮MALFORMED_RESPONSE.md`（`verified`：中转把同 step 的两个并行工具调用合并进一个 tool_use 块且丢了第二个名字 ⇒ 整轮 MALFORMED_RESPONSE；修法＝`llm/stream` waterfall 插件 `llm-stream-repair` 补 `block-end` 覆盖坏参数并改写终止原因为 `tool-calls`，金丝雀假流端到端实测通过） |
+| 想改 DSH 模型调用行为（重试/改写流/降级路由）又不想动 app.asar；插件装上了但报 `cannot get property "config" without inject` | 同上记录「可复用规则」2–5 条（`ctx.on('llm/stream', (options, next) => ...)`、`apply(ctx, pluginConfig)` 第二参数、`remove_bundle`→`install_bundle` 顺序、profile patch 手写行不热生效） |
 
 **AI 协作与提示词**（`03-通用/02-AI协作与提示词/`）
 
