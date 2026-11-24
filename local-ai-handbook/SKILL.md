@@ -109,6 +109,7 @@ description: 本机（这台 Windows）《AI本地使用手册》（G:\AIrenwu\�
 | 要让 AI/脚本剪 CapCut（国际版）视频、生成草稿、加离线字幕；或 pip 装 vosk 挂起不动 | `03-通用/03-调试与验证/经验-CapCut国际版草稿自动化-pycapcut建草稿与vosk离线字幕.md`（`verified`：pycapcut 0.0.4 建草稿文件级断言通过；vosk small-cn + SAPI TTS 自测逐字命中；装库用自带 3.12 别用 3.15；CapCut 首页识别已过，时间线待补；v2 补转场/音频轨/旁白去停顿；v3 整片审查法；v4 转场总时长不变语义 + settb 坑 + 不依赖编辑器的 ffmpeg 成品导出） |
 | 微信收到的视频/音频过一阵消失、脚本报找不到文件 | `03-通用/03-调试与验证/经验-微信msg-video临时文件会被自动清理-收到媒体立即备份.md`（`verified`：msg\video 临时缓存自动清理，收到立即备份原件或抽音轨） |
 | 给 XD 课件/原型加拖移（drag）跳转，或校验器对 XD 自己存的文件报 `unknown action 'auto-animate'`/symbol 键 `matches NO node` | `03-通用/03-调试与验证/经验-XD拖移auto-animate落盘格式用亲笔样本定案与校验器盲区.md`（`verified`：落盘 drag=`triggerEvent:"drag"`+`action:"auto-animate"`（独立 action，transition 残留 dissolve 被忽略）；无先例用活缓存 `%LOCALAPPDATA%\Packages\Adobe.XD_pc75e8sa7ep4e\LocalState\<hash>\interactions.json` 或用户另存文件的亲笔条目定案；校验器 FAIL 先跑未改动基线区分盲区，修后负例证没放水；xdpatch spec 加 `autoAnimate:true`） |
+| CC Switch 报 claude「不是内部或外部命令」、claude/codex/pi「另有 1 处安装」、装了 Antigravity 却显示未安装、顶部「系统环境变量冲突」横幅 | `03-通用/03-调试与验证/踩坑-CCSwitch判claude无法运行且反重力不识别-陈旧npm前缀遮蔽与进程PATH.md`（`verified`：陈旧前缀 D:\node-global+junction C:\node-global 遮蔽 Roaming\npm、自更新中断留 .old 残骸→备份移走九入口三包；Antigravity 条目只认 agy CLI（官方 install.cmd -d D:\agy\bin 装）；安装枚举只用进程 PATH→注册表实时 PATH 重启 GUI；ANTHROPIC* 用户变量 grep 消费方+备份后删消横幅） |
 
 **前端**（`01-前端/07-表单与交互/`）
 

@@ -133,3 +133,4 @@
 - [AI 模型统一存放 D:\Models](rule-models-store-in-d-models.md) — 用户 m01482 规定：一切模型权重只放/只从 D:\Models 加载，zip 归 _archives；脚本默认路径已改并验证。
 - [vlog 剪辑偏好：平淡是唯一目标](feedback-vlog-plain-edit-preferences.md) — 时长不优化；切点进静音锚点、上调语气说完；停顿两侧不淡化；字幕逐字原话稀疏；交付后清场。
 - [工作区不留视频](rule-workspace-no-videos.md) — 成品/缓存落 D:\AI-Tool-State，工作区只留图文证据；交付确认后清；CapCut 草稿依赖媒体例外不可删。
+- [CC Switch 检测三坑与 agy 重装现状](reference-ccswitch-detection-and-agy-reinstall-2026-11-24.md) — 2026-11-24：D:\agy 已官方重装（agy 1.5.15、PATH 含 D:\agy\bin、未登录）；代理现 7890（7897 已死）；CC Switch Antigravity 条目=CLI 非 IDE、安装枚举只用进程 PATH；陈旧 npm 前缀已备份移走；ANTHROPIC* 用户变量备份后删消横幅。
