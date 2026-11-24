@@ -134,3 +134,4 @@
 - [vlog 剪辑偏好：平淡是唯一目标](feedback-vlog-plain-edit-preferences.md) — 时长不优化；切点进静音锚点、上调语气说完；停顿两侧不淡化；字幕逐字原话稀疏；交付后清场。
 - [工作区不留视频](rule-workspace-no-videos.md) — 成品/缓存落 D:\AI-Tool-State，工作区只留图文证据；交付确认后清；CapCut 草稿依赖媒体例外不可删。
 - [CC Switch 检测三坑与 agy 重装现状](reference-ccswitch-detection-and-agy-reinstall-2026-11-24.md) — 2026-11-24：D:\agy 已官方重装（agy 1.5.15、PATH 含 D:\agy\bin、未登录）；代理现 7890（7897 已死）；CC Switch Antigravity 条目=CLI 非 IDE、安装枚举只用进程 PATH；陈旧 npm 前缀已备份移走；ANTHROPIC* 用户变量备份后删消横幅。
+- [反重力汉化与启动整合](reference-antigravity-hans-launch-integration-2026-11-24.md) — 2026-11-24：普通版 Antigravity 2.35.0 汉化=动态 CDP 会话级注入故每次单跑；已用官方 --shortcut --app 一键链+repoint 开始菜单 lnk 整合（稳定副本 D:\AI-Tool-State\antigravity-hans）；静态 --patch 仅 IDE；双击 exe 仍英文。
