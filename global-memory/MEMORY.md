@@ -141,3 +141,4 @@
 - [重启后复核闭环](reference-post-reboot-verify-2026-11-24.md) — 2026-11-24：开机任务迁 .android/Android/Huawei/CapCut 共 14.57G 成功自删；.android 补进守护 ALL，共 54 联接全绿；DSH 已自动更新 0.2.3-alpha.2，冗余安装缓存 574.9MB 移 D:\AI-Tool-State\disk-audit\updater-cache-bak（更新器目录空≠缺更新）；C 剩 173.2G（今日+59G）。
 - [Viap 清理前两项必检（用户规定）](reference-viap-precheck-rule-2026-11-24.md) — 2026-11-24 用户长期规则：用 Viap 清理数据/内存前必①跑 health_check.py/双守护确认 D 盘 54 联接效果还在（D:\DevCache* 是真源不是可清理内存）②对比 GitHub latest 结合本机包核验 Viap 更新；updater-cache-bak 用户决定永久保留不删。
 - [CC Switch 环境变量冲突复发：真因是 headroom manifest 整批进注册表](reference-ccswitch-env-conflict-recur-2026-11-24.md) — 横幅只扫 ANTHROPIC/OPENAI/GEMINI/GOOGLE_GEMINI/XAI 前缀的用户注册表变量；删变量后**必须重启 CC Switch**（读启动快照）横幅才消失；重启会重写 ~/.claude/settings.json 与 config.toml 但 URL 仍指 8787，复核看 URL 不看 hash；判端口死活只能 curl，netstat 会漏。
+- [用户删的东西不默认恢复](rule-user-deleted-not-auto-restore.md) — 用户自己删的路径不得静默重建/还原；仅当挡住当前任务且已说明影响+获确认才可恢复；AI 自建临时文件不在此列（C:\「开始」两次恢复事件）。
