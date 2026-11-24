@@ -111,6 +111,7 @@ description: 本机（这台 Windows）《AI本地使用手册》（G:\AIrenwu\�
 | 给 XD 课件/原型加拖移（drag）跳转，或校验器对 XD 自己存的文件报 `unknown action 'auto-animate'`/symbol 键 `matches NO node` | `03-通用/03-调试与验证/经验-XD拖移auto-animate落盘格式用亲笔样本定案与校验器盲区.md`（`verified`：落盘 drag=`triggerEvent:"drag"`+`action:"auto-animate"`（独立 action，transition 残留 dissolve 被忽略）；无先例用活缓存 `%LOCALAPPDATA%\Packages\Adobe.XD_pc75e8sa7ep4e\LocalState\<hash>\interactions.json` 或用户另存文件的亲笔条目定案；校验器 FAIL 先跑未改动基线区分盲区，修后负例证没放水；xdpatch spec 加 `autoAnimate:true`） |
 | CC Switch 报 claude「不是内部或外部命令」、claude/codex/pi「另有 1 处安装」、装了 Antigravity 却显示未安装、顶部「系统环境变量冲突」横幅 | `03-通用/03-调试与验证/踩坑-CCSwitch判claude无法运行且反重力不识别-陈旧npm前缀遮蔽与进程PATH.md`（`verified`：陈旧前缀 D:\node-global+junction C:\node-global 遮蔽 Roaming\npm、自更新中断留 .old 残骸→备份移走九入口三包；Antigravity 条目只认 agy CLI（官方 install.cmd -d D:\agy\bin 装）；安装枚举只用进程 PATH→注册表实时 PATH 重启 GUI；ANTHROPIC* 用户变量 grep 消费方+备份后删消横幅） |
 | 反重力每次启动都要单跑汉化工具、想启动即中文 | `03-通用/03-调试与验证/经验-反重力汉化每次需单跑工具-动态CDP注入与官方一键快捷方式整合.md`（`verified`：普通版动态 CDP 会话级注入→官方 `--shortcut --app` 生成 conhost --headless 一键链，备份后 repoint 开始菜单原 lnk；静态 --patch 仅 IDE 不含会话页；直接双击 exe 仍英文） |
+| 反重力汉化工具想启动时自动更新／headless 启动链里检查报错或乱码 | `03-通用/03-调试与验证/经验-反重力汉化每次需单跑工具-动态CDP注入与官方一键快捷方式整合.md`（`verified` 后续：launch.ps1 每次启动比对 GitHub release digest 自动更新、失败回落旧版；conhost --headless OEM936 码页须 curl -o 文件+UTF8 读） |
 
 **前端**（`01-前端/07-表单与交互/`）
 
