@@ -17,3 +17,4 @@
 - 坑：conhost --headless 控制台码页 OEM936 把 curl stdout 的 UTF-8 中文解出杂散反斜杠致 ConvertFrom-Json 失败（交互 pwsh 正常）→ 改 curl -o 临时文件 + Get-Content -Raw -Encoding UTF8。
 - 实测：上游 v0.5.0 digest == 本机哈希（已最新）；隔离假旧 exe 走完整更新分支 5s 通过；headless -CheckOnly 记 up-to-date；坏 ApiUrl 走 catch 记日志 exit 0。
 - 回滚：backup\antigravity-hans.prev.exe（更新前 exe）、lnk *.chain1.bak（改链前）。
+- 复验：11:08:15 空闲门控全链 up-to-date+启动，抓图全中文，清理 remaining_pids=[]（归档 04_产物\verify_result2.json、hans_launch_capture2.png）。
