@@ -228,3 +228,4 @@ description: 本机（这台 Windows）《AI本地使用手册》（G:\AIrenwu\�
 - ❌ 还按 `E:\本地AI使用手册` 找手册 → 2026-11-16 已迁入 `G:\AIrenwu\本地AI使用手册`，E 盘不存在。
 | 想给子代理单独指定模型，配了 `modelSelection` 却不生效；或子代理报 `without a recorded model-selection policy, explicit selection is limited to the parent route` | `03-通用/03-调试与验证/经验-DSH装插件与删provider的四个动作点.md`「2026-11-22 再补」第①②条 |
 | 改了插件源码（如 memsearch `client.js` 关横条），插件一升级就被还原 | 同上文件「2026-11-22 再补」第④条；脚本在 `E:\fullstack-code\tools\dsh-post-upgrade-repatch\` |
+| C 盘 AppData 越来越大想迁 D 盘；怀疑已迁数据被 AI 重复写回 C；评估 Viap 这类 Junction 迁移工具 | `03-通用/04-工程规范与安全/经验-AppData缓存迁D盘复用DSH-Guard核心按组包装.md`（复用 D:\DSH-Guard 核心按组包装；回流核查法；锁定目录开机任务；D 盘副本是真源别清理） |
