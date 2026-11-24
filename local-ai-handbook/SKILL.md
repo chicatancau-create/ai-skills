@@ -113,6 +113,8 @@ description: 本机（这台 Windows）《AI本地使用手册》（G:\AIrenwu\�
 | CC Switch 报 claude「不是内部或外部命令」、claude/codex/pi「另有 1 处安装」、装了 Antigravity 却显示未安装、顶部「系统环境变量冲突」横幅 | `03-通用/03-调试与验证/踩坑-CCSwitch判claude无法运行且反重力不识别-陈旧npm前缀遮蔽与进程PATH.md`（`verified`：陈旧前缀 D:\node-global+junction C:\node-global 遮蔽 Roaming\npm、自更新中断留 .old 残骸→备份移走九入口三包；Antigravity 条目只认 agy CLI（官方 install.cmd -d D:\agy\bin 装）；安装枚举只用进程 PATH→注册表实时 PATH 重启 GUI；ANTHROPIC* 用户变量 grep 消费方+备份后删消横幅） |
 | 反重力每次启动都要单跑汉化工具、想启动即中文 | `03-通用/03-调试与验证/经验-反重力汉化每次需单跑工具-动态CDP注入与官方一键快捷方式整合.md`（`verified`：普通版动态 CDP 会话级注入→官方 `--shortcut --app` 生成 conhost --headless 一键链，备份后 repoint 开始菜单原 lnk；静态 --patch 仅 IDE 不含会话页；直接双击 exe 仍英文） |
 | 反重力汉化工具想启动时自动更新／headless 启动链里检查报错或乱码 | `03-通用/03-调试与验证/经验-反重力汉化每次需单跑工具-动态CDP注入与官方一键快捷方式整合.md`（`verified` 后续：launch.ps1 每次启动比对 GitHub release digest 自动更新、失败回落旧版；conhost --headless OEM936 码页须 curl -o 文件+UTF8 读） |
+| PixPin（或类似 Qt/原生截图工具）启动即退、退出码 0xC0000409、pixpin.log 截断为 0、无 WER 转储 | `03-通用/03-调试与验证/踩坑-PixPin启动即崩0xC0000409因截图历史索引损坏改名即修复.md`（`verified`：上次截图 UiRegionDetector 超时崩溃写坏 %LOCALAPPDATA%\PixPin\History\_ScreenshotRecord 索引，启动读它即 __fastfail；整目录改名全新数据能跑⇒数据损坏，逐文件改名隔离定位；修复＝_ScreenshotRecord 改名 .off 保留备份，截图本体 Data 与 Config 不丢；0xC0000409 不走 WER，别因无转储排除崩溃） |
+| 「GPT」/ChatGPT/Codex 桌面版（MSIX）起不来、事件日志 0x800701C0「配置运行时遇到错误」、重注册报 0x80073D3C「等待删除请注销」 | `99-收件箱/待验证-CodexChatGPT桌面版MSIX框架延迟删除致0x800701C0启动失败.md`（`needs-review`：依赖框架 OpenAI.CodexPrimaryRuntime Status=NotAvailable 延迟删除未完成→主程序 0x800701C0；重注册被 0x80073D3C 挡；可靠解＝注销/重启后重注册框架；已布 HKLM RunOnce\CodexAutoRepair 自动修复） |
 
 **前端**（`01-前端/07-表单与交互/`）
 
