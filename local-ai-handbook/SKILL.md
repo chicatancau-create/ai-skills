@@ -157,6 +157,7 @@ description: 本机（这台 Windows）《AI本地使用手册》（G:\AIrenwu\�
 | 要把私有仓库转公开，担心历史/路径/证据哈希 | `规则-仓库公开前脱敏须扫全历史且改证据要重签哈希清单.md`（`verified`：扫 `git rev-list --all`；代码默认值不改；改证据必须重签 manifest；历史留痕让用户拍板；生效判据是匿名 API 200） |
 | 手册/任务区路径对不上、还按 E 盘找手册、回写逐次请示、全局「先查手册」触发失效 | `规则-任务区与手册一体化联动.md`（`verified`：2026-11-16 手册迁入 `G:\AIrenwu\本地AI使用手册`；回写按 2026-10-13 授权自动执行；`~/.dsh/AGENTS.md` 第〇节曾缺失已重建；技能经 skill-router 按需读） |
 | 任务区根目录该放什么、脚本/证据/产物往哪归 | `规则-工作区大纲与归类铁律.md`（2026-11-16 更新为根 7 类：手册是第 7 类；脚本库 10 分类） |
+| 要摸透/调整 PowerToys 功能、脚本启停模块或改热键；安装根调 Settings CLI 报 CommandNotFoundException | `03-通用/04-工程规范与安全/经验-PowerToys功能配置速查与CLI-DSC自动化入口.md`（`verified`：CLI 在 WinUI3Apps 子目录、DSC get 实测与配置一致；38 模块清单在任务归档报告；Junction 真源在 D、提权须 RunAs） |
 
 **AI 协作与提示词**（`03-通用/02-AI协作与提示词/`）
 
