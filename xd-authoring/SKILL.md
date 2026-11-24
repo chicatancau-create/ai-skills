@@ -107,13 +107,18 @@ zip 时间戳/压缩方式/属性全保留、`testzip()=None`）。
   **重名节点（如多个 `icon`）只能用 id 前缀**——先用 `--index` 看清楚。
 - 只替换 `interactions/interactions.json`，其余成员字节不动；`--dry-run` 不落盘；
   失败 `FAIL: ...` + 退出码 2 且不留半成品。
+- **拖移跳转（drag）**：link 加 `"trigger": "drag", "autoAnimate": true` → 落盘
+  `triggerEvent:"drag"` + `action:"auto-animate"`。auto-animate 是独立 action，不是 transition 值；
+  `properties.transition` 残留 `"dissolve"` 会被忽略（与 XD 亲笔一致）。XD 拖移缺省 `easing=linear`、
+  `duration=0.3`。格式真样本与证据见 `SCHEMA.md` §10 与 `provenance\drag_format_evidence*.json`，
+  可复现 spec：`specs\自动播放轮播图拖移.json`（2026-11-16 交付，四校验全 PASS）。
 
 ## 交付前必须过的四道校验
 
 ```powershell
 $py='C:\Users\Admin\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\python\python.exe'
 $env:PYTHONIOENCODING='utf-8'
-& $py "C:\Users\Admin\.dsh\tools\xd\validate.py"       "E:\out.xd" --compare "E:\XD\自动播放轮播图初始文件（单图）.xd"
+& $py "C:\Users\Admin\.dsh\tools\xd\validate.py"       "E:\out.xd" --compare "E:\XD\交互式原型初始文件.xd"
 & $py "C:\Users\Admin\.dsh\tools\xd\validate_proto.py" "E:\out.xd"
 & $py "C:\Users\Admin\.dsh\tools\xd\geom_check.py"     "E:\out.xd"
 & $py "C:\Users\Admin\.dsh\tools\xd\inter_probe.py"    "E:\out.xd"
@@ -176,6 +181,7 @@ home 走到（不可达 FAIL）、`time` 触发是否给了正 delay（FAIL）�
 | 能力 | 状态 |
 |---|---|
 | 给已有 .xd 加交互，其余字节不动 | ✅ 实测：用 `specs\交互式原型.json` 复现了交付物 11 条交互，节点→目的地逐条一致，`validate_proto.py` 19 passed |
+| 给已有 .xd 加拖移跳转（drag + auto-animate） | ✅ 2026-11-16 实测：轮播底稿追加 6 条 drag + home，四校验全 PASS（validate 20/0、validate_proto 25/0、geom_check 0 fail、inter_probe 0 fail）；与用户自己在 XD 里另存的 drag 条目格式逐字段同构（`provenance\drag_format_evidence_user.json`）；原生 `autoAnimate:true` 复现逐键一致。真机预览未跑（当时用户活跃，不抢前台） |
 | 从零生成 3 画板课件（分组 + 6 条交互） | ✅ 结构四校验 PASS（`validate.py` 18/0/1 skipped、`validate_proto.py` 14 passed、`geom_check.py` 0 fails、`inter_probe.py` 0 fail／0 warn）、**真机打开渲染正确**（2026-11-11 23:17：3 画板、卡片 y=104/212/320、底栏完整在画板内、`←` 与三个 tab 图标/标签都正常）、**6 条交互全部在预览里点通 6/6**（见下一行） |
 | 生成器的通用性（非内置模板） | ✅ 另起 414x736 两板设计、含换行段落/四角不同圆角/半透明椭圆/内嵌图片/两层嵌套组 → 四校验全 PASS |
 | 从零生成文件的交互在预览里点通 | ✅ **2026-11-12 10:22 实跑 `tpl_check.py '示例-课件模板' specs\课件模板点测.json` → `done 6/6`**：card1→详情、详情顶栏→previous、tab3→列表、列表顶栏→previous、tab1→首页(自身不跳)、`time` 5s 自动→列表，六个签名/截图全部符合预期。证据 `E:\XD\证据\模板点测\`（6 张 PNG，`03` 与 `06` 字节相同、`02`/`04`/`05` 字节相同，状态稳定无残留）。 |

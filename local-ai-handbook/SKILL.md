@@ -108,6 +108,7 @@ description: 本机（这台 Windows）《AI本地使用手册》（G:\AIrenwu\�
 | 怀疑「装了两个相同程序」（开始菜单/任务栏出现新旧名两个入口），或应用自更新后改名留旧入口；或想改 Trae CN 默认启动 IDE/Agent 模式 | `踩坑-TraeCN自更新改名留旧快捷方式致开始菜单两个Trae实为同一程序.md`（`verified`：Trae CN 3.4.20 自更新 TraeCode CN→TRAE CN 新增 lnk 不删旧，两 lnk TargetPath 同指一个 exe；判重看进程 Path/卸载注册表/lnk TargetPath 三清单，不看图标数；清理删重复 lnk、保留用户固定/可见的那个（改 lnk 文件名会坏开始菜单磁贴，用户要改名先告知重固定）；默认启动模式用设置 window.startupWindowType=agent/ide，非 CLI 参数；本机已执行：删新留旧→改名 TRAE CN→默认 agent） |
 | 要让 AI/脚本剪 CapCut（国际版）视频、生成草稿、加离线字幕；或 pip 装 vosk 挂起不动 | `03-通用/03-调试与验证/经验-CapCut国际版草稿自动化-pycapcut建草稿与vosk离线字幕.md`（`verified`：pycapcut 0.0.4 建草稿文件级断言通过；vosk small-cn + SAPI TTS 自测逐字命中；装库用自带 3.12 别用 3.15；CapCut 首页识别已过，时间线待补；v2 补转场/音频轨/旁白去停顿；v3 整片审查法；v4 转场总时长不变语义 + settb 坑 + 不依赖编辑器的 ffmpeg 成品导出） |
 | 微信收到的视频/音频过一阵消失、脚本报找不到文件 | `03-通用/03-调试与验证/经验-微信msg-video临时文件会被自动清理-收到媒体立即备份.md`（`verified`：msg\video 临时缓存自动清理，收到立即备份原件或抽音轨） |
+| 给 XD 课件/原型加拖移（drag）跳转，或校验器对 XD 自己存的文件报 `unknown action 'auto-animate'`/symbol 键 `matches NO node` | `03-通用/03-调试与验证/经验-XD拖移auto-animate落盘格式用亲笔样本定案与校验器盲区.md`（`verified`：落盘 drag=`triggerEvent:"drag"`+`action:"auto-animate"`（独立 action，transition 残留 dissolve 被忽略）；无先例用活缓存 `%LOCALAPPDATA%\Packages\Adobe.XD_pc75e8sa7ep4e\LocalState\<hash>\interactions.json` 或用户另存文件的亲笔条目定案；校验器 FAIL 先跑未改动基线区分盲区，修后负例证没放水；xdpatch spec 加 `autoAnimate:true`） |
 
 **前端**（`01-前端/07-表单与交互/`）
 
