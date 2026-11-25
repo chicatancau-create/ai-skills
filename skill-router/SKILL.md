@@ -27,7 +27,7 @@ description: 本机技能总路由，默认必开。Use at the START of EVERY ta
 D:\Skills\<目录名>\SKILL.md
 ```
 
-Qoder 工具箱的在 `D:\QoderToolkit\<目录名>\SKILL.md`。
+原 QoderToolkit 的 9 个技能已并入本库，同样在 `D:\Skills\<目录名>\SKILL.md`（`web-kimi` 因许可排除，仍在 `D:\QoderToolkit\web-kimi`）。
 索引里给了准确路径的以索引为准（少数目录名与技能名不同）。
 
 **第 3 步 · 执行。** 按读到的说明书做。需要它的子文件（scripts/、references/）
@@ -71,7 +71,7 @@ python D:\Skills\skill-router\ops.py backup    # git 备份状态（backup now �
 | 库 | 本地 | GitHub | GitCode |
 | --- | --- | --- | --- |
 | 统一技能库 | `D:\Skills`（就地 `git init`，零复制） | `chicatancau-create/ai-skills`（private） | `zhoumoyukuai/ai-skills`（private） |
-| Qoder 工具箱 | `D:\QoderToolkit` | `chicatancau-create/qoder-toolkit`（private） | `zhoumoyukuai/qoder-toolkit`（private） |
+| Qoder 工具箱（已并入本库，仅留 `web-kimi`） | `D:\QoderToolkit` | `chicatancau-create/qoder-toolkit`（private） | `zhoumoyukuai/qoder-toolkit`（private） |
 
 - **自动保持最新**：`wire_guard` 每轮顺带调 `git_backup.py`，**10 分钟去抖 + 只在真有改动时**提交推送，
   推完回读 `ls-remote` 核对 SHA。日志 `D:\AI-Tool-State\git-backup\backup.log`。
@@ -84,7 +84,7 @@ python D:\Skills\skill-router\ops.py backup    # git 备份状态（backup now �
 - **7 个技能按许可排除在远端之外**（`.gitignore` 按目录排除，本地仍可用）：
   `docx`/`pdf`/`pptx`/`xlsx`（Anthropic 专有，明文禁止在 Services 外保留副本、禁止转移第三方）、
   `reverse-trace`/`reverse-wechat-miniapp`（无 LICENSE，PROVENANCE 限定仅本机自用）、
-  `webapp-building`（泄露的 Kimi 技能，上游明示无任何使用许可）。QoderToolkit 另排除 `web-kimi`。
+  `webapp-building`（泄露的 Kimi 技能，上游明示无任何使用许可）。原 QoderToolkit 的 `web-kimi` 同一泄露来源，**未并入本库**（仍在 `D:\QoderToolkit\web-kimi`）。
   **私有仓库不能解决这一条**——上传到托管平台本身就是「转移给第三方」。依据见 `BACKUP_SCOPE.md`。
 - `git_backup.py` 提交前会**再查一遍暂存路径**，命中排除目录就拒绝提交并 reset，不靠 `.gitignore` 单点。
 - 恢复：`git clone <远端> D:\Skills` → `wire_agents.py --apply` → `router.py sync` → `ops.py wire`。
@@ -187,7 +187,7 @@ headroom install apply --preset persistent-task --runtime python --scope user \
 - `xlsx` — Excel/CSV/TSV 表格读写与公式
 - `pptx` — PowerPoint .pptx/.potx 读写编辑
 - `pdf` — PDF 读取/提取/合并/拆分/表单/OCR
-- `ppt-master` — PPT 母版/批量生成与归属校验 → `D:\QoderToolkit\ppt-master`
+- `ppt-master` — PPT 母版/批量生成与归属校验 → `D:\Skills\ppt-master`
 - `frontend-slides` — HTML 演示文稿（可由 PPT 转换）→ `sickn33-frontend-slides`
 
 ### 全栈开发流水线（按阶段选，不要整套全开）
@@ -211,7 +211,7 @@ headroom install apply --preset persistent-task --runtime python --scope user \
 - `landing-page-design` — **动态网页落地页**：滚动揭示/逐词点亮/动效曲线/转化结构（MIT，elayadesign）
 - `figma-designer` — Figma 设计稿/组件库/设计变量（**需 Figma MCP，本机未装，只能给建议**）
 - `impeccable` — 高质量界面/海报/落地页，避免 AI 通用感（Apache-2.0）
-- `web-taste` — 网页审美评审与改造 → `D:\QoderToolkit\web-taste`（MIT）
+- `web-taste` — 网页审美评审与改造 → `D:\Skills\web-taste`（MIT）
 - `webapp-building` — Kimi 前端流程与 shadcn 脚手架参考 → **泄露内容，仅本机学习，禁止对外交付**
 
 ### 搜索 / 外部服务
@@ -240,7 +240,7 @@ headroom install apply --preset persistent-task --runtime python --scope user \
 - `spider-king` — 纯 Web 协议逆向 → 无浏览器 Python 采集器 → `reverse-trace`
 - `wechat-miniapp-reverse` — 微信小程序/WMPF 逆向调试 → `reverse-wechat-miniapp`
 
-### Qoder 取证方法论（都在 `D:\QoderToolkit\<名>`）
+### Qoder 取证方法论（已并入本库，都在 `D:\Skills\<名>`）
 - `qoder-toolkit` — 工具箱总入口（含本机硬规则）
 - `headless-cdp-visual-acceptance` — 无头 CDP 视觉验收
 - `verify-app-security-claims` — 核实应用的安全声明

@@ -15,7 +15,7 @@
 | `reverse-wechat-miniapp` | 同上 | 同上 |
 | `webapp-building` | **泄露的 Kimi 产品技能，没有任何使用许可** | 与 `D:\QoderToolkit\web-kimi` 逐文件 sha256 比对：**175 个文件中 173 个字节相同**；web-kimi 的 `PROVENANCE.md` 记来源为 `QvvvvvvQ/skills_leaks`，上游 README 声明「版权及知识产权归属原公司，**没有任何使用许可**」「不要二次分发、不要公开传播」 |
 
-QoderToolkit 仓库另排除 **`web-kimi`**（同一条泄露来源）。
+QoderToolkit 仓库另排除 **`web-kimi`**（同一条泄露来源）。2026-11-25 起，QoderToolkit 的其余 **9 个技能**（含 MIT 的 `ppt-master`、`web-taste`）已字节级迁入本库并纳入远端备份；**只有 `web-kimi` 留在原库 `D:\QoderToolkit\web-kimi`，不进本仓库**。
 
 **把仓库设成 private 也不能解决这一条**：上传到托管平台本身就是「转移给第三方」，
 而且 Anthropic 那条明确禁止「在 Services 之外保留副本」。所以是排除，不是「私有就行」。

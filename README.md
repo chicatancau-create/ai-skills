@@ -8,7 +8,7 @@
 
 | 目录 | 角色 |
 | --- | --- |
-| `D:\Skills` | **全量库**，44 个技能实体，唯一真源 |
+| `D:\Skills` | **全量库**，53 个技能实体，唯一真源 |
 | `D:\Skills-active` | **默认窗口**，只放 `headroom` + `skill-router` 两条联接 |
 | `D:\Skills-disabled` | 停用区，不参与自动发现，保留可恢复源文件 |
 
@@ -51,7 +51,7 @@
 - 判据：**文件进了回收站 ⇒ 是 shell 删的，不是 Python `rmtree`**（后者不进回收站）。
 - 兜底：`skill_shield.py` 每 20 秒自愈一次，但**刚写还没镜像的内容仍会丢**；真正的兜底是本仓库的 git 远端。
 
-## 四、技能清单（44 个）
+## 四、技能清单（53 个）
 
 标 LOCK 的**不进 git 远端备份**（许可禁止再分发），仍在本地可用；依据见 `BACKUP_SCOPE.md`。
 
@@ -134,14 +134,30 @@
 | `reverse-trace` 🔒 | 【逆向工具·仅授权目标】Pure-web protocol reverse skill: turn hostile browser clients into browser-free Python collectors. |
 | `reverse-wechat-miniapp` 🔒 | 【逆向工具·仅授权目标】【微信小程序任务优先】微信小程序 / WeChat Mini Program / WMPF 逆向调试。强触发关键词：微信小程序、PC微信小程序、WMPF、WeChatAppEx、AppServic |
 
-## 五、第二个库：QoderToolkit
+### 原 QoderToolkit 并入（9 个）
 
-`D:\QoderToolkit` → `D:\_整理\04-AI工具包\QoderToolkit`（总联接，隔离「另一个 AI 还在搬 D:\_整理」的风险）。10 个技能，其中 `ppt-master` 约 89 MB。
+2026-11-25 从 `D:\QoderToolkit` 字节级迁入（`web-kimi` 因许可排除，仍在原库）。第三方来源见各自 `PROVENANCE.md`。
 
-**为什么必须有 `D:\QoderToolkit` 这层总联接**：`qoder-toolkit\SKILL.md` 正文硬编码了
-`D:\QoderToolkit\ppt-master\SKILL.md`、`D:\QoderToolkit\web-taste\SKILL.md`、
-`D:\QoderToolkit\web-kimi\scripts\template\`、`D:\QoderToolkit\ppt-master\scripts\attribution_guard.py` 四处路径。
-只改 `.qoder\skills` 的联接不够。它单独一个 git 仓库备份。
+| 目录 | 用途 |
+| --- | --- |
+| `codeweave-visual-rebuild-rerun` | CodeWeave 视觉重建复跑（60-cell 矩阵） |
+| `headless-cdp-visual-acceptance` | 无头 CDP 视觉验收 |
+| `install-github-skill-on-windows-qoder` | 在 Windows Qoder 上安装 GitHub 技能 |
+| `localstorage-data-shape-seeding` | 按真实数据形状给 localStorage 播种 |
+| `ppt-master` | PPT 母版/批量生成与归属校验（MIT，约 89 MB，字节不可改） |
+| `qoder-toolkit` | Qoder 工具箱总入口（本机硬规则 + 路由） |
+| `verify-app-security-claims` | 核实应用的安全声明是否属实 |
+| `visual-tool-add-section` | 给可视化工具加新板块 |
+| `web-taste` | 网页审美/品味评审与改造（MIT） |
+
+## 五、原第二库 QoderToolkit：已并入本库
+
+`D:\QoderToolkit` → `D:\_整理\04-AI工具包\QoderToolkit`（总联接，隔离「另一个 AI 还在搬 D:\_整理」的风险）**不再是独立技能源**：其 9 个技能已于 2026-11-25 字节级迁入本库 `D:\Skills\<同名目录>`，索引、路由一律指向本库。
+
+- **为什么迁**：两个库并存时，同一个技能名会在 `skill-router` 索引里撞车，且改一处忘另一处。
+- **唯一保留在原库的**：`web-kimi`（上游 `QvvvvvvQ/skills_leaks` 泄露内容，无使用许可，不得再分发），仍在 `D:\QoderToolkit\web-kimi`，**不进本库、不进 git 远端**。
+- **`ppt-master` 特别约定**：目录内任何文件字节不可改动（完整性闸门 `scripts\attribution_guard.py`），迁移是纯复制，闸门在新位置实测通过。
+- 原库仍是独立 git 仓库（GitHub `chicatancau-create/qoder-toolkit` + GitCode `zhoumoyukuai/qoder-toolkit`），保留作历史备份。
 
 ## 六、规则
 
