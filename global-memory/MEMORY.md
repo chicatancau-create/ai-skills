@@ -17,7 +17,7 @@
 - [干净环境用 git archive 复现](feedback-clean-room-git-archive.md) — 只导出已跟踪文件到临时目录，再 npm ci/Maven 跑门禁；同机同服务要写明，不等于 CI。
 - [Backup and write authorization](feedback-backup-and-write-authorization.md) — recover dir outside the project, per-file pre-write copies for vault writes, follow the plan doc's own stated first milestone.
 - [Autonomous execution with delegation](feedback-autonomous-execution.md) — 合理且无外部副作用的操作直接做、不再问许可；提交/推送/临时服务已预授权；只停破坏性/公开敏感/标准类。
-- [每轮收尾三端推送](feedback-round-then-push-both-remotes.md) — 同一 commit 推 GitHub(origin)/GitCode(domestic)/AtomGit(atomgit)；**AtomGit 才是交付目标**；新增 remote 必须点名；GitHub 走 7897。
+- [每轮收尾两端推送](feedback-round-then-push-both-remotes.md) — 同一 commit 推 GitHub(origin)/GitCode=AtomGit(同一平台，remote 名 gitcode 或 atomgit)；新增 remote 必须点名；GitHub 代理端口会漂(本轮7890)。
 - [规范文件先查所有远端](feedback-check-remotes-before-missing.md) — 本地没有≠不存在：MS6–MS11 只在 atomgit/main（5739c94）；先 fetch + ls-tree 再执行，别自拟验收标准。
 - [Subagent and task-list hygiene](feedback-subagent-hygiene.md) — user kills idle agents; relaunch or delete stale entries, detect liveness by file mtime, never verify from a dirty tree.
 - [In-app browser UI verification](reference-inapp-browser-verification.md) — hidden in-app tab limits screenshots; for real layout/visual proof self-launch headless Edge (Node 24 全局 WebSocket，不需 ws)，never attach to port 9333；overflow-hidden 下 over==0 不代表没被裁；**--window-size≠CSS 视口，数元素别信像素簇**。
@@ -145,4 +145,4 @@
 - [C 盘不放下载实体](rule-c-drive-no-downloads.md) — 下载统一落 H:\下载；C 盘只允许短时缓存；发现 C 盘下载物先报告清单+建议去向，由用户决定，不擅自删/搬。
 - [备份目录归口](rule-backup-dir-location.md) — 备份/回滚/历史快照一律放 G:\数据备份\，不再散落在业务工作区；G:\CodeWeave\工作区\data\迁移回滚 已于 2026-11-25 整体移入；核验目录移动无损用 fullindex\cmp_dirs.py（走索引秒级），别重扫。
 - [备份归口与合并规则](rule-backup-consolidation.md)：备份统一归 `G:\数据备份\`；不在 `G:\CodeWeave\工作区\data\` 重建 `迁移回滚`；合并须全量 SHA-256 比对、取并集、败方留档。2026-11-25 确立。
-- [GitCode 已并入 AtomGit，扫仓库走 API+代理](reference-gitcode-atomgit-merged-scan.md) — 2026-11-25：两平台账号/数据互通（旧三端实为两端）；网页 SPA 抓不到、匿名 repos 接口 400 点名 private-token 头；正路 curl 走 7890+private-token 打 api/v5/user/repos；gh 当轮未手动挂代理即可用。
+- [GitCode 已并入 AtomGit，扫仓库走 API+代理](reference-gitcode-atomgit-merged-scan.md) — 2026-11-25：两平台账号/数据互通（旧拓扑实为两端）；网页 SPA 抓不到、匿名 repos 接口 400 点名 private-token 头；正路 curl 走 7890+private-token 打 api/v5/user/repos；gh 当轮未手动挂代理即可用。
