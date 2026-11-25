@@ -9,6 +9,8 @@ description: 'Rebuild-triggered re-measurement pipeline for the CodeWeave (G:\Co
 
 The project's own rule (M6 §16.4, restated at §18.3): once the shipped `app/dist` hash moves, every matrix and states number in the docs becomes "a reading of the previous build" and must be re-taken on the new build. A batch is only worth its numbers if it ran on an isolated evidence directory, with the tools frozen, on an idle machine, and if the cross-batch comparison is done column by column. This skill is that pipeline, plus the reading standards that decide which differences count.
 
+> **路径时效性（2026-11-25 复核）**：本技能的具体机器路径（`G:\CodeWeave\workspace\app`、`tools\visual\*.mjs`、`docs\M6-整体验收-执行记录.md`、`G:\CodeWeave-recovery\`）反映 2026-11-06 项目重构前的旧布局。当前 `G:\CodeWeave` 顶层已改为 `网页端/应用端/移动端/工作区/工程文件`，上述 visual 运行器与 recovery 树在原路径已不存在。**可复用的是方法论**（批次隔离、NaN 安全的逐列跨批对比、读数判据、批次验收清单）；套用前必须先按当前布局重新定位运行器与证据目录，勿直接照搬旧路径。
+
 ## When to use / not use
 
 - Use: `npm run build` (or the §11.1 gate run) printed a changed `sha256_12` for `index-*.css` / `index-*.js`; or you must prove a fix did not move the numbers; or a batch got voided and needs a clean re-take.

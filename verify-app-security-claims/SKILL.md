@@ -163,10 +163,8 @@ export async function run({ openPage, evalInSandbox, assertFreePorts }) {
 
 需要看一套跑通的实物时(只读,勿改):
 
-- 被核的声称:`E:/CodeWeave/README.md` 第 244—248 行「JavaScript 沙箱」四句
-- 提示性守卫与其自述:`E:/CodeWeave/src/engine/javascript-sandbox.ts` 第 6—20 行
-- 两个运行器:`src/engine/javascript-sandbox.ts`(实战)与 `src/engine/teaching-runtime.ts`(教学)
-- 四代探针与结论:`E:/CodeWeave-recovery/tmp-m6-visual/probe-sandbox{,2,3,4}.mjs`(+ `probe-sandbox4.json`)
+- 两个运行器(2026-11-25 复核仍在):`G:\CodeWeave\网页端\项目\src\engine\javascript-sandbox.ts`(实战)与同目录 `teaching-runtime.ts`(教学)
+- 被核的声称与四代探针(历史示例):原 `E:/CodeWeave/README.md`「JavaScript 沙箱」四句、`E:/CodeWeave-recovery/tmp-m6-visual/probe-sandbox{,2,3,4}.mjs`(+ `probe-sandbox4.json`)属 2026-11-06 项目重构前的旧布局,现已不存在(根 README 被根白名单禁用、recovery 树已清);引用前先按当前 `网页端/应用端/移动端/工作区/工程文件` 布局重新定位,勿照搬旧路径与旧行号。
 - 更正入册方式:`docs/` 下 M6/M7 执行记录里带日期的判定补丁
 
 ## 边界
