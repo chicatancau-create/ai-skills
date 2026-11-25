@@ -145,3 +145,4 @@
 - [C 盘不放下载实体](rule-c-drive-no-downloads.md) — 下载统一落 H:\下载；C 盘只允许短时缓存；发现 C 盘下载物先报告清单+建议去向，由用户决定，不擅自删/搬。
 - [备份目录归口](rule-backup-dir-location.md) — 备份/回滚/历史快照一律放 G:\数据备份\，不再散落在业务工作区；G:\CodeWeave\工作区\data\迁移回滚 已于 2026-11-25 整体移入；核验目录移动无损用 fullindex\cmp_dirs.py（走索引秒级），别重扫。
 - [备份归口与合并规则](rule-backup-consolidation.md)：备份统一归 `G:\数据备份\`；不在 `G:\CodeWeave\工作区\data\` 重建 `迁移回滚`；合并须全量 SHA-256 比对、取并集、败方留档。2026-11-25 确立。
+- [GitCode 已并入 AtomGit，扫仓库走 API+代理](reference-gitcode-atomgit-merged-scan.md) — 2026-11-25：两平台账号/数据互通（旧三端实为两端）；网页 SPA 抓不到、匿名 repos 接口 400 点名 private-token 头；正路 curl 走 7890+private-token 打 api/v5/user/repos；gh 当轮未手动挂代理即可用。
