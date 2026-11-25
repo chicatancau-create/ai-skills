@@ -144,3 +144,4 @@
 - [用户删的东西不默认恢复](rule-user-deleted-not-auto-restore.md) — 用户自己删的路径不得静默重建/还原；仅当挡住当前任务且已说明影响+获确认才可恢复；AI 自建临时文件不在此列（C:\「开始」两次恢复事件）。
 - [C 盘不放下载实体](rule-c-drive-no-downloads.md) — 下载统一落 H:\下载；C 盘只允许短时缓存；发现 C 盘下载物先报告清单+建议去向，由用户决定，不擅自删/搬。
 - [备份目录归口](rule-backup-dir-location.md) — 备份/回滚/历史快照一律放 G:\数据备份\，不再散落在业务工作区；G:\CodeWeave\工作区\data\迁移回滚 已于 2026-11-25 整体移入；核验目录移动无损用 fullindex\cmp_dirs.py（走索引秒级），别重扫。
+- [备份归口与合并规则](rule-backup-consolidation.md)：备份统一归 `G:\数据备份\`；不在 `G:\CodeWeave\工作区\data\` 重建 `迁移回滚`；合并须全量 SHA-256 比对、取并集、败方留档。2026-11-25 确立。
