@@ -1,4 +1,4 @@
----
+﻿---
 name: local-ai-handbook
 description: 本机（这台 Windows）《AI本地使用手册》（G:\AIrenwu\本地AI使用手册，2026-11-16 由 E:\本地AI使用手册 迁入任务区工作区）的**默认前置知识库**。每次任务开始前先检索、任务结束前判断是否回写；任务里出现报错、超时、编码乱码、命令失败、排版异常、插件/技能问题、AI 客户端连不上、或需要本机环境既有结论与取证方法时，必须查证再动手。手册记录的是这台机器上已复现、已验证的踩坑与修复（PowerShell 5.1 编码与传参、沙箱只放行工作区致写 E 盘被拒、虚拟网卡抢默认路由致域名假超时、AI 面板 1ms 连接失败误判、Excel 行高裁字、提权 .cmd 写法、中文注册表导致插件兜底失败、技能发现机制与安装位置、逆向工具箱清单等）。
 ---
@@ -163,6 +163,7 @@ description: 本机（这台 Windows）《AI本地使用手册》（G:\AIrenwu\�
 | 要摸透/调整 PowerToys 功能、脚本启停模块或改热键；安装根调 Settings CLI 报 CommandNotFoundException | `03-通用/04-工程规范与安全/经验-PowerToys功能配置速查与CLI-DSC自动化入口.md`（`verified`：CLI 在 WinUI3Apps 子目录、DSC get 实测与配置一致；38 模块清单在任务归档报告；Junction 真源在 D、提权须 RunAs） |
 | **DSH 会话老是「本轮运行失败」**、报 `Tool call "xxx": Unexpected non-whitespace character after JSON at position N`、`Received arguments` 里两个 JSON 对象粘在一起 | `03-通用/03-调试与验证/踩坑-上游中转把并行工具调用粘进同一tool_use参数致整轮MALFORMED_RESPONSE.md`（`verified`：中转把同 step 的两个并行工具调用合并进一个 tool_use 块且丢了第二个名字 ⇒ 整轮 MALFORMED_RESPONSE；修法＝`llm/stream` waterfall 插件 `llm-stream-repair` 补 `block-end` 覆盖坏参数并改写终止原因为 `tool-calls`，金丝雀假流端到端实测通过） |
 | 想改 DSH 模型调用行为（重试/改写流/降级路由）又不想动 app.asar；插件装上了但报 `cannot get property "config" without inject` | 同上记录「可复用规则」2–5 条（`ctx.on('llm/stream', (options, next) => ...)`、`apply(ctx, pluginConfig)` 第二参数、`remove_bundle`→`install_bundle` 顺序、profile patch 手写行不热生效） |
+| 环境变量指向不存在的目录、PATH 里有重复项、`python3` 报 exit 9009、命令行 hvigor/adb/hdc 找不到 | `04-工程规范与安全/经验-环境变量体检与整理-失效路径重复PATH与缺失SDK变量.md`（`verified`：判据＝值含盘符逐条 `Test-Path -LiteralPath` + PATH 合并后 `Group-Object` 找重复 + `python3.exe` 大小为 0 即存根；本机实测 3 条失效路径（`MAVEN_HOME` 停在已删的 3.9.16、`AQUA`/`RUSTROVER_VM_OPTIONS` 指向不存在的 `D:\JAVA\jetbra`）、3 条冗余 PATH（`C:\node-global` 是 `D:\node-global` 的 Junction、`D:\Git\cmd` 与机器级重复、`\.dotnet\tools` 不存在）、3 条缺失变量（`DEVECO_SDK_HOME`/`ANDROID_HOME`/`ANDROID_SDK_ROOT`）；修法＝SetEnvironmentVariable User + 强制 REG_SZ + 广播 WM_SETTINGCHANGE，`python3` 用 `python.exe` 副本放到 PATH 更靠前的目录遮蔽 0 字节存根） |
 
 **AI 协作与提示词**（`03-通用/02-AI协作与提示词/`）
 
