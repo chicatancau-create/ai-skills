@@ -89,6 +89,7 @@ description: 本机（这台 Windows）《AI本地使用手册》（G:\AIrenwu\�
 | GitCode/AtomGit 令牌是否有效（存了≠有效），要零副作用活验 | `规则-GitCode令牌只读活验用api-v5用户端点.md` |
 | GitCode 仓库列表抓不到／匿名 API 400 点名 private-token／gitcode.com 直连超时 | `踩坑-GitCode合并AtomGit后repos接口要private-token头且直连超时走7890.md` |
 | 两端仓库对齐写操作／GitCode 建仓改简介改公开删仓／gh 改公开被拒或删仓 403／GitHub git push 连接被重置／中文简介变问号 | `规则-两端仓库对齐写操作GitCode增删改UTF8字节body与gh改公开删仓scope.md` |
+| 公开仓历史脱敏／清历史手机号邮箱／filter-repo 重写／force-push 被拒 cannot lock ref／历史重写后守护推回旧历史 | `规则-公开仓历史PII清洗用filter-repo镜像克隆法.md` |
 | gh api 探活报 404「仓库不见了」、或 422 缺 name | `踩坑-ghapi带-f默认POST致探活404误判仓库已删.md` |
 | GitHub 大包推送报 curl 56 / 中途被重置，ls-remote 却正常 | `踩坑-GitHub大包推送被重置需分块推送.md` |
 | 设了 VSLANG=1033 但 `cl.exe` 仍输出中文诊断 | `踩坑-VSLANG1033未把MSVC诊断切成英文.md`（`verified`：本机只装中文 2052 语言包、无 1033 资源，VSLANG 只在已装语言间切换；真修复是装英文语言包） |
