@@ -122,6 +122,7 @@ description: 本机（这台 Windows）《AI本地使用手册》（G:\AIrenwu\�
 |---|---|
 | 提示条/通知浮层挂几天不消失，被用户当成删不掉的悬浮元素 | `踩坑-浮层提示不自动消散被用户当成删不掉的悬浮元素.md`（`verified`：成功类不弹浮层改页面内留痕；其余 info 4s / error 8s 自动消散；验收截图覆盖操作后 N 秒） |
 | `powercfg /list` 只显 2 个方案、注册表里却堆了十几个；或按 `REG_SZ` 读 `FriendlyName` 全空 | `踩坑-电源计划被驱动更新工具复制成同名方案且FriendlyName是REG_EXPAND_SZ.md`（`verified`：判重复要比 `powercfg -query` 归一化后的哈希不是名字；`powercfg -delete` 非提权可用；名字叫 Overlay 不代表是 overlay 方案） |
+| 电源/盖子按钮明明设了「休眠」却总变回「睡眠」；或设了休眠但机器从不真休眠（合盖只是亮屏即回、耗电不掉） | `踩坑-电源按钮反复变回睡眠且从不真休眠-S0现代待机未转休眠与组策略硬锁.md`（`verified`：两层问题——值被「设置」App/第三方工具 reset，用 `HKLM\SOFTWARE\Policies\Microsoft\Power\PowerSettings\<设置GUID>` 写 AC/DCSettingIndex 硬锁；真休眠要 `PlatformAoAcOverride=0` + `HibernateAfterTimeout=600` + 重启，因为只支持 S0 的机器按钮进的是 S0 联网待机。查值必须 `powercfg /qh`，`/q` 只显 1 项；LID/PBUTTON/SBUTTON 是 `1=睡眠 2=休眠`，UIBUTTON_ACTION 是 `0=睡眠 1=休眠 2=关机`） |
 | Git Bash 里 `cmdkey /list` 只打印用法、像命令坏了 | `踩坑-GitBash调cmdkey的list被MSYS改写成路径.md`（`verified`：`/list` 被 MSYS 当绝对路径改写，加 `MSYS_NO_PATHCONV=1` 或写 `//list` 即恢复） |
 | ppt-master 门禁报 bounds 溢出，或 final gate 全绿但 PowerPoint 仍裁字 | `踩坑-ppt-master出片需预留bounds且导出后必须COM导PNG目视.md`（`verified`：按检查器实际文字外框扩区；名义到 720 仍可能被 COM 渲染裁底，必须逐页导 PNG 复核） |
 | 所有 workflow 一起 failure，但 job 里 0 个 step、2 秒结束、日志 404 | `踩坑-GitHubActions计费阻断表现为job零step两秒结束.md`（`verified`：`enabled:true` 不代表能跑；真因只在 check-run annotations 的付款文案；判据看 `steps` 数与 `runner_name`，结论只能写「本机通过、云端未验证」） |
