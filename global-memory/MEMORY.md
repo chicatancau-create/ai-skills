@@ -146,3 +146,4 @@
 - [备份目录归口](rule-backup-dir-location.md) — 备份/回滚/历史快照一律放 G:\数据备份\，不再散落在业务工作区；G:\CodeWeave\工作区\data\迁移回滚 已于 2026-11-25 整体移入；核验目录移动无损用 fullindex\cmp_dirs.py（走索引秒级），别重扫。
 - [备份归口与合并规则](rule-backup-consolidation.md)：备份统一归 `G:\数据备份\`；不在 `G:\CodeWeave\工作区\data\` 重建 `迁移回滚`；合并须全量 SHA-256 比对、取并集、败方留档。2026-11-25 确立。
 - [GitCode 已并入 AtomGit，扫仓库走 API+代理](reference-gitcode-atomgit-merged-scan.md) — 2026-11-25：两平台账号/数据互通（旧拓扑实为两端）；网页 SPA 抓不到、匿名 repos 接口 400 点名 private-token 头；正路 curl 走 7890+private-token 打 api/v5/user/repos；gh 当轮未手动挂代理即可用。
+- [两端仓库对齐写操作要点](reference-two-platform-repo-align-write-ops.md) — 2026-11-25：GitCode 增删改 API 要 UTF-8 字节 body+charset（传字符串中文永久变 ?）；gh 改公开加 --accept-visibility-change-consequences、删仓需 delete_repo（默认令牌没有，非交互无法自授）；GitHub git 挂 7890 代理；多分支仓验默认分支 HEAD 用 merge-base 判快进；7 保留仓两端全公开+HEAD 对齐，4 待删仓已备份缺权限待授权。
