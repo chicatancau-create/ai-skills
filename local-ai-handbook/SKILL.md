@@ -122,6 +122,7 @@ description: 本机（这台 Windows）《AI本地使用手册》（G:\AIrenwu\�
 
 | CrossDesk `--unattended-enable` 永远 exit 1 且重定向输出全空；便携版开不了登录前无人值守；安装版 GUI 开着时 enable 也失败 | `03-通用/03-调试与验证/踩坑-CrossDesk便携版开不了登录前无人值守-三层门禁与CLI输出只上控制台.md`（`verified`：三层＝便携编译门禁 kAutostartRequiresElevation=false（autostart_task.h:10-15）、CLI AttachConsole+freopen CONOUT$ 致重定向必空、kClient 租约要求 GUI 完全退出（WM_CLOSE 只缩托盘须 taskkill /F）；identity 在 %APPDATA%\CrossDesk\trusted-devices\ 而非 Local cache；修复＝安装版→首启联网取 ID→杀 GUI→提权 enable→复核 ProgramData\CrossDeskUnattended\status.json 与服务 Automatic） |
 | SnugWin 加手机屏报「原主显示器脱离活动桌面，已中止」重启复现；虚拟屏建屏安全中止；SetDisplayConfig/QueryDisplayConfig 返回 87 | `03-通用/03-调试与验证/踩坑-SnugWin加手机屏安全中止实为克隆到达误报-扩展拓扑存库修复.md`（`verified`：克隆到达使物理屏 dedicated 哈希变→EnsureNonCherryIntact 误报；修复＝保持管道连接 Add→纯拓扑旗标扩展→QueryDisplayConfig 原始字节块(topologyId=NULL)回传 SAVE_TO_DATABASE 存库→Remove；清场 RemoveAll 防遗留占位；判到达只比 CCD 活动条数别用 AllScreens；拓扑旗标与存库旗标互斥致 87） |
+| CrossDesk 手机菜单「隐私屏异常：Capture changed; privacy screen is being turned off」、隐私屏按钮灰；断开后本机自动锁屏、重连落在锁屏 | `03-通用/03-调试与验证/踩坑-CrossDesk防窥屏CaptureChanged异常-断开自动锁屏致锁屏态重连竞态.md`（`verified`：lock_on_disconnect=true 断开即锁机→锁屏态重连→解锁恢复捕获时后端重启的 capture-stop 通知撞上隐私自动启用→privacy_controller.cpp:171-181 FailLocked；修复＝停 GUI+服务后把 GUI cache config.ini 与 ProgramData\CrossDeskUnattended\shared-identity.json 内嵌 host_config 的 lock_on_disconnect 同改 false 再启；取舍＝断开不再自动锁机；手动锁屏态重连仍可复现上游竞态） |
 
 **前端**（`01-前端/07-表单与交互/`）
 
