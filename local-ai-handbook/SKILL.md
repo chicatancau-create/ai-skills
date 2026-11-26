@@ -98,6 +98,7 @@ description: 本机（这台 Windows）《AI本地使用手册》（G:\AIrenwu\�
 | 强杀 FlClash 后全机断网、端口不监听 | `踩坑-FlClash强杀后停未运行不自动起核心且系统代理悬空致全机断网.md` |
 | 关掉 FlClash/开机后全机断网、系统代理开关悬空指死端口 | `修复-FlClash关闭后悬空系统代理的常驻守卫与自动运行.md` |
 | FlClash 升级后 sc 报 1060 服务未安装、allow-lan=false 写了但 LAN 仍可连 | `踩坑-FlClash升级0.9.5删helper服务与allow-lan覆写键未生效.md` |
+| 防火墙三个 profile 全关想开启、又怕断远程/断局域网 | `修复-Windows防火墙长期全关后安全开启与远程工具放行.md`（`verified`：`state on`+`firewallpolicy blockinbound,allowoutbound`+按程序/接口放行+开丢包日志；`logging blocked` 参数名是错的，正确 `droppedconnections`；杀软在跑≠接管防火墙） |
 | Postman「Something went wrong」崩溃屏、网络恢复后仍不复活 | `踩坑-Postman启动瞬间云端断网致崩溃屏且网络自愈后不自恢复须重启.md` |
 | 热点上开 DoH 后解析反而 27–32s | `踩坑-DoH在UDP受限手机热点反而劣化须回退DHCP.md` |
 | 手机正常电脑断、Wi-Fi 约 6s 硬断 | `踩坑-MediaTek WLAN扩展mtkwlex卸载重载致Wi-Fi硬断手机正常电脑断.md` |
