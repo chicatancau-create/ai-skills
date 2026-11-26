@@ -120,7 +120,7 @@ Chrome 标题随即变成「登录 - Google 账号」= 浏览器确实被拉起�
 `agy` 无 TTY 时直接退出且零输出 → 登录链路没法在我这边无头复现，只能用户真终端跑。
 
 用户侧资源（2026-10-08）：4 个 Google 账号都有 PRO，分别登录在 4 个 Chrome 资料里
-（Chica Tancau / <已脱敏昵称> / <已脱敏昵称> / <已脱敏昵称>），授权时按资料窗口区分账号。
+（Chica Tancau 及另外 3 个账号，昵称已脱敏），授权时按资料窗口区分账号。
 
 ## 2026-10-09 复核：1.3.2 自己承认了死因，且 CLI 只存一个号
 
@@ -136,8 +136,8 @@ Chrome 标题随即变成「登录 - Google 账号」= 浏览器确实被拉起�
   查是哪个号：解 `id_token` 的 JWT payload 取 `email`（脚本 `C:\Users\Admin\AppData\Local\Temp\agywho.ps1`，
   依赖同目录 `agycred_src.txt` 里的 `CR2::Raw`）。
 - **一键换号**：`D:\agy\switch.cmd` = `taskkill /IM agy.exe /F` + `cmdkey /delete:gemini:antigravity` + `call D:\agy\ag.cmd`。
-  换号前要先在 Chrome 切到对应的**个人资料**（本机 4 个资料：Chica / <已脱敏昵称> / <已脱敏昵称> / <已脱敏昵称>，
-  邮箱分别是 chicatancau / <已脱敏用户名> / <已脱敏用户名> / <已脱敏用户名> @gmail.com），否则授权页会顺着默认资料又登回旧号。
+  换号前要先在 Chrome 切到对应的**个人资料**（本机 4 个资料：Chica 及其余 3 个已脱敏账号，
+  邮箱分别是 chicatancau 及其余 3 个已脱敏用户名 @gmail.com），否则授权页会顺着默认资料又登回旧号。
 - `D:\agy\ag.cmd` 已改成**不带参数也能直接跑**（内部用 `shift` + `%1..%9`，仍不能用 `%*`）。
   要带参数又不指定账号时写 `ag.cmd - -p "..."`。
 - **验证链接是一次性的、几分钟就废**，浏览器打开后报 `400 That's an error` 基本都是过期/已被用，重新跑一次 agy 取新链即可。
@@ -151,12 +151,12 @@ Chrome 标题随即变成「登录 - Google 账号」= 浏览器确实被拉起�
   只能靠先把目标资料的窗口顶到最前，赌 Chrome 把新标签开在最前窗口里。
 - 换号壳子 `D:\agy\go.cmd [1|2|3|4]`：杀 agy → `cmdkey /delete` → `chrome.exe --profile-directory="..."` 顶到前面
   → `call ag.cmd`。资料目录对应关系（读 `Google\Chrome\User Data\Local State` 的 `profile.info_cache`）：
-  `Default`=Chica/chicatancau、`Profile 1`=<已脱敏昵称>/<已脱敏用户名>、`Profile 2`=<已脱敏昵称>/<已脱敏用户名>、`Profile 3`=<已脱敏昵称>/<已脱敏用户名>。
+  `Default`=Chica/chicatancau，`Profile 1`/`Profile 2`/`Profile 3` 为其余 3 个账号（昵称与邮箱均已脱敏）。
 - **Gemini 桌面版不是替代品**：它是网页套壳，不能读写本地文件、不能跑命令，我驱动它也榨不出可用于工作的额度；
   换号还得在它的界面里切账号，比 CLI 更麻烦。
 - 用户 2026-10-09 明确的目标是**「把这 4 个号的额度全用完」**，并直接否掉了我做的「一键换号」方向
   （「我并不需要一键换号」）。⇒ 别在 UX 便利性上继续加工，先解决「能不能真跑起来」。
-  当前状态：4 个号里实测 2 个（Chica、<已脱敏昵称>）全卡在同一道手机扫码验证，**未证实** <已脱敏昵称> / <已脱敏昵称> 是否也卡。
+  当前状态：4 个号里实测 2 个（Chica 与 Profile 1 那个已脱敏账号）全卡在同一道手机扫码验证，**未证实**另外 2 个已脱敏账号是否也卡。
 
 ## 2026-10-08 晚实测：agy 登录通了，真正卡点是「Google 要求验证账号」不是地区
 
@@ -196,7 +196,7 @@ validation_url=https://accounts.google.com/signin/continue?sarp=1&scc=1&continue
 
 用户问「我有 4 个 PRO 号，能不能反代 Gemini」时顺带查到的状态：
 
-- 两个号 **`<已脱敏邮箱>`** 与 **`<已脱敏邮箱>`** 打开就是中文页
+- 两个号（邮箱均已脱敏）打开就是中文页
   「我们**无法验证您的身份**」+ 三条建议（用以前登录过的设备/浏览器、用家里或单位的 Wi-Fi、
   改辅助电话号码）。这是 **Google 账号自己的登录风控挑战页**，不是封号，也不是 Antigravity 的资格检查页
   （后者文案是 `We couldn't verify your info` / `not eligible`，官方论坛确认那是 OAuth 过了但资格检查失败）。
