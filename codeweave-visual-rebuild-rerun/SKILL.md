@@ -1,6 +1,6 @@
 ---
 name: codeweave-visual-rebuild-rerun
-description: 'Rebuild-triggered re-measurement pipeline for the CodeWeave (G:\CodeWeave) section 5.4 visual-acceptance evidence. When vite build changes the dist asset hash, re-run the 60-cell matrix and the twelve-section states batch into an isolated evidence directory (VC_OUT / VC_DATA_TAG / VC_SHOTS / VC_REPORT), cross-compare the two batches over the 16 judgment columns and the 21 key readings, then update the M6 section 16.4 batch ledger and the section 16.5 terminal pointers. Use after any change under workspace/app that moves a CSS or JS hash, when a batch is voided by toolChangedDuringRun, before quoting section 13 / 15 / 16 numbers on a new build, or when the user says 重测 / 重跑取证 / 换构建 / 批次账 / 终版批次. Not for the pre-refactor baseline runner, vault content edits, or publishing.'
+description: 'Rebuild-triggered re-measurement METHODOLOGY (archive) for CodeWeave (G:\CodeWeave) visual-acceptance evidence: isolate each batch (VC_OUT / VC_DATA_TAG / VC_SHOTS / VC_REPORT), cross-compare batches column-by-column over the 16 judgment columns and 21 key readings with NaN-safe defaults, apply the fixed reading standards and the batch acceptance checklist, then keep the batch ledger / terminal pointers. The original concrete pipeline (workspace/app runners, tools/visual, M6 ledger, CodeWeave-recovery) was removed in the 2026-11-06 refactor and no longer exists under G:\CodeWeave (verified 2026-11-26); reuse the method after re-locating or rebuilding runners on the current layout. Trigger words: 重测 / 重跑取证 / 换构建 / 批次账 / 终版批次 / 跨批对比 / 读数判据 / 批次验收. Not for vault content edits or publishing.'
 ---
 
 # Rebuild-triggered §5.4 evidence re-measurement (CodeWeave)
@@ -9,14 +9,14 @@ description: 'Rebuild-triggered re-measurement pipeline for the CodeWeave (G:\Co
 
 The project's own rule (M6 §16.4, restated at §18.3): once the shipped `app/dist` hash moves, every matrix and states number in the docs becomes "a reading of the previous build" and must be re-taken on the new build. A batch is only worth its numbers if it ran on an isolated evidence directory, with the tools frozen, on an idle machine, and if the cross-batch comparison is done column by column. This skill is that pipeline, plus the reading standards that decide which differences count.
 
-> **路径时效性（2026-11-25 复核）**：本技能的具体机器路径（`G:\CodeWeave\workspace\app`、`tools\visual\*.mjs`、`docs\M6-整体验收-执行记录.md`、`G:\CodeWeave-recovery\`）反映 2026-11-06 项目重构前的旧布局。当前 `G:\CodeWeave` 顶层已改为 `网页端/应用端/移动端/工作区/工程文件`，上述 visual 运行器与 recovery 树在原路径已不存在。**可复用的是方法论**（批次隔离、NaN 安全的逐列跨批对比、读数判据、批次验收清单）；套用前必须先按当前布局重新定位运行器与证据目录，勿直接照搬旧路径。
+> **路径时效性（2026-11-26 复核确认）**：本技能的具体机器路径（`G:\CodeWeave\workspace\app`、`tools\visual\*.mjs`、`docs\M6-整体验收-执行记录.md`、`G:\CodeWeave-recovery\`）反映 2026-11-06 项目重构前的旧布局。当前 `G:\CodeWeave` 顶层为 `网页端/应用端/移动端/工作区/工程文件`；经全树 glob 确认 `visual-check.mjs / visual-states.mjs / paths.mjs / compare-*.mjs` 与 `M6-*.md` 在 `G:\CodeWeave` 已**整体不存在**，`G:\CodeWeave-recovery` 亦不存在——原 visual 取证流水线已随重构移除。**本技能现为方法论档案**：可复用的是批次隔离、NaN 安全的逐列跨批对比、读数判据、批次验收清单这套方法；下文具体路径与脚本名仅作历史示例，套用前必须按当前布局重新定位或重建运行器与证据目录，勿直接照搬旧路径。
 
 ## When to use / not use
 
 - Use: `npm run build` (or the §11.1 gate run) printed a changed `sha256_12` for `index-*.css` / `index-*.js`; or you must prove a fix did not move the numbers; or a batch got voided and needs a clean re-take.
 - Do not use: for `baseline-check.mjs` (pre-refactor old build, its own ports and `BASELINE_*` vars), for vault/content edits, or to justify publishing — publishing needs the user present.
 - Adjacent skills, do not reinvent them here: adding or changing a *section / injected probe* in the two runners is `visual-tool-add-section`; putting a page into its has-data shape is `localstorage-data-shape-seeding`. This skill covers only the re-measure-after-a-rebuild line and the bookkeeping that follows.
-- Everything here is machine-specific to `G:\CodeWeave` + `G:\CodeWeave-recovery`. Confirm both exist before step 0.
+- Everything here was machine-specific to the pre-refactor `G:\CodeWeave\workspace` + `G:\CodeWeave-recovery` layout, which no longer exists (see the timeliness note above). Treat the concrete paths as historical examples; confirm the current runner/evidence locations before step 0, or rebuild them.
 
 ## Step 0 — Prove the build moved, and name the new fingerprint
 
@@ -144,7 +144,9 @@ Verified reference outcomes (reproduce these before trusting a re-created script
 
 ## Resources
 
-- Runners: `G:\CodeWeave\workspace\tools\visual\{visual-check.mjs, visual-states.mjs, paths.mjs, probes.mjs, layout-record.mjs, browser.mjs, app-instance.mjs}`
+> 下列均为 2026-11-06 重构前的历史路径，当前已不存在（2026-11-26 全树 glob 确认）；保留作方法论参照，套用前按当前布局重新定位或重建。
+
+- Runners (historical): `G:\CodeWeave\workspace\tools\visual\{visual-check.mjs, visual-states.mjs, paths.mjs, probes.mjs, layout-record.mjs, browser.mjs, app-instance.mjs}`
 - Comparators: `G:\CodeWeave-recovery\tmp-m6-visual\{compare-matrix-builds.mjs, compare-batches.mjs}` (recreate from Step 5 if lost)
 - Evidence root: `G:\CodeWeave-recovery\tmp-m6-visual-<tag>\{report.json, shots\}` and `report-states-<tag>.json`
 - Ledger and reading standards: `G:\CodeWeave\workspace\docs\M6-整体验收-执行记录.md` §16.4 / §16.5 / §17.10 / §18.3 / §18.4 / §18.6 / §18.8 / §18.11
