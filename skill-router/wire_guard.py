@@ -138,6 +138,37 @@ def maybe_start_headroom():
         log("start attempt failed: %s" % e)
 
 
+# ---- proxy-guard 看门狗（2026-11-26 对抗式审查 M6 后新增） ----
+# 守卫每 60 秒写一次 state.json 心跳；心跳文件超过 180 秒没更新就经启动 vbs 重拉。
+# 守卫自带单实例互斥，活着时多拉一次会立即退出，不会双跑。
+# 已知边界：进程活着但卡死时互斥仍被占用，重拉无效（守卫主循环全异常捕获，极难卡死）。
+PROXY_GUARD_STATE = r"D:\AI-Tool-State\proxy-guard\state.json"
+PROXY_GUARD_VBS = os.path.join(
+    os.environ.get("APPDATA", r"C:\Users\Admin\AppData\Roaming"),
+    r"Microsoft\Windows\Start Menu\Programs\Startup\proxy-guard-autostart.vbs")
+_pg_last_launch = 0.0
+
+
+def proxy_guard_watchdog():
+    global _pg_last_launch
+    now = time.time()
+    try:
+        age = now - os.path.getmtime(PROXY_GUARD_STATE)
+    except OSError:
+        age = 1e9  # 心跳文件还不存在（刚开机）也视为需要拉起
+    if age <= 180 or now - _pg_last_launch < 300:
+        return None
+    _pg_last_launch = now
+    try:
+        subprocess.Popen(["wscript.exe", PROXY_GUARD_VBS],
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        log("proxy-guard watchdog: heartbeat stale %.0fs -> relaunched via vbs" % min(age, 99999))
+        return "proxy-guard: heartbeat stale -> relaunched"
+    except Exception as e:
+        log("proxy-guard watchdog: relaunch failed: %s" % e)
+        return "proxy-guard: relaunch failed %s" % e
+
+
 def check_claude(apply_):
     mode, attached = cc_mode("claude")
     J = read_json(CLAUDE)
@@ -216,6 +247,13 @@ def tick(apply_):
                     out.append("backup: %s pushed" % n)
         except Exception as e:
             out.append("backup: error %s: %s" % (type(e).__name__, e))
+        # proxy-guard 看门狗：心跳停跳就重拉（零新增常驻进程，复用本 watch 循环）
+        try:
+            r = proxy_guard_watchdog()
+            if r:
+                out.append(r)
+        except Exception as e:
+            out.append("proxy-guard: error %s: %s" % (type(e).__name__, e))
     return out
 
 
