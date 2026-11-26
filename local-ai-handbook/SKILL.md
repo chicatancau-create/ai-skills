@@ -245,3 +245,5 @@ description: 本机（这台 Windows）《AI本地使用手册》（G:\AIrenwu\�
 | C 盘 AppData 越来越大想迁 D 盘；怀疑已迁数据被 AI 重复写回 C；评估 Viap 这类 Junction 迁移工具 | `03-通用/04-工程规范与安全/经验-AppData缓存迁D盘复用DSH-Guard核心按组包装.md`（复用 D:\DSH-Guard 核心按组包装；回流核查法；锁定目录开机任务；D 盘副本是真源别清理） |
 | 要用 Viap（或同类工具）清理数据/内存/幽灵链接/强力卸载 | `03-通用/04-工程规范与安全/规则-用Viap清理前必检D盘联接效果与Viap更新.md`（用户长期规定：先跑 health_check.py/双守护确认 D 盘 54 联接效果还在，再对比 GitHub latest 核验 Viap 更新；D:\DevCache* 是真源不是可清理内存） |
 | 想程序化驱动 LightC/Tauri 清理软件跑扫描取结果；设 WebView2 调试端口不监听；清理软件勾选不生效或怕误删用户数据 | `03-通用/03-调试与验证/经验-LightC全模块UIA驱动清理与社交默认全选误删用户数据.md`（Tauri 覆盖调试参数改 UIA；各模块控件形态+确认反向找；-ExpectMin 守卫+dry-run；社交默认全选含用户数据；旧驱动同体积备份净释放 0） |
+
+| 清理 git 污染误删未跟踪目录 / ai-renwu 本地历史被 ai-skills 污染 | `03-通用/04-工程规范与安全/规则-清理git污染勿删白名单外真实未跟踪工作目录.md` |
