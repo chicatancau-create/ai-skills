@@ -103,7 +103,7 @@ description: 本机（这台 Windows）《AI本地使用手册》（G:\AIrenwu\�
 | 热点上开 DoH 后解析反而 27–32s | `踩坑-DoH在UDP受限手机热点反而劣化须回退DHCP.md` |
 | 手机正常电脑断、Wi-Fi 约 6s 硬断 | `踩坑-MediaTek WLAN扩展mtkwlex卸载重载致Wi-Fi硬断手机正常电脑断.md` |
 | 导出 QQ 群成员成班级名单 | `规则-QQ群成员名单用无障碍树加滚动采集并拆姓名手机号.md` |
-| 抖音聊天 PC 闪退/群消息采集/开群导航 | `规则-抖音聊天PC群采集GUI事实与启动链.md` |
+| 抖音聊天 PC 闪退/群消息采集/开群导航/OCR 提取/去重 | `规则-抖音聊天PC群采集GUI事实与启动链.md` |
 | npm 报 E404、包名在等宽字体里分不清 `mysq12`/`mysql2`、报错域名与配置的镜像不一致 | `踩坑-npm报404包名肉眼难辨mysq12与mysql2须读debug日志.md`（`verified`：判据只认 `npm-cache\_logs\*-debug-0.log` 的 `http fetch GET 404` 行；一条 install 里一个包 404 会让整条回滚） |
 | WebView2/Tauri/Pake 壳应用点了「下载」全盘找不到文件 | `踩坑-壳应用点下载找不到文件先查WebView2的History下载表与真实Downloads目录.md`（`verified`：`downloads` 表 0 行＝从未下载；本机真实 Downloads 是 `G:\NDM下载`，`C:\Users\Admin\Downloads` 不存在） |
 | 按截图目视坐标裁原图裁到全黑/无关区域 | `踩坑-Read显示图是缩放版按显示坐标裁原图必裁错.md`（`verified`：Read 显示层等比缩放，定位先像素扫描再裁、最后目视） |
