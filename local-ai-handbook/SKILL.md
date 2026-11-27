@@ -259,3 +259,4 @@ description: 本机（这台 Windows）《AI本地使用手册》（G:\AIrenwu\�
 
 | 清理 git 污染误删未跟踪目录 / ai-renwu 本地历史被 ai-skills 污染 | `03-通用/04-工程规范与安全/规则-清理git污染勿删白名单外真实未跟踪工作目录.md` |
 | HarmonyOS App 网络数据/网络图片全空白但不报错，编译 `BUILD SUCCESSFUL`；同一份代码前一天还正常 | `01-前端/06-网络请求与接口联调/HarmonyOS-写死局域网IP作为接口地址-换网络后静默全挂.md`（`verified`：2026-11-26/27 跨夜实测，后端进程 PID 未变、`127.0.0.1:3000` 一直 200，仅电脑换网络后 DHCP 把 IP 从 `10.149.175.18` 改成 `192.168.113.52`，写死的 `SERVER_URL` 就全挂。查法＝先用 `Invoke-WebRequest` 测代码里那串写死的 URL，再测 `127.0.0.1`；改 IP 后必须重新构建） |
+| CapCut 草稿批量生成后素材离线 / 换目录后视频不显示；或 CapCut 截图全黑、UI Automation 取不到控件，想验证工程是否正常 | `03-通用/04-工程规范与安全/踩坑-CapCut草稿素材路径迁移与CEF无法截图验证.md`（媒体绝对路径在 `draft_content.json` + `draft_virtual_store.json` **两处**，只改一处素材面板仍离线；CEF/GPU 渲染截图必黑、UIA 文本=0，验收改判引用完整性+路径 exists+duration 对齐；`draft_meta_info.json` 启动后统一回写＝加载成功强证据） |
