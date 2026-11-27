@@ -1,0 +1,114 @@
+    source_root: ET.Element,
+    generated_root: ET.Element,
+) -> None:
+    """Copy only advance attributes while preserving the source visual effect."""
+    source_carriers = transition_carriers(source_root)
+    generated_carriers = transition_carriers(generated_root)
+    if len(source_carriers) > 1 or len(generated_carriers) > 1:
+        raise TemplateStructureError(
+            "Round-trip transition advance patch requires at most one carrier"
+        )
+
+    transition_tag = f"{{{PML_NS}}}transition"
+
+    def _elements(carrier: ET.Element) -> list[ET.Element]:
+        if carrier.tag == transition_tag:
+            return [carrier]
+        return list(carrier.iter(transition_tag))
+
+    generated_transitions = (
+        _elements(generated_carriers[0]) if generated_carriers else []
+    )
+    advance_values = {
+        (transition.get("advClick"), transition.get("advTm"))
+        for transition in generated_transitions
+    }
+    if len(advance_values) > 1:
+        raise TemplateStructureError(
+            "Generated transition branches disagree on advance attributes"
+        )
+    advance_click, advance_after = (
+        next(iter(advance_values)) if advance_values else (None, None)
+    )
+
+    if not source_carriers:
+        if advance_click is not None or advance_after is not None:
+            clone = ET.Element(transition_tag)
+            if advance_click is not None:
+                clone.set("advClick", advance_click)
+            if advance_after is not None:
+                clone.set("advTm", advance_after)
+            children = list(source_root)
+            insert_at = next(
+                (
+                    index
+                    for index, child in enumerate(children)
+                    if child.tag in {
+                        f"{{{PML_NS}}}timing",
+                        f"{{{PML_NS}}}extLst",
+                    }
+                ),
+                len(children),
+            )
+            source_root.insert(insert_at, clone)
+        return
+
+    source_transitions = _elements(source_carriers[0])
+    if not source_transitions:
+        raise TemplateStructureError(
+            "Source logical transition carrier contains no p:transition"
+        )
+    for transition in source_transitions:
+        for attribute, value in (
+            ("advClick", advance_click),
+            ("advTm", advance_after),
+        ):
+            if value is None:
+                transition.attrib.pop(attribute, None)
+            else:
+                transition.set(attribute, value)
+
+
+_RAW_ALTERNATE_CONTENT_RE = re.compile(
+    rb"<mc:AlternateContent\b[^>]*>.*?</mc:AlternateContent\s*>",
+    re.DOTALL,
+)
+_RAW_DIRECT_TRANSITION_RE = re.compile(
+    rb"<p:transition\b(?:[^>]*/>|[^>]*>.*?</p:transition\s*>)",
+    re.DOTALL,
+)
+_RAW_TIMING_RE = re.compile(
+    rb"<p:timing\b(?:[^>]*/>|[^>]*>.*?</p:timing\s*>)",
+    re.DOTALL,
+)
+
+
+def _raw_transition_carrier_span(xml_data: bytes) -> tuple[int, int] | None:
+    """Locate one raw root transition carrier in PowerPoint slide XML."""
+    alternate_spans = [
+        match.span()
+        for match in _RAW_ALTERNATE_CONTENT_RE.finditer(xml_data)
+    ]
+    carriers = [
+        span
+        for span in alternate_spans
+        if _RAW_DIRECT_TRANSITION_RE.search(xml_data[span[0]:span[1]])
+    ]
+    for match in _RAW_DIRECT_TRANSITION_RE.finditer(xml_data):
+        if any(start <= match.start() < end for start, end in alternate_spans):
+            continue
+        carriers.append(match.span())
+    if len(carriers) > 1:
+        raise TemplateStructureError(
+            "Round-trip slide has multiple raw transition carriers"
+        )
+    return carriers[0] if carriers else None
+
+
+def _preserve_roundtrip_transition_markup(
+    serialized_slide: bytes,
+    source_slide: bytes,
+) -> bytes:
+    """Restore an unchanged source transition carrier byte-for-byte."""
+    source_span = _raw_transition_carrier_span(source_slide)
+    serialized_span = _raw_transition_carrier_span(serialized_slide)

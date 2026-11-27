@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+"""Regressions for third-round text, font, and language audit fixes."""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+import tempfile
+import unittest
+import zipfile
+from pathlib import Path
+from xml.etree import ElementTree as ET
+
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from svg_to_pptx import convert_svg_to_slide_shapes  # noqa: E402
+from svg_to_pptx.drawingml.theme_fonts import (  # noqa: E402
+    MasterTextStyleSpec,
+    apply_theme_font_spec,
+    load_theme_font_spec,
+)
+from svg_to_pptx.pptx_package.builder import (  # noqa: E402
+    _apply_template_text_language,
+    create_pptx_with_native_svg,
+)
+from text_measure import measure_text, wrap_text  # noqa: E402
+
+NS = {
+    "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+    "p": "http://schemas.openxmlformats.org/presentationml/2006/main",
+}
+THAI_SAMPLE = "ข้าวหอมมะลิไทยคุณภาพดีและส่งออกทั่วโลก"
+ARABIC_SAMPLE = "مرحبا بكم في عالم القهوة العربية والتقاليد الجميلة"
+
+
+class WordControlWrappingTests(unittest.TestCase):
+    def test_joining_controls_keep_oversized_words_intact(self) -> None:
+        words = (
+            "क्\u200dषत्रिय", "می\u200cروم", "हिन्\u200dदी",
+            "ab\u034fcd", "ab\u2060cd", "क्षत्रिय", "میروم",
+            "ن\u2060\u064eص", "क\u2060\u093fताब",
+        )
+        for word in words:
+            with self.subTest(word=word):
+                width = measure_text(word, size=20, family="Arial")
+                lines, widths, oversized = wrap_text(
+                    word, size=20, family="Arial", max_width=width * 0.7,
+                )
+                self.assertEqual(lines, [word])
+                self.assertEqual(widths, [width])
+                self.assertEqual(oversized, [(word, width)])
+
+    def test_spaces_and_nbsp_remain_word_boundaries(self) -> None:
+        width = measure_text("alpha", size=20, family="Arial")
+        for separator in (" ", "\u00a0", "\t"):
+            with self.subTest(separator=separator):
+                lines, widths, oversized = wrap_text(
+                    "alpha" + separator + "beta", size=20,
+                    family="Arial", max_width=width,
+                )
+                self.assertEqual(lines, ["alpha", "beta"])
+                self.assertEqual(oversized, [])
+                self.assertTrue(all(value <= width for value in widths))
+
+    def test_thai_and_cjk_keep_unspaced_wrapping(self) -> None:
+        for text in (THAI_SAMPLE, "中文正文需要正常换行保持文字完整"):
+            with self.subTest(text=text):
+                lines, widths, oversized = wrap_text(
+                    text, size=20, family="Arial", max_width=100,
+                )
+                self.assertGreater(len(lines), 1)
+                self.assertEqual("".join(lines), text)
+                self.assertEqual(oversized, [])
+                self.assertTrue(all(width <= 100 for width in widths))
+
+
+class ThemeScriptOverrideTests(unittest.TestCase):
+    def test_explicit_script_selects_the_actual_theme_font(self) -> None:
+        cases = (
+            ("pa-Arab-PK", "Arab"),
+            ("pa-Guru-IN", "Guru"),
+            ("pa-IN", "Guru"),
+            ("hi-Latn", "Latn"),
+            ("pa-x-Arab", "Guru"),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            (project / "spec_lock.md").write_text(
+                "# Spec Lock\n## typography\n- font_family: Tahoma\n"
+                "- title_family: Tahoma\n- body_family: Tahoma\n",
+                encoding="utf-8",
+            )
+            theme_path = project / "ppt" / "theme" / "theme1.xml"
+            theme_path.parent.mkdir(parents=True)
+            for language, selected in cases:
+                with self.subTest(language=language):
+                    theme_path.write_text(
+                        f'<a:theme xmlns:a="{NS["a"]}"><a:themeElements>'

@@ -1,0 +1,106 @@
+    parse_preserve_slides,
+    parse_template_slides,
+    template_placeholder_bindings,
+)
+from .template_validation import validate_pptx_template_package
+
+SLIDE_LAYOUT_REL_TYPE = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout"
+)
+SLIDE_REL_TYPE = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide"
+)
+SLIDE_MASTER_REL_TYPE = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster"
+)
+NOTES_SLIDE_REL_TYPE = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide"
+)
+THEME_REL_TYPE = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme"
+)
+THEME_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.theme+xml"
+PML_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
+
+# ST_SlideSizeType tokens for the standard screen ratios; every other canvas
+# (portrait story, banner, print) is ``custom``. python-pptx's default
+# template says ``screen4x3`` whatever cx/cy are set to afterwards.
+_SLIDE_SIZE_TYPES = ((4, 3, "screen4x3"), (16, 9, "screen16x9"), (16, 10, "screen16x10"))
+
+
+def _slide_size_type(width_emu: int, height_emu: int) -> str:
+    """Return the ``p:sldSz type`` token matching a slide size."""
+    for ratio_w, ratio_h, token in _SLIDE_SIZE_TYPES:
+        if abs(width_emu * ratio_h - height_emu * ratio_w) <= max(width_emu, height_emu) // 200:
+            return token
+    return "custom"
+
+
+def _set_slide_size_type(presentation, width_emu: int, height_emu: int) -> None:
+    """Make the ``type`` token agree with the cx/cy the exporter just set."""
+    slide_size = presentation.element.find(f"{{{PML_NS}}}sldSz")
+    if slide_size is not None:
+        slide_size.set("type", _slide_size_type(width_emu, height_emu))
+DML_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+P14_NS = "http://schemas.microsoft.com/office/powerpoint/2010/main"
+MC_NS = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+A14_NS = "http://schemas.microsoft.com/office/drawing/2010/main"
+MATH_NS = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+PACKAGE_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+
+for _prefix, _uri in (
+    ("p", PML_NS),
+    ("a", DML_NS),
+    ("r", REL_NS),
+    ("p14", P14_NS),
+    ("mc", MC_NS),
+    ("a14", A14_NS),
+    ("m", MATH_NS),
+):
+    try:
+        ET.register_namespace(_prefix, _uri)
+    except (ValueError, AttributeError):
+        pass
+
+
+@dataclass(frozen=True)
+class PptxStructureContext:
+    """Resolved base package structure reused when slide XML is regenerated."""
+
+    slide_layout_targets: dict[int, str]
+    slide_master_parts: dict[int, str]
+
+    def slide_layout_target(self, slide_num: int) -> str:
+        """Return the slide layout target for a generated slide."""
+        try:
+            return self.slide_layout_targets[slide_num]
+        except KeyError as exc:
+            raise RuntimeError(
+                f"Missing slide layout relationship for generated slide {slide_num}"
+            ) from exc
+
+    def slide_master_part(self, slide_num: int) -> str:
+        """Return the slide master package part for a generated slide."""
+        try:
+            return self.slide_master_parts[slide_num]
+        except KeyError as exc:
+            raise RuntimeError(
+                f"Missing slide master relationship for generated slide {slide_num}"
+            ) from exc
+
+
+@dataclass(frozen=True)
+class RoundtripSlidePatch:
+    """One authoring slide overlay applied onto its preserved source part."""
+
+    source_ref_ids: frozenset[str]
+    edited_ref_ids: frozenset[str]
+    deleted_ref_ids: frozenset[str]
+    visual_changed: bool
+    authoring_visual_changed: bool
+    motion_changed: bool
+    transition_changed: bool
+    transition_replaced: bool
+    animation_changed: bool
+    notes_changed: bool

@@ -1,0 +1,111 @@
+        elif ar > 0.8:
+            categories["Square (0.8-1.2)"].append(img)
+        else:
+            categories["Portrait (<0.8)"].append(img)
+
+    for cat, imgs in categories.items():
+        if imgs:
+            print(f"\n{cat}: {len(imgs)} images")
+            for img in imgs[:5]:  # Show only the first 5
+                print(f"  - {img['width']}x{img['height']} (ratio {img['aspect_ratio']:.2f}) - {img['filename'][:35]}...")
+            if len(imgs) > 5:
+                print(f"  ... and {len(imgs) - 5} more")
+
+    native_only = [
+        img for img in results
+        if img.get('asset_kind') == 'office_vector'
+        and not img.get('svg_renderable', True)
+    ]
+    if native_only:
+        print("\nOffice vector assets for PPTX native passthrough:")
+        for img in native_only[:10]:
+            original = img.get('original_filename', img['filename'])
+            print(f"  - {original} (display ratio {img['aspect_ratio']:.2f}; SVG preview not supported)")
+        if len(native_only) > 10:
+            print(f"  ... and {len(native_only) - 10} more")
+
+
+def _format_optional_number(value: object, digits: int = 2) -> str:
+    """Format a numeric value for CSV, leaving unavailable facts blank."""
+    if not isinstance(value, (int, float)):
+        return ""
+    return f"{float(value):.{digits}f}"
+
+
+def save_csv(results: list[ImageAnalysis], csv_path: str | Path) -> None:
+    """Atomically save analysis results to a standards-compliant CSV file."""
+    target = Path(csv_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    header = [
+        "No",
+        "Filename",
+        "Width",
+        "Height",
+        "AspectRatio",
+        "PixelAspectRatio",
+        "SourceDisplayRatio",
+        "RatioSource",
+        "Format",
+        "HasTransparentPixels",
+        "UsageCount",
+        "DisplayRatioVariants",
+        "AssetKind",
+        "SvgRenderable",
+        "PptxNativeSupported",
+        "SizeKB",
+        "Category",
+    ]
+
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            newline="",
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            dir=target.parent,
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            writer = csv.writer(handle, lineterminator="\n")
+            writer.writerow(header)
+            for index, image in enumerate(results, 1):
+                row = [
+                    index,
+                    image["filename"],
+                    image["width"],
+                    image["height"],
+                    _format_optional_number(image["aspect_ratio"]),
+                    _format_optional_number(image.get("pixel_aspect_ratio")),
+                    _format_optional_number(image.get("source_display_ratio")),
+                    image.get("ratio_source", "native"),
+                    image.get("format", ""),
+                    image.get("has_transparent_pixels", ""),
+                    image.get("usage_count", 1),
+                    image.get("display_ratio_variants", ""),
+                    image.get("asset_kind", "bitmap"),
+                    image.get("svg_renderable", True),
+                    image.get("pptx_native_supported", True),
+                    _format_optional_number(image["filesize_kb"], digits=1),
+                    image["category"],
+                ]
+                writer.writerow(row)
+        os.replace(temporary_path, target)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+    print(f"\n[REPORT] Image analysis CSV: {target}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the CLI entry point."""
+    parser = argparse.ArgumentParser(
+        description="Analyze objective image-file facts"
+    )
+    parser.add_argument(
+        "images_dir",
+        help="Path to the images directory"
+    )

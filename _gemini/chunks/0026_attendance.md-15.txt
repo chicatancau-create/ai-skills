@@ -1,0 +1,63 @@
+| --plan-id | y* | 排班ID（与 --result-id 二选一） | `dws attendance schedule get` 返回的 `id` 字段 |
+| --result-id | y* | 打卡结果ID（与 --plan-id 二选一，优先使用） | **暂不支持**（record get 未返回此字段） |
+| --time | n | 新打卡时间，格式 yyyy-MM-dd HH:mm | - |
+| --result | n | 打卡结果枚举值 | - |
+| --absent-min | n | 缺勤时长（分钟） | - |
+| --remark | n | 备注，最长500字符 | - |
+| --user-say-yes | n | 用户已确认，跳过交互式确认提示 | - |
+
+**获取 planId 步骤**:
+1. 查询排班记录：`dws attendance schedule get --userIdList USER_ID --workDateBegin DATE --workDateEnd DATE`
+2. 从返回结果中找到对应打卡类型（OnDuty=上班，OffDuty=下班）的记录
+3. 使用该记录的 `id` 字段作为 `--plan-id` 参数
+4. 示例返回：`{"id": 948964045503, "checkType": "OffDuty", ...}` → `--plan-id 948964045503`
+
+**打卡结果枚举值**:
+- Normal: 正常
+- TimesResultA: 迟到
+- TimesResultB: 早退
+- TimesResultC: 缺卡
+- TimesResultD: 迟到+早退
+- TimesResultE: 缺卡+早退
+- TimesResultF: 迟到+缺卡
+
+**示例**:
+```bash
+# 步骤1：获取排班记录的 planId
+dws attendance schedule get --userIdList 03642229451220076 --workDateBegin 2026-05-13 --workDateEnd 2026-05-13 -f json
+
+# 步骤2：使用返回的 id 作为 --plan-id 改签
+# 假设返回 id: 948964045503 (OffDuty 下班打卡)
+dws attendance boss-check --plan-id 948964045503 --result Normal --user-say-yes
+
+# 同时修改打卡时间
+dws attendance boss-check --plan-id 948964045503 --time "2026-05-13 18:00" --result Normal --yes
+```
+
+## 自动化脚本
+
+| 脚本 | 场景 | 用法 |
+|------|------|------|
+| [attendance_my_record.py](../../scripts/attendance_my_record.py) | 查看我今天/指定日期的考勤记录 | `python attendance_my_record.py today` |
+| [attendance_team_shift.py](../../scripts/attendance_team_shift.py) | 查询团队成员本周排班 | `python attendance_team_shift.py --users userId1,userId2` |
+| [attendance_report_common.py](../../scripts/attendance_report_common.py) | 考勤报表导出公共模块（不可单独执行） | — |
+| [attendance_vacation_balance.py](../../scripts/attendance_vacation_balance.py) | 假期余额列表 Excel 导出 | **禁止直接调用**，必须先读 [attendance-vacation.md](./attendance-vacation.md) 按工作流执行 |
+| attendance_report_detail.py | 考勤报表 — **明细粒度** |  **禁止直接调用**，必须先读 [attendance-report.md](./attendance-report.md) 按工作流执行 |
+| attendance_report_monthly.py | 考勤报表 — **月度汇总** |  **禁止直接调用**，必须先读 [attendance-report.md](./attendance-report.md) 按工作流执行 |
+| attendance_report_daily.py | 考勤报表 — **每日统计** |  **禁止直接调用**，必须先读 [attendance-report.md](./attendance-report.md) 按工作流执行 |
+| attendance_schedule_import.py | 排班导入（含校验、回显、执行） | **禁止直接调用**，必须先读 [attendance-schedule.md](./attendance-schedule.md) 按工作流执行 |
+| attendance_schedule_export.py | 排班查询导出（分批查询、排班表 Excel） | **禁止直接调用**，必须先读 [attendance-schedule.md](./attendance-schedule.md) 按工作流执行 |
+
+> 说明：
+> - `attendance_report_*.py` 三个脚本由 [attendance-report.md](./attendance-report.md) 工作流编排使用，自动处理 `--users` 超过 20 人分批、`--start/--end` 超过 32 天按月切片，输出 `attendance_report_<startDate>_<endDate>_<粒度>.xlsx`
+> - `attendance_schedule_import.py` 由 [attendance-schedule.md](./attendance-schedule.md) 排班导入工作流编排使用，自动处理考勤组校验、班次校验、排班回显确认
+> - `attendance_schedule_export.py` 由 [attendance-schedule.md](./attendance-schedule.md) 排班查询导出工作流编排使用，自动处理分批查询（超 20 人自动分批）、userId→姓名转换、classId→班次名称转换、输出排班表格式 Excel
+
+## 严格约束
+- 不要凭历史记忆复用 userId / classId / leaveCode / groupId / instanceId 等任何 ID，每次必须从当次命令返回值中提取
+- 不要猜测命令，先查询明确命令，不要使用记忆中未经证实（即不存在于本.md文件中的指令）或执行失败（指令传参有误或flag不正确）的的命令
+- 制定 plan 并自我审查，严格按 plan 执行
+- 涉及超过 3 条记录的聚合（求和、分组、计数、排序、跨字段计算）时必须落 Python 脚本处理，禁止用大模型口算或目测。脚本里如果用到 mcp，先提前看下 mcp 返回的结构，避免执行异常
+- 遇到时长字段时，注意区分单位是秒、分钟还是小时
+- 遇到意图不清晰的场景不要猜测，主动询问用户明确意图
+- 如果查询结果很多时，不要自作主张省略，必须明确告知用户或者用表格或展示所有。

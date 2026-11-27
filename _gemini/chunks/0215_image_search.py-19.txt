@@ -1,0 +1,120 @@
+                    result.candidate_page + 1
+                    if result.has_more_candidates
+                    else None
+                ),
+                "review_sheet": (
+                    f"candidates/{Path(filename).stem}/{sheet.name}"
+                ),
+            },
+            (
+                f"{result.candidate_count}/{result.candidate_total} thumbnail "
+                f"candidate(s), page {result.candidate_page}: {sheet}"
+                + (
+                    f"; next page: {result.candidate_page + 1}"
+                    if result.has_more_candidates
+                    else "; pool exhausted"
+                )
+            ),
+            False,
+            True,
+            None,
+            None,
+        )
+    if result.candidate is None:
+        return (
+            None,
+            result.error or "search failed",
+            result.failure_kind == SEARCH_FAILURE_RETRYABLE,
+            False,
+            None,
+            None,
+        )
+    if result.staged_path is None or result.output_path is None:
+        return (
+            None,
+            "search succeeded without a staged output",
+            True,
+            False,
+            None,
+            None,
+        )
+
+    try:
+        item_args = argparse.Namespace(
+            filename=filename,
+            slide=item.get("slide", ""),
+            purpose=item.get("purpose", ""),
+            query=item["query"],
+            orientation=orientation,
+            required_terms=request.required_terms,
+            query_variants=request.query_variants,
+        )
+        manifest_item = _candidate_to_manifest_item(
+            result.candidate,
+            item_args,
+            provider_name=result.provider_name or "",
+            stage=result.stage or "",
+            actual_dimensions=result.actual_dimensions,
+        )
+        return (
+            manifest_item,
+            None,
+            False,
+            False,
+            result.staged_path,
+            result.output_path,
+        )
+    except Exception:
+        if result.staged_path is not None:
+            try:
+                result.staged_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+
+
+def run_search_manifest(
+    manifest: dict,
+    manifest_path: str,
+    *,
+    output_dir: Path,
+    sources_manifest_path: Path,
+    concurrency: int,
+    save_candidates: bool,
+    max_candidates: int,
+    candidate_page: int,
+    default_provider: Optional[str],
+    default_strict: bool,
+    default_min_width: int,
+    default_min_height: int,
+) -> tuple[int, int, int, int, int]:
+    """Process all Pending/Failed rows concurrently with a bounded pool.
+
+    On success the rich provenance entry is appended to ``image_sources.json``
+    (the credit source of truth) and the row's status flips to ``Sourced``.
+    Thumbnail-only rows become ``Needs-Selection`` until promoted or re-queried.
+    A row that exhausts the provider/stage chain becomes ``Needs-Manual``.
+    Status is written back after each completion, so an interrupt preserves
+    finished rows. Returns
+    ``(sourced, needs_selection, needs_manual, failed, skipped)``.
+    """
+    sources_manifest = _read_existing_manifest(sources_manifest_path)
+    items = manifest["items"]
+
+    provenance_filenames = {
+        item["filename"].casefold(): item["filename"]
+        for item in sources_manifest.get("items", [])
+        if isinstance(item.get("filename"), str)
+    }
+    repaired_sourced = False
+    for item in items:
+        if item["status"] != SEARCH_STATUS_SOURCED:
+            continue
+        filename = item["filename"]
+        target_path = output_dir / filename
+        reasons: list[str] = []
+        provenance_filename = provenance_filenames.get(filename.casefold())
+        if provenance_filename is None:
+            reasons.append("image_sources.json has no matching provenance entry")
+        elif provenance_filename != filename:
+            reasons.append(

@@ -1,0 +1,102 @@
+        RuntimeError,
+        ValueError,
+    ) as exc:
+        print(
+            f"Error: failed to replace {target_filename} and record provenance: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+    finally:
+        try:
+            staged_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    print(f"  fetched: {url} -> {target_filename}", file=sys.stderr)
+    print(f"  manifest updated: {written}", file=sys.stderr)
+    review = _write_review_copy(dst_path, output_dir / ".review", target_filename)
+    if review is not None:
+        print(f"  review copy: {review}", file=sys.stderr)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Batch mode (`--batch image_queries.json`)
+# ---------------------------------------------------------------------------
+
+
+def load_search_manifest(path: str) -> dict:
+    """Load and validate an ``image_queries.json`` batch manifest.
+
+    Schema (top level): ``{"items": [ ... ]}``. Each item requires
+    ``filename``, ``query``, ``status``. Optional per-item overrides:
+    ``query_variants``, ``candidate_page``, ``slide``, ``purpose``,
+    ``orientation``, ``provider``, ``strict_no_attribution``, ``min_width``,
+    ``min_height``, ``last_error``.
+    """
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ValueError(f"Cannot read {path}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Invalid JSON in {path}: {exc.msg} "
+            f"(line {exc.lineno}, col {exc.colno})"
+        ) from exc
+
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"{path}: top level must be a JSON object, got {type(data).__name__}"
+        )
+
+    items = data.get("items")
+    if not isinstance(items, list) or not items:
+        raise ValueError(f"{path}: 'items' must be a non-empty array")
+
+    seen_filenames: dict[str, str] = {}
+    for i, item in enumerate(items):
+        prefix = f"{path}: items[{i}]"
+        if not isinstance(item, dict):
+            raise ValueError(f"{prefix} must be an object")
+        for field in SEARCH_REQUIRED_ITEM_FIELDS:
+            if field not in item:
+                raise ValueError(f"{prefix} missing required field '{field}'")
+            if not isinstance(item[field], str) or not item[field].strip():
+                raise ValueError(
+                    f"{prefix} field '{field}' must be a non-empty string"
+                )
+        if item["status"] not in SEARCH_VALID_STATUSES:
+            raise ValueError(
+                f"{prefix} status '{item['status']}' is invalid. "
+                f"Valid: {sorted(SEARCH_VALID_STATUSES)}"
+            )
+        if "required_terms" in item:
+            try:
+                _parse_required_terms(item["required_terms"])
+            except ValueError as exc:
+                raise ValueError(f"{prefix} {exc}") from exc
+        if "query_variants" in item:
+            try:
+                _parse_query_variants(item["query_variants"])
+            except ValueError as exc:
+                raise ValueError(f"{prefix} {exc}") from exc
+        if "candidate_page" in item:
+            candidate_page = item["candidate_page"]
+            if (
+                not isinstance(candidate_page, int)
+                or isinstance(candidate_page, bool)
+                or candidate_page < 1
+            ):
+                raise ValueError(
+                    f"{prefix} field 'candidate_page' must be a positive integer"
+                )
+        for dimension_field in ("min_width", "min_height"):
+            if dimension_field not in item:
+                continue
+            value = item[dimension_field]
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value < 1
+            ):
+                raise ValueError(

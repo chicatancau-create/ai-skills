@@ -1,0 +1,123 @@
+"""ChartEx native chart XML emitters."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from ..drawingml.utils import _xml_escape
+from .marker_common import (
+    CHARTEX_URI,
+    CHART_COLOR_STYLE_REL_TYPE,
+    CHART_STYLE_REL_TYPE,
+    PACKAGE_REL_TYPE,
+    _clean_hex,
+    _compact_key,
+    _excel_col,
+    _first_present,
+)
+
+
+def _chart_ex_legend_xml(payload: dict[str, Any]) -> str:
+    style = payload.get("style") if isinstance(payload.get("style"), dict) else {}
+    show_legend = payload.get("show_legend", style.get("show_legend", False))
+    if not show_legend:
+        return ""
+    position_key = _compact_key(payload.get("legend_position") or style.get("legend_position") or "bottom")
+    positions = {
+        "bottom": "b",
+        "b": "b",
+        "left": "l",
+        "l": "l",
+        "right": "r",
+        "r": "r",
+        "top": "t",
+        "t": "t",
+    }
+    position = positions.get(position_key, "b")
+    return f'<cx:legend pos="{position}" align="ctr" overlay="0"/>'
+
+
+def _cx_points(values: list[Any]) -> str:
+    return "".join(
+        f'<cx:pt idx="{idx}">{_xml_escape(str(value))}</cx:pt>'
+        for idx, value in enumerate(values)
+    )
+
+
+def _cx_col_range(start_col: int, col_count: int, row_count: int) -> str:
+    start = _excel_col(start_col)
+    end = _excel_col(start_col + col_count - 1)
+    return f"Sheet1!${start}$2:${end}${row_count + 1}"
+
+
+def _cx_str_dim(levels: list[list[str]], *, start_col: int, row_count: int) -> str:
+    levels_xml = "".join(
+        f'<cx:lvl ptCount="{len(level)}">{_cx_points(level)}</cx:lvl>'
+        for level in reversed(levels)
+    )
+    return (
+        '<cx:strDim type="cat">'
+        f"<cx:f>{_cx_col_range(start_col, len(levels), row_count)}</cx:f>"
+        f"{levels_xml}"
+        "</cx:strDim>"
+    )
+
+
+def _cx_num_dim(
+    values: list[int | float],
+    *,
+    dim_type: str,
+    col: int,
+) -> str:
+    return (
+        f'<cx:numDim type="{dim_type}">'
+        f"<cx:f>Sheet1!${_excel_col(col)}$2:${_excel_col(col)}${len(values) + 1}</cx:f>"
+        f'<cx:lvl ptCount="{len(values)}" formatCode="General">{_cx_points(values)}</cx:lvl>'
+        "</cx:numDim>"
+    )
+
+
+def _chart_ex_data_xml(chart_data: dict[str, Any]) -> str:
+    chart_type = chart_data["type"]
+    if chart_type in {"sunburst", "treemap"}:
+        values = chart_data["values"]
+        levels = chart_data["levels"]
+        return (
+            '<cx:data id="0">'
+            f'{_cx_str_dim(levels, start_col=1, row_count=len(values))}'
+            f'{_cx_num_dim(values, dim_type="size", col=len(levels) + 1)}'
+            "</cx:data>"
+        )
+    if chart_type == "histogram":
+        values = chart_data["values"]
+        return f'<cx:data id="0">{_cx_num_dim(values, dim_type="val", col=1)}</cx:data>'
+    if chart_type in {"funnel", "pareto", "waterfall"}:
+        values = chart_data["values"]
+        categories = chart_data["categories"]
+        return (
+            '<cx:data id="0">'
+            f'{_cx_str_dim([categories], start_col=1, row_count=len(values))}'
+            f'{_cx_num_dim(values, dim_type="val", col=2)}'
+            "</cx:data>"
+        )
+    if chart_type == "box_whisker":
+        parts: list[str] = []
+        for idx, item in enumerate(chart_data["series"]):
+            start_col = idx * 2 + 1
+            parts.append(
+                f'<cx:data id="{idx}">'
+                f'{_cx_str_dim([item["categories"]], start_col=start_col, row_count=len(item["values"]))}'
+                f'{_cx_num_dim(item["values"], dim_type="val", col=start_col + 1)}'
+                "</cx:data>"
+            )
+        return "".join(parts)
+    raise RuntimeError(f"Native PPTX {chart_type} chart is outside current basic chart support")
+
+
+def _chart_ex_title_text(payload: dict[str, Any]) -> str | None:
+    raw_title = payload.get("title")
+    if isinstance(raw_title, dict):
+        raw_title = raw_title.get("text")
+    if raw_title is None:
+        return None
+    title = str(raw_title).strip()

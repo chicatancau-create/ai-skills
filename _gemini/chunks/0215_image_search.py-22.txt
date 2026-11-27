@@ -1,0 +1,116 @@
+                        item["last_error"] = error or "provider/download failure"
+                        _clear_candidate_selection_outputs(item)
+                        failed_count += 1
+                        print(
+                            f"  [FAIL] {item['filename']} — {item['last_error']}"
+                        )
+                    else:
+                        item["status"] = SEARCH_STATUS_NEEDS_MANUAL
+                        item["last_error"] = error or "search failed"
+                        _clear_candidate_selection_outputs(item)
+                        needs_manual_count += 1
+                        print(
+                            f"  [MANUAL] {item['filename']} — "
+                            f"{item['last_error']}"
+                        )
+                    save_search_manifest(manifest_path, manifest)
+    finally:
+        # Workers only stage files. Any result not committed because of an
+        # interrupt or a later manifest error must not leave candidate residue.
+        for future in futures:
+            if not future.done():
+                continue
+            try:
+                outcome = future.result()
+            except BaseException:
+                continue
+            staged_path = outcome[5]
+            if staged_path is not None:
+                try:
+                    staged_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    print(
+        f"\n[Batch] Done: {sourced_count} sourced / "
+        f"{needs_selection_count} needs-selection / {failed_count} failed / "
+        f"{needs_manual_count} needs-manual ({skipped} pre-skipped). "
+        f"Manifest: {manifest_path}"
+    )
+    return (
+        sourced_count,
+        needs_selection_count,
+        needs_manual_count,
+        failed_count,
+        skipped,
+    )
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Search openly-licensed web images, shortlist thumbnails, or "
+            "download one selected original. Sister to image_gen.py."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "query",
+        nargs="?",
+        default=None,
+        help="Search query (1-4 concrete keywords work best). Omit in --batch mode.",
+    )
+    parser.add_argument(
+        "--query-variant",
+        action="append",
+        default=None,
+        metavar="QUERY",
+        help=(
+            "Add a materially different spelling, translation, or entity "
+            "query. Repeatable; results are aggregated and deduplicated."
+        ),
+    )
+    parser.add_argument(
+        "--filename",
+        default=None,
+        help=(
+            "Local filename for the chosen image (e.g. cover_bg.jpg). "
+            "Required for single-query, --promote, and --from-url modes; "
+            "ignored only during batch search."
+        ),
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        default=".",
+        help="Output directory. Manifest defaults to <output>/image_sources.json.",
+    )
+    parser.add_argument(
+        "--provider",
+        choices=ALL_PROVIDERS,
+        default=None,
+        help=(
+            "Pin one provider. Default: try zero-config providers (openverse, "
+            "wikimedia) plus any keyed provider whose API key is set."
+        ),
+    )
+    parser.add_argument(
+        "--orientation",
+        choices=ORIENTATION_CHOICES,
+        default="any",
+        help="Preferred orientation.",
+    )
+    parser.add_argument(
+        "--purpose",
+        default="",
+        help="Purpose tag stored in the manifest (e.g. background, hero, side).",
+    )
+    parser.add_argument(
+        "--slide",
+        default="",
+        help="Slide identifier the image belongs to (e.g. 01_cover).",

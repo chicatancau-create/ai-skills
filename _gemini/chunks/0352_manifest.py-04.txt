@@ -1,0 +1,118 @@
+        target = _preferred_image_target(blip, rels)
+        if target is None or target in seen:
+            continue
+        seen.add(target)
+        targets.append(target)
+    return targets
+
+
+def _preferred_image_target(
+    blip: ET.Element,
+    rels: dict[str, dict[str, str]],
+) -> str | None:
+    """Resolve an Office SVG relationship before its raster fallback."""
+    for rel_id in blip_embed_relationship_ids(blip):
+        rel = rels.get(rel_id)
+        if rel and rel["type"] == IMAGE_REL:
+            return rel["target"]
+    return None
+
+
+def detect_background_asset(root: ET.Element | None, rels: dict[str, dict[str, str]]) -> str | None:
+    if root is None:
+        return None
+
+    bg = root.find("p:cSld/p:bg", NS)
+    if bg is None:
+        bg = root.find("p:bg", NS)
+    if bg is None:
+        return None
+
+    blip = bg.find(".//a:blip", NS)
+    if blip is None:
+        return None
+
+    return _preferred_image_target(blip, rels)
+
+
+def count_slide_shapes(root: ET.Element | None) -> int:
+    if root is None:
+        return 0
+    sp_tree = root.find("p:cSld/p:spTree", NS)
+    if sp_tree is None:
+        return 0
+    return len(list(sp_tree))
+
+
+def classify_slide(index: int, total: int, texts: list[str], image_count: int, shape_count: int) -> str:
+    joined = " ".join(texts).lower()
+    if any(keyword in joined for keyword in THANKS_KEYWORDS):
+        return "ending_candidate"
+    if any(keyword in joined for keyword in TOC_KEYWORDS):
+        return "toc_candidate"
+    if any(keyword in joined for keyword in CHAPTER_KEYWORDS):
+        return "chapter_candidate"
+    if index == 1 and image_count <= 3:
+        return "cover_candidate"
+    if index == total and len(texts) <= 6:
+        return "ending_candidate"
+    if len(texts) <= 3 and shape_count <= 12:
+        return "chapter_candidate"
+    return "content_candidate"
+
+
+def parse_theme(root: ET.Element | None) -> dict[str, Any]:
+    if root is None:
+        return {"colors": {}, "fonts": {}}
+
+    colors: dict[str, str] = {}
+    clr_scheme = root.find(".//a:clrScheme", NS)
+    if clr_scheme is not None:
+        for child in list(clr_scheme):
+            if not isinstance(child.tag, str):
+                continue
+            name = child.tag.split("}", 1)[-1]
+            srgb = child.find("a:srgbClr", NS)
+            sys_clr = child.find("a:sysClr", NS)
+            if srgb is not None and "val" in srgb.attrib:
+                colors[name] = f"#{srgb.attrib['val']}"
+            elif sys_clr is not None:
+                last = sys_clr.attrib.get("lastClr")
+                if last:
+                    colors[name] = f"#{last}"
+
+    fonts: dict[str, str] = {}
+    font_scheme = root.find(".//a:fontScheme", NS)
+    if font_scheme is not None:
+        major = font_scheme.find("a:majorFont", NS)
+        minor = font_scheme.find("a:minorFont", NS)
+        if major is not None:
+            latin = major.find("a:latin", NS)
+            if latin is not None and latin.attrib.get("typeface"):
+                fonts["majorLatin"] = latin.attrib["typeface"]
+        if minor is not None:
+            latin = minor.find("a:latin", NS)
+            if latin is not None and latin.attrib.get("typeface"):
+                fonts["minorLatin"] = latin.attrib["typeface"]
+            ea = minor.find("a:ea", NS)
+            if ea is not None and ea.attrib.get("typeface"):
+                fonts["minorEastAsia"] = ea.attrib["typeface"]
+
+    return {"colors": colors, "fonts": fonts}
+
+
+def choose_common_assets(asset_usage: Counter[str]) -> list[str]:
+    common = [asset for asset, count in asset_usage.items() if count > 1]
+    return sorted(common)
+
+
+def _effective_inherited_image_assets(
+    *,
+    show_inherited_shapes: bool,
+    layout_record: dict[str, Any] | None,
+    master_record: dict[str, Any] | None,
+) -> set[str]:
+    """Return visible inherited shape images, excluding background assets."""
+    if not show_inherited_shapes:
+        return set()
+

@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""Focused tests for illustration-sheet alpha-key diagnostics."""
+
+from __future__ import annotations
+
+import base64
+import io
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from xml.etree import ElementTree as ET
+
+from PIL import Image, ImageDraw
+
+from slice_images import slice_sheet
+from svg_finalize.crop_images import process_svg_images
+from svg_finalize.embed_images import _optimize_image_bytes
+from svg_finalize.fix_image_aspect import (
+    get_image_dimensions_from_base64,
+    get_image_dimensions_pil,
+)
+from pptx_to_svg.pic_to_svg import _apply_blip_image_effects, _image_size_at_96_dpi
+
+
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+SCRIPT = SCRIPTS_DIR / "slice_images.py"
+
+
+class SliceImagesDiagnosticsTests(unittest.TestCase):
+    def test_pure_key_despill_keeps_opaque_key_hue_foreground_and_recovers_shadow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sheet_path = root / "sheet.png"
+            key = (0, 255, 0)
+            malachite = (63, 143, 108)
+            image = Image.new("RGB", (240, 100), key)
+            draw = ImageDraw.Draw(image)
+            draw.rectangle((20, 20, 100, 80), fill=malachite)
+            # A black shadow composited over the key at 50% alpha.
+            draw.rectangle((140, 20, 220, 80), fill=(0, 128, 0))
+            image.save(sheet_path)
+
+            written = slice_sheet(
+                sheet_path, 1, 1, root / "out",
+                names=["element"], alpha=True, bg=key, tolerance=18,
+            )
+            element = Image.open(written[0]).convert("RGBA")
+
+            self.assertEqual(element.getpixel((60, 50)), malachite + (255,))
+            shadow_r, shadow_g, shadow_b, shadow_a = element.getpixel((180, 50))
+            self.assertLessEqual(max(shadow_r, shadow_g, shadow_b), 8)
+            self.assertTrue(120 <= shadow_a <= 136, shadow_a)
+            self.assertEqual(element.getpixel((120, 50))[3], 0)
+
+    def test_sheet_orientation_is_applied_before_slicing(self) -> None:
+        for orientation, expected_size in ((6, (40, 80)), (None, (80, 40))):
+            with self.subTest(orientation=orientation), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source = root / "sheet.jpg"
+                image = Image.new("RGB", (80, 40), "red")
+                image.paste("blue", (40, 0, 80, 40))
+                exif = image.getexif()
+                if orientation is not None:
+                    exif[274] = orientation
+                image.save(source, exif=exif)
+
+                paths = slice_sheet(source, 1, 1, root / "output")
+
+                with Image.open(paths[0]) as result:
+                    self.assertEqual(result.size, expected_size)
+                    self.assertNotIn(274, result.getexif())
+                    self.assertGreater(result.getpixel((10, 10))[0], 200)
+                    blue_point = (10, 60) if orientation == 6 else (60, 10)
+                    self.assertGreater(result.getpixel(blue_point)[2], 200)
+
+    def test_grid_uses_oriented_dimensions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "sheet.jpg"
+            image = Image.new("RGB", (80, 40), "red")
+            image.paste("blue", (40, 0, 80, 40))
+            exif = image.getexif()
+            exif[274] = 6
+            image.save(source, exif=exif)
+
+            paths = slice_sheet(source, 2, 1, root / "output")
+
+            for path, channel in zip(paths, (0, 2)):
+                with Image.open(path) as result:
+                    self.assertEqual(result.size, (40, 40))
+                    self.assertGreater(result.getpixel((20, 20))[channel], 200)
+
+    def test_strict_alpha_reports_measured_sheet_border_and_exact_rerun(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sheet_path = root / "sheet.png"

@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+web_to_md.py - Web Page to Markdown Converter (Python Version)
+
+Usage:
+    python scripts/source_to_md/web_to_md.py <url>
+    python scripts/source_to_md/web_to_md.py <url1> <url2> ...
+    python scripts/source_to_md/web_to_md.py -f urls.txt
+    python scripts/source_to_md/web_to_md.py <url> -o output.md
+
+Dependencies:
+    pip install requests beautifulsoup4
+
+TLS fingerprint handling:
+    Some sites (e.g., WeChat mp.weixin.qq.com) block Python's default 'requests'
+    library based on TLS fingerprints (JA3). If 'curl_cffi' is installed, this script
+    uses it to impersonate a modern Chrome fingerprint and bypass such blocks. If
+    'curl_cffi' is unavailable, it silently falls back to plain 'requests' — so
+    non-blocking sites still work without the extra dependency.
+
+    Public-only requests pin validated addresses: curl_cffi uses CURLOPT_RESOLVE
+    while requests uses connection-local validation and numeric socket targets.
+    Both retain the URL hostname for TLS verification. Environment proxies are
+    disabled in this mode because a proxy could resolve the target again;
+    --allow-private-hosts restores proxy use and unrestricted address resolution.
+
+    Install for WeChat / Chinese-portal coverage:
+        pip install curl_cffi
+
+    If curl_cffi is unavailable on your platform, the Node.js counterpart
+    (scripts/source_to_md/web_to_md.cjs) remains available as a fallback.
+"""
+
+from __future__ import annotations
+
+import argparse
+import codecs
+import datetime
+import io
+import ipaddress
+import json
+import os
+import re
+import unicodedata
+import socket
+import subprocess
+import sys
+import time
+from email.message import Message
+from pathlib import Path
+from urllib.parse import urljoin, urlparse
+from urllib.request import Request
+
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from console_encoding import configure_utf8_stdio  # noqa: E402
+from _dispatcher import (  # noqa: E402
+    DOC_SUFFIXES,
+    EXCEL_SUFFIXES,
+    LEGACY_EXCEL_SUFFIXES,
+    PDF_SUFFIXES,
+    PRESENTATION_SUFFIXES,
+    build_conversion_command,
+)
+from _conversion_profile import (  # noqa: E402
+    profile_path_for,
+    record_source_url,
+    write_conversion_profile_best_effort,
+)
+
+configure_utf8_stdio()
+
+# Help must not depend on the optional conversion packages: a stdlib-only
+# interpreter still gets the argparse usage (docs/rules/code-style.md §4).
+_HELP_REQUESTED = __name__ == "__main__" and any(
+    arg in {"-h", "--help"} for arg in sys.argv[1:]
+)
+if not _HELP_REQUESTED:
+    try:
+        import requests
+        from bs4 import BeautifulSoup, Comment, NavigableString, Tag
+        from urllib3.util import parse_url
+    except ImportError:
+        print("Error: This script requires 'requests' and 'beautifulsoup4'.", file=sys.stderr)
+        print("Please run: pip install requests beautifulsoup4", file=sys.stderr)
+        sys.exit(1)
+
+# Prefer curl_cffi for TLS-fingerprint impersonation (bypasses JA3 blocking on
+# sites like WeChat). Fall back to plain requests when it's not installed.
+try:
+    from curl_cffi import CurlOpt  # type: ignore
+    from curl_cffi import requests as curl_requests  # type: ignore
+    _CURL_IMPERSONATE = "chrome120"
+except ImportError:
+    CurlOpt = None
+    curl_requests = None
+    _CURL_IMPERSONATE = None
+
+
+class _UnsafeUrlError(ValueError):
+    """Reject a URL that cannot be verified as a public HTTP(S) target."""
+
+
+_NON_PUBLIC_IPV4_NETWORKS = tuple(ipaddress.ip_network(network) for network in (
+    "0.0.0.0/8", "100.64.0.0/10", "240.0.0.0/4",
+))
+
+
+def _check_url_characters(url: str) -> None:
+    """Reject characters clients could strip or reinterpret before parsing."""
+    if "\\" in url or any(char.isspace() or unicodedata.category(char) == "Cc" for char in url):
+        raise _UnsafeUrlError("Refusing URL containing backslash, whitespace, or control characters")
+
+

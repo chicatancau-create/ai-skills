@@ -1,0 +1,116 @@
+    data_root: ET.Element | None,
+    slide_part: str,
+    slide_relationships: dict[str, dict[str, str]],
+) -> tuple[str | None, list[str]]:
+    if not data_part or data_root is None:
+        return None, []
+    data_model_ext = data_root.find(".//dsp:dataModelExt", DIAGRAM_NS_MAP)
+    rel_id = data_model_ext.attrib.get("relId", "") if data_model_ext is not None else ""
+    if not rel_id:
+        return None, []
+
+    warnings: list[str] = []
+    relationship = slide_relationships.get(rel_id)
+    relationship_owner = slide_part
+    if relationship is not None and not _relationship_matches(
+        relationship.get("type", ""),
+        "diagramDrawing",
+    ):
+        relationship = None
+    if relationship is None:
+        try:
+            data_relationships = _slide_relationships(zf, _rels_name_for_part(data_part))
+        except ET.ParseError:
+            data_relationships = {}
+            warnings.append("invalid-persisted-drawing-relationships")
+        relationship = data_relationships.get(rel_id)
+        relationship_owner = data_part
+        if relationship is not None and not _relationship_matches(
+            relationship.get("type", ""),
+            "diagramDrawing",
+        ):
+            relationship = None
+    if relationship is None:
+        warnings.append("unresolved-persisted-drawing-relationship")
+        return None, warnings
+
+    part_name = _normalize_part(relationship["target"], relationship_owner)
+    if part_name not in zf.namelist():
+        warnings.append("missing-persisted-drawing-part")
+        return None, warnings
+    return part_name, warnings
+
+
+def _layout_info(
+    layout_root: ET.Element | None,
+    data_root: ET.Element | None,
+) -> dict[str, Any]:
+    unique_id = layout_root.attrib.get("uniqueId") if layout_root is not None else None
+    if not unique_id and data_root is not None:
+        document_properties = data_root.find(
+            ".//dgm:pt[@type='doc']/dgm:prSet",
+            DIAGRAM_NS_MAP,
+        )
+        if document_properties is not None:
+            unique_id = document_properties.attrib.get("loTypeId")
+    title = layout_root.find("dgm:title", DIAGRAM_NS_MAP) if layout_root is not None else None
+    name = title.attrib.get("val") if title is not None else None
+    if not name and unique_id:
+        name = unique_id.rstrip("/").rsplit("/", 1)[-1]
+    categories = (
+        [
+            category.attrib["type"]
+            for category in layout_root.findall("dgm:catLst/dgm:cat", DIAGRAM_NS_MAP)
+            if category.attrib.get("type")
+        ]
+        if layout_root is not None
+        else []
+    )
+    return {
+        "name": name,
+        "unique_id": unique_id,
+        "categories": categories,
+    }
+
+
+def _integer_or_none(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _point_text(point: ET.Element) -> str:
+    text_body = point.find("dgm:t", DIAGRAM_NS_MAP)
+    if text_body is None:
+        return ""
+    return "\n".join(_paragraph_texts(text_body)).strip()
+
+
+def _connections(data_root: ET.Element) -> list[dict[str, Any]]:
+    connections: list[dict[str, Any]] = []
+    for connection in data_root.findall(
+        ".//dgm:cxnLst/dgm:cxn",
+        DIAGRAM_NS_MAP,
+    ):
+        source_id = connection.attrib.get("srcId", "")
+        destination_id = connection.attrib.get("destId", "")
+        if not source_id or not destination_id:
+            continue
+        connections.append(
+            {
+                "type": connection.attrib.get("type") or "parOf",
+                "source_id": source_id,
+                "destination_id": destination_id,
+                "source_order": _integer_or_none(connection.attrib.get("srcOrd")),
+                "destination_order": _integer_or_none(connection.attrib.get("destOrd")),
+            }
+        )
+    return connections
+
+
+def _nearest_content_parent(
+    node_id: str,
+    parent_by_id: dict[str, str],

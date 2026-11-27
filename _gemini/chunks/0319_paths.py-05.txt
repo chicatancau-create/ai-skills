@@ -1,0 +1,108 @@
+        zero_width = math.isclose(
+            min_x, max_x, rel_tol=0.0, abs_tol=1e-9
+        )
+        zero_height = math.isclose(
+            min_y, max_y, rel_tol=0.0, abs_tol=1e-9
+        )
+        if not zero_width and not zero_height:
+            continue
+
+        dimension = 'width and height' if zero_width and zero_height else (
+            'width' if zero_width else 'height'
+        )
+        elem_id = elem.get('id')
+        label = f'<{tag} id={elem_id!r}>' if elem_id else f'<{tag}>'
+        errors.add(
+            f'{label} stroke=url(#{gradient_id}) has zero intrinsic {dimension}; '
+            'objectBoundingBox gradients do not include stroke width and will '
+            'not render. Use a non-degenerate path or a closed filled shape'
+        )
+
+    return sorted(errors)
+
+
+def svg_path_to_absolute(commands: list[PathCommand]) -> list[PathCommand]:
+    """Convert all relative path commands to absolute."""
+    result: list[PathCommand] = []
+    cx, cy = 0.0, 0.0  # current point
+    sx, sy = 0.0, 0.0  # subpath start
+
+    for cmd in commands:
+        a = cmd.args
+        if cmd.cmd == 'M':
+            cx, cy = a[0], a[1]
+            sx, sy = cx, cy
+            result.append(PathCommand('M', [cx, cy]))
+        elif cmd.cmd == 'm':
+            cx += a[0]; cy += a[1]
+            sx, sy = cx, cy
+            result.append(PathCommand('M', [cx, cy]))
+        elif cmd.cmd == 'L':
+            cx, cy = a[0], a[1]
+            result.append(PathCommand('L', [cx, cy]))
+        elif cmd.cmd == 'l':
+            cx += a[0]; cy += a[1]
+            result.append(PathCommand('L', [cx, cy]))
+        elif cmd.cmd == 'H':
+            cx = a[0]
+            result.append(PathCommand('L', [cx, cy]))
+        elif cmd.cmd == 'h':
+            cx += a[0]
+            result.append(PathCommand('L', [cx, cy]))
+        elif cmd.cmd == 'V':
+            cy = a[0]
+            result.append(PathCommand('L', [cx, cy]))
+        elif cmd.cmd == 'v':
+            cy += a[0]
+            result.append(PathCommand('L', [cx, cy]))
+        elif cmd.cmd == 'C':
+            result.append(PathCommand('C', list(a)))
+            cx, cy = a[4], a[5]
+        elif cmd.cmd == 'c':
+            abs_args = [
+                cx + a[0], cy + a[1],
+                cx + a[2], cy + a[3],
+                cx + a[4], cy + a[5],
+            ]
+            result.append(PathCommand('C', abs_args))
+            cx, cy = abs_args[4], abs_args[5]
+        elif cmd.cmd == 'S':
+            result.append(PathCommand('S', list(a)))
+            cx, cy = a[2], a[3]
+        elif cmd.cmd == 's':
+            abs_args = [cx + a[0], cy + a[1], cx + a[2], cy + a[3]]
+            result.append(PathCommand('S', abs_args))
+            cx, cy = abs_args[2], abs_args[3]
+        elif cmd.cmd == 'Q':
+            result.append(PathCommand('Q', list(a)))
+            cx, cy = a[2], a[3]
+        elif cmd.cmd == 'q':
+            abs_args = [cx + a[0], cy + a[1], cx + a[2], cy + a[3]]
+            result.append(PathCommand('Q', abs_args))
+            cx, cy = abs_args[2], abs_args[3]
+        elif cmd.cmd == 'T':
+            result.append(PathCommand('T', list(a)))
+            cx, cy = a[0], a[1]
+        elif cmd.cmd == 't':
+            abs_args = [cx + a[0], cy + a[1]]
+            result.append(PathCommand('T', abs_args))
+            cx, cy = abs_args[0], abs_args[1]
+        elif cmd.cmd == 'A':
+            result.append(PathCommand('A', list(a)))
+            cx, cy = a[5], a[6]
+        elif cmd.cmd == 'a':
+            abs_args = [a[0], a[1], a[2], a[3], a[4], cx + a[5], cy + a[6]]
+            result.append(PathCommand('A', abs_args))
+            cx, cy = abs_args[5], abs_args[6]
+        elif cmd.cmd in ('Z', 'z'):
+            result.append(PathCommand('Z', []))
+            cx, cy = sx, sy
+
+    return result
+
+
+def _reflect_control_point(
+    cp_x: float, cp_y: float,
+    cx: float, cy: float,
+) -> tuple[float, float]:
+    """Reflect a control point through the current point."""

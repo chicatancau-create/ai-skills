@@ -1,0 +1,91 @@
+                    preserved_parts=roundtrip_source_parts - replaced_narration_parts,
+                )
+            )
+            if verbose and pruned_roundtrip_payloads:
+                print(
+                    "  Round-trip overlay: pruned "
+                    f"{pruned_roundtrip_payloads} unused payload part(s)"
+                )
+
+        if (
+            use_native_shapes
+            and pptx_structure == "structured"
+            and definition_svg_files
+            and success_count == total_slide_count
+        ):
+            removed = _remove_trailing_layout_definition_slides(
+                extract_dir,
+                public_slide_count,
+                total_slide_count,
+            )
+            pruned_payload_parts = _prune_unreferenced_definition_payload_parts(
+                extract_dir
+            )
+            for slide_num in range(public_slide_count + 1, total_slide_count + 1):
+                slide_part = f"ppt/slides/slide{slide_num}.xml"
+                if template_background_expectations is not None:
+                    template_background_expectations.pop(slide_part, None)
+                if template_shape_roster_expectations is not None:
+                    template_shape_roster_expectations.pop(slide_part, None)
+            if verbose:
+                print(
+                    "  Layout definition carriers: "
+                    f"removed {removed} internal slide(s), pruned "
+                    f"{pruned_payload_parts} orphan payload part(s)"
+                )
+
+        morph_trace_names = _apply_morph_shape_names(
+            extract_dir,
+            morph_pairs,
+            public_slide_numbers,
+            morph_shape_ids,
+        )
+        if template_shape_roster_expectations is not None:
+            for slide_number in morph_trace_names:
+                slide_part = f"ppt/slides/slide{slide_number}.xml"
+                template_shape_roster_expectations[
+                    slide_part
+                ] = _top_level_shape_name_roster(
+                    ET.parse(extract_dir / slide_part).getroot()
+                )
+        if conversion_trace is not None:
+            for trace_entry in conversion_trace:
+                slide_number = int(trace_entry.get("slide_num", 0))
+                names = morph_trace_names.get(slide_number)
+                if names:
+                    trace_entry["morph_names"] = dict(sorted(names.items()))
+
+        # Update [Content_Types].xml
+        content_types_path = extract_dir / '[Content_Types].xml'
+        with open(content_types_path, 'r', encoding='utf-8') as f:
+            content_types = f.read()
+
+        if not use_native_shapes:
+            content_types = _add_default_content_type(content_types, 'svg', 'image/svg+xml')
+        for ext in sorted(image_exts_used):
+            content_types = _add_default_content_type(
+                content_types,
+                ext,
+                _content_type_for_extension(ext),
+            )
+        if 'xlsx' in package_exts_used:
+            content_types = _add_default_content_type(
+                content_types,
+                'xlsx',
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            )
+        for part_name, content_type in sorted(package_content_overrides.items()):
+            content_types = _add_content_type_override(content_types, part_name, content_type)
+        with open(content_types_path, 'w', encoding='utf-8') as f:
+            f.write(content_types)
+
+        if audio_exts_used:
+            for ext in sorted(audio_exts_used):
+                content_type = AUDIO_CONTENT_TYPES.get(ext)
+                if content_type:
+                    content_types = _add_default_content_type(
+                        content_types,
+                        ext.removeprefix('.'),
+                        content_type,
+                    )
+            if 'Extension="png"' not in content_types:

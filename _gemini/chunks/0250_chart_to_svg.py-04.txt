@@ -1,0 +1,105 @@
+        val_position = _element_val(val_axis.find("c:axPos", C_NS))
+        if val_position == "l":
+            axis_name = "primary"
+            category_role = "category"
+            value_role = "value"
+            allowed_value_crosses = {"autoZero"}
+        elif val_position == "r":
+            axis_name = "secondary"
+            category_role = "secondary_category"
+            value_role = "secondary_value"
+            allowed_value_crosses = {"max"}
+        else:
+            raise _UnsupportedChart("unsupported-combo-chart")
+
+        axis_pair = (cat_id, val_id)
+        previous_pair = axis_pairs.get(axis_name)
+        if previous_pair is not None and previous_pair != axis_pair:
+            raise _UnsupportedChart("unsupported-combo-chart")
+        if any(
+            set(existing_pair).intersection(axis_pair)
+            for name, existing_pair in axis_pairs.items()
+            if name != axis_name
+        ):
+            raise _UnsupportedChart("unsupported-combo-chart")
+        axis_pairs[axis_name] = axis_pair
+
+        category_axis = _axis_config_from_xml(
+            cat_axis,
+            role=category_role,
+            expected_cross_axis_id=val_id,
+            allowed_crosses={"autoZero"},
+            expected_cross_between=None,
+        )
+        value_axis = _axis_config_from_xml(
+            val_axis,
+            role=value_role,
+            expected_cross_axis_id=cat_id,
+            allowed_crosses=allowed_value_crosses,
+            expected_cross_between="between",
+        )
+        for role, config in (
+            (category_role, category_axis),
+            (value_role, value_axis),
+        ):
+            if role in axes and axes[role] != config:
+                raise _UnsupportedChart("unsupported-combo-chart")
+            axes[role] = config
+        referenced_axis_ids.update((cat_id, val_id))
+
+        categories_are_numeric = _category_cache_is_numeric(chart)
+        if categories_are_numeric:
+            expected_category_format = category_axis.get(
+                "number_format",
+                "General",
+            )
+            if _numeric_category_cache_format(chart) != expected_category_format:
+                raise _UnsupportedChart("unsupported-combo-category-format")
+        plot_payload = _category_payload(
+            chart,
+            chart_type,
+            xfrm,
+            category_kind="numeric" if categories_are_numeric else "text",
+        )
+        if axis_name == "primary" and primary_categories is None:
+            primary_categories = list(plot_payload["categories"])
+            primary_categories_are_numeric = categories_are_numeric
+        plot_styles = _validate_chart_semantics(
+            plot_payload,
+            plot_area,
+            chart,
+            palette=palette,
+            validate_axes=False,
+        )
+        visual_styles.extend(plot_styles)
+        colors.extend(
+            str(color)
+            for color in plot_payload.get("style", {}).get("colors", [])
+        )
+        _apply_plot_data_labels(plot_payload, chart, palette=palette)
+        plot_entry: dict[str, Any] = {
+            "axis": axis_name,
+            "categories": list(plot_payload["categories"]),
+            "category_numeric": categories_are_numeric,
+            "series": plot_payload["series"],
+            "series_indices": series_indices,
+            "type": chart_type,
+        }
+        for key in ("data_labels", "grouping", "line_style"):
+            if plot_payload.get(key) is not None:
+                plot_entry[key] = plot_payload[key]
+        plots.append(plot_entry)
+
+    if primary_categories is None or not plots:
+        raise _UnsupportedChart("unsupported-combo-chart")
+    if referenced_axis_ids != set(axes_by_id):
+        raise _UnsupportedChart("unsupported-combo-chart")
+
+    category_layouts = {
+        (
+            bool(plot["category_numeric"]),
+            tuple(plot["categories"]),
+        )
+        for plot in plots
+    }
+    if len(category_layouts) == 1:

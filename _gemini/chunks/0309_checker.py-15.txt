@@ -1,0 +1,91 @@
+                self._classify_preserved_mirror_geometry(svg_path, result)
+            result['passed'] = len(result['errors']) == 0
+
+        except Exception as e:
+            result['errors'].append(f"Failed to read file: {e}")
+            result['passed'] = False
+
+        return self._record_result(result)
+
+    def _classify_preserved_mirror_geometry(self, svg_path: Path, result: Dict) -> None:
+        """Report immutable source geometry as inherited, never exempt edits.
+
+        The materializer records the exact published SVG hash. Only its text
+        width estimates and source-object overlap qualify; XML, assets, native
+        payloads and reusable structure remain fully blocking.
+        """
+        manifest_path = svg_path.parent / 'template_execution_manifest.json'
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            return
+        if (not isinstance(manifest, dict)
+                or manifest.get('schema') != 'ppt-master.template-execution-manifest.v1'
+                or manifest.get('replication_mode') != 'mirror'
+                or manifest.get('source_geometry_unchanged') is not True
+                or not re.fullmatch(r'[0-9a-f]{64}', str(manifest.get('source_package_sha256', '')))):
+            return
+        entries = manifest.get('templates')
+        if not isinstance(entries, list):
+            return
+        if not any(isinstance(entry, dict)
+                   and entry.get('prototype') == svg_path.name
+                   and entry.get('source_svg_sha256') == result.get('source_sha256')
+                   for entry in entries):
+            return
+        dependencies = manifest.get('source_files_sha256')
+        if not isinstance(dependencies, dict) or not dependencies:
+            return
+        try:
+            for relative, digest in dependencies.items():
+                path = (svg_path.parent / relative).resolve()
+                path.relative_to(svg_path.parent.parent.resolve())
+                if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+                    return
+        except (OSError, ValueError, TypeError):
+            return
+        result['info']['mirror_source_unchanged'] = True
+        source_import = manifest.get('source_import')
+        if isinstance(source_import, dict):
+            self._source_import_summary = source_import
+        for bucket in ('errors', 'warnings'):
+            for message in list(result[bucket]):
+                if (message.startswith('<text>') and ' exceeds ' in message) or (
+                    message.startswith('<g ') and ' data-pptx-bounds overlaps ' in message
+                ):
+                    result[bucket].remove(message)
+                    result['info'].setdefault('inherited', []).append({
+                        'kind': 'mirror-source-geometry', 'message': message,
+                    })
+
+    def _record_result(self, result: Dict) -> Dict:
+        """Append one file result and update aggregate counters."""
+        self.summary['total'] += 1
+        if result['passed']:
+            if result['warnings']:
+                self.summary['warnings'] += 1
+            else:
+                self.summary['passed'] += 1
+        else:
+            self.summary['errors'] += 1
+
+        # Categorize issue types
+        for error in result['errors']:
+            self.issue_types[self._categorize_issue(error)] += 1
+
+        self.results.append(result)
+        return result
+
+    def check_roundtrip_workspace(self, workspace: str) -> List[Dict]:
+        """Check edited text on the resolved round-trip output page roster."""
+        from authoring_roundtrip import (
+            AuthoringRoundtripError,
+            _generate_baseline_bundle,
+            _load_current_assets,
+            _load_documents,
+            _load_page_plan,
+            _parse_svg,
+            roundtrip_source_fingerprint,
+        )
+
+        project_path = Path(workspace).resolve()

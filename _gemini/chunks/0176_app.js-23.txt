@@ -1,0 +1,94 @@
+        function collect(src) {
+            return {
+                background: read(src, ["background", "bg"]),
+                secondary_bg: read(src, ["secondary_bg", "secondary_background", "card_bg", "card_background"]),
+                primary: read(src, ["primary"]),
+                accent: read(src, ["accent"]),
+                secondary_accent: read(src, ["secondary_accent", "secondary"]),
+                body_text: read(src, ["body_text", "text"])
+            };
+        }
+        if (c && c.palette) {
+            return collect(c.palette);
+        }
+        if (!c) return {};
+        return collect(c);
+    }
+
+    function recommendationLanguage() {
+        // `lang` controls the Confirm UI language; it is not evidence of the
+        // deck's content language. New staged files carry `primary_language`.
+        var raw = REC && (REC.primary_language || REC.content_language || REC.language);
+        if (raw && typeof raw === "object") {
+            raw = raw.value || raw.id || raw.code || "";
+        }
+        // The API is the single normalizer; the browser consumes its canonical
+        // value instead of maintaining a second alias table.
+        return String(raw || "und").trim().replace(/_/g, "-");
+    }
+
+    function isEnglishProject() {
+        return /^en(?:-|$)/i.test(recommendationLanguage());
+    }
+
+    function setEnglishLanguageAttributes(node) {
+        node.lang = "en";
+        node.dir = "ltr";
+    }
+
+    function setUiLanguageAttributes(node) {
+        node.lang = LANG === "zh" ? "zh-CN" : (LANG === "zh-TW" ? "zh-TW" : (LANG === "ja" ? "ja-JP" : "en-US"));
+        node.dir = "ltr";
+    }
+
+    function setNaturalInputDirection(node) {
+        node.dir = "auto";
+    }
+
+    function stringList(value) {
+        if (Array.isArray(value)) return value.map(String);
+        if (value == null || value === "") return [];
+        return [String(value)];
+    }
+
+    function normalizedFontToken(value) {
+        return String(value || "").trim().toLowerCase().replace(/[_\s]+/g, "-");
+    }
+
+    function fontScriptTokens(language) {
+        var parts = normalizedFontToken(language).split("-");
+        var base = parts[0];
+        if (!base || base === "und") return [];
+        var explicitScript = parts.filter(function (part) {
+            return /^[a-z]{4}$/.test(part);
+        })[0];
+        if (explicitScript) return [explicitScript];
+        if (base === "en") return ["latin", "latn", "english"];
+        if (base === "zh") {
+            if (parts.indexOf("cn") >= 0 || parts.indexOf("sg") >= 0) {
+                return ["han", "hans", "cjk", "chinese", "zh"];
+            }
+            if (parts.indexOf("tw") >= 0 || parts.indexOf("hk") >= 0 ||
+                    parts.indexOf("mo") >= 0) {
+                return ["han", "hant", "cjk", "chinese", "zh"];
+            }
+            return ["han", "hans", "cjk", "chinese", "zh"];
+        }
+        if (base === "ja") return ["han", "jpan", "kana", "hiragana", "katakana", "cjk", "japanese", "ja"];
+        if (base === "ko") return ["hangul", "kore", "han", "cjk", "korean", "ko"];
+        if (["ru", "uk", "bg", "sr", "mk"].indexOf(base) >= 0) return ["cyrl", "cyrillic"];
+        if (["ar", "fa", "ur"].indexOf(base) >= 0) return ["arab", "arabic"];
+        if (base === "he" || base === "iw") return ["hebr", "hebrew"];
+        if (base === "el") return ["grek", "greek"];
+        if (base === "th") return ["thai"];
+        if (base === "hi" || base === "mr" || base === "ne") return ["deva", "devanagari"];
+        // Most remaining presentation locales use Latin script. Locale metadata
+        // still wins before this fallback.
+        return ["latin", "latn"];
+    }
+
+    function fontSupportsLanguage(font, language) {
+        var target = normalizedFontToken(language);
+        var targetBase = target.split("-")[0];
+        var locales = stringList(font && font.locales).map(normalizedFontToken);
+        if (locales.some(function (locale) {

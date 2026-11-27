@@ -1,0 +1,47 @@
+def apply_theme_color_spec(extract_dir: Path, spec: ThemeColorSpec) -> None:
+    """Install the locked color scheme into every existing PPTX theme part."""
+    theme_dir = extract_dir / "ppt" / "theme"
+    theme_paths = sorted(theme_dir.glob("theme*.xml"))
+    if not theme_paths:
+        raise ThemeColorError(f"PPTX package has no theme part under {theme_dir}")
+
+    ET.register_namespace("a", DML_NS)
+    for theme_path in theme_paths:
+        try:
+            tree = ET.parse(theme_path)
+        except (OSError, ET.ParseError) as exc:
+            raise ThemeColorError(f"Cannot parse {theme_path}: {exc}") from exc
+        color_scheme = tree.getroot().find(f".//{{{DML_NS}}}clrScheme")
+        if color_scheme is None:
+            raise ThemeColorError(f"Theme has no clrScheme: {theme_path}")
+        color_scheme.set("name", "PPT Master")
+        for slot, color in spec.slots.items():
+            _set_scheme_color(color_scheme, slot, color)
+        tree.write(theme_path, encoding="utf-8", xml_declaration=True)
+
+
+def rewrite_chart_accent_colors(data: bytes, spec: ThemeColorSpec | None) -> bytes:
+    """Promote exact locked accent colors inside native chart XML."""
+    if spec is None or b"<a:srgbClr" not in data:
+        return data
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data
+
+    def replacement(match: re.Match[str], *, paired: bool) -> str:
+        attrs = match.group("attrs")
+        value_match = _VAL_RE.search(attrs)
+        if value_match is None:
+            return match.group(0)
+        scheme = spec.scheme_for(value_match.group("color"), "chart")
+        if scheme is None:
+            return match.group(0)
+        new_attrs = _VAL_RE.sub(f'val="{scheme}"', attrs, count=1)
+        if paired:
+            return f'<a:schemeClr{new_attrs}>{match.group("body")}</a:schemeClr>'
+        return f'<a:schemeClr{new_attrs}/>'
+
+    text = _SRGB_PAIR_RE.sub(lambda match: replacement(match, paired=True), text)
+    text = _SRGB_EMPTY_RE.sub(lambda match: replacement(match, paired=False), text)
+    return text.encode("utf-8")

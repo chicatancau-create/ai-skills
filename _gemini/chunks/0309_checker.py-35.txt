@@ -1,0 +1,105 @@
+            if self._has_ancestor_id(text_el, parent_by_id, unchanged_groups):
+                continue
+            try:
+                runs = self._resolved_single_line_text_runs(
+                    text_el,
+                    parent_by_id,
+                    font_sizes,
+                    letter_spacings,
+                )
+                if not runs:
+                    continue
+                if not ''.join(str(run['text']) for run in runs).strip():
+                    continue
+                text_width = _estimate_single_line_text_frame_width(runs)
+                ext_cx = _drawingml_text_frame_width_emu(
+                    text_width,
+                    font_sizes[id(text_el)],
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+            if ext_cx < 1:
+                errors.append(
+                    f'{_element_label(text_el)} negative letter-spacing '
+                    'produces a non-positive DrawingML text-frame extent '
+                    f'(cx={ext_cx})'
+                )
+                continue
+            try:
+                _validate_single_line_text_run_advances(runs)
+            except ValueError as exc:
+                errors.append(f'{_element_label(text_el)} {exc}')
+        result['errors'].extend(errors)
+
+    @classmethod
+    def _positioned_text_lines(
+        cls,
+        text_el: ET.Element,
+        parent_by_id: Dict[int, ET.Element],
+        font_sizes: Dict[int, float],
+        letter_spacings: Dict[int, float],
+    ) -> List[Tuple[ET.Element, float, float, List[Dict], float]] | None:
+        """Resolve direct positioned tspans into estimable visual lines."""
+        if _parse_project_geometry_length is None:
+            return None
+        children = list(text_el)
+        if not children:
+            return None
+        line_groups = None
+        synthetic_first = None
+        leads_with_inline_run = (
+            cls._is_tspan(children[0]) and not cls._is_line_tspan(children[0])
+        )
+        if (text_el.text or '').strip() or leads_with_inline_run:
+            if _classify_paragraph_block is None:
+                return None
+            paragraph = _classify_paragraph_block(
+                text_el,
+                preserve_line_breaks=True,
+            )
+            if paragraph is None:
+                return None
+            _base, _extras, _breaks, line_groups, synthetic_first = paragraph
+        elif any(
+            descendant.get('dx') is not None
+            for child in children
+            if not cls._is_line_tspan(child)
+            for descendant in child.iter()
+        ):
+            line_groups = []
+            for child in children:
+                if not (cls._is_tspan(child) or _local_name(child) == 'a'):
+                    return None
+                if cls._is_line_tspan(child):
+                    line_groups.append([child])
+                elif line_groups:
+                    line_groups[-1].append(child)
+                else:
+                    return None
+        if line_groups is not None:
+            try:
+                current_y = _parse_project_geometry_length(
+                    text_el.get('y') or '0',
+                    'y',
+                )
+                parent_x = _parse_project_geometry_length(
+                    text_el.get('x') or '0',
+                    'x',
+                )
+            except ValueError:
+                return None
+
+            lines: List[
+                Tuple[ET.Element, float, float, List[Dict], float]
+            ] = []
+            for line_group in line_groups:
+                starter = line_group[0]
+                if starter is synthetic_first:
+                    line_element = text_el
+                    line_x = parent_x
+                    line_y = current_y
+                else:
+                    if starter.get('x') is None:
+                        return None
+                    line_element = starter
+                    try:

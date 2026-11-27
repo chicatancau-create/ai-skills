@@ -1,0 +1,106 @@
+    """Return whether `path` resolves inside `parent`."""
+    try:
+        path.resolve().relative_to(parent.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _has_usable_import(summary: dict[str, list[str]]) -> bool:
+    """Return whether import-sources produced at least one usable source artifact."""
+    return any(
+        summary.get(key)
+        for key in ("archived", "markdown", "assets", "images", "analysis")
+    )
+
+
+class ProjectManager:
+    """Create, inspect, validate, and populate project folders."""
+
+    CANVAS_FORMATS = CANVAS_FORMATS
+
+    def __init__(self, base_dir: str | Path | None = None) -> None:
+        self.base_dir = Path(base_dir) if base_dir is not None else PROJECTS_ROOT
+
+    def scaffold_artifact(self, project_path: str, artifact: str) -> str:
+        """Delegate deterministic Markdown scaffold rendering."""
+        return scaffold_project_artifact(Path(project_path), artifact)
+
+    def init_project(
+        self,
+        project_name: str,
+        canvas_format: str | None = None,
+        base_dir: str | None = None,
+        *,
+        quick_generate: bool = False,
+    ) -> str:
+        base_path = Path(base_dir) if base_dir else self.base_dir
+
+        if (
+            not project_name
+            or project_name in {".", ".."}
+            or Path(project_name).is_absolute()
+            or "/" in project_name
+            or "\\" in project_name
+        ):
+            raise ValueError(
+                "Project name must be a single, non-absolute path component"
+            )
+
+        normalized_format: str | None = None
+        if canvas_format is not None:
+            normalized_format = normalize_canvas_format(canvas_format)
+            if normalized_format not in self.CANVAS_FORMATS:
+                available = ", ".join(sorted(self.CANVAS_FORMATS.keys()))
+                raise ValueError(
+                    f"Unsupported canvas format: {canvas_format} "
+                    f"(available: {available}; common alias: xhs -> xiaohongshu)"
+                )
+
+        date_str = datetime.now().strftime("%Y%m%d")
+        if normalized_format is None:
+            # A name already carrying a `_<YYYYMMDD>` suffix (e.g. a full
+            # project dir name pasted back into init) is used as-is —
+            # re-appending would produce `name_20260101_20260102`.
+            if re.search(r"_\d{8}$", project_name):
+                project_dir_name = project_name
+            else:
+                project_dir_name = f"{project_name}_{date_str}"
+        else:
+            # A name already carrying a `_<format>_<YYYYMMDD>` suffix (e.g. a
+            # full project dir name pasted back into init) is used as-is —
+            # re-appending would produce
+            # `name_ppt169_20260101_ppt169_20260102`.
+            if re.search(r"_\d{8}$", project_name):
+                # `_<format>_<YYYYMMDD>` or a plain `_<YYYYMMDD>`: the caller
+                # pinned the directory name; --format still sets the canvas.
+                project_dir_name = project_name
+            else:
+                project_dir_name = f"{project_name}_{normalized_format}_{date_str}"
+        project_path = base_path / project_dir_name
+
+        if not is_within_path(project_path, base_path):
+            raise ValueError(
+                f"Project directory must stay within the base directory: {base_path}"
+            )
+        if project_path.exists():
+            raise FileExistsError(f"Project directory already exists: {project_path}")
+
+        project_dirs = (
+            ("svg_output",)
+            if quick_generate
+            else (
+                "svg_output",
+                "svg_final",
+                "images",
+                "icons",
+                "notes",
+                "templates",
+                "live_preview",
+                SOURCE_DIRNAME,
+                "analysis",
+                "validation",
+                "exports",
+            )
+        )
+        for rel_path in project_dirs:

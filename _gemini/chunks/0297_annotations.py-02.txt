@@ -1,0 +1,111 @@
+        prior_baseline = _tspan_baseline(text_el, prior)
+        if prior_baseline is not None:
+            prev_y = prior_baseline[1]
+            break
+    if prev_y is None:
+        prev_y = _first_number(text_el.get('y')) or 0.0
+    next_el.set('dy', _format_number(next_baseline[1] - prev_y))
+
+
+def _copy_text_attrs(src: ET.Element, dst: ET.Element, skip: set[str]) -> None:
+    for key, value in src.attrib.items():
+        if key not in skip:
+            dst.set(key, value)
+
+
+def promote_tspan_to_text(
+    root: ET.Element,
+    element_id: str,
+    x: str,
+    y: str,
+) -> tuple[bool, Optional[str]]:
+    """Promote a moved direct-child <tspan> into an independent <text>.
+
+    Writing vertical movement into ``dy`` changes the baseline for following
+    tspans. Promotion preserves the edited line as its own object whose final
+    position lives in x/y, while adjacent lines remain anchored in the parent.
+    """
+    target, text_el = _find_with_parent(root, element_id)
+    if target is None or text_el is None:
+        return False, 'not-found'
+    if _local_name(target) != 'tspan' or _local_name(text_el) != 'text':
+        return False, 'not-tspan'
+
+    grandparent: Optional[ET.Element] = None
+    for candidate in root.iter():
+        if text_el in list(candidate):
+            grandparent = candidate
+            break
+    if grandparent is None:
+        return False, 'parent-not-found'
+
+    _adjust_following_tspan_dy(text_el, target)
+
+    new_text = ET.Element(f'{{{SVG_NS}}}text')
+    _copy_text_attrs(text_el, new_text, {'id', 'x', 'y', 'dx', 'dy'})
+    _copy_text_attrs(target, new_text, {'id', 'x', 'y', 'dx', 'dy', 'transform'})
+    new_text.set('id', element_id)
+    new_text.set('x', x)
+    new_text.set('y', y)
+
+    if len(list(target)) == 0:
+        new_text.text = ''.join(target.itertext())
+    else:
+        new_text.text = target.text
+        for child in list(target):
+            new_text.append(deepcopy(child))
+
+    target_index = list(text_el).index(target)
+    tail = target.tail
+    text_el.remove(target)
+    if tail:
+        if target_index == 0:
+            text_el.text = (text_el.text or '') + tail
+        else:
+            prev = list(text_el)[target_index - 1]
+            prev.tail = (prev.tail or '') + tail
+
+    parent_index = list(grandparent).index(text_el)
+    grandparent.insert(parent_index + 1, new_text)
+    if not (text_el.text or '').strip() and len(list(text_el)) == 0:
+        grandparent.remove(text_el)
+    return True, None
+
+
+def parse_annotations(root: ET.Element) -> list[dict]:
+    """Extract all annotations from an SVG element tree."""
+    annotations = []
+    for elem in root.iter():
+        if elem.get('data-edit-target') == 'true':
+            annotations.append({
+                'element_id': elem.get('id', ''),
+                'tag': elem.tag.split('}', 1)[1] if '}' in elem.tag else elem.tag,
+                'annotation': elem.get('data-edit-annotation', ''),
+            })
+    return annotations
+
+
+def set_annotation(root: ET.Element, element_id: str, annotation: str) -> bool:
+    """Add or update an annotation on an SVG element. Returns True if found."""
+    elem = _find_by_id(root, element_id)
+    if elem is None:
+        return False
+    elem.set('data-edit-target', 'true')
+    elem.set('data-edit-annotation', annotation)
+    return True
+
+
+def remove_annotation(root: ET.Element, element_id: str) -> bool:
+    """Remove annotation attributes from an SVG element. Returns True if found."""
+    elem = _find_by_id(root, element_id)
+    if elem is None:
+        return False
+    elem.attrib.pop('data-edit-target', None)
+    elem.attrib.pop('data-edit-annotation', None)
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Direct (AI-free) editing — used by server.py POST /api/slide/<name>/edit.
+# These mutate the element itself (text content / presentation attributes)
+# instead of leaving an annotation marker for the AI to act on. Value

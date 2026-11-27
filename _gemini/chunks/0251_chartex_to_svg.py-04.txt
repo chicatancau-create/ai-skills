@@ -1,0 +1,111 @@
+    except (OverflowError, ValueError):
+        raise UnsupportedChartEx("unsupported-chartex-cache") from None
+    if not math.isfinite(number):
+        raise UnsupportedChartEx("unsupported-chartex-cache")
+    return int(number) if number.is_integer() else number
+
+
+def _waterfall_subtotals(series: ET.Element) -> list[int]:
+    subtotals: list[int] = []
+    for item in series.findall("cx:layoutPr/cx:subtotals/cx:idx", CX_NS):
+        subtotals.append(
+            _nonnegative_int(item.attrib.get("val"), "unsupported-chartex-cache")
+        )
+    return subtotals
+
+
+def _treemap_parent_labels(series: ET.Element) -> str | None:
+    parent = series.find("cx:layoutPr/cx:parentLabelLayout", CX_NS)
+    if parent is None:
+        return None
+    value = parent.attrib.get("val")
+    return value if value in {"banner", "none", "overlapping"} else None
+
+
+def _series_name(series: ET.Element, index: int) -> str:
+    value = series.findtext("cx:tx/cx:txData/cx:v", default="", namespaces=CX_NS)
+    return value or f"Series {index}"
+
+
+def _resolved_chart_colors(
+    chart_part: PartRef,
+    pkg: OoxmlPackage,
+    palette: ColorPalette | None,
+) -> list[str]:
+    """Resolve the base color cycle; any style failure normalizes silently."""
+    try:
+        targets = [
+            info.get("target")
+            for info in chart_part.rels.values()
+            if info.get("type") == CHART_COLOR_STYLE_REL_TYPE
+            and not info.get("external")
+            and info.get("target")
+        ]
+        if len(targets) != 1:
+            return []
+        colors_part = pkg.load_part(str(targets[0]))
+        if colors_part is None:
+            return []
+        color_nodes = [
+            child
+            for child in colors_part.xml
+            if _namespace(child.tag) == NS["a"]
+            and _local_name(child.tag) in COLOR_TAGS
+        ]
+        if not color_nodes:
+            return []
+        colors: list[str] = []
+        for color_node in color_nodes:
+            color, _alpha = resolve_color(color_node, palette)
+            if color is None:
+                return []
+            colors.append(color)
+        return colors
+    except (AttributeError, OverflowError, RuntimeError, TypeError, ValueError):
+        return []
+
+
+def _one_child(parent: ET.Element, name: str, status: str) -> ET.Element:
+    children = _children(parent, name)
+    if len(children) != 1:
+        raise UnsupportedChartEx(status)
+    return children[0]
+
+
+def _children(parent: ET.Element, name: str) -> list[ET.Element]:
+    return [
+        child
+        for child in parent
+        if child.tag == f"{{{CHARTEX_URI}}}{name}"
+    ]
+
+
+def _nonnegative_int(raw_value: str | None, status: str) -> int:
+    if raw_value is None or _INT_TOKEN_RE.fullmatch(raw_value) is None:
+        raise UnsupportedChartEx(status)
+    value = int(raw_value)
+    if value < 0:
+        raise UnsupportedChartEx(status)
+    return value
+
+
+def _bounds_payload(xfrm: Xfrm) -> dict[str, int | float]:
+    return {
+        "height": _round_payload_number(xfrm.h),
+        "width": _round_payload_number(xfrm.w),
+        "x": _round_payload_number(xfrm.x),
+        "y": _round_payload_number(xfrm.y),
+    }
+
+
+def _round_payload_number(value: float) -> int | float:
+    rounded = round(float(value), 3)
+    return int(rounded) if rounded.is_integer() else rounded
+
+
+def _namespace(tag: str) -> str:
+    return tag[1:].split("}", 1)[0] if tag.startswith("{") else ""
+
+
+def _local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1] if "}" in tag else tag

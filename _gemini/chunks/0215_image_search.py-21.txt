@@ -1,0 +1,81 @@
+            futures = [ex.submit(_one, i) for i in pending_idx]
+            for fut in concurrent.futures.as_completed(futures):
+                (
+                    idx,
+                    manifest_item,
+                    error,
+                    retryable,
+                    selection_required,
+                    staged_path,
+                    target_path,
+                ) = fut.result()
+                item = items[idx]
+                with write_lock:
+                    if (
+                        manifest_item is not None
+                        and staged_path is not None
+                        and target_path is not None
+                    ):
+                        try:
+                            _commit_staged_image(
+                                staged_path,
+                                target_path,
+                                lambda: write_sources_manifest(
+                                    sources_manifest_path,
+                                    manifest_item,
+                                ),
+                            )
+                        except Exception as exc:
+                            if not _is_recoverable_image_error(exc):
+                                raise
+                            item["status"] = SEARCH_STATUS_FAILED
+                            item["last_error"] = (
+                                f"canonical/provenance commit failed: {exc}"
+                            )[:500]
+                            _clear_candidate_selection_outputs(item)
+                            failed_count += 1
+                            print(
+                                f"  [FAIL] {item['filename']} — "
+                                f"{item['last_error']}"
+                            )
+                        else:
+                            item["status"] = SEARCH_STATUS_SOURCED
+                            item["provider"] = manifest_item.get("provider", "")
+                            item["license_tier"] = manifest_item.get(
+                                "license_tier",
+                                "",
+                            )
+                            item.pop("last_error", None)
+                            _clear_candidate_selection_outputs(item)
+                            sourced_count += 1
+                            review = _write_review_copy(
+                                target_path,
+                                output_dir / ".review",
+                                target_path.name,
+                            )
+                            if review is not None:
+                                print(
+                                    f"  review copy: {review}",
+                                    file=sys.stderr,
+                                )
+                            print(
+                                f"  [OK]   {item['filename']} "
+                                f"({item['provider']})"
+                            )
+                    elif selection_required:
+                        item["status"] = SEARCH_STATUS_NEEDS_SELECTION
+                        _clear_candidate_selection_outputs(item)
+                        # The row's own `provider` is the caller's pin; the
+                        # next candidate page must search the same provider.
+                        pinned_provider = item.get("provider")
+                        if manifest_item is not None:
+                            item.update(manifest_item)
+                        item.pop("last_error", None)
+                        item.pop("provider", None)
+                        item.pop("license_tier", None)
+                        if pinned_provider:
+                            item["provider"] = pinned_provider
+                        needs_selection_count += 1
+                        print(f"  [REVIEW] {item['filename']} — {error}")
+                    elif retryable:
+                        item["status"] = SEARCH_STATUS_FAILED

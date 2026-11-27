@@ -1,0 +1,109 @@
+            if child.tag in _TOP_LEVEL_SHAPE_TAGS:
+                visit(child)
+
+    for shape_id in affected_top_ids:
+        visit(source_shapes[shape_id])
+    return restore_ids
+
+
+def _restore_roundtrip_nested_source_shapes(
+    generated_nodes: list[ET.Element],
+    source_shapes: dict[str, ET.Element],
+    restore_ids: set[str],
+    traced_ids: dict[str, list[str]],
+) -> None:
+    """Replace converter-safe nested placeholders with exact source shapes."""
+    locations: dict[str, tuple[ET.Element, ET.Element]] = {}
+
+    def index_children(parent: ET.Element) -> None:
+        for child in parent:
+            if child.tag not in _TOP_LEVEL_SHAPE_TAGS:
+                continue
+            shape_id = _direct_shape_id(child)
+            if shape_id is not None:
+                previous = locations.setdefault(shape_id, (parent, child))
+                if previous[1] is not child:
+                    raise TemplateStructureError(
+                        "Generated round-trip slide repeats nested shape id "
+                        f"{shape_id}"
+                    )
+            if child.tag == f"{{{PML_NS}}}grpSp":
+                index_children(child)
+
+    for node in generated_nodes:
+        if node.tag == f"{{{PML_NS}}}grpSp":
+            index_children(node)
+
+    for source_id in sorted(restore_ids, key=_roundtrip_shape_sort_key):
+        candidate_ids = {source_id}
+        candidate_ids.update(traced_ids.get(f"shape-{source_id}", []))
+        matches = {
+            candidate_id: locations[candidate_id]
+            for candidate_id in candidate_ids
+            if candidate_id in locations
+        }
+        if len(matches) != 1:
+            raise TemplateStructureError(
+                "Unchanged nested round-trip source object did not produce "
+                f"exactly one restore placeholder: {source_id}"
+            )
+        parent, placeholder = next(iter(matches.values()))
+        source = source_shapes.get(source_id)
+        if source is None:
+            raise TemplateStructureError(
+                f"Round-trip source shape is missing for nested ref {source_id}"
+            )
+        clone = ET.fromstring(ET.tostring(source, encoding="utf-8"))
+        clone.tail = placeholder.tail
+        position = list(parent).index(placeholder)
+        parent.remove(placeholder)
+        parent.insert(position, clone)
+
+
+def _roundtrip_shape_sort_key(value: str) -> tuple[int, int | str]:
+    """Sort native numeric ids before stable synthetic ids."""
+    return (0, int(value)) if value.isdigit() else (1, value)
+
+
+def _relationship_key(attrs: dict[str, str]) -> tuple[str, str, str | None]:
+    """Return the identity used to reuse one source relationship."""
+    return (
+        attrs.get("Type", ""),
+        attrs.get("Target", ""),
+        attrs.get("TargetMode"),
+    )
+
+
+def _merge_roundtrip_relationships(
+    source_rels: bytes,
+    generated_rels_path: Path,
+    generated_slide_root: ET.Element,
+    required_generated_ids: set[str],
+) -> None:
+    """Retarget generated references into the preserved source rel roster."""
+    try:
+        source_root = ET.fromstring(source_rels)
+        generated_root = ET.parse(generated_rels_path).getroot()
+    except ET.ParseError as exc:
+        raise TemplateStructureError(
+            "Round-trip slide relationships are not valid XML"
+        ) from exc
+
+    source_by_key: dict[tuple[str, str, str | None], str] = {}
+    used_ids: set[str] = set()
+    for relationship in source_root:
+        attrs = _relationship_attrs(relationship)
+        rel_id = attrs.get("Id")
+        if not rel_id:
+            continue
+        used_ids.add(rel_id)
+        source_by_key.setdefault(_relationship_key(attrs), rel_id)
+    numeric_ids = [
+        int(match.group(1))
+        for rel_id in used_ids
+        if (match := re.fullmatch(r"rId(\d+)", rel_id)) is not None
+    ]
+    next_id = max(numeric_ids, default=0) + 1
+
+    id_map: dict[str, str] = {}
+    added_relationship = False

@@ -1,0 +1,105 @@
+            Path(page.get("svg", f"slide_{page['source_slide']:02d}.svg")).stem: page["source_slide"]
+            for page in plan["pages"]
+        }
+    resource_paths = {
+        row["packagePart"]: row["workspacePath"]
+        for row in manifest["resources"]["items"]
+    }
+    inherited = {}
+    # Legacy manifests can recover the same mapping from immutable source XML.
+    with zipfile.ZipFile(source_pptx_path(workspace)) as archive:
+        for svg in svg_files:
+            row = rows.get(sources.get(svg.stem))
+            if row is None:
+                continue
+            relative = row.get("narrationAudio")
+            if "narrationAudio" not in row:
+                part = row["sourcePart"]
+                rels = posixpath.join(posixpath.dirname(part), "_rels", posixpath.basename(part) + ".rels")
+                parts = narration_audio_parts(archive.read(part), archive.read(rels), part)
+                relative = resource_paths.get(parts[0]) if len(parts) == 1 else None
+            if not isinstance(relative, str):
+                continue
+            path = (workspace / relative).resolve()
+            if path.parent == audio_dir.resolve() and path.is_file() and path.suffix.lower() in NARRATION_EXTENSIONS:
+                inherited[svg.stem] = path
+    return inherited
+
+
+def remove_narration(slide_xml: str) -> tuple[str, set[str]]:
+    """Remove owned narration carriers/timing and return exclusively owned rIds."""
+    root = parse_source_xml(slide_xml)
+    pictures = narration_shapes(root)
+    if not pictures:
+        return slide_xml, set()
+    shape_ids = {
+        picture.find(f"{_qn(PML_NS, 'nvPicPr')}/{_qn(PML_NS, 'cNvPr')}").get("id")
+        for picture in pictures
+    }
+    relationship_ids = {
+        value for picture in pictures for node in picture.iter()
+        for key, value in node.attrib.items() if key.startswith(f"{{{RELATIONSHIPS_NS}}}") and value
+    }
+    for parent in root.iter():
+        for child in list(parent):
+            if child in pictures or (
+                child.tag == _qn(PML_NS, "audio")
+                and any(target.get("spid") in shape_ids for target in child.iter(_qn(PML_NS, "spTgt")))
+            ):
+                parent.remove(child)
+    still_used = {
+        value for node in root.iter() for key, value in node.attrib.items()
+        if key.startswith(f"{{{RELATIONSHIPS_NS}}}")
+    }
+    return serialize_source_xml(root, slide_xml).decode("utf-8"), relationship_ids - still_used
+
+
+def probe_audio_duration(audio_path: Path) -> float | None:
+    """Return duration in seconds using ffprobe when available."""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "json",
+                str(audio_path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        data = json.loads(result.stdout or "{}")
+        duration = float(data.get("format", {}).get("duration", 0))
+        return duration if duration > 0 else None
+    except Exception:
+        return None
+
+
+def next_shape_id(slide_xml: str) -> int:
+    """Return the next slide-local non-visual shape id."""
+    root = parse_source_xml(slide_xml)
+    if root.tag != _qn(PML_NS, "sld"):
+        raise ValueError("narration source XML root must be p:sld")
+    ids = _numeric_ids(
+        root.iter(_qn(PML_NS, "cNvPr")),
+        "shape",
+        minimum=1,
+    )
+    next_id = max(ids, default=1) + 1
+    if next_id > MAX_OOXML_UNSIGNED_INT:
+        raise ValueError("narration source has no available shape identifiers")
+    return next_id
+
+
+def _create_audio_pic_element(
+    shape_id: int,
+    shape_name: str,
+    audio_rid: str,
+    media_rid: str,
+    poster_rid: str,
+) -> ET.Element:
+    pic = ET.Element(_qn(PML_NS, "pic"))
+    nv_pic_pr = ET.SubElement(pic, _qn(PML_NS, "nvPicPr"))
+    c_nv_pr = ET.SubElement(
+        nv_pic_pr,

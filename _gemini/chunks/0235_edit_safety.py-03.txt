@@ -1,0 +1,62 @@
+    h_merge = _ooxml_bool(cell.attrib.get("hMerge"))
+    v_merge = _ooxml_bool(cell.attrib.get("vMerge"))
+    row_span = _positive_span(cell.attrib.get("rowSpan"))
+    col_span = _positive_span(cell.attrib.get("gridSpan"))
+    is_merge_slave = h_merge or v_merge
+    is_merge_anchor = not is_merge_slave and (row_span > 1 or col_span > 1)
+    merge_role = "slave" if is_merge_slave else "anchor" if is_merge_anchor else "none"
+    return {
+        "merge_role": merge_role,
+        "is_merge_anchor": is_merge_anchor,
+        "is_merge_slave": is_merge_slave,
+        "row_span": row_span,
+        "col_span": col_span,
+        "h_merge": h_merge,
+        "v_merge": v_merge,
+    }
+
+
+def _table_merge_topology(table: ET.Element) -> dict[str, Any]:
+    """Describe merge anchors and physical slave cells in a DrawingML table."""
+    cell_states: list[tuple[int, int, dict[str, Any]]] = []
+    anchors: list[dict[str, int]] = []
+    for row_index, row in enumerate(table.findall("a:tr", NS)):
+        for col_index, cell in enumerate(row.findall("a:tc", NS)):
+            info = _table_cell_merge_info(cell)
+            cell_states.append((row_index, col_index, info))
+            if info["is_merge_anchor"]:
+                anchors.append(
+                    {
+                        "row": row_index,
+                        "col": col_index,
+                        "row_span": info["row_span"],
+                        "col_span": info["col_span"],
+                    }
+                )
+
+    covered_by: dict[tuple[int, int], dict[str, int]] = {}
+    for anchor in anchors:
+        for row_index in range(anchor["row"], anchor["row"] + anchor["row_span"]):
+            for col_index in range(anchor["col"], anchor["col"] + anchor["col_span"]):
+                if (row_index, col_index) == (anchor["row"], anchor["col"]):
+                    continue
+                covered_by.setdefault(
+                    (row_index, col_index),
+                    {"row": anchor["row"], "col": anchor["col"]},
+                )
+
+    slave_cells: list[dict[str, Any]] = []
+    for row_index, col_index, info in cell_states:
+        if not info["is_merge_slave"]:
+            continue
+        slave: dict[str, Any] = {"row": row_index, "col": col_index}
+        anchor = covered_by.get((row_index, col_index))
+        if anchor is not None:
+            slave["anchor"] = anchor
+        slave_cells.append(slave)
+
+    return {
+        "has_merges": bool(anchors or slave_cells),
+        "anchors": anchors,
+        "slave_cells": slave_cells,
+    }

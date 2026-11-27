@@ -1,0 +1,112 @@
+def _resolve_spec_path(template_dir: Path, kind: str) -> Path:
+    """Return the Design Spec one kind owns inside a template source directory.
+
+    A library workspace keeps the exact ``design_spec.md`` because
+    ``<kind_dir>/<template_id>/`` already names its kind and id. A project
+    workspace root has no such parent, so it keeps
+    ``design_spec.<kind>.<id>.md`` and may hold one spec per kind side by side.
+    """
+    qualified = _validate_spec_shape(template_dir)
+    exact = template_dir / "design_spec.md"
+    if exact.is_file():
+        return exact
+    matches = sorted(
+        path for path, declared_kind in qualified if declared_kind == kind
+    )
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise SpecParseError(
+            f"missing design_spec.md or design_spec.{kind}.<id>.md in {template_dir}"
+        )
+    raise SpecParseError(
+        f"{template_dir} declares kind {kind!r} more than once: "
+        + ", ".join(path.name for path in matches)
+    )
+
+
+def validate_brand_workspace(template_root: str | Path) -> dict:
+    """Validate a portable Brand workspace without registering it.
+
+    This is the project-scope entry used by ``svg_quality_checker.py
+    --template-mode``. Library registration calls the same extraction path with
+    an expected directory id, so both scopes share one Brand schema authority.
+    """
+    return _extract_entry("brand", None, Path(template_root))
+
+
+def validate_style_workspace(template_root: str | Path) -> dict:
+    """Validate a portable Style workspace without registering it.
+
+    Global library roots also enforce directory identity and the one-file
+    package boundary. Project roots keep their unrelated initialized-project
+    scaffolding out of the Style contract.
+    """
+    root = Path(template_root)
+    expected_id = (
+        root.name
+        if root.resolve().parent == KIND_CONFIG["style"]["dir"].resolve()
+        else None
+    )
+    return _extract_entry("style", expected_id, root)
+
+
+# ---------------------------------------------------------------------------
+# Index / README writers
+# ---------------------------------------------------------------------------
+
+def _load_index(path: Path) -> "OrderedDict[str, dict]":
+    if not path.exists():
+        return OrderedDict()
+    raw_text = path.read_text(encoding="utf-8").strip() or "{}"
+    raw = json.loads(raw_text)
+    return OrderedDict(sorted(raw.items()))
+
+
+def _write_index(path: Path, data: "OrderedDict[str, dict]", *, dry_run: bool) -> None:
+    payload = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+    if dry_run:
+        print(f"--- {path.name} (dry-run) ---")
+        print(payload)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(payload, encoding="utf-8")
+
+
+def _enumerate_ids(kind: str) -> list[str]:
+    base = KIND_CONFIG[kind]["dir"]
+    if not base.exists():
+        return []
+    return sorted(
+        p.name for p in base.iterdir()
+        if p.is_dir()
+        and (p / "templates" / "design_spec.md").is_file()
+    )
+
+
+def _print_completion_card(kind: str, template_id: str, entry: dict, extras: dict) -> None:
+    pretty_kind = {
+        "layout": "Layout",
+        "deck": "Deck",
+        "brand": "Brand",
+        "style": "Style",
+    }[kind]
+    dir_name = {
+        "layout": "layouts",
+        "deck": "decks",
+        "brand": "brands",
+        "style": "styles",
+    }[kind]
+    print()
+    print(f"## {pretty_kind} Registration Complete")
+    print()
+    print(f"**{pretty_kind} ID**: {template_id}")
+    print(f"**Path**: `templates/{dir_name}/{template_id}/`")
+    if kind in ("brand", "deck"):
+        primary = entry.get("primary_color") or "—"
+        print(f"**Primary Color**: {primary}")
+    if kind in ("layout", "deck"):
+        canvas = entry.get("canvas_format") or "—"
+        pc = entry.get("page_count") or "—"
+        print(f"**Canvas**: {canvas}")
+        print(f"**Pages**: {pc}")

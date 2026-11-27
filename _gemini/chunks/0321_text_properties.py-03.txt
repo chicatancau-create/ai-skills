@@ -1,0 +1,117 @@
+    if raw not in {'start', 'middle', 'end'}:
+        raise ValueError("expected 'start', 'middle', or 'end'")
+    return ParsedTextProperty(raw, raw)
+
+
+def parse_project_text_decoration(raw: str) -> ParsedTextProperty:
+    """Parse text decoration without substring-based false positives."""
+    canonical = {
+        'none': 'none',
+        'underline': 'underline',
+        'line-through': 'line-through',
+        'underline line-through': 'underline line-through',
+    }
+    if raw in canonical:
+        value = (
+            'underline' in raw.split(),
+            'line-through' in raw.split(),
+        )
+        return ParsedTextProperty(value, canonical[raw])
+    if raw == 'line-through underline':
+        return ParsedTextProperty(
+            (True, True),
+            'underline line-through',
+            True,
+        )
+    raise ValueError(
+        "expected 'none', 'underline', 'line-through', or "
+        "'underline line-through'"
+    )
+
+
+def parse_project_baseline_shift(raw: str) -> ParsedTextProperty:
+    """Map the closed superscript/subscript grammar to DrawingML baseline."""
+    values = {
+        'super': 30_000,
+        'sub': -25_000,
+    }
+    if raw not in values:
+        raise ValueError("expected exactly 'super' or 'sub'")
+    return ParsedTextProperty(values[raw], raw)
+
+
+def parse_project_letter_spacing(
+    raw: str,
+    *,
+    font_size: float = 16.0,
+    scale_x: float = 1.0,
+) -> ParsedTextProperty:
+    """Parse project tracking into scaled SVG pixels and validate DML range."""
+    if _CANONICAL_DECIMAL_RE.fullmatch(raw):
+        amount = float(raw)
+        unit = ''
+        compatible = False
+    else:
+        match = _COMPATIBLE_LETTER_SPACING_RE.fullmatch(raw)
+        if match is None:
+            raise ValueError(
+                'expected a finite ordinary decimal, optionally followed by '
+                'the registered compatible unit px, pt, or em'
+            )
+        amount = float(match.group(1))
+        unit = match.group(2).lower()
+        compatible = True
+
+    if not math.isfinite(amount):
+        raise ValueError('must be finite')
+    if not math.isfinite(font_size) or font_size <= 0:
+        raise ValueError('requires a finite positive effective font size')
+    if not math.isfinite(scale_x) or scale_x <= 0:
+        raise ValueError('requires a finite positive horizontal scale')
+
+    if unit == 'em':
+        value_px = amount * font_size
+    elif unit == 'pt':
+        value_px = amount * 4.0 / 3.0 * scale_x
+    else:
+        value_px = amount * scale_x
+
+    spacing = round(value_px * 75)
+    if not _DRAWINGML_TEXT_SPACING_MIN <= spacing <= _DRAWINGML_TEXT_SPACING_MAX:
+        raise ValueError(
+            'converts outside the DrawingML character-spacing range '
+            f'{_DRAWINGML_TEXT_SPACING_MIN}..{_DRAWINGML_TEXT_SPACING_MAX}'
+        )
+    return ParsedTextProperty(
+        value_px,
+        _format_decimal(value_px),
+        compatible,
+    )
+
+
+def drawingml_letter_spacing(value_px: float) -> int:
+    """Return validated DrawingML ``a:rPr@spc`` hundredths-of-a-point."""
+    if not math.isfinite(value_px):
+        raise ValueError('letter-spacing must be finite')
+    spacing = round(value_px * 75)
+    if not _DRAWINGML_TEXT_SPACING_MIN <= spacing <= _DRAWINGML_TEXT_SPACING_MAX:
+        raise ValueError(
+            'letter-spacing converts outside the DrawingML range '
+            f'{_DRAWINGML_TEXT_SPACING_MIN}..{_DRAWINGML_TEXT_SPACING_MAX}'
+        )
+    return spacing
+
+
+def parse_project_text_property(
+    name: str,
+    raw: str,
+    *,
+    font_size: float = 16.0,
+) -> ParsedTextProperty:
+    """Parse one declaration from the shared text-property value contract."""
+    parsers = {
+        'baseline-shift': parse_project_baseline_shift,
+        'font-weight': parse_project_font_weight,
+        'font-style': parse_project_font_style,
+        'text-anchor': parse_project_text_anchor,
+        'letter-spacing': parse_project_letter_spacing,

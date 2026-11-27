@@ -1,0 +1,108 @@
+            values = [_finite_token_value(token, 'path d') for token in group]
+            if command in {'A', 'a'}:
+                if values[0] < 0 or values[1] < 0:
+                    raise ValueError('path arc radii must be non-negative')
+
+            emitted_command = command
+            if command == 'M' and group_index > 0:
+                emitted_command = 'L'
+            elif command == 'm' and group_index > 0:
+                emitted_command = 'l'
+            commands.append(PathCommand(emitted_command, values))
+            number_tokens.extend(group)
+    return commands, number_tokens
+
+
+def parse_svg_path(d: str) -> list[PathCommand]:
+    """Parse one complete supported SVG path value or fail closed."""
+    commands, _ = _parse_svg_path_tokens(d)
+    return commands
+
+
+def parse_svg_points(
+    points: str,
+    *,
+    min_points: int = 2,
+) -> list[tuple[float, float]]:
+    """Parse complete polygon/polyline points into finite coordinate pairs."""
+    tokens = _tokenize_points(points)
+    if len(tokens) % 2:
+        raise ValueError(
+            f'points has {len(tokens)} numeric value(s); expected coordinate pairs'
+        )
+    point_count = len(tokens) // 2
+    if point_count < min_points:
+        raise ValueError(
+            f'points requires at least {min_points} coordinate pair(s); '
+            f'found {point_count}'
+        )
+    values = [_finite_token_value(token, 'points') for token in tokens]
+    return [
+        (values[index], values[index + 1])
+        for index in range(0, len(values), 2)
+    ]
+
+
+def noncanonical_path_numbers(d: str) -> tuple[str, ...]:
+    """Return compatible path numbers that generated SVG should normalize."""
+    _, number_tokens = _parse_svg_path_tokens(d)
+    return tuple(
+        token.raw
+        for token in number_tokens
+        if _CANONICAL_FREEFORM_NUMBER_RE.fullmatch(token.raw) is None
+    )
+
+
+def noncanonical_points_numbers(points: str, *, min_points: int) -> tuple[str, ...]:
+    """Return compatible point numbers that generated SVG should normalize."""
+    parse_svg_points(points, min_points=min_points)
+    return tuple(
+        token.raw
+        for token in _tokenize_points(points)
+        if _CANONICAL_FREEFORM_NUMBER_RE.fullmatch(token.raw) is None
+    )
+
+
+def iter_project_freeform_geometry(
+    root: ET.Element,
+) -> Iterator[tuple[ET.Element, str, str | None, int | None]]:
+    """Yield path/points values and their minimum point-count contract."""
+    for elem in root.iter():
+        raw_tag = str(elem.tag)
+        if raw_tag.startswith('{'):
+            namespace, tag = raw_tag[1:].split('}', 1)
+            if namespace != SVG_NS:
+                continue
+        else:
+            tag = raw_tag
+        if tag == 'path':
+            yield elem, 'd', elem.get('d'), None
+        elif tag == 'polygon':
+            yield elem, 'points', elem.get('points'), 3
+        elif tag == 'polyline':
+            yield elem, 'points', elem.get('points'), 2
+
+
+def project_freeform_geometry_errors(root: ET.Element) -> list[str]:
+    """Return blocking path/points grammar errors for converter preflight."""
+    errors: list[str] = []
+    for elem, attribute, raw, min_points in iter_project_freeform_geometry(root):
+        tag = elem.tag.rsplit('}', 1)[-1] if '}' in str(elem.tag) else str(elem.tag)
+        elem_id = elem.get('id')
+        label = f'<{tag} id={elem_id!r}>' if elem_id else f'<{tag}>'
+        try:
+            if raw is None:
+                raise ValueError(f'<{tag}> requires {attribute}')
+            if attribute == 'd':
+                parse_svg_path(raw)
+            else:
+                parse_svg_points(raw, min_points=min_points or 2)
+        except ValueError as exc:
+            errors.append(f'{label} {attribute}: {exc}')
+    return errors
+
+
+def _project_path_like_bounds(
+    elem: ET.Element,
+) -> tuple[float, float, float, float] | None:
+    """Return intrinsic bounds for line-like SVG geometry."""

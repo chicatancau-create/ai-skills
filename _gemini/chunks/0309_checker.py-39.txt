@@ -1,0 +1,116 @@
+                include_headroom=include_headroom,
+            )
+            for line_el, x, y, line_runs, font_size in lines
+        ]
+        resolved = [item for item in bounds if item is not None]
+        if not resolved:
+            return None
+        return (
+            min(item[0] for item in resolved),
+            min(item[1] for item in resolved),
+            max(item[2] for item in resolved),
+            max(item[3] for item in resolved),
+        )
+
+    @staticmethod
+    def _accumulated_transform_matrix(
+        element: ET.Element,
+        parent_by_id: Dict[int, ET.Element],
+    ):
+        """Return the element-to-root transform matrix when available."""
+        if any(helper is None for helper in (
+            _IDENTITY_MATRIX,
+            _matrix_multiply,
+            _parse_transform_matrix,
+        )):
+            return None
+        chain: List[ET.Element] = []
+        current: ET.Element | None = element
+        while current is not None:
+            chain.append(current)
+            current = parent_by_id.get(id(current))
+        matrix = _IDENTITY_MATRIX
+        try:
+            for current in reversed(chain):
+                raw_transform = current.get('transform')
+                if raw_transform:
+                    matrix = _matrix_multiply(
+                        matrix,
+                        _parse_transform_matrix(raw_transform),
+                    )
+        except (TypeError, ValueError):
+            return None
+        return matrix
+
+    @classmethod
+    def _transformed_rect_bounds(
+        cls,
+        element: ET.Element,
+        bounds: Tuple[float, float, float, float],
+        parent_by_id: Dict[int, ET.Element],
+    ) -> Tuple[float, float, float, float] | None:
+        """Transform one local rectangle into root SVG coordinates."""
+        if _transform_point is None:
+            return None
+        matrix = cls._accumulated_transform_matrix(element, parent_by_id)
+        if matrix is None:
+            return None
+        x, y, width, height = bounds
+        try:
+            corners = [
+                _transform_point(matrix, corner_x, corner_y)
+                for corner_x, corner_y in (
+                    (x, y),
+                    (x + width, y),
+                    (x + width, y + height),
+                    (x, y + height),
+                )
+            ]
+        except (TypeError, ValueError):
+            return None
+        xs = [point[0] for point in corners]
+        ys = [point[1] for point in corners]
+        return min(xs), min(ys), max(xs), max(ys)
+
+    @classmethod
+    def _transformed_rect_edge_lengths(
+        cls,
+        element: ET.Element,
+        bounds: Tuple[float, float, float, float],
+        parent_by_id: Dict[int, ET.Element],
+    ) -> Tuple[float, float] | None:
+        """Return frame-axis lengths after accumulated SVG transforms."""
+        if _transform_point is None:
+            return None
+        matrix = cls._accumulated_transform_matrix(element, parent_by_id)
+        if matrix is None:
+            return None
+        x, y, width, height = bounds
+        try:
+            origin = _transform_point(matrix, x, y)
+            width_end = _transform_point(matrix, x + width, y)
+            height_end = _transform_point(matrix, x, y + height)
+        except (TypeError, ValueError):
+            return None
+        rendered_w = math.hypot(
+            width_end[0] - origin[0],
+            width_end[1] - origin[1],
+        )
+        rendered_h = math.hypot(
+            height_end[0] - origin[0],
+            height_end[1] - origin[1],
+        )
+        if rendered_w <= 0 or rendered_h <= 0:
+            return None
+        return rendered_w, rendered_h
+
+    @classmethod
+    def _text_width_diagnostic(
+        cls,
+        text_element: ET.Element,
+        parent_by_id: Dict[int, ET.Element],
+        font_sizes: Dict[int, float],
+        letter_spacings: Dict[int, float],
+        *,
+        container_width: float,
+        include_headroom: bool,

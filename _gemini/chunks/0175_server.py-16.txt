@@ -1,0 +1,96 @@
+            image_strategy = candidate.get('image_strategy')
+            if not isinstance(image_strategy, dict):
+                return f'{label}.image_strategy must be an object'
+            rendering = str(image_strategy.get('rendering') or '').strip()
+            if not rendering:
+                return f'{label}.image_strategy.rendering must be non-empty'
+            if rendering != 'custom':
+                return f'{label}.image_strategy.rendering must be custom'
+            for prose_field in ('name', 'visual', 'mood'):
+                if not _localized_text_present(image_strategy, prose_field):
+                    return (
+                        f'{label}.image_strategy requires non-empty localized '
+                        f'{prose_field}'
+                    )
+            if not _localized_text_present(image_strategy, 'behavior'):
+                return (
+                    f'{label}.image_strategy.rendering=custom requires non-empty '
+                    'localized behavior'
+                )
+        return _typography_candidates_fixed_error(
+            typography_candidates,
+            main_language=main_language,
+        )
+
+    # Legacy staged files remain readable, but they must still provide three
+    # complete color combinations and at least one complete typography choice.
+    colors = _candidate_list(recommendations.get('color'))
+    if len(colors) < 3:
+        return 'Stage 2 recommendations must include 3 complete color candidates'
+    for index, color in enumerate(colors):
+        error = _palette_error(color, f'color.candidates[{index}]')
+        if error:
+            return error
+    typography = _candidate_list(recommendations.get('typography'))
+    if not typography:
+        return 'Stage 2 recommendations must include typography candidates'
+    if main_language and len(typography) < 3:
+        return 'Stage 2 recommendations must include 3 typography candidates'
+    for index, candidate in enumerate(typography):
+        error = _typography_error(
+            candidate,
+            f'typography.candidates[{index}]',
+            require_sizes=False,
+            main_language=main_language,
+        )
+        if error:
+            return error
+    if main_language:
+        return _typography_candidates_fixed_error(
+            typography,
+            main_language=main_language,
+        )
+    return None
+
+
+def _stage2_custom_candidates_error(recommendations: dict) -> Optional[str]:
+    """Validate optional legacy standalone custom alternatives."""
+    candidates = recommendations.get('custom_candidates')
+    if candidates is None:
+        return None
+    if not isinstance(candidates, dict):
+        return 'custom_candidates must be an object when present'
+
+    for field in ('mode', 'visual_style'):
+        candidate = candidates.get(field)
+        if candidate is None:
+            continue
+        if not isinstance(candidate, dict):
+            return f'custom_candidates.{field} must be an object'
+        for prose_field in ('name', 'behavior'):
+            if not _localized_text_present(candidate, prose_field):
+                return (
+                    f'custom_candidates.{field} requires non-empty localized '
+                    f'{prose_field}'
+                )
+
+    image_candidate = candidates.get('image_strategy')
+    if image_candidate is None:
+        return None
+    if not isinstance(image_candidate, dict):
+        return 'custom_candidates.image_strategy must be an object'
+    if image_candidate.get('rendering') != 'custom':
+        return 'custom_candidates.image_strategy.rendering must be custom'
+    for prose_field in ('name', 'visual', 'mood', 'behavior'):
+        if not _localized_text_present(image_candidate, prose_field):
+            return (
+                'custom_candidates.image_strategy requires non-empty localized '
+                f'{prose_field}'
+            )
+    return None
+
+
+def _submission_stage_error(
+    confirm_dir: Path,
+    submitted_stage: Optional[str],
+    *,

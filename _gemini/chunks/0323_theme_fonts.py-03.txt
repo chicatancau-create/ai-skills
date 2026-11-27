@@ -1,0 +1,110 @@
+    major_family = major_family or minor_family
+    if not major_family or not minor_family:
+        return None
+    return ThemeFontSpec(
+        major=_font_face(major_family, language),
+        minor=_font_face(minor_family, language),
+        major_family=major_family,
+        minor_family=minor_family,
+        cs_scripts=_complex_theme_scripts(language),
+    )
+
+
+def _font_size_hpt(raw: str, field: str) -> int:
+    try:
+        px = float(raw)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ThemeFontError(
+            f"spec_lock.md typography {field} must be a numeric px value: {raw!r}"
+        ) from exc
+    try:
+        size = font_px_to_hpt(px)
+    except ValueError as exc:
+        raise ThemeFontError(
+            f"spec_lock.md typography {field} is outside the PowerPoint "
+            f"font-size range: {raw!r}"
+        ) from exc
+    return size
+
+
+def load_master_text_style_spec(project_path: Path) -> MasterTextStyleSpec:
+    """Load required title/body defaults for generated Master text styles."""
+    lock_path = project_path / "spec_lock.md"
+    if not lock_path.is_file():
+        raise ThemeFontError(
+            "Master export requires spec_lock.md typography title and body rows"
+        )
+    rows = _typography_rows(lock_path)
+    missing = [field for field in ("title", "body") if field not in rows]
+    if missing:
+        raise ThemeFontError(
+            "Master export requires spec_lock.md typography rows: "
+            + ", ".join(missing)
+        )
+    return MasterTextStyleSpec(
+        title_hpt=_font_size_hpt(rows["title"], "title"),
+        body_hpt=_font_size_hpt(rows["body"], "body"),
+    )
+
+
+def theme_font_tokens(
+    fonts: dict[str, str],
+    spec: ThemeFontSpec | None,
+) -> dict[str, str] | None:
+    """Return DrawingML major/minor tokens for a locked SVG font face."""
+    if spec is None:
+        return None
+    major_match = spec.major.matches(fonts)
+    minor_match = spec.minor.matches(fonts)
+    if major_match and not minor_match:
+        prefix = "+mj"
+    elif minor_match:
+        # When title/body use the same family, minor is the least surprising
+        # default for ordinary text boxes. Template assembly forces semantic
+        # title placeholders to the major role after SVG conversion.
+        prefix = "+mn"
+    else:
+        return None
+    return {
+        "latin": f"{prefix}-lt",
+        "ea": f"{prefix}-ea",
+        "cs": f"{prefix}-cs",
+    }
+
+
+# Theme ``<a:font script="...">`` codes by language base for scripts that
+# PowerPoint renders through the complex-script slot.
+_COMPLEX_SCRIPT_BY_LANGUAGE = {
+    "he": "Hebr", "yi": "Hebr",
+    "th": "Thai", "lo": "Laoo", "km": "Khmr", "my": "Mymr", "bo": "Tibt",
+    "hi": "Deva", "mr": "Deva", "ne": "Deva", "sa": "Deva", "kok": "Deva",
+    "bn": "Beng", "as": "Beng", "pa": "Guru", "gu": "Gujr", "or": "Orya",
+    "ta": "Taml", "te": "Telu", "kn": "Knda", "ml": "Mlym", "si": "Sinh",
+    "ka": "Geor", "hy": "Armn", "am": "Ethi", "ti": "Ethi",
+}
+
+
+def _complex_theme_scripts(language: str | None) -> tuple[str, ...]:
+    """Return the theme supplemental script(s) the primary language writes in."""
+    if not language:
+        return ()
+    script = _explicit_language_script(language)
+    if script:
+        return (script,)
+    base = language_base(language)
+    if base in _COMPLEX_SCRIPT_BY_LANGUAGE:
+        return (_COMPLEX_SCRIPT_BY_LANGUAGE[base],)
+    return ("Arab",) if language_uses_rtl(language) else ()
+
+
+def _patch_font_collection(
+    collection: ET.Element,
+    face: ThemeFontFace,
+    cs_scripts: tuple[str, ...] = (),
+) -> None:
+    for tag, value in (("latin", face.latin), ("ea", face.ea), ("cs", face.cs)):
+        elem = collection.find(f"{{{DML_NS}}}{tag}")
+        if elem is None:
+            elem = ET.SubElement(collection, f"{{{DML_NS}}}{tag}")
+        elem.set("typeface", value)
+    for supplemental in collection.findall(f"{{{DML_NS}}}font"):

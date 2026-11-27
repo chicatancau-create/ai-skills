@@ -1,0 +1,82 @@
+The generated route may add an explicit `slides.<destination>.morph` block to
+bind direct-root SVG groups across adjacent slides. The sidecar stable key is
+lowered to the same top-level `p:cNvPr@name="!!<key>"` on both final
+Slide-local objects. This does not create an Animation Pane row and does not
+change either object's numeric shape id.
+
+The full plan is resolved before any SVG conversion so a source group named by
+the following slide remains a stable top-level target. Names are written only
+after flat/structured/preserve processing has finished; structured slide-shape
+roster expectations are then refreshed. Package read-back requires:
+
+- the declared source to be the immediately preceding public slide;
+- exactly one `!!<key>` object on each side;
+- the same OOXML object container type on both sides;
+- Morph by object on the destination; and
+- no structural target, same-slide name collision, group/key conflict, or
+  undeclared shared `!!` name on a Morph edge.
+
+Morph without an explicit pair block retains PowerPoint's automatic matching
+behavior. Explicit pairing is generated-route authoring; source-preserving
+round-trip export keeps existing object names and transition XML.
+
+---
+
+## 4. Route Mapping
+
+| Route | Default enter | Default advance | Compatibility note |
+|---|---|---|---|
+| Generated PPTX CLI | fade, 0.4s; no sound | click | auto-advance maps to both; an optional sidecar sound is project-local |
+| Recorded narration | Preserve resolved enter | narration | none remains visually none |
+| Edit Native PPTX (`svg_to_pptx.py --roundtrip`) | preserve source | preserve source | Compare enter, advance, and animation against the import baseline separately. `-t` or explicit slide `transition` replaces enter; omission inherits source even with importer `defaults.transition: none`. Effect-only edits retain `advClick` / `advTm`; explicit advance or `--use-narration-timings` replaces advance |
+
+The public `create_pptx_with_native_svg` Python API retains its legacy 0.5s
+default; the generated-deck CLI explicitly passes 0.4s.
+
+---
+
+## 5. OOXML Rules
+
+**Slide child order**:
+
+~~~text
+p:cSld
+p:clrMapOvr
+p:transition or transition mc:AlternateContent
+p:timing
+p:extLst
+~~~
+
+One slide may contain at most one logical transition carrier:
+
+- one direct p:transition; or
+- one root-level mc:AlternateContent whose Choice/Fallback branches contain
+  p:transition.
+
+Mutation rules:
+
+| Operation | Direct transition | AlternateContent |
+|---|---|---|
+| preserve | Leave unchanged | Leave wrapper and branches unchanged |
+| advance-only | Patch direct attributes | Patch Choice and Fallback identically |
+| replace | Replace the direct carrier | Remove the whole wrapper, then write one carrier |
+| none | Remove visual effect; retain a non-visual carrier when sound or timing is needed | Remove the whole wrapper; write a non-visual carrier when sound or timing is needed |
+
+**Sound placement**: for a direct transition, append `p:sndAc` inside
+`p:transition` after the visual-effect child, when present. For
+`mc:AlternateContent`, write the same sound action into both Choice and
+Fallback transition carriers so older Office consumers do not lose the cue.
+The slide relationship targets one packaged WAV part; replacing or removing a
+requested generated sound must not leave a dangling relationship.
+
+**MCE prefix rule**: Requires and Ignorable values contain textual prefix
+names. Serialization must retain bindings for those exact names. Renaming an
+effect prefix without updating these attributes corrupts compatibility.
+
+**Package timing rule**: when a route writes advTm, set
+ppt/presProps.xml p:presentationPr/p:showPr useTimings=1. Do not write showPr
+into ppt/presentation.xml.
+
+**Kiosk show**: `svg_to_pptx.py --kiosk` writes `p:showPr loop="1"` with a
+`p:kiosk` child (PowerPoint's "Browsed at a kiosk"): the show loops until
+Escape and ignores click and keyboard advance, so only `advTm` timings and

@@ -1,0 +1,90 @@
+            href = image.get('href') or image.get(f'{{{XLINK_NS}}}href')
+            if not href or href.startswith('data:'):
+                continue
+            if self.template_mode and '{{' in href and '}}' in href:
+                continue
+            if _resolve_external_image_reference is None:
+                result['warnings'].append(
+                    "Detected image references, but shared image resolver could not be imported; "
+                    "export will still validate them."
+                )
+                return
+
+            img_path = _resolve_external_image_reference(svg_dir, href)
+            if img_path is None:
+                # The shared image-source contract already reports the
+                # blocking resolution failure. This pass adds quality advice
+                # only for valid, resolved images.
+                continue
+
+            # Check resolution vs display size
+            display_owner = image
+            parent = parent_by_id.get(id(image))
+            if (
+                parent is not None
+                and parent is not working_root
+                and parent.tag == f'{{{SVG_NS}}}svg'
+            ):
+                # Imported crops use a unit-frame inner image. Quality advice
+                # must compare the source against the visible outer frame.
+                display_owner = parent
+            display_w_str = display_owner.get('width')
+            display_h_str = display_owner.get('height')
+            if not display_w_str or not display_h_str:
+                continue
+
+            try:
+                display_x = float(display_owner.get('x') or '0')
+                display_y = float(display_owner.get('y') or '0')
+                local_display_w = float(display_w_str)
+                local_display_h = float(display_h_str)
+            except (ValueError, TypeError):
+                continue
+            if local_display_w <= 0 or local_display_h <= 0:
+                continue
+            display_w = local_display_w
+            display_h = local_display_h
+            transformed_size = self._transformed_rect_edge_lengths(
+                display_owner,
+                (display_x, display_y, local_display_w, local_display_h),
+                parent_by_id,
+            )
+            if transformed_size is not None:
+                display_w, display_h = transformed_size
+            axis_scale_x = display_w / local_display_w
+            axis_scale_y = display_h / local_display_h
+
+            try:
+                from PIL import Image as PILImage, ImageOps
+                with PILImage.open(img_path) as img:
+                    actual_w, actual_h = ImageOps.exif_transpose(img).size
+                source_bytes = img_path.stat().st_size
+
+                visible_w = float(actual_w)
+                visible_h = float(actual_h)
+                fit_owner = image
+                if display_owner is not image:
+                    fit_owner = display_owner
+                    viewbox = (display_owner.get('viewBox') or '').split()
+                    if len(viewbox) == 4:
+                        try:
+                            viewbox_w = float(viewbox[2])
+                            viewbox_h = float(viewbox[3])
+                        except ValueError:
+                            pass
+                        else:
+                            if 0 < viewbox_w <= 1 and 0 < viewbox_h <= 1:
+                                visible_w *= viewbox_w
+                                visible_h *= viewbox_h
+
+                raw_aspect = fit_owner.get('preserveAspectRatio')
+                try:
+                    align, mode = (
+                        _parse_project_image_aspect_ratio(raw_aspect)
+                        if _parse_project_image_aspect_ratio is not None
+                        else ('xMidYMid', 'meet')
+                    )
+                except ValueError:
+                    continue
+
+                local_scale_x = local_display_w / visible_w

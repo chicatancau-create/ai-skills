@@ -1,0 +1,38 @@
+  `powershell -NoProfile -Command "New-Item -ItemType Junction -Path '<link>' -Target '<target>' | Out-Null"`,
+  then confirm with `Get-ChildItem` showing `LinkType=Junction` + `Target`, and by reading `SKILL.md` through the link.
+  Failing routes to skip: calling `cmd //c mklink /J ...` inline gives a mangled path-syntax error, and an inline
+  `node -e` printed success while creating nothing (a scratch `.mjs` + `fs.symlinkSync(t, l, 'junction')` does work,
+  it's just more steps than the PowerShell one-liner). Removing a link is `cmd //c rmdir "<link>"` — contents-safe.
+- **`skill_manage` 也穿不过 junction 去改。** 2026-09-24 实测: 技能迁进 `D:\QoderToolkit` 并回挂 junction 之后,
+  `patch` 直接返回 `SKILL_PATH_INVALID` —— 和 `create` 一样不肯越出允许根。要改已归案的自建技能, 只能走
+  **摘→改→回写→重挂** 四步: `cmd //c rmdir <link>` 摘链接 → 把实体 `copytree` 成 `.qoder\skills\<name>` 真实目录
+  (比对 SKILL.md 字节) → `skill_manage patch` → 把改后的 SKILL.md 拷回实体并比对 → 逐文件删除+`os.rmdir` 清掉
+  真实目录(**先断言它不是 junction**, 否则递归删会穿透删实体) → 重新 `mklink /J` → 穿链接读回比对。
+- **`SKILL_PATCH_NOT_UNIQUE` 大多是「压根没匹配上」，不是「匹配多了」。** 2026-09-24 两轮实测：
+  (1) 我的 `old_string` 用了全角逗号/括号而文件里是半角 —— 零匹配却报 NOT_UNIQUE，换回半角后**同一条 patch 立刻成功**；
+  (2) 另一条在 junction 态下报 NOT_UNIQUE，摘成真实目录后成功（那次锚点本身是对的）。
+  排查顺序固定为：先用 Python 数 `old_string` 在文件里的**出现次数**（0 次＝标点/空格抄错了），
+  再查 `LinkType` 是不是 junction，最后才怀疑工具口径。别急着重写内容或换锚点。
+- **交付物别只留在工作区。** `E:\AIrenwu\qoder-toolkit-landing\`(落地页 + 登录页)在 2026-09-24 同一天的两轮
+  对话之间整个消失, 不是我删的(我只删过三张 png) —— 并发会话会按自己的范围清理工作区。要长期留的东西
+  落到集合包或明确告知用户位置, 并优先用「重跑取证回路可再生」的形态存在。
+- `D:\QoderToolkit` is shared with live concurrent sessions and is partly automation-managed: make only
+  **additive** edits to `README.md`, never rewrite existing lines. `ppt-master\` has an integrity gate
+  (content/rename/BOM/CRLF changes fail), `web-kimi\` is a frozen snapshot.
+- `D:\QoderToolkit\README.md` is LF-only, no BOM. Per this user's general rule, write text files with the
+  Edit/Write tools or Python utf-8, not PowerShell. See [[windows-config-json-encoding]].
+
+- **登记键是目录名，不是 frontmatter 的 `name`**（2026-10-11 探针实测）：建 `~\.qoder\skills\probe-shape-test\SKILL.md`
+  且 `name: spider-king-probe`，可用技能列表里出现的是 **`probe-shape-test`**；`argument-hint`、`compatibility`
+  这类 Claude Code 风格的多余 frontmatter 字段**不影响识别**。⇒ 想让某技能在列表里叫什么，就改目录名；
+  第三方包若 `name` 与目录名不一致（例：`trace` 包内 `name: spider-king`），列表里只会看到目录名。
+- **例外：用户明确要求"全机 AI 都能用"时，实体放 `D:\Skills`**（2026-10-11 授权安装 `reverse-trace` /
+  `reverse-wechat-miniapp` 两个第三方逆向技能）。判据：`~\.agents\skills` 是 junction → `D:\Skills`，
+  Qoder 也扫它，所以**放进 `D:\Skills` 就不要再在 `~\.qoder\skills` 建联接**（同名两条会被列成重复项）。
+  标注类别的做法=目录名加前缀（`reverse-`）+ `description` 开头加 `【逆向工具·仅授权目标】`，
+  并在包内写 `PROVENANCE.md`（无 LICENSE 的第三方包必写）。
+- **改第三方 SKILL.md 的 frontmatter 要按文件自己的换行符来**：`trace` 的 SKILL.md **源包就是全 CRLF**（作者用
+  Windows 编辑器写的），"顺手规范化"会污染字节比对。字符串手术插标记时留意引号标量——
+  一次把 `description: "原文"` 改成 `description: "标记"原文"` 直接把 YAML 改坏，必须用 PyYAML 真解析复核。
+
+Related: [[qoder-toolkit]], [[feedback-vault-engineering-rules]]

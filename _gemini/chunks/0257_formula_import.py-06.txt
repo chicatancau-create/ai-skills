@@ -1,0 +1,86 @@
+        return _preview_children(element)
+    return ""
+
+
+def _preview_script(base: str, subscript: str, superscript: str) -> str:
+    if subscript:
+        base += f"_({subscript})"
+    if superscript:
+        base += f"^({superscript})"
+    return base
+
+
+def _dominant_run_style(root: ET.Element) -> tuple[float, str, str]:
+    sizes: list[str] = []
+    colors: list[str] = []
+    languages: list[str] = []
+    for properties in root.iter(f"{_A}rPr"):
+        if properties.get("sz"):
+            sizes.append(properties.get("sz") or "")
+        if properties.get("lang"):
+            languages.append(properties.get("lang") or "")
+        color = properties.find(f"{_A}solidFill/{_A}srgbClr")
+        if color is not None and color.get("val"):
+            colors.append(color.get("val") or "")
+    raw_size = _dominant(sizes, "2100")
+    try:
+        font_size = max(1.0, min(400.0, int(raw_size) / 75.0))
+    except ValueError:
+        font_size = 28.0
+    return (
+        font_size,
+        f"#{_dominant(colors, '000000').upper()}",
+        _dominant(languages, "en-US"),
+    )
+
+
+def _formula_alignment(root: ET.Element) -> str:
+    if root.tag != f"{_M}oMathPara":
+        return "left"
+    value = _property_value(root, "oMathParaPr", "jc", "center")
+    return {"left": "left", "right": "right"}.get(value, "center")
+
+
+def _dominant(values: list[str], default: str) -> str:
+    return Counter(values).most_common(1)[0][0] if values else default
+
+
+def _property_value(owner: ET.Element, properties: str, name: str, default: str) -> str:
+    container = owner.find(f"{_M}{properties}")
+    value = _property_child_value(container, name)
+    return value if value is not None else default
+
+
+def _property_child_value(owner: ET.Element | None, name: str) -> str | None:
+    if owner is None:
+        return None
+    child = owner.find(f"{_M}{name}")
+    return child.get(f"{_M}val") if child is not None else None
+
+
+def _on_property(owner: ET.Element | None, name: str) -> bool:
+    return _property_child_value(owner, name) in {"on", "true", "1"}
+
+
+def _drawing_on(owner: ET.Element, name: str) -> bool:
+    return owner.get(name) in {"on", "true", "1"}
+
+
+def _drawing_color(owner: ET.Element | None) -> str | None:
+    if owner is None:
+        return None
+    color = owner.find(f"{_A}solidFill/{_A}srgbClr")
+    return color.get("val") if color is not None else None
+
+
+def _local_name(element: ET.Element) -> str:
+    return element.tag.rsplit("}", 1)[-1]
+
+
+__all__ = [
+    "A14_NS",
+    "FormulaImport",
+    "FormulaImportError",
+    "import_formula",
+    "opaque_formula_preview",
+]

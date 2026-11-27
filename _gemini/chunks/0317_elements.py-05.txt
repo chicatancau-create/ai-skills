@@ -1,0 +1,137 @@
+) -> str:
+    """Wrap DrawingML content into a <p:sp> shape element."""
+    rot_attr = f' rot="{rot}"' if rot else ''
+    xfrm_attrs = f'{xfrm_attr}{rot_attr}'
+    return f'''<p:sp>
+<p:nvSpPr>
+<p:cNvPr id="{shape_id}" name="{_xml_escape(name)}"/>
+<p:cNvSpPr/><p:nvPr>{placeholder_xml}</p:nvPr>
+</p:nvSpPr>
+<p:spPr>
+<a:xfrm{xfrm_attrs}><a:off x="{off_x}" y="{off_y}"/><a:ext cx="{ext_cx}" cy="{ext_cy}"/></a:xfrm>
+{geom_xml}
+{fill_xml}
+{stroke_xml}
+{effect_xml}
+</p:spPr>
+{extra_xml}
+</p:sp>'''
+
+
+def _wrap_connector(
+    shape_id: int,
+    name: str,
+    off_x: int,
+    off_y: int,
+    ext_cx: int,
+    ext_cy: int,
+    geom_xml: str,
+    fill_xml: str,
+    stroke_xml: str,
+    effect_xml: str = '',
+    rot: int = 0,
+    xfrm_attr: str = '',
+    connection_xml: str = '',
+    extra_xml: str = '',
+) -> str:
+    """Wrap DrawingML content into a native ``p:cxnSp`` connector."""
+    rot_attr = f' rot="{rot}"' if rot else ''
+    xfrm_attrs = f'{xfrm_attr}{rot_attr}'
+    return f'''<p:cxnSp>
+<p:nvCxnSpPr>
+<p:cNvPr id="{shape_id}" name="{_xml_escape(name)}"/>
+<p:cNvCxnSpPr>{connection_xml}</p:cNvCxnSpPr><p:nvPr/>
+</p:nvCxnSpPr>
+<p:spPr>
+<a:xfrm{xfrm_attrs}><a:off x="{off_x}" y="{off_y}"/><a:ext cx="{ext_cx}" cy="{ext_cy}"/></a:xfrm>
+{geom_xml}
+{fill_xml}
+{stroke_xml}
+{effect_xml}
+</p:spPr>
+{extra_xml}
+</p:cxnSp>'''
+
+
+def _wrap_geometry_object(
+    elem: ET.Element,
+    ctx: ConvertContext,
+    shape_id: int,
+    name: str,
+    off_x: int,
+    off_y: int,
+    ext_cx: int,
+    ext_cy: int,
+    geom_xml: str,
+    fill_xml: str,
+    stroke_xml: str,
+    effect_xml: str = '',
+    xfrm_attr: str = '',
+) -> str:
+    """Wrap a semantic leaf as a shape or connector without guessing."""
+    if not effect_xml:
+        effect_xml = _element_effect_xml(elem, ctx)
+    name = shape_display_name(elem, name)
+    shape_style_xml = _decode_shape_style(elem)
+    object_kind = elem.get('data-pptx-object')
+    if object_kind != 'connector':
+        return _wrap_shape(
+            shape_id,
+            name,
+            off_x,
+            off_y,
+            ext_cx,
+            ext_cy,
+            geom_xml,
+            fill_xml,
+            stroke_xml,
+            effect_xml,
+            extra_xml=shape_style_xml,
+            xfrm_attr=xfrm_attr,
+            placeholder_xml=_imported_placeholder_xml(elem),
+        )
+
+    prst = elem.get('data-pptx-prst')
+    is_custom = elem.get('data-pptx-geometry-kind') == 'custom'
+    if prst is None and not is_custom:
+        raise ValueError(
+            'data-pptx-object="connector" requires preset or preserved '
+            'custom geometry'
+        )
+    return _wrap_connector(
+        shape_id,
+        name,
+        off_x,
+        off_y,
+        ext_cx,
+        ext_cy,
+        geom_xml,
+        fill_xml,
+        stroke_xml,
+        effect_xml,
+        xfrm_attr=xfrm_attr,
+        connection_xml=_connector_connection_xml(elem, ctx),
+        extra_xml=shape_style_xml,
+    )
+
+
+def _imported_placeholder_xml(elem: ET.Element) -> str:
+    """Restore an imported slide placeholder marker when its identity is exact."""
+    placeholder_type = elem.get('data-ph-type')
+    placeholder_index = elem.get('data-pptx-placeholder-index')
+    if placeholder_type is None and placeholder_index is None:
+        return ''
+    if placeholder_type is not None and not re.fullmatch(r'[A-Za-z][A-Za-z0-9]*', placeholder_type):
+        raise ValueError(
+            f'Invalid imported placeholder type: {placeholder_type!r}'
+        )
+    if placeholder_index is not None and (
+        not placeholder_index.isdigit() or int(placeholder_index) > 0xFFFFFFFF
+    ):
+        raise ValueError(
+            f'Invalid imported placeholder index: {placeholder_index!r}'
+        )
+    attrs = {name: value for name, value in (('type', placeholder_type), ('idx', placeholder_index))
+             if value is not None}
+    placeholder_size = elem.get('data-pptx-placeholder-size')
+    if placeholder_size is not None:

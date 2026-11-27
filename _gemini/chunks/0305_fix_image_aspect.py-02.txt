@@ -1,0 +1,124 @@
+        match = re.match(r'data:image/(\w+);base64,(.+)', data_uri)
+        if not match:
+            return None, None
+        
+        img_format = match.group(1)
+        b64_data = match.group(2)
+        img_bytes = base64.b64decode(b64_data)
+        
+        if HAS_PIL:
+            with Image.open(io.BytesIO(img_bytes)) as img:
+                return ImageOps.exif_transpose(img).size
+        else:
+            # Use basic method
+            if img_bytes[:8] == b'\x89PNG\r\n\x1a\n':
+                w = int.from_bytes(img_bytes[16:20], 'big')
+                h = int.from_bytes(img_bytes[20:24], 'big')
+                return w, h
+        
+        return None, None
+    except Exception as e:
+        print(f"  [WARN] Cannot parse base64 image: {e}")
+        return None, None
+
+
+def get_image_dimensions(href: str, svg_dir: str) -> tuple[int | None, int | None]:
+    """Get image dimensions for either inline or external images."""
+    # Handle data URI
+    if href.startswith('data:'):
+        return get_image_dimensions_from_base64(href)
+    
+    # Handle external files
+    if not os.path.isabs(href):
+        full_path = os.path.join(svg_dir, href)
+    else:
+        full_path = href
+    
+    if not os.path.exists(full_path):
+        print(f"  [WARN] Image not found: {href}")
+        return None, None
+    
+    if HAS_PIL:
+        return get_image_dimensions_pil(full_path)
+    else:
+        return get_image_dimensions_basic(full_path)
+
+
+def calculate_fitted_dimensions(
+    img_width: int,
+    img_height: int,
+    box_width: float,
+    box_height: float,
+    mode: str = 'meet',
+) -> tuple[float, float, float, float]:
+    """
+    Calculate the fitted dimensions for an image within a bounding box.
+
+    Args:
+        img_width, img_height: Original image dimensions
+        box_width, box_height: Container box dimensions
+        mode: 'meet' preserves aspect ratio and fully displays image (may have whitespace)
+              'slice' preserves aspect ratio and fully fills container (may crop)
+
+    Returns:
+        (new_width, new_height, offset_x, offset_y)
+    """
+    img_ratio = img_width / img_height
+    box_ratio = box_width / box_height
+    
+    if mode == 'meet':
+        # Fully display image, may have whitespace
+        if img_ratio > box_ratio:
+            # Image is wider, fit by width
+            new_width = box_width
+            new_height = box_width / img_ratio
+        else:
+            # Image is taller, fit by height
+            new_height = box_height
+            new_width = box_height * img_ratio
+    else:  # slice
+        # Fully fill container, may crop
+        if img_ratio > box_ratio:
+            # Image is wider, fit by height
+            new_height = box_height
+            new_width = box_height * img_ratio
+        else:
+            # Image is taller, fit by width
+            new_width = box_width
+            new_height = box_width / img_ratio
+
+    # Center offset
+    offset_x = (box_width - new_width) / 2
+    offset_y = (box_height - new_height) / 2
+    
+    return new_width, new_height, offset_x, offset_y
+
+
+def fix_image_aspect_in_svg(svg_path: str, dry_run: bool = False, verbose: bool = True) -> int:
+    """
+    Fix image aspect ratios in an SVG file.
+
+    Args:
+        svg_path: SVG file path
+        dry_run: Whether to only preview without modifying
+        verbose: Whether to output detailed information
+
+    Returns:
+        Number of images fixed
+    """
+    svg_dir = os.path.dirname(os.path.abspath(svg_path))
+    
+    with open(svg_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+    
+    # Register SVG namespaces
+    namespaces = {
+        '': 'http://www.w3.org/2000/svg',
+        'xlink': 'http://www.w3.org/1999/xlink',
+        'svg': 'http://www.w3.org/2000/svg',
+        'sodipodi': 'http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd',
+        'inkscape': 'http://www.inkscape.org/namespaces/inkscape',
+    }
+    
+    for prefix, uri in namespaces.items():
+        if prefix:

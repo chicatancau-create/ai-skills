@@ -1,0 +1,114 @@
+    color = _hex_or_none(next_fill)
+    if not color:
+        return []
+    local_bbox = _element_local_bbox(elem)
+    if local_bbox is None:
+        return []
+    x1, y1, x2, y2 = _apply_matrix_bbox(local_bbox, local_matrix)
+    area = max(x2 - x1, 0.0) * max(y2 - y1, 0.0)
+    return [(area, color)] if area > 0 else []
+
+
+def _inferred_chart_background(elem: ET.Element) -> str | None:
+    bounds = _inferred_bounds(elem)
+    if bounds is None:
+        return None
+    x1, y1, x2, y2 = bounds
+    bounds_area = max(x2 - x1, 0.0) * max(y2 - y1, 0.0)
+    if bounds_area <= 0:
+        return None
+
+    candidates: list[tuple[float, str]] = []
+    for child in elem:
+        candidates.extend(_fallback_fill_candidates(child))
+    if not candidates:
+        return None
+    area, color = max(candidates, key=lambda item: item[0])
+    # Avoid mistaking a large data bar for a chart background when no panel /
+    # plot-area rectangle exists in the fallback drawing.
+    return color if area >= bounds_area * 0.25 else None
+
+
+def _fallback_text_colors(
+    elem: ET.Element,
+    inherited_fill: str | None = None,
+) -> list[str]:
+    tag = _local_tag(elem)
+    if tag == "metadata" or tag in {"defs", "clipPath", "mask", "filter", "style"}:
+        return []
+    if elem.get("display") == "none" or elem.get("visibility") == "hidden":
+        return []
+    if not _paint_visible(elem, "fill"):
+        return []
+
+    fill = _style_attr(elem, "fill")
+    next_fill = fill if fill is not None else inherited_fill
+    colors: list[str] = []
+    if tag in {"text", "tspan"} and next_fill:
+        color = _hex_or_none(next_fill)
+        if color:
+            colors.append(color)
+    for child in elem:
+        colors.extend(_fallback_text_colors(child, next_fill))
+    return colors
+
+
+def _fallback_stroke_colors(
+    elem: ET.Element,
+    inherited_stroke: str | None = None,
+) -> list[str]:
+    tag = _local_tag(elem)
+    if tag == "metadata" or tag in {"defs", "clipPath", "mask", "filter", "style"}:
+        return []
+    if elem.get("display") == "none" or elem.get("visibility") == "hidden":
+        return []
+    if not _paint_visible(elem, "stroke"):
+        return []
+
+    stroke = _style_attr(elem, "stroke")
+    next_stroke = stroke if stroke is not None else inherited_stroke
+    colors: list[str] = []
+    if tag in {"circle", "ellipse", "line", "path", "polygon", "polyline", "rect"} and next_stroke:
+        color = _hex_or_none(next_stroke)
+        if color:
+            colors.append(color)
+    for child in elem:
+        colors.extend(_fallback_stroke_colors(child, next_stroke))
+    return colors
+
+
+def _most_common_color(colors: list[str]) -> str | None:
+    if not colors:
+        return None
+    counts: dict[str, int] = {}
+    for color in colors:
+        counts[color] = counts.get(color, 0) + 1
+    return max(counts.items(), key=lambda item: item[1])[0]
+
+
+def _relative_luminance(color: str) -> float:
+    channels = [int(color[idx:idx + 2], 16) / 255.0 for idx in (0, 2, 4)]
+    linear = [
+        channel / 12.92 if channel <= 0.04045 else ((channel + 0.055) / 1.055) ** 2.4
+        for channel in channels
+    ]
+    return linear[0] * 0.2126 + linear[1] * 0.7152 + linear[2] * 0.0722
+
+
+def _resolved_bounds(
+    elem: ET.Element,
+    payload: dict[str, Any],
+    ctx: ConvertContext,
+) -> tuple[float, float, float, float, bool]:
+    """Resolve object bounds in SVG px plus whether all bounds were explicit."""
+    if ctx.use_transform_matrix:
+        raise RuntimeError("Native PPTX replacement markers support translate/scale only")
+
+    raw_x = payload.get("x", elem.get("data-pptx-x"))
+    raw_y = payload.get("y", elem.get("data-pptx-y"))
+    raw_width = payload.get("width", elem.get("data-pptx-width"))
+    raw_height = payload.get("height", elem.get("data-pptx-height"))
+    explicit_bounds = all(value is not None for value in (raw_x, raw_y, raw_width, raw_height))
+    inferred = None
+    if not explicit_bounds:
+        inferred = _inferred_bounds(elem)

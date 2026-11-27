@@ -1,0 +1,108 @@
+                effective_animation_config,
+            )
+        )
+    except Exception as exc:
+        print(f"Error: Failed to load animation config: {exc}", file=sys.stderr)
+        return 1
+    if animation_config and roundtrip_page_plan_present:
+        try:
+            animation_config = _roundtrip_animation_config_for_pages(
+                animation_config,
+                roundtrip_pages,
+            )
+        except RuntimeError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+    config_errors: list[str] = []
+    if animation_config:
+        config_errors.extend(validate_transition_config(animation_config))
+        config_errors.extend(validate_animation_config_errors(animation_config))
+    config_errors = list(dict.fromkeys(config_errors))
+    if config_errors:
+        for error in config_errors:
+            print(f"Error: {error}", file=sys.stderr)
+        return 1
+
+    config_warnings: list[str] = []
+    if animation_config:
+        reference_messages = validate_animation_config(
+            project_path,
+            animation_config,
+            svg_files=native_files,
+        )
+        config_warnings = [
+            message for message in reference_messages
+            if ' has no id and cannot be customized in animations.json' in message
+        ]
+        reference_errors = [
+            message for message in reference_messages
+            if message not in config_warnings
+        ]
+        if reference_errors:
+            for error in reference_errors:
+                print(f"Error: {error}", file=sys.stderr)
+            return 1
+
+    if animation_config and verbose:
+        config_label = (
+            effective_animation_config
+            or str(project_path / 'animations.json')
+        )
+        print(f"  Animation config: {config_label}")
+        for warning in config_warnings:
+            print(f"  [warn] {warning}")
+    elif args.no_animations and verbose:
+        print("  Animations: disabled")
+
+    inherited_motion: dict[str, object] = {}
+    if args.inherit_motion_from:
+        try:
+            inherited_motion = _load_deck_motion_handoff(
+                project_path,
+                args.inherit_motion_from,
+                native_files,
+            )
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        if verbose:
+            print(f"  Deck motion handoff: {args.inherit_motion_from}")
+
+    defaults = animation_config.get('defaults', {}) if animation_config else {}
+    transition_defaults = _as_dict(defaults.get('transition')) if isinstance(defaults, dict) else {}
+    animation_defaults = _as_dict(defaults.get('animation')) if isinstance(defaults, dict) else {}
+    inherited_transition = _as_dict(inherited_motion.get('transition'))
+    inherited_animation = _as_dict(inherited_motion.get('animation'))
+    inherited_overrides = _as_dict(inherited_motion.get('cli_overrides'))
+
+    transition_arg = args.transition
+    transition_effect = (
+        'none'
+        if args.no_animations
+        else (
+            transition_arg
+            if transition_arg is not None
+            else (
+                inherited_transition['effect']
+                if 'effect' in inherited_transition
+                else transition_defaults.get('effect', 'fade')
+            )
+        )
+    )
+    try:
+        transition, transition_effect_options = (
+            normalize_transition_effect_request(
+                transition_effect,
+                (
+                    None
+                    if transition_arg is not None or args.no_animations
+                    else (
+                        inherited_transition.get('effect_options')
+                        if 'effect' in inherited_transition
+                        else transition_defaults.get('effect_options')
+                    )
+                ),
+            )
+        )
+        explicit_transition_uses_default_duration = (
+            args.roundtrip

@@ -1,0 +1,95 @@
+            if _native_replacement_status is None or _native_replacement_kind is None:
+                continue
+            try:
+                status = _native_replacement_status(elem)
+                replacement_kind = _native_replacement_kind(elem)
+            except ValueError:
+                continue
+            if not status or replacement_kind:
+                continue
+            marker_id = elem.get('id') or elem.get('data-name') or '<unnamed>'
+            result['warnings'].append(
+                f"Native PPTX object {marker_id} is fallback-only: {status}"
+            )
+
+        markers = [
+            elem for elem in root.iter()
+            if (
+                _native_replacement_kind is not None
+                and elem.tag.rsplit('}', 1)[-1] != 'metadata'
+                and elem not in invalid_status_elements
+                and _native_replacement_kind(elem)
+            )
+        ]
+        if not markers:
+            return
+        if _validate_native_object_marker is None:
+            result['warnings'].append(
+                "Detected data-pptx-replace-with markers, but replacement validator "
+                "could not be imported; export-time validation will still run."
+            )
+            return
+
+        parent_map = {
+            child: parent
+            for parent in root.iter()
+            for child in parent
+        }
+
+        def append_metadata_legacy_warnings(marker: ET.Element) -> None:
+            if _native_marker_legacy_warnings is None:
+                return
+            marker_id = marker.get('id') or '<unnamed>'
+            for child in marker:
+                if child.tag.rsplit('}', 1)[-1] != 'metadata':
+                    continue
+                for warning in _native_marker_legacy_warnings(child):
+                    result['warnings'].append(
+                        f"PPTX replacement marker {marker_id}: {warning}"
+                    )
+
+        for marker in markers:
+            marker_id = marker.get('id') or '<unnamed>'
+            replacement_kind = _native_replacement_kind(marker)
+            if (
+                self.canonical_authoring
+                and replacement_kind in {'chart', 'table'}
+            ):
+                if _require_fresh_native_fallback is None:
+                    result['errors'].append(
+                        "Unable to import native fallback freshness validator; "
+                        f"cannot verify canonical marker {marker_id}"
+                    )
+                else:
+                    try:
+                        _require_fresh_native_fallback(
+                            marker,
+                            document_root=root,
+                        )
+                    except RuntimeError as exc:
+                        result['errors'].append(
+                            f"Canonical SVG-first native marker {marker_id}: {exc}"
+                        )
+            ancestors = []
+            parent = parent_map.get(marker)
+            while parent is not None and parent is not root:
+                if parent.tag.rsplit('}', 1)[-1] == 'g':
+                    ancestors.append(parent)
+                parent = parent_map.get(parent)
+            ancestors_tuple = tuple(reversed(ancestors))
+            if _validate_native_object_marker_with_warnings is not None:
+                try:
+                    warnings = _validate_native_object_marker_with_warnings(
+                        marker,
+                        ancestors=ancestors_tuple,
+                        document_root=root,
+                    )
+                except RuntimeError as exc:
+                    result['errors'].append(
+                        f"Invalid data-pptx-replace-with marker {marker_id}: {exc}"
+                    )
+                    continue
+                for warning in warnings:
+                    result['warnings'].append(
+                        f"data-pptx-replace-with marker {marker_id}: {warning}"
+                    )

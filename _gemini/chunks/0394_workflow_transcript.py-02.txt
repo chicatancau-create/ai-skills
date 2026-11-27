@@ -1,0 +1,101 @@
+        """Stop transcript writes without changing tool execution."""
+        self.enabled = False
+        try:
+            self.original_stderr.write(
+                f"[WARN] Workflow audit recording stopped: {exc}\n"
+            )
+            self.original_stderr.flush()
+        except (OSError, ValueError):
+            pass
+
+    def _write(self, text: str) -> None:
+        """Append and flush one complete audit record."""
+        if not self.enabled:
+            return
+        try:
+            self.handle.write(text)
+            self.handle.flush()
+        except (OSError, UnicodeError, ValueError) as exc:
+            self._disable(exc)
+
+    def start(self) -> None:
+        """Write the Python-command envelope."""
+        self._write(
+            f"\n=== {_utc_timestamp()} PYTHON run={self.run_id} ===\n"
+            f"cwd: {Path.cwd()}\n"
+            f"argv: {json.dumps(self.argv, ensure_ascii=False)}\n"
+        )
+
+    @staticmethod
+    def _is_decoration(line: str) -> bool:
+        """Return whether a non-empty line is only visual separator glyphs."""
+        stripped = line.strip()
+        return bool(stripped) and set(stripped) <= {"-", "=", "_"}
+
+    def _should_retain(self, stream_name: str, line: str) -> bool:
+        """Select a bounded set of explicit outcomes for the cold audit log."""
+        stripped = line.strip()
+        if not stripped or self._is_decoration(stripped):
+            return False
+
+        if _SUMMARY_MARKER in stripped:
+            self.summary_context_remaining = _SUMMARY_CONTEXT_LIMIT
+            return True
+        if any(marker in stripped for marker in _SUMMARY_STOP_MARKERS):
+            self.summary_context_remaining = 0
+            return False
+        if self.summary_context_remaining > 0:
+            self.summary_context_remaining -= 1
+            return True
+        if any(marker in stripped for marker in _CRITICAL_MARKERS):
+            self.critical_context_remaining = _CRITICAL_CONTEXT_LIMIT
+            return True
+        if self.critical_context_remaining > 0:
+            self.critical_context_remaining -= 1
+            return True
+        if any(marker in stripped for marker in _ALWAYS_RETAIN_MARKERS):
+            return True
+        if any(marker in stripped for marker in _WARNING_MARKERS):
+            if self.warning_samples < _WARNING_SAMPLE_LIMIT:
+                self.warning_samples += 1
+                return True
+            return False
+        if _OK_MARKER in stripped:
+            if self.ok_samples < _OK_SAMPLE_LIMIT:
+                self.ok_samples += 1
+                return True
+            return False
+        if stream_name == "stderr" and self.stderr_samples < _STDERR_SAMPLE_LIMIT:
+            self.stderr_samples += 1
+            return True
+        return False
+
+    def _record_line(self, stream_name: str, line: str) -> None:
+        """Record one material logical line or account for its omission."""
+        if not line.strip():
+            return
+        self.observed_lines += 1
+        if not self._should_retain(stream_name, line):
+            self.omitted_lines += 1
+            if stream_name == "stderr" and not self._is_decoration(line):
+                self.stderr_tail.append(line)
+            return
+        if stream_name == "stderr":
+            self.stderr_tail.clear()
+        self.retained_lines += 1
+        if self.current_record_stream != stream_name:
+            self._write(f"{stream_name}:\n")
+            self.current_record_stream = stream_name
+        self._write(f"  {line}\n")
+
+    def write_stream(self, stream_name: str, text: str) -> None:
+        """Buffer fragments and write complete logical lines."""
+        if not text or not self.enabled:
+            return
+        with self.lock:
+            pending = self.pending[stream_name] + text
+            while "\n" in pending:
+                line, pending = pending.split("\n", 1)
+                self._record_line(stream_name, line)
+            self.pending[stream_name] = pending
+

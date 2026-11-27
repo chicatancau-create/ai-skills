@@ -1,0 +1,78 @@
+| Ordinary content group | Animatable; a legacy block resolves one row and `effects[]` may resolve several rows against the same final shape |
+| Chrome-like ids, static roles/placeholders, and structural exclusions | See [`animations.md`](../../references/animations.md) §5 for defaults and explicit sidecar overrides |
+
+---
+
+## 5. OOXML Rules
+
+The writer emits animation timing after `p:transition` and before `p:extLst`.
+Normally this is one root `p:timing`; nonzero `bounce_end` uses PowerPoint's
+native `mc:AlternateContent` with a p14 Choice and non-bounce Fallback. Each
+branch contains a `tmRoot`, a `mainSeq` when ordinary Start rows exist, one
+`interactiveSeq` per trigger-shape row, unique branch-local `p:cTn@id` values,
+and same-slide `p:spTgt` references.
+
+Trigger mapping:
+
+| Public trigger | Object row `p:cTn@nodeType` |
+|---|---|
+| `on-click` | `clickEffect` |
+| `with-previous` | `withEffect` |
+| `after-previous` | `afterEffect` |
+
+A row-level `trigger_shape` resolves to a different shape id and writes
+PowerPoint's native `interactiveSeq` with `onClick` shape conditions. Its row
+remains `clickEffect`; row `delay` becomes `TriggerDelayTime`. Ordinary rows
+remain in `mainSeq` and keep the slide Start mode.
+
+Row `trigger` overrides slide Start in both forms. `trigger_shape` implies
+`on-click` and conflicts with an explicit non-`on-click` Start. Repeated
+`p:spTgt@spid` values are valid distinct Animation Pane rows. Ordinary rows
+retain page-wide `order`; trigger-shape rows retain their relative order in
+separate `interactiveSeq` branches and do not interleave with `mainSeq`.
+
+The writer does not emit `p:bldP` for grouped content or pictures. Microsoft
+defines `p:bldP@spid` for a text-bearing `p:sp`; using it for `p:grpSp` or
+`p:pic` creates an invalid build reference. Package validation still accepts a
+valid source `p:bldP` that targets a text-bearing shape.
+
+Direct-PPTX preserve mode also tolerates an unchanged legacy `p:bldP` that
+targets an existing group/picture. Earlier PPT Master exports wrote this form;
+the direct routes fingerprint and preserve it instead of blocking those decks.
+New generated output never writes it, and generated-package validation remains
+strict.
+
+`entrance_appear` is the visibility-flip exception: its `p:set` behavior is
+always 1ms. The configured positive duration remains the row's scheduling span
+used when computing the next `after-previous` offset; read-back verifies the
+1ms behavior and the resulting timeline offset separately. The compatibility
+inputs `appear` and `cut` normalize to this canonical preset.
+
+Other native presets with a
+finite duration scale every finite behavior duration and start delay
+proportionally, preserving multi-step timing such as bounce and teeter.
+PowerPoint-authored instantaneous emphasis presets keep their `indefinite`
+behavior duration; their configured duration remains the scheduling span for
+the next `after-previous` row.
+
+---
+
+## 6. Validation and Read-Back
+
+Before export, `animation_config.py validate` uses the writer's effect-behavior
+test for `bounce_end` and resolves declared sound paths against the project
+root. Missing paths, non-files, and unsupported audio extensions fail this
+project-level preflight; field-only validation remains filesystem-independent.
+
+Generated export reads every slide back before packaging and compares each
+requested row with the serialized result:
+
+- row count and row order, including stable repeated-target rows;
+- trigger, optional trigger shape, and shape target;
+- resolved effect key, preset class, filter, `presetID`, and `presetSubtype`;
+- exact effect options, repeat/reverse/rewind/acceleration/bounce/restart
+  semantics, completion behavior, sound relationship, and playback span;
+- native behavior-tree signature, serialized behavior duration, and computed
+  timeline offset (`entrance_appear` and instantaneous native presets use the
+  exceptions above).
+

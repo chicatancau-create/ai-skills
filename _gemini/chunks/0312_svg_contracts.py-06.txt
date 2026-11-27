@@ -1,0 +1,103 @@
+            f'{property_name}="{normalized}". No change is required '
+            "for export."
+        )
+    result['warnings'].extend(sorted(fidelity_warnings))
+
+
+def check_authoring_property_contract(
+    root: ET.Element,
+    result: Dict,
+) -> None:
+    """Validate inline CSS and attributes against the authoring surface."""
+    errors: set[str] = set()
+    validated_value_properties = set(_OPACITY_PROPERTIES or ())
+    validated_value_properties.update(_PAINT_PROPERTIES or ())
+    for elem in root.iter():
+        label = _element_label(elem)
+        for fragment in (elem.get('style') or '').split(';'):
+            fragment = fragment.strip()
+            if not fragment:
+                continue
+            if ':' not in fragment:
+                if fragment.lower() not in validated_value_properties:
+                    errors.add(
+                        f"{label} has malformed inline style declaration "
+                        f"{fragment!r}"
+                    )
+                continue
+            name, value = fragment.split(':', 1)
+            name = name.strip().lower()
+            value = value.strip()
+            if not name or not value:
+                if name not in validated_value_properties:
+                    errors.add(
+                        f"{label} has malformed inline style declaration "
+                        f"{fragment!r}"
+                    )
+                continue
+            if name in _BAKE_REQUIRED_VISUAL_PROPERTIES:
+                errors.add(
+                    f"{label} uses Bake-required visual property {name!r}; "
+                    "bake the effect or rebuild it with supported geometry"
+                )
+            elif (
+                name not in _SUPPORTED_INLINE_STYLE_PROPERTIES
+                and name not in _SHARED_FAIL_CLOSED_STYLE_PROPERTIES
+            ):
+                errors.add(
+                    f"{label} uses unsupported inline style property {name!r}; "
+                    "native PPTX export would ignore it"
+                )
+            if '!important' in value.lower():
+                errors.add(
+                    f"{label} inline style property {name!r} cannot use !important"
+                )
+
+        for attr_name in elem.attrib:
+            local_attr = attr_name.rsplit('}', 1)[-1]
+            if local_attr in _BAKE_REQUIRED_VISUAL_PROPERTIES:
+                errors.add(
+                    f"{label} uses Bake-required visual attribute {local_attr!r}; "
+                    "bake the effect or rebuild it with supported geometry"
+                )
+
+    result['errors'].extend(sorted(errors))
+
+
+def check_text_property_contract(
+    root: ET.Element,
+    result: Dict,
+) -> None:
+    """Validate text property names and values with the export contract."""
+    if _project_text_property_diagnostics is None:
+        result['warnings'].append(
+            "Unable to import the shared text-property validator; native "
+            "export will still validate text properties."
+        )
+        return
+
+    errors: set[str] = set()
+    recommendations: Counter[tuple[str, str, str]] = Counter()
+    examples: Dict[tuple[str, str, str], List[str]] = defaultdict(list)
+    for diagnostic in _project_text_property_diagnostics(root):
+        if diagnostic.severity == 'error':
+            errors.add(diagnostic.message)
+            continue
+        if diagnostic.canonical is None:
+            continue
+        key = (
+            diagnostic.name,
+            diagnostic.raw,
+            diagnostic.canonical,
+        )
+        recommendations[key] += 1
+        if (
+            diagnostic.label not in examples[key]
+            and len(examples[key]) < 3
+        ):
+            examples[key].append(diagnostic.label)
+
+    result['errors'].extend(sorted(errors))
+    for (name, raw, canonical), count in sorted(recommendations.items()):
+        shown_examples = ', '.join(examples[(name, raw, canonical)])
+        result['warnings'].append(

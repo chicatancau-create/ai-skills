@@ -1,0 +1,116 @@
+        raise ValueError(
+            f"Authoring manifest not found: {manifest_path}"
+        ) from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"Cannot decode authoring manifest {manifest_path}: {exc}"
+        ) from exc
+    if not isinstance(manifest, dict) or manifest.get("schema") != AUTHORING_SCHEMA:
+        raise ValueError(
+            f"Unsupported authoring manifest schema in {manifest_path}"
+        )
+    documents = manifest.get("documents")
+    if not isinstance(documents, list):
+        raise ValueError(
+            f"Authoring manifest documents must be an array: {manifest_path}"
+        )
+
+    names: list[str] = []
+    for index, document in enumerate(documents):
+        if not isinstance(document, dict):
+            raise ValueError(
+                f"Authoring manifest documents[{index}] must be an object"
+            )
+        name = document.get("authoring")
+        relative = Path(name) if isinstance(name, str) else Path()
+        if (
+            not isinstance(name, str)
+            or not name
+            or relative.is_absolute()
+            or any(part in {"", ".", ".."} for part in relative.parts)
+            or relative.suffix.lower() != ".svg"
+        ):
+            raise ValueError(
+                f"Authoring manifest documents[{index}].authoring is invalid"
+            )
+        names.append(name)
+    if len(names) != len(set(names)):
+        raise ValueError("Authoring manifest contains duplicate document names")
+
+    from pptx_workspace import ROUNDTRIP_PAGE_PLAN_PATH
+
+    project_path = authoring_dir.parent
+    if (project_path / ROUNDTRIP_PAGE_PLAN_PATH).exists():
+        from authoring_roundtrip import (
+            AuthoringRoundtripError,
+            _load_documents,
+            _load_page_plan,
+        )
+
+        try:
+            _, _, roundtrip_documents, _, _ = _load_documents(
+                project_path,
+                authoring_dir,
+            )
+            pages, _ = _load_page_plan(
+                project_path,
+                authoring_dir,
+                roundtrip_documents,
+            )
+        except AuthoringRoundtripError as exc:
+            raise ValueError(
+                f"Cannot build page-plan-aware authoring summary: {exc}"
+            ) from exc
+        source_slides = {
+            name: document.source_slide
+            for name, document in roundtrip_documents.items()
+        }
+        source_slides.update({
+            page.svg_name: page.source_slide
+            for page in pages
+        })
+        return manifest, sorted(source_slides), source_slides
+
+    actual_names = sorted(
+        path.relative_to(authoring_dir).as_posix()
+        for path in authoring_dir.rglob("*.svg")
+        if path.is_file()
+    )
+    if sorted(names) != actual_names:
+        raise ValueError(
+            "Authoring manifest/file roster differs while building summary"
+        )
+    return manifest, sorted(names), None
+
+
+def _authoring_summary_bytes(authoring_dir: Path) -> bytes:
+    (
+        manifest,
+        document_names,
+        source_slides,
+    ) = _load_authoring_summary_manifest(authoring_dir)
+    documents = [
+        _authoring_summary_document(
+            authoring_dir / name,
+            name,
+            source_slide=(
+                source_slides[name]
+                if source_slides is not None
+                else None
+            ),
+        )
+        for name in document_names
+    ]
+    total_icon_assets = {
+        icon_name
+        for document in documents
+        for icon_name in document["icon_refs"]
+    }
+    totals = {
+        "svg_bytes": sum(int(document["bytes"]) for document in documents),
+        "elements": sum(int(document["elements"]) for document in documents),
+        "top_level_elements": sum(
+            int(document["top_level_elements"])
+            for document in documents
+        ),
+        "drawables": sum(int(document["drawables"]) for document in documents),

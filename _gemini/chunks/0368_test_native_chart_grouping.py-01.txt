@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+"""Regression tests for native chart companion groups and animation targets."""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import random
+import sys
+import unittest
+from pathlib import Path
+from xml.etree import ElementTree as ET
+
+
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from pptx_animations import create_sequence_timing_xml  # noqa: E402
+from svg_to_pptx.drawingml.context import ConvertContext  # noqa: E402
+from svg_to_pptx.drawingml.converter import convert_element  # noqa: E402
+from svg_to_pptx.native_objects import stamp_native_fallback_baseline  # noqa: E402
+from svg_to_pptx.pptx_package.builder import _build_sequence_targets  # noqa: E402
+
+
+NS = {
+    "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+    "c": "http://schemas.openxmlformats.org/drawingml/2006/chart",
+    "cx": "http://schemas.microsoft.com/office/drawing/2014/chartex",
+    "p": "http://schemas.openxmlformats.org/presentationml/2006/main",
+    "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+}
+SVG_NS = "http://www.w3.org/2000/svg"
+EMU_PER_PX = 9525
+
+
+def _payload(**extra: object) -> dict:
+    return {
+        "type": "column",
+        "x": 100, "y": 80, "width": 400, "height": 240,
+        "categories": ["A", "B"],
+        "series": [{"name": "S", "values": [1, 2]}],
+        **extra,
+    }
+
+
+def _marker(payload: dict, kind: str = "chart", **attrs: str) -> ET.Element:
+    elem = ET.Element(f"{{{SVG_NS}}}g", {
+        "id": "sales-chart",
+        "data-pptx-replace-with": kind,
+        "data-pptx-native-authority": "json",
+        **attrs,
+    })
+    ET.SubElement(elem, f"{{{SVG_NS}}}metadata", {
+        "type": "application/json",
+    }).text = json.dumps(payload)
+    ET.SubElement(elem, f"{{{SVG_NS}}}rect", {
+        "x": "100", "y": "80", "width": "400", "height": "240", "fill": "#123456",
+    })
+    ET.SubElement(elem, f"{{{SVG_NS}}}text", {
+        "x": "100", "y": "350", "font-size": "16",
+    }).text = "Fallback label"
+    return elem
+
+
+def _parse(xml: str) -> ET.Element:
+    namespaces = " ".join(f'xmlns:{key}="{value}"' for key, value in NS.items())
+    return ET.fromstring(f"<root {namespaces}>{xml}</root>")
+
+
+def _shape_id(shape: ET.Element) -> int:
+    return int(shape.find(".//p:cNvPr", NS).get("id"))
+
+
+def _box(shape: ET.Element, path: str) -> tuple[int, int, int, int]:
+    xfrm = shape.find(path, NS)
+    off = xfrm.find("a:off", NS)
+    ext = xfrm.find("a:ext", NS)
+    x, y = int(off.get("x")), int(off.get("y"))
+    return x, y, x + int(ext.get("cx")), y + int(ext.get("cy"))
+
+
+class NativeChartGroupingTests(unittest.TestCase):
+    def _convert(self, elem: ET.Element, **options: object) -> tuple:
+        ctx = ConvertContext(native_objects_enabled=True, trace_events=[], **options)
+        result = convert_element(elem, ctx)
+        self.assertIsNotNone(result)
+        return result, _parse(result.xml), ctx
+
+    def _assert_group(self, result, root: ET.Element, ctx: ConvertContext) -> ET.Element:
+        self.assertEqual(len(root), 1, "replacement must be one slide object")
+        group = root[0]
+        self.assertEqual(group.tag, f"{{{NS['p']}}}grpSp")
+        frame = group.find("p:graphicFrame", NS)
+        self.assertIsNotNone(frame)
+        labels = group.findall("p:sp", NS)
+        self.assertTrue(labels)
+        child_bounds = [_box(frame, "p:xfrm")]
+        child_bounds.extend(_box(label, "p:spPr/a:xfrm") for label in labels)
+        expected = (
+            min(box[0] for box in child_bounds),
+            min(box[1] for box in child_bounds),
+            max(box[2] for box in child_bounds),
+            max(box[3] for box in child_bounds),
+        )
+        self.assertEqual(result.bounds_emu, expected)
+        self.assertEqual(_box(group, "p:grpSpPr/a:xfrm"), expected)
+        xfrm = group.find("p:grpSpPr/a:xfrm", NS)

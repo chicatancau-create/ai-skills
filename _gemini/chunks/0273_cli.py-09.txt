@@ -1,0 +1,90 @@
+                        f"{item}: expanded directory into {len(directory_files)} file(s)"
+                    )
+                else:
+                    summary["skipped"].append(f"{item}: directory contains no files")
+                continue
+            expanded_items.append(item)
+
+        explicit_markdown_stems = {
+            Path(item).stem
+            for item in expanded_items
+            if not is_url(item)
+            and Path(item).exists()
+            and Path(item).is_file()
+            and Path(item).suffix.lower() in {".md", ".markdown"}
+        }
+
+        for item in expanded_items:
+            if is_url(item):
+                markdown_path = self._ensure_unique_path(
+                    sources_dir / f"{derive_url_basename(item)}.md"
+                )
+                try:
+                    self._import_url(item, markdown_path)
+                except Exception as exc:  # pragma: no cover - summary path
+                    archived = self._archive_url_record(sources_dir, item)
+                    summary["url_records"].append(str(archived))
+                    summary["skipped"].append(f"{item}: {exc}")
+                    continue
+
+                if not self._is_valid_imported_url_markdown(markdown_path):
+                    markdown_path.unlink(missing_ok=True)
+                    archived = self._archive_url_record(sources_dir, item)
+                    summary["url_records"].append(str(archived))
+                    summary["skipped"].append(f"{item}: URL conversion produced no usable Markdown")
+                    continue
+
+                summary["markdown"].append(str(markdown_path))
+                if propagate_images:
+                    self._propagate_companion_image_assets(markdown_path, project_dir)
+                continue
+
+            source_path = Path(item)
+            if not source_path.exists():
+                moved_home = next(
+                    (
+                        moved
+                        for origin, moved in moved_web_sources.items()
+                        if is_within_path(source_path, origin)
+                    ),
+                    None,
+                )
+                if moved_home is not None:
+                    summary["notes"].append(
+                        f"{item}: already imported with its research pair under {moved_home}"
+                    )
+                else:
+                    summary["skipped"].append(f"{item}: path not found")
+                continue
+            if source_path.is_dir():
+                summary["skipped"].append(f"{item}: directories are not supported")
+                continue
+
+            inside_projects = is_within_path(source_path, PROJECTS_ROOT)
+            # A file inside another project's tree (projects/<other>/...) is
+            # that project's material: taking it by default emptied a finished
+            # project's images/ once. Copy unless --move is explicit.
+            inside_other_project = (
+                inside_projects
+                and not is_within_path(source_path, project_dir.resolve())
+                and source_path.resolve().parent != PROJECTS_ROOT.resolve()
+                and _is_project_tree(source_path)
+            )
+            if copy:
+                effective_move = False
+            elif inside_other_project and not move:
+                effective_move = False
+                print(
+                    f"note: {source_path} belongs to another project; copied "
+                    f"(not moved). Pass --move to take it out of that project.",
+                    file=sys.stderr,
+                )
+            elif inside_projects:
+                effective_move = True
+            else:
+                effective_move = False
+            if move and not inside_projects:
+                print(
+                    f"note: {source_path} is outside {PROJECTS_ROOT}; copied "
+                    f"(not moved). Only sources under projects/ may be moved.",
+                    file=sys.stderr,

@@ -1,0 +1,113 @@
+    """Radar chart data point"""
+    index: int
+    label: str
+    value: float
+    percentage: float  # Percentage relative to max value
+    angle: float       # Angle (degrees)
+    x: float           # X relative to center
+    y: float           # Y relative to center
+    abs_x: float       # Absolute X coordinate
+    abs_y: float       # Absolute Y coordinate
+    label_x: float     # Label X position
+    label_y: float     # Label Y position
+
+
+class RadarChartCalculator:
+    """Radar chart calculator"""
+
+    def __init__(self, center: Tuple[float, float] = (640, 400), radius: float = 200):
+        self.cx, self.cy = center
+        self.radius = radius
+
+    def calculate(self, data: Dict[str, float],
+                  max_value: Optional[float] = None,
+                  start_angle: float = -90) -> List[RadarPoint]:
+        """
+        Calculate radar chart vertex coordinates
+
+        Args:
+            data: Data dictionary {dimension_name: value}
+            max_value: Maximum value (for normalization); uses data maximum if None
+            start_angle: Start angle (degrees, -90 means starting from 12 o'clock)
+        """
+        labels = list(data.keys())
+        values = list(data.values())
+        n = len(labels)
+
+        if n == 0:
+            return []
+
+        if max_value is None:
+            max_value = max(values)
+
+        angle_step = 360 / n
+        results = []
+
+        for i, (label, value) in enumerate(zip(labels, values)):
+            angle = start_angle + i * angle_step
+            rad = math.radians(angle)
+
+            # Calculate normalized radius
+            percentage = (value / max_value * 100) if max_value > 0 else 0
+            point_radius = self.radius * (value / max_value) if max_value > 0 else 0
+
+            # Calculate coordinates
+            x = point_radius * math.cos(rad)
+            y = point_radius * math.sin(rad)
+
+            # Label position (outside the outermost ring)
+            label_distance = self.radius + 30
+            label_x = self.cx + label_distance * math.cos(rad)
+            label_y = self.cy + label_distance * math.sin(rad)
+
+            results.append(RadarPoint(
+                index=i + 1,
+                label=label,
+                value=value,
+                percentage=round(percentage, 1),
+                angle=round(angle, 1),
+                x=round(x, 2),
+                y=round(y, 2),
+                abs_x=round(self.cx + x, 2),
+                abs_y=round(self.cy + y, 2),
+                label_x=round(label_x, 1),
+                label_y=round(label_y, 1)
+            ))
+
+        return results
+
+    def calculate_grid(self, levels: int = 5) -> List[List[Tuple[float, float]]]:
+        """Calculate grid layer coordinates (for drawing background polygons)"""
+        n = 6  # Assume 6 dimensions
+        grids = []
+
+        for level in range(1, levels + 1):
+            level_radius = self.radius * level / levels
+            points = []
+
+            angle_step = 360 / n
+            for i in range(n):
+                angle = -90 + i * angle_step
+                rad = math.radians(angle)
+                x = level_radius * math.cos(rad)
+                y = level_radius * math.sin(rad)
+                points.append((round(x, 2), round(y, 2)))
+
+            grids.append(points)
+
+        return grids
+
+    def format_table(self, points: List[RadarPoint]) -> str:
+        """Format as table output"""
+        lines = []
+        lines.append(f"Center: ({self.cx}, {self.cy}) | Radius: {self.radius}")
+        lines.append("")
+        lines.append("Index Dimension     Value     Pct     Angle      X        Y      Abs_X    Abs_Y")
+        lines.append("----  ----------  ------  --------  ------  -------  -------  -------  -------")
+
+        for p in points:
+            lines.append(
+                f"{p.index:4d}  {p.label:<10s}  {p.value:>6.1f}  {p.percentage:>6.1f}%  "
+                f"{p.angle:>6.1f}  {p.x:>7.2f}  {p.y:>7.2f}  {p.abs_x:>7.1f}  {p.abs_y:>7.1f}"
+            )
+

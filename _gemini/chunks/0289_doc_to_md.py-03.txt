@@ -1,0 +1,116 @@
+            "pixel_ratio": round(ratio, 6) if ratio else None,
+            "display_ratio": round(ratio, 6) if ratio else None,
+            "occurrences": occurrences,
+            "usage_count": len(occurrences) if occurrences else 1,
+        }
+        manifest.append(entry)
+
+    if manifest:
+        (media_dir / "image_manifest.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+
+def _local_name(elem: ET.Element) -> str:
+    """Return an XML element local name without its namespace."""
+    return elem.tag.rsplit("}", 1)[-1]
+
+
+def _relationship_target_path(target: str) -> str:
+    """Normalize a Word relationship target to a DOCX zip path."""
+    target = unquote(target)
+    if target.startswith("/"):
+        normalized = posixpath.normpath(target.lstrip("/"))
+    else:
+        normalized = posixpath.normpath(posixpath.join("word", target))
+    return normalized
+
+
+def _zip_sha256_for_target(media_hashes: dict[str, str], target: str) -> str | None:
+    """Return the SHA-256 digest for an embedded DOCX part target."""
+    if not target:
+        return None
+    return media_hashes.get(_relationship_target_path(target))
+
+
+def _length_to_emu(value: str) -> int | None:
+    """Parse a VML CSS length into EMU."""
+    match = re.match(r"^\s*([\d.]+)\s*([a-zA-Z]*)\s*$", value)
+    if not match:
+        return None
+    number = float(match.group(1))
+    unit = (match.group(2) or "pt").lower()
+    factors = {
+        "in": EMU_PER_INCH,
+        "cm": EMU_PER_INCH / 2.54,
+        "mm": EMU_PER_INCH / 25.4,
+        "pt": EMU_PER_INCH / 72,
+        "px": EMU_PER_INCH / 96,
+    }
+    factor = factors.get(unit)
+    if factor is None:
+        return None
+    return int(round(number * factor))
+
+
+def _vml_display_size_emu(shape: ET.Element | None) -> tuple[int, int]:
+    """Read VML shape width/height from its style attribute."""
+    if shape is None:
+        return 0, 0
+    style = shape.attrib.get("style", "")
+    values: dict[str, str] = {}
+    for part in style.split(";"):
+        if ":" not in part:
+            continue
+        key, value = part.split(":", 1)
+        values[key.strip().lower()] = value.strip()
+    width = _length_to_emu(values.get("width", "")) or 0
+    height = _length_to_emu(values.get("height", "")) or 0
+    return width, height
+
+
+def _occurrence_entry(
+    *,
+    rel_id: str | None,
+    target: str,
+    width_emu: int,
+    height_emu: int,
+    source_sha256: str | None,
+    source_kind: str,
+) -> dict[str, object]:
+    """Build one image metadata occurrence row."""
+    display_ratio = (
+        width_emu / height_emu
+        if width_emu > 0 and height_emu > 0
+        else None
+    )
+    return {
+        "relationship_id": rel_id,
+        "source_target": target,
+        "source_path": _relationship_target_path(target) if target else "",
+        "source_ext": _normalize_ext(Path(target).suffix),
+        "source_sha256": source_sha256,
+        "source_kind": source_kind,
+        "display_width_emu": width_emu,
+        "display_height_emu": height_emu,
+        "display_width_in": round(width_emu / EMU_PER_INCH, 4) if width_emu else None,
+        "display_height_in": round(height_emu / EMU_PER_INCH, 4) if height_emu else None,
+        "display_ratio": round(display_ratio, 6) if display_ratio else None,
+    }
+
+
+def _docx_image_occurrences(input_file: Path) -> list[dict[str, object]]:
+    """Read DOCX drawing order and Word display dimensions."""
+    try:
+        with zipfile.ZipFile(input_file) as docx:
+            rels_root = ET.fromstring(docx.read("word/_rels/document.xml.rels"))
+            doc_root = ET.fromstring(docx.read("word/document.xml"))
+            media_hashes = {
+                name: hashlib.sha256(docx.read(name)).hexdigest()
+                for name in docx.namelist()
+                if name.startswith("word/media/")
+            }
+    except (KeyError, ET.ParseError, zipfile.BadZipFile, OSError):
+        return []
+

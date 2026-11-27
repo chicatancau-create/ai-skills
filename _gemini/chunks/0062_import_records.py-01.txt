@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+"""
+从 CSV / JSON 批量导入记录到钉钉 AI 表格（新版 schema）
+
+用法:
+    python import_records.py <baseId> <tableId> data.csv [batch_size]
+    python import_records.py <baseId> <tableId> data.json [batch_size]
+
+说明：
+- CSV 表头默认视为 fieldId
+- JSON 支持两种格式：
+  1. [{"cells": {"fldxxx": "value"}}, ...]
+  2. [{"fldxxx": "value"}, ...]  # 会自动包装成 cells
+"""
+
+import sys
+
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+import csv
+import json
+import subprocess
+import os
+import re
+from pathlib import Path
+from typing import Union, List, Dict, Any, Optional, Tuple
+
+JsonData = Union[List[Any], Dict[str, Any]]
+RecordDict = Dict[str, str]
+
+MAX_FILE_SIZE = 50 * 1024 * 1024
+ALLOWED_CSV_EXTENSIONS = ['.csv']
+ALLOWED_JSON_EXTENSIONS = ['.json']
+RESOURCE_ID_PATTERN = re.compile(r'^[A-Za-z0-9_-]{8,128}$')
+MAX_RECORDS_PER_BATCH = 100
+DEFAULT_BATCH_SIZE = 50
+
+
+def resolve_safe_path(
+    path: str, allowed_root: Optional[str] = None
+) -> Path:
+    if allowed_root is None:
+        allowed_root = os.environ.get('OPENCLAW_WORKSPACE', os.getcwd())
+    allowed_root = Path(allowed_root).resolve()
+    target_path = (
+        Path(path).resolve()
+        if Path(path).is_absolute()
+        else (Path.cwd() / path).resolve()
+    )
+    try:
+        target_path.relative_to(allowed_root)
+        return target_path
+    except ValueError:
+        raise ValueError(
+            f"路径超出允许范围：{path}\n"
+            f"目标路径：{target_path}\n"
+            f"允许根目录：{allowed_root}\n"
+            f"提示：设置 OPENCLAW_WORKSPACE 环境变量或确保文件在工作目录内"
+        )
+
+
+def validate_resource_id(resource_id: str) -> bool:
+    return bool(
+        resource_id and RESOURCE_ID_PATTERN.match(resource_id.strip())
+    )
+
+
+def validate_file_extension(
+    filename: str, allowed_extensions: list
+) -> bool:
+    return any(filename.lower().endswith(ext) for ext in allowed_extensions)
+
+
+def safe_csv_load(
+    file_path: Path, max_size: int = MAX_FILE_SIZE
+) -> List[RecordDict]:
+    file_size = file_path.stat().st_size
+    if file_size > max_size:
+        raise ValueError(
+            f"文件过大：{file_size:,} 字节 (限制：{max_size:,} 字节)"
+        )
+    with open(file_path, 'r', encoding='utf-8', newline='') as f:
+        return list(csv.DictReader(f))
+
+
+def safe_json_load(
+    file_path: Path, max_size: int = MAX_FILE_SIZE
+) -> JsonData:
+    file_size = file_path.stat().st_size
+    if file_size > max_size:
+        raise ValueError(
+            f"文件过大：{file_size:,} 字节 (限制：{max_size:,} 字节)"
+        )
+    with open(file_path, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+
+def sanitize_record_value(
+    value: Any,
+) -> Optional[Union[str, int, float, bool, list, dict]]:
+    if value is None:
+        return None
+    if isinstance(value, (bool, int, float, list, dict)):
+        return value
+    if not isinstance(value, str):
+        return value
+    if not value.strip():
+        return None
+
+    value = value.strip()
+    if value.lower() == 'true':
+        return True
+    if value.lower() == 'false':
+        return False
+
+    try:
+        if '.' in value:
+            return float(value)
+        return int(value)
+    except ValueError:
+        return value
+
+
+def normalize_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    if 'cells' in record and isinstance(record['cells'], dict):
+        cells = record['cells']
+    else:
+        cells = record
+    normalized = {}
+    for key, value in cells.items():
+        sanitized = sanitize_record_value(value)
+        if sanitized is not None:
+            normalized[key] = sanitized
+    return {'cells': normalized}
+
+
+def validate_record(
+    record: Dict[str, Any], headers: List[str]
+) -> Tuple[bool, str]:
+    if not isinstance(record, dict):
+        return False, '记录必须是对象'
+    normalized = normalize_record(record)
+    cells = normalized.get('cells', {})
+    if not cells or not isinstance(cells, dict):

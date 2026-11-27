@@ -1,0 +1,102 @@
+                            filename = os.path.basename(local_path)
+                            counter += 1
+                        with open(local_path, "wb") as f:
+                            f.write(resp.content)
+                else:
+                    local_path = os.path.join(image_dir, filename)
+
+                    # Avoid accidental overwrites if filenames collide
+                    counter = 1
+                    stem, ext = os.path.splitext(filename)
+                    while os.path.exists(local_path):
+                        local_path = os.path.join(
+                            image_dir, f"{stem}_{counter}{ext}")
+                        filename = os.path.basename(local_path)
+                        counter += 1
+
+                    with open(local_path, "wb") as f:
+                        f.write(resp.content)
+                downloaded[abs_url] = filename
+                saved_name = filename
+                manifest_by_filename[saved_name] = {
+                    "index": len(manifest_by_filename) + 1,
+                    "filename": saved_name,
+                    "original_filename": converted_from or saved_name,
+                    "asset_kind": "bitmap",
+                    "svg_renderable": True,
+                    "pptx_native_supported": True,
+                    "source_kind": "web_image",
+                    "source_url": abs_url,
+                    "source_page_url": page_url,
+                    "content_type": content_type.split(";")[0] if content_type else "",
+                    "occurrences": [],
+                }
+                saved += 1
+            except _UnsafeUrlError:
+                raise
+            except Exception as e:
+                print(f"   [WARN] Skip image {abs_url}: {e}")
+                continue
+
+        rel_path = os.path.join(
+            rel_prefix, saved_name) if rel_prefix else saved_name
+        img["src"] = rel_path
+        manifest_item = manifest_by_filename.get(saved_name)
+        if manifest_item is not None:
+            occurrences = manifest_item.setdefault("occurrences", [])
+            if isinstance(occurrences, list):
+                occurrences.append({
+                    "occurrence_index": idx + 1,
+                    "source_url": abs_url,
+                    "alt_text": img.get("alt", ""),
+                })
+                manifest_item["usage_count"] = len(occurrences)
+
+    if manifest_by_filename:
+        manifest_path = os.path.join(image_dir, "image_manifest.json")
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(
+                list(manifest_by_filename.values()),
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+            f.write("\n")
+
+    return saved
+
+
+def extract_metadata(soup: BeautifulSoup, url: str) -> dict[str, str]:
+    """Extract page metadata such as title, date, description, and author."""
+
+    # 1. Title
+    title_tag = soup.title
+    title = clean_title(title_tag.string if title_tag else "")
+
+    # 2. Meta tags
+    metas = {}
+    for meta in soup.find_all("meta"):
+        name = meta.get("name") or meta.get("property")
+        content = meta.get("content")
+        if name and content:
+            metas[name.lower()] = content.strip()
+
+    # 3. Date Extraction Strategies
+    date = (
+        metas.get("article:published_time") or
+        metas.get("og:published_time") or
+        metas.get("pubdate") or
+        metas.get("publishdate") or
+        metas.get("date")
+    )
+
+    if not date:
+        # Try matching date patterns in the text
+        text_content = soup.get_text()
+        date_patterns = [
+            r"发布[时日]间[：:]\s*(\d{4}[-\/年]\d{1,2}[-\/月]\d{1,2}[日]?)",
+            r"日期[：:]\s*(\d{4}[-\/年]\d{1,2}[-\/月]\d{1,2}[日]?)",
+            r"(\d{4}[-\/年]\d{1,2}[-\/月]\d{1,2}[日]?)\s*(?:发布|来源)",
+            r"时间[：:]\s*(\d{4}[-\/]\d{1,2}[-\/]\d{1,2})"
+        ]
+        for pattern in date_patterns:

@@ -1,0 +1,105 @@
+    recorded pid, then clears the lock. A no-op when nothing is running.
+    """
+    existing = _read_lock(lock_file)
+    if not existing:
+        logger.info('no confirm server running — nothing to stop')
+        return 0
+    pid = _lock_pid(existing)
+    port = existing.get('port')
+    if not _process_alive(pid):
+        _clear_lock(lock_file)
+        logger.info('confirm server already stopped; cleared stale lock')
+        return 0
+    # Graceful first: the server flushes and releases its own lock.
+    if port:
+        try:
+            req = urllib.request.Request(
+                f'http://127.0.0.1:{port}/api/shutdown',
+                data=b'{"reason": "step4-cleanup"}',
+                headers={'Content-Type': 'application/json'},
+                method='POST',
+            )
+            urllib.request.urlopen(req, timeout=3)
+        except OSError:
+            pass  # server may already be exiting; fall through to the kill path
+    for _ in range(20):  # up to ~2s for the graceful exit to land
+        if not _process_alive(pid):
+            break
+        time.sleep(0.1)
+    if _process_alive(pid):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    _clear_lock(lock_file)
+    logger.info('confirm server stopped (pid=%s)', pid)
+    return 0
+
+
+def _build_catalogs() -> dict:
+    """Return the static catalog set with the canvas list synced live from
+    ``config.CANVAS_FORMATS`` — the single source of truth for canvas formats —
+    so the confirm page can never drift from the pipeline's real formats. The
+    set of formats and their dimensions come from config; four-language labels
+    and use text are kept from catalogs.json (with a plain fallback for new ids).
+    """
+    data = json.loads(_CATALOGS_PATH.read_text(encoding='utf-8'))
+    try:
+        import config  # scripts/ is on sys.path (injected at import time)
+        formats = config.CANVAS_FORMATS
+    except (ImportError, AttributeError):  # missing module/attr → static canvas
+        return data
+    existing = {
+        c.get('id'): c
+        for c in data.get('canvas', [])
+        if isinstance(c, dict) and c.get('id')
+    }
+    canvas = []
+    for cid, fmt in formats.items():
+        entry = dict(existing.get(cid, {}))
+        entry['id'] = cid
+        entry['dim'] = fmt.get('dimensions', entry.get('dim', ''))
+        if not entry.get('label'):
+            name = fmt.get('name', cid)
+            entry['label'] = name
+            entry.setdefault('label_zh', name)
+            entry.setdefault('label_en', name)
+        if not entry.get('use_en') and fmt.get('use_case'):
+            entry['use_en'] = fmt['use_case']
+        canvas.append(entry)
+    data['canvas'] = canvas
+    return data
+
+
+def _icon_preview_svg(library: str, name: str) -> str:
+    """Read a trusted sample SVG from the bundled icon templates."""
+    icon_path = _ICON_LIBRARY_DIR / library / f'{name}.svg'
+    raw = icon_path.read_text(encoding='utf-8')
+    raw = re.sub(r'<\?xml[^>]*>\s*', '', raw)
+    raw = re.sub(r'<!--.*?-->\s*', '', raw, flags=re.S)
+    return raw.strip()
+
+
+def _build_icon_previews() -> dict:
+    previews = {}
+    for library, names in _ICON_PREVIEW_SAMPLES.items():
+        items = []
+        for name in names:
+            try:
+                items.append({'name': name, 'svg': _icon_preview_svg(library, name)})
+            except OSError as exc:
+                logger.warning('icon preview sample missing: %s/%s (%s)', library, name, exc)
+        previews[library] = items
+    return previews
+
+
+def _ai_comparison_items(kind: str) -> list[dict[str, str]]:
+    manifest = _AI_IMAGE_COMPARISON_DIR / kind / '_manifest.json'
+    if not manifest.exists():
+        return []
+    data = json.loads(manifest.read_text(encoding='utf-8'))
+    items = []
+    for item in data.get('items', []):
+        filename = item.get('filename')
+        if not isinstance(filename, str) or not filename.endswith('.png'):
+            continue

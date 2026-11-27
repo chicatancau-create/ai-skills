@@ -1,0 +1,104 @@
+        )
+        result[section] = copy.deepcopy(section_data)
+    return result
+
+
+def _validated_cell_styles(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    raw_styles = payload.get("cell_styles", {})
+    styles = _require_object(raw_styles, "cell_styles")
+    result: dict[str, dict[str, Any]] = {}
+    for name, raw_style in styles.items():
+        if not isinstance(name, str) or not _STYLE_NAME_RE.fullmatch(name):
+            raise RuntimeError(
+                "Native PPTX table cell style names must use lower-case kebab-case"
+            )
+        style = _require_object(raw_style, f"cell_styles.{name}")
+        _reject_unknown_fields(
+            style,
+            set(_CELL_FORMAT_FIELDS),
+            f"cell_styles.{name}",
+        )
+        result[name] = copy.deepcopy(style)
+    return result
+
+
+def _expand_run(value: Any, run_defaults: dict[str, Any]) -> dict[str, Any]:
+    run = _require_object(value, "run")
+    _reject_unknown_fields(run, _RUN_FIELDS, "run")
+    return _format_layers(run_defaults, run)
+
+
+def _expand_paragraph(
+    value: Any,
+    paragraph_defaults: dict[str, Any],
+    run_defaults: dict[str, Any],
+) -> dict[str, Any]:
+    if isinstance(value, str):
+        paragraph = {"text": value}
+    else:
+        paragraph = _require_object(value, "paragraph")
+        _reject_unknown_fields(paragraph, _PARAGRAPH_FIELDS, "paragraph")
+    expanded = _format_layers(paragraph_defaults, paragraph)
+    if "runs" in expanded:
+        runs = expanded["runs"]
+        if not isinstance(runs, list):
+            raise RuntimeError("Native PPTX table paragraph runs must be a list")
+        expanded["runs"] = [_expand_run(run, run_defaults) for run in runs]
+    return expanded
+
+
+def _expand_cell(
+    value: Any,
+    defaults: dict[str, dict[str, Any]],
+    cell_styles: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    if isinstance(value, dict):
+        cell = copy.deepcopy(value)
+        _reject_unknown_fields(cell, _CELL_FIELDS, "cell")
+    else:
+        cell = {"text": "" if value is None else str(value)}
+
+    style_name = cell.pop("cell_style", None)
+    if style_name is None:
+        style = {}
+    elif not isinstance(style_name, str) or style_name not in cell_styles:
+        raise RuntimeError(
+            f"Native PPTX table cell references unknown cell_style: {style_name!r}"
+        )
+    else:
+        style = cell_styles[style_name]
+
+    expanded = _format_layers(defaults["cell"], style, cell)
+    # A plain-text cell is one run, and a text-only paragraph is one run in
+    # the cell's colour: run defaults reach both through the cell unless the
+    # cell (or its cell_style / cell defaults) already set the field. Runs
+    # spelled out under paragraphs[].runs take the same defaults directly.
+    for field in _PLAIN_TEXT_RUN_FIELDS:
+        if field not in expanded and field in defaults["run"]:
+            expanded[field] = copy.deepcopy(defaults["run"][field])
+    if "paragraphs" in expanded:
+        paragraphs = expanded["paragraphs"]
+        if not isinstance(paragraphs, list):
+            raise RuntimeError("Native PPTX table cell paragraphs must be a list")
+        expanded["paragraphs"] = [
+            _expand_paragraph(
+                paragraph,
+                defaults["paragraph"],
+                defaults["run"],
+            )
+            for paragraph in paragraphs
+        ]
+    return expanded
+
+
+def expand_semantic_table_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Expand semantic-table.v2 defaults and named styles into canonical cells."""
+    source = _require_object(payload, "payload")
+    if source.get("schema") != SEMANTIC_TABLE_SCHEMA:
+        raise RuntimeError(
+            "Native PPTX table metadata requires schema "
+            f"{SEMANTIC_TABLE_SCHEMA!r}"
+        )
+    _reject_unknown_fields(source, _TOP_LEVEL_FIELDS, "payload")
+    style = source.get("style", {})
+    if not isinstance(style, dict):

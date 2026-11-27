@@ -1,0 +1,48 @@
+  登录 POST 通常已经成功，只是那个 SSO 跳转页在内嵌 CEF 里渲染不出来。判据：**关掉白屏（WM_SYSCOMMAND/SC_CLOSE 有效，
+  WM_CLOSE 无效）→ 截主窗口**，若已出现「免责声明·同意/不同意」就是登进去了。别急着重登、更别杀进程重启。
+- **「登录」按钮变暗橙（文字发灰）= 禁用态**，多半是上方账号框被清空（页面滚动/刷新导致预填丢失）。
+  亮红才是可点态。看颜色就能区分，别硬点。
+- 报错码要分开记：**144 小时 = 绑定作废**（见上一节）；**1004「未知错误，稍后重试」= 服务端拒绝**
+  （「正在验证设备信息」是绿勾、卡在「正在解锁」）。1004 常见诱因是账号刚登录/刚绑定尚未生效、或账号触发风控；
+  连续重试会加重风控，隔 12–24 小时再试比连点有效。
+- 「正在解锁」显示 50% 转圈**不是卡死**，但若此时设备已离开 fastboot，工具就会空等到超时再回 1004。
+  进度条跑起来时用 `fastboot devices` + `adb devices` 确认设备还在 fastboot。
+
+## PnP 的 `Status=Unknown` 不等于「在位」
+
+- `Get-PnpDevice` 里 `Status = Unknown` 的条目**可能是历史记录**：同一份列表里明显没插的
+  `REDMI K90 Max` 也是 Unknown。**判在位只有两个硬判据**：`Get-PnpDevice -PresentOnly` 能列出来，
+  或者出现 `Status = OK`。
+- 我曾据一条 `USB\VID_0E8D&PID_0003\...  Status=Unknown` 的 BROM 记录宣布「BROM 进去了」——**是过度断言**。
+  后来 `-PresentOnly` 从来没列出过 0E8D，说明那只是残影。
+
+## MTK BROM 入口与 WinUSB（2026-11-10 实测，未打通）
+
+- **`adb reboot edl` 不可靠**：一次把手机带出 Android 但没枚举、一次干脆当普通重启回到 Android。
+  双音量键三次全部落到 fastboot（`VID_18D1&PID_D00D` 是 Google fastboot 的 ID）。
+  ⇒ 这台 cezanne 很可能把 BROM 入口关掉了，真要进只能拆后盖短接测试点。
+- BROM 若出现，会以 **COM 口（usbser）**形式枚举，`antumbra` **不认 COM 口**（会一直打
+  `Waiting for MTK device` 然后挂住），必须先把 `VID_0E8D&PID_0003` 绑成 **WinUSB**。
+- `wdi-simple.exe -t 0` 报 `libwdi:error [check_dir] Unable to create directory 'usb_driver'` +
+  `Access denied` + `exit=-3`，真因是 **bin 目录里残留了上一次失败留下的 `usb_driver` 目录**；
+  删掉它再跑即 `Installing driver(s)... Success`（`exit=0`）。卸载设备节点前先 `pnputil /export-driver` 备份原 VCOM 驱动。
+- pyusb 在这台机器 `NoBackendError: No backend available`（缺 libusb DLL），所以别用 pyusb 轮询抓 BROM。
+
+## `Xiaomi-MTK-Bootloader-Unlock`（LK 强解）的适配事实
+
+- 该仓库 **`lk-unlock.py` 支持 A-only**：跑完会自己打印 `Cert bypass applied to partition 'lk'`（不是 `lk_a`）。
+  **只有外层 `Unlock-Windows.bat` 把分区名写死成 `lk_a`/`lk_b`**，A-only 机型（如 cezanne，scatter 里只有
+  `lk`/`lk2`，`lk_a` 命中 0）必须先改脚本，否则第一步读 `lk_a` 就失败退出。
+- 它**自带 Restore 脚本，同样写死 `lk_a`/`lk_b` 且要刷 `preloader_backup`**（cezanne 没有这个分区）
+  ⇒ 适配解锁脚本时必须同步适配救砖脚本，否则救援路径是坏的。
+- 收尾必发 `fastboot stage signature.bin` + `fastboot oem unlock`，**双清不可避免**（文档也写明了）。
+- 依赖安装：`cryptography` + `pyasn1` + `liblk`(GitHub 源码)。这台机器上
+  **代理跑 git/uv fetch GitHub 全是 TLS EOF，改 codeload 直连下载 zip 再本地 `uv pip install <dir>` 才成**；
+  PyPI 用清华镜像直连。
+- 离线可行性验证（零风险，推荐先做）：拿固件包里的 `lk.img`（md5 与包内 `md5sum.xml` 一致）直接
+  `lk-unlock.py patch lk.img` —— cezanne 会在偏移 **`0x11ABB0`** 找到小米 RSA-2048 模数并成功打补丁
+  （`cert2 957 -> 1047`，产物 +96 B）。这一步能在不碰手机的前提下判定「这条路对本机通不通」。
+
+相关：[[reference-large-file-download-on-this-box]]、[[reference-windows-window-capture-pixelcheck]]、
+[[reference-uipi-blocks-elevated-target-testing]]、[[feedback-no-unverified-cause-claims]]、
+[[project-k30ultra-root-prep]]

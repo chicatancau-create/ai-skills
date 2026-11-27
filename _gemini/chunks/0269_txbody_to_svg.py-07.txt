@@ -1,0 +1,100 @@
+    list_def_rpr = _child_chain(para_style_chain[1:], "a:defRPr")
+    para.empty_line_font_size_px = _font_size_px(
+        (end_rpr, def_rpr, list_def_rpr) + fallback_run_props,
+        default_font_size_px,
+    )
+
+    def resolved_run(text: str, rpr: ET.Element | None) -> TextRun:
+        return _build_run(
+            text, rpr, end_rpr, palette, theme_fonts,
+            def_rpr=def_rpr,
+            list_def_rpr=list_def_rpr,
+            fallback_run_props=fallback_run_props,
+            default_fill=default_fill,
+            default_font_size_px=default_font_size_px,
+            id_prefix=id_prefix, id_seq=id_seq,
+            hyperlink_resolver=hyperlink_resolver,
+            strict=strict,
+            diagnostic_sink=diagnostic_sink,
+        )
+
+    def append_resolved_text(text: str, rpr: ET.Element | None) -> None:
+        """Preserve literal newlines inside a:t as explicit DrawingML breaks."""
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+        segments = normalized.split("\n")
+        for index, segment in enumerate(segments):
+            if segment or len(segments) == 1:
+                para.runs.append(resolved_run(segment, rpr))
+            if index < len(segments) - 1:
+                line_break = resolved_run("", rpr)
+                line_break.is_break = True
+                para.runs.append(line_break)
+
+    for child in list(p_elem):
+        if not isinstance(child.tag, str):
+            continue
+        local = child.tag.split("}", 1)[-1]
+        if local == "r":
+            rpr = child.find("a:rPr", NS)
+            text_elem = child.find("a:t", NS)
+            text = text_elem.text or "" if text_elem is not None else ""
+            append_resolved_text(text, rpr)
+        elif local == "br":
+            break_rpr = child.find("a:rPr", NS)
+            para.runs.append(TextRun(
+                text="",
+                font_size_px=_font_size_px(
+                    (break_rpr, def_rpr, list_def_rpr, end_rpr)
+                    + fallback_run_props,
+                    default_font_size_px,
+                ),
+                font_family="sans-serif",
+                fill=default_fill,
+                is_break=True,
+            ))
+        elif local == "fld":
+            # Slide SVGs have a concrete page context, so resolve slide-number
+            # fields there. Standalone master/layout renders keep the literal
+            # fallback because one shared part can serve many slide numbers.
+            rpr = child.find("a:rPr", NS)
+            text_elem = child.find("a:t", NS)
+            text = text_elem.text or "" if text_elem is not None else ""
+            field_type = child.attrib.get("type", "").strip().lower()
+            if field_type == "slidenum" and slide_number is not None:
+                text = str(slide_number)
+            if text:
+                append_resolved_text(text, rpr)
+        elif (
+            child.tag
+            == "{http://schemas.microsoft.com/office/drawing/2010/main}m"
+            and inline_formula_resolver is not None
+        ):
+            latex, preview = inline_formula_resolver(child)
+            if preview:
+                formula_rpr = next(
+                    child.iter(f"{{{NS['a']}}}rPr"),
+                    None,
+                )
+                run = resolved_run(preview, formula_rpr)
+                run.formula_latex = latex
+                para.runs.append(run)
+
+    return para
+
+
+def _apply_norm_autofit(
+    body_pr: ET.Element | None,
+    paragraphs: list[TextParagraph],
+) -> None:
+    """Scale runs by the stored shrink-on-overflow result PowerPoint renders with."""
+    autofit = body_pr.find("a:normAutofit", NS) if body_pr is not None else None
+    if autofit is None:
+        return
+
+    def fraction(attr: str, default: float) -> float:
+        try:
+            value = int(autofit.attrib.get(attr, "")) / 100000.0
+        except ValueError:
+            return default
+        return value if 0.0 < value <= 1.0 else default
+

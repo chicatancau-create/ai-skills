@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""Unified PPTX preparation entry point for the /create-template workflow.
+
+Reads OOXML directly via `pptx_to_svg` and writes a reusable reference workspace:
+
+- `analysis/manifest.json` — source of truth for slide size, theme, resources,
+  image inventory, and per-slide / per-layout / per-master metadata
+- `analysis/native_structure.json` + `sources/source.pptx` — source-structure
+  facts and a byte-identical backing package
+- `images/`, `audio/`, `sounds/`, `video/`, and `native-payloads/` — semantic
+  source resources, created only when populated
+- `validation/conversion-report.json` — source-recovery diagnostics emitted
+  with SVG conversion
+- `svg/` — canonical layered template view (every master
+  and layout in the deck rendered once each as `master_*.svg` /
+  `layout_*.svg`, slides contain only their own shapes, and an
+  `inheritance.json` describes the reuse graph)
+- `svg-flat/` — optional verification view (`--inheritance-mode both`): each
+  `slide_NN.svg` is self-contained, so opening one slide shows the full page
+  like PowerPoint would
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import shutil
+import tempfile
+from pathlib import Path
+from xml.etree import ElementTree as ET
+from zipfile import BadZipFile
+
+from console_encoding import configure_utf8_stdio
+from pptx_workspace import (
+    AUTHORING_SVG_DIR,
+    AUTHORING_SVG_FLAT_DIR,
+    CONVERSION_REPORT_PATH,
+    TEMPLATE_MANIFEST_PATH,
+    reject_removed_workspace_layout,
+    template_manifest_path,
+)
+from template_import.manifest import build_manifest
+from template_import.native_structure import (
+    CONTRACT_NAME,
+    SOURCE_TEMPLATE_NAME,
+    write_native_structure_bundle,
+)
+
+configure_utf8_stdio()
+
+_MANIFEST_NAME = TEMPLATE_MANIFEST_PATH.as_posix()
+_CONVERSION_REPORT_NAME = CONVERSION_REPORT_PATH.as_posix()
+
+
+def _project_authoring_directory(
+    staged_dir: Path,
+    *,
+    source_dir: Path,
+    output_dir: Path,
+    projection_kind: str,
+    id_prefix: str,
+    reuse_inventory_path: Path | None = None,
+) -> int:
+    """Create one compact, readable authoring bundle in the transaction."""
+    from extract_svg_assets import extract_directory
+    from svg_authoring_view import project_svg_batch
+
+    source_root = staged_dir / source_dir
+    authoring_root = staged_dir / output_dir
+    sources = sorted(source_root.rglob("*.svg"))
+    if not sources:
+        raise ValueError(f"No SVG files found under {source_root}")
+    mapping = [
+        (source, authoring_root / source.relative_to(source_root))
+        for source in sources
+    ]
+    reports = project_svg_batch(
+        mapping,
+        source_root,
+        authoring_root,
+        force=False,
+        projection_kind=projection_kind,
+        source_proxy_dir=(
+            staged_dir / "images" / "source-object-previews"
+        ),
+    )
+    extract_directory(
+        authoring_root,
+        staged_dir / "icons",
+        "imported",
+        min_decoration_bytes=3000,
+        inplace=True,
+        id_prefix=id_prefix,
+        inventory_path=(
+            staged_dir / f"{output_dir.name}_vector_asset_inventory.json"
+        ),
+        reuse_inventory_path=reuse_inventory_path,
+    )
+    return len(reports)
+
+
+def parse_args() -> argparse.Namespace:
+    """Build the CLI argument parser for the import entry point."""
+    parser = argparse.ArgumentParser(
+        description="Prepare a PPTX reference workspace for /create-template."
+    )
+    parser.add_argument("pptx_file", help="Path to the source .pptx file")
+    parser.add_argument(
+        "-o",
+        "--output",
+        help="Output directory (default: <pptx_stem>_template_import beside the source file)",
+    )
+    parser.add_argument(
+        "--skip-manifest",
+        action="store_true",
+        help=(
+            "Skip metadata, asset inventory, native structure contract, and "
+            "preserved source-package generation"
+        ),
+    )
+    parser.add_argument(
+        "--manifest-only",

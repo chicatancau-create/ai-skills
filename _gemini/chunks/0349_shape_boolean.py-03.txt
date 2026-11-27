@@ -1,0 +1,137 @@
+            + ", ".join(unknown)
+        )
+    normalized: dict[str, str] = {}
+    for name in _STYLE_OVERRIDE_ATTRS:
+        if name not in style:
+            continue
+        value = style[name]
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(
+                f"Shape Boolean style override {name!r} must be a non-empty string"
+            )
+        normalized[name] = value.strip()
+    return normalized
+
+
+def _index_element_ids(
+    root: ET.Element,
+) -> tuple[dict[str, ET.Element], set[str]]:
+    elements: dict[str, ET.Element] = {}
+    duplicates: set[str] = set()
+    for element in root.iter():
+        element_id = element.get("id")
+        if not element_id:
+            continue
+        if element_id in elements:
+            duplicates.add(element_id)
+        else:
+            elements[element_id] = element
+    return elements, duplicates
+
+
+def _validate_result_id_collision(
+    result_id: str,
+    elements_by_id: Mapping[str, ET.Element],
+    source_ids: Sequence[str],
+) -> None:
+    if result_id in elements_by_id and result_id not in source_ids:
+        raise ValueError(
+            f"Shape Boolean result id already exists outside the sources: "
+            f"{result_id!r}"
+        )
+
+
+def _load_pathops() -> Any:
+    try:
+        import pathops
+    except ImportError as exc:
+        raise RuntimeError(
+            "Shape Boolean operations require skia-pathops. Install the "
+            "project requirements, or run: pip install skia-pathops"
+        ) from exc
+    required = (
+        "FillType",
+        "Path",
+        "PathOp",
+        "PathOpsError",
+        "PathVerb",
+        "op",
+        "simplify",
+    )
+    missing = [name for name in required if not hasattr(pathops, name)]
+    if missing:
+        raise RuntimeError(
+            "Installed skia-pathops is incompatible; missing: "
+            + ", ".join(missing)
+        )
+    return pathops
+
+
+def _element_to_pathops(
+    element: ET.Element,
+    parents: Mapping[ET.Element, ET.Element],
+    pathops: Any,
+    *,
+    font_dirs: Sequence[str | Path] = (),
+) -> Any:
+    chain = _element_chain(element, parents)
+    _validate_source_location(element, chain)
+    matrix = _combined_transform(chain)
+    tag = _local_name(element.tag)
+
+    if tag == "g":
+        commands = _compact_preset_commands(element, matrix)
+    elif tag in _BOOLEAN_TAGS:
+        commands = _shape_commands(element)
+        commands = transform_path_commands(commands, matrix)
+    elif tag == "text":
+        from .text_outline import text_element_to_path_commands
+
+        commands = text_element_to_path_commands(
+            element,
+            parents,
+            font_dirs=font_dirs,
+        )
+        commands = transform_path_commands(commands, matrix)
+    else:
+        supported = ", ".join((*sorted(_BOOLEAN_TAGS), "text"))
+        raise ValueError(
+            f"Shape Boolean source {_element_label(element)} must be a "
+            f"supported {supported}, or a compact authored preset group"
+        )
+
+    result = _simplify_path(_commands_to_pathops(commands, pathops), pathops)
+    if _path_is_empty(result):
+        raise ValueError(
+            f"Shape Boolean source {_element_label(element)} has no filled area"
+        )
+    return result
+
+
+def _element_chain(
+    element: ET.Element,
+    parents: Mapping[ET.Element, ET.Element],
+) -> list[ET.Element]:
+    chain = [element]
+    current = element
+    while current in parents:
+        current = parents[current]
+        chain.append(current)
+    chain.reverse()
+    return chain
+
+
+def _validate_source_location(
+    element: ET.Element,
+    chain: Sequence[ET.Element],
+) -> None:
+    definition_ancestor = next(
+        (
+            ancestor
+            for ancestor in chain[:-1]
+            if _local_name(ancestor.tag) in _DEFINITION_TAGS
+        ),
+        None,
+    )
+    if definition_ancestor is not None:
+        raise ValueError(

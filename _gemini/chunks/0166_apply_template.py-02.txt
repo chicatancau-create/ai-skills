@@ -1,0 +1,109 @@
+    if kind not in KINDS:
+        raise ApplyTemplateError(
+            f"{spec_path} declares no kind in its frontmatter; a legacy or "
+            "semantic-only package needs a new workspace from Create Template"
+        )
+    template_id = str(fm.get(KIND_CONFIG[kind]["id_key"]) or "").strip()
+    if not template_id:
+        raise ApplyTemplateError(
+            f"{spec_path} declares kind {kind!r} without {KIND_CONFIG[kind]['id_key']}"
+        )
+    return kind, template_id, fm
+
+
+def _discover_specs(templates_dir: Path) -> list[SpecRecord]:
+    bare = templates_dir / "design_spec.md"
+    try:
+        qualified = _validate_spec_shape(templates_dir)
+    except SpecParseError as exc:
+        raise ApplyTemplateError(str(exc)) from exc
+    if bare.is_file():
+        kind, template_id, fm = _frontmatter_identity(bare)
+        return [SpecRecord(kind, template_id, bare, fm)]
+    specs: list[SpecRecord] = []
+    for path, _kind in qualified:
+        try:
+            kind, template_id, fm, _body = validate_qualified_spec_identity(path)
+        except SpecParseError as exc:
+            raise ApplyTemplateError(str(exc)) from exc
+        specs.append(SpecRecord(kind, template_id, path, fm))
+    if not specs:
+        raise ApplyTemplateError(
+            f"{templates_dir} holds neither design_spec.md nor "
+            "design_spec.<kind>.<id>.md"
+        )
+    return specs
+
+
+def _source_label(root: Path, specs: list[SpecRecord]) -> str:
+    if len(specs) != 1:
+        return "explicit"
+    spec = specs[0]
+    config = KIND_CONFIG[spec.kind]
+    library_root = (config["dir"] / spec.template_id).resolve()
+    if root.resolve() != library_root:
+        return "explicit"
+    index_path = config["index"]
+    try:
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "explicit"
+    return "library" if spec.template_id in index else "explicit"
+
+
+def _load_root(supplied: str, project: Path) -> RootRecord:
+    root = Path(supplied).expanduser()
+    if not root.is_dir():
+        raise ApplyTemplateError(f"workspace root is not a directory: {supplied}")
+    if root.name == "templates" and (root / "design_spec.md").is_file():
+        raise ApplyTemplateError(
+            f"{supplied} is an inner templates/ directory; pass its workspace "
+            "root so sibling images/ and icons/ install with it"
+        )
+    root = root.resolve()
+    templates_dir = root / "templates"
+    if not templates_dir.is_dir():
+        raise ApplyTemplateError(f"{supplied} has no templates/ directory")
+    specs = _discover_specs(templates_dir)
+    in_place = root == project.resolve()
+    if in_place and any(spec.path.name == "design_spec.md" for spec in specs):
+        raise ApplyTemplateError(
+            "an in-place project root must already hold kind-qualified specs "
+            "(design_spec.<kind>.<id>.md); templates/design_spec.md is a "
+            "library shape"
+        )
+    record = RootRecord(
+        supplied=supplied,
+        root=root,
+        source="explicit" if in_place else _source_label(root, specs),
+        specs=specs,
+        in_place=in_place,
+    )
+    if record.source == "library" and specs[0].kind == "style":
+        for extra in (*ASSET_DIRS, "exports"):
+            if (root / extra).exists():
+                raise ApplyTemplateError(
+                    f"Style-only library package {record.display} carries "
+                    f"{extra}/; a Style contributes only its spec"
+                )
+    return record
+
+
+def _validate_root(record: RootRecord) -> None:
+    command = [
+        sys.executable,
+        str(CHECKER),
+        str(record.templates_dir),
+        "--template-mode",
+        "--canonical-authoring",
+    ]
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if result.returncode != 0:
+        tail = "\n".join(

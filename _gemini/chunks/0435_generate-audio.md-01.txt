@@ -1,0 +1,37 @@
+---
+description: Shared post-processing stage for narration audio, PPTX embedding, PowerPoint video delivery, and triggered sound mixing.
+---
+
+# Generate Audio Stage
+
+> Shared narration stage, run after the owning route's notes step. Edge, ElevenLabs, MiniMax, and timestamp-capable CosyVoice produce per-slide audio/SRT pairs; Qwen is audio-only because its API exposes no timing. The caller owns final PPTX integration. Context-independent: it reads `notes/*.md` and the selected voice catalog, chooses no route, and patches no slide design. Tool behavior, prerequisites, keys, and every flag are documented in [`narration.md`](../../scripts/docs/narration.md).
+
+**Trigger**: Generate PPTX — the effective `Narration Audio` outcome in `design_spec.md` §I is `enabled` (a later explicit request first updates that outcome and provenance); Quick — the request or active-context decision selects narration; Edit Native PPTX — the confirmed plan enables narration.
+
+**Hard dependency — speaker notes**: audio requires complete per-slide notes: Generate additionally requires its effective `Speaker Notes` outcome enabled; Edit Native follows its confirmed plan (a note for every output page); Quick records the same dependency. Never enter audio generation with missing or incomplete notes — generate and validate them first. Missing notes recover through the owning route: Generate returns to its notes branch and runs `total_md_split.py <project_path>`; Edit Native returns to [`edit-native-pptx`](../edit-native-pptx.md) §6 and writes `notes/<svg-stem>.md` per output page; never run the Generate splitter on a round-trip workspace.
+
+## When to Run
+
+- Per-page notes exist at `notes/*.md` — split from `notes/total.md` in Generate Step 7.1, or `notes/<svg-stem>.md` keyed by output page in Edit Native (roster from `page_plan.json`, copies inherit source notes).
+- The stage is page-level only: one note → one audio file (plus SRT on provider-timed paths). Never substitute one long track or automatic splitting; SRT bound to an authoritative existing recording does not enter TTS, and recorded narration requires page-level audio or an explicit page/time map.
+- Final/literal script notes are synthesized verbatim; source SRT timecodes are pacing evidence only.
+- The deck is in one dominant language (mixed decks: pick the one the audience hears most — judgment, not a heuristic).
+- Optional native video export runs only through `powerpoint_video.py` on Windows PowerPoint 2016+; slideshow capture is an explicit manual Windows handoff, never an automatic fallback; direct MP4 delivery with resolved sound cues additionally needs `ffmpeg` plus `numpy`.
+
+---
+
+## Step 1: Determine the deck's language
+
+The AI already knows it from writing the notes — no detection script. Identify `zh` / `en` / `ja` / `ko` / …; for Chinese choose `zh-CN` (default), `zh-TW`, or `zh-HK` from context — Default may ask when unclear, Quick chooses the best supported default.
+
+---
+
+## Step 2: Choose audio backend and pull the voice catalog
+
+Default to **edge** unless the user asks for a cloud provider, higher-quality cloud narration, or a cloned voice.
+
+```bash
+python3 skills/ppt-master/scripts/notes_to_audio.py --list-voices --locale <locale>
+python3 skills/ppt-master/scripts/notes_to_audio.py --provider <elevenlabs|minimax|qwen|cosyvoice> --list-voices
+```
+

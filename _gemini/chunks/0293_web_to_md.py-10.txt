@@ -1,0 +1,125 @@
+    tag_name = element.name.lower()
+
+    # Skip hidden/unwanted tags
+    if tag_name in ['script', 'style', 'meta', 'link', 'input', 'button', 'select']:
+        return ""
+
+    content = ""
+    for child in element.children:
+        content += element_to_markdown(child)
+        # Add spacing logic here if needed, but usually block elements handle it
+
+    # Block handlers
+    if tag_name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+        level = int(tag_name[1])
+        return f"\n{'#' * level} {content}\n\n"
+
+    elif tag_name == 'p':
+        # Clean up internal whitespace
+        content = re.sub(r'\s+', ' ', content).strip()
+        return f"\n{content}\n\n" if content else ""
+
+    elif tag_name == 'br':
+        return "  \n"
+
+    elif tag_name == 'hr':
+        return "\n---\n"
+
+    elif tag_name == 'div':
+        return f"\n{content}\n"
+
+    elif tag_name == 'blockquote':
+        lines = content.strip().split('\n')
+        quoted = '\n'.join([f"> {line}" for line in lines if line.strip()])
+        return f"\n{quoted}\n\n"
+
+    elif tag_name in ['ul', 'ol']:
+        # This is tricky without "state" (knowing we are in a list)
+        # For simplicity in this recursive version, we rely on LI handling
+        return f"\n{content}\n"
+
+    elif tag_name == 'li':
+        # Simple list handling
+        clean_content = content.strip()
+        return f"- {clean_content}\n"
+
+    elif tag_name == 'pre':
+        return f"\n```\n{content}\n```\n\n"
+
+    elif tag_name == 'code':
+        # If parent is pre, handle in pre. If inline:
+        parent = element.parent
+        if parent and parent.name == 'pre':
+            return content
+        return f"`{content}`"
+
+    elif tag_name == 'a':
+        href = element.get('href', '')
+        if href and not href.startswith('javascript:'):
+            return f"[{content}]({href})"
+        return content
+
+    elif tag_name == 'img':
+        src = element.get('src', '')
+        alt = element.get('alt', '')
+        if src:
+            return f"![{alt}]({src})"
+        return ""
+
+    elif tag_name == 'table':
+        # Basic table text extraction, full markdown table support is complex
+        # Leaving as raw text or simplistic conversion for now
+        # Ideally, we'd parse TRs and TDs
+        return f"\n{content}\n"
+
+    elif tag_name == 'tr':
+        return f"{content}|\n"
+
+    elif tag_name in ['td', 'th']:
+        return f"| {content.strip()} "
+
+    # Style formatting
+    elif tag_name in ['strong', 'b']:
+        return f"**{content}**"
+    elif tag_name in ['em', 'i']:
+        return f"*{content}*"
+    elif tag_name in ['del', 's', 'strike']:
+        return f"~~{content}~~"
+
+    # Default for span, section, etc.
+    return f"{content} "
+
+
+def simple_html_to_markdown_traversal(
+    soup: Tag | BeautifulSoup | None, page_url: str = "",
+) -> str:
+    """Convert HTML content to Markdown using BeautifulSoup traversal."""
+    lines = []
+
+    def fold(node: Tag) -> str:
+        """Convert a cell or caption like body text, folded onto one line."""
+        text = ''.join(traverse(child) for child in node.children)
+        return re.sub(r'\s+', ' ', text).strip().replace('|', '\\|')
+
+    def span(cell: Tag, name: str) -> int:
+        try:
+            return min(max(int(cell.get(name) or 1), 1), 50)
+        except ValueError:
+            return 1
+
+    def row_cells(row: Tag, carried: dict[int, int] | None = None) -> list[str]:
+        """Return one row's cells on the table grid.
+
+        A colspan pads empty cells to its right; ``carried`` maps a column to
+        the rows a rowspan above still covers, which take an empty cell here.
+        """
+        carried = {} if carried is None else carried
+        cells: list[str] = []
+
+        def fill_carried() -> None:
+            while carried.get(len(cells), 0) > 0:
+                carried[len(cells)] -= 1
+                cells.append('')
+
+        for cell in row.find_all(['td', 'th'], recursive=False):
+            fill_carried()

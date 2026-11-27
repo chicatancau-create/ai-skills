@@ -1,0 +1,103 @@
+                    prefix="pptx-delivery-check-"
+                ) as tmp:
+                    extract_dir = Path(tmp) / "pptx"
+                    archive.extractall(extract_dir)
+                    relationship_problems = verify_internal_relationships(
+                        extract_dir
+                    )
+                    relationship_problems.extend(unused_slide_relationship_problems(extract_dir))
+                    for problem in custom_show_problems({
+                        name: archive.read(name) for name in archive.namelist() if name.endswith('.xml')
+                    }):
+                        errors.append(_issue("dangling_custom_show_reference", problem))
+            relationships = package["relationships"]
+            if not isinstance(relationships, dict):
+                raise AssertionError(
+                    "delivery report relationships container is invalid"
+                )
+            relationships["problems"] = relationship_problems
+            for problem in relationship_problems:
+                code = _relationship_problem_code(problem)
+                if code == "unreferenced_slide_relationship":
+                    # The target exists and PowerPoint ignores the entry; it
+                    # is dead weight, not a broken package.
+                    advisories.append(_issue(code, problem))
+                    continue
+                errors.append(
+                    _issue(
+                        code,
+                        problem,
+                    )
+                )
+    except zipfile.BadZipFile as exc:
+        errors.append(
+            _issue(
+                "invalid_zip_package",
+                f"File is not a readable PPTX ZIP package: {exc}.",
+            )
+        )
+        return report
+    except (NotImplementedError, RuntimeError) as exc:
+        errors.append(
+            _issue(
+                "unsupported_zip_compression",
+                f"PPTX ZIP members cannot be decoded: {exc}.",
+            )
+        )
+        return report
+    except OSError as exc:
+        errors.append(
+            _issue(
+                "package_read_failed",
+                f"Cannot read PPTX package: {exc}.",
+            )
+        )
+        return report
+
+    try:
+        identity = extract_identity(pptx_path)
+    except (KeyError, OSError, RuntimeError, ValueError, zipfile.BadZipFile) as exc:
+        advisories.append(
+            _issue(
+                "font_inventory_unavailable",
+                f"Could not resolve theme and declared font facts: {exc}.",
+            )
+        )
+    else:
+        identity_theme = identity.get("theme")
+        theme_fonts = (
+            identity_theme.get("fonts", {})
+            if isinstance(identity_theme, dict)
+            else {}
+        )
+        fonts = report["fonts"]
+        if not isinstance(fonts, dict):
+            raise AssertionError("delivery report fonts container is invalid")
+        declared_fonts = fonts.get("declared", {})
+        if not isinstance(declared_fonts, dict):
+            declared_fonts = {}
+        fonts["theme"] = theme_fonts
+        unsafe_faces = _unsafe_font_faces(
+            _font_faces_for_advisory(theme_fonts, declared_fonts)
+        )
+        fonts["portability_advisory_faces"] = unsafe_faces
+        if unsafe_faces:
+            advisories.append(
+                _issue(
+                    "font_portability",
+                    (
+                        "Some fonts declared or referenced by the presentation "
+                        "are outside the common Office/OS portability set; "
+                        "target-system availability was not verified."
+                    ),
+                    faces=unsafe_faces,
+                )
+            )
+
+    slide_count, hidden_slides, motion = _motion_and_hidden_summary(
+        pptx_path,
+        errors,
+    )
+    slides = report["slides"]
+    if not isinstance(slides, dict):
+        raise AssertionError("delivery report slides container is invalid")

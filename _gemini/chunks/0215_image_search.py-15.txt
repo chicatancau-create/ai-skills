@@ -1,0 +1,107 @@
+                metadata_dimensions=metadata_dimensions,
+            )
+        else:
+            staged_path, actual_dimensions = _stage_validated_image(
+                selected_candidate.download_url,
+                dst_path,
+                min_width=min_width,
+                min_height=min_height,
+                metadata_dimensions=metadata_dimensions,
+            )
+
+        item_args = argparse.Namespace(
+            filename=target_filename,
+            slide=str(request_meta.get("slide") or ""),
+            purpose=str(request_meta.get("purpose") or ""),
+            query=str(request_meta.get("query") or ""),
+            orientation=str(request_meta.get("orientation") or "any"),
+            required_terms=_parse_required_terms(
+                request_meta.get("required_terms")
+            ),
+            query_variants=_parse_query_variants(
+                request_meta.get("query_variants")
+            ),
+        )
+        source_item = _candidate_to_manifest_item(
+            selected_candidate,
+            item_args,
+            provider_name=selected_candidate.provider,
+            stage=str(meta.get("license_stage") or "all"),
+            actual_dimensions=actual_dimensions,
+            selection_method="visual-thumbnail",
+        )
+        source_item["status"] = "promoted"
+
+        _commit_staged_image(
+            staged_path,
+            dst_path,
+            lambda: write_sources_manifest(mpath, source_item),
+        )
+    except Exception as exc:
+        if not _is_recoverable_image_error(exc):
+            raise
+        print(f"Error: candidate promotion failed: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        if staged_path is not None:
+            try:
+                staged_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    print(f"  promoted: {candidate_filename} → {target_filename}", file=sys.stderr)
+    print(f"  manifest updated: {mpath}", file=sys.stderr)
+
+    # The selection marker must never move ahead of canonical provenance.
+    meta["selected"] = candidate_filename
+    try:
+        _write_json_atomic(cand_meta_path, meta)
+    except OSError as exc:
+        print(
+            f"Error: image was promoted, but {cand_meta_path} could not be updated: "
+            f"{exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+    if queries_manifest_path is not None:
+        try:
+            queries_manifest = load_search_manifest(str(queries_manifest_path))
+            query_row = next(
+                (
+                    row
+                    for row in queries_manifest["items"]
+                    if row["filename"].casefold() == target_filename.casefold()
+                ),
+                None,
+            )
+            if query_row is None or query_row["filename"] != target_filename:
+                raise RuntimeError(
+                    f"no exact query row for {target_filename!r}"
+                )
+            query_row["status"] = SEARCH_STATUS_SOURCED
+            query_row["provider"] = selected_candidate.provider
+            query_row["license_tier"] = selected_candidate.license_tier
+            query_row.pop("last_error", None)
+            _clear_candidate_selection_outputs(query_row)
+            save_search_manifest(str(queries_manifest_path), queries_manifest)
+        except (OSError, RuntimeError, ValueError) as exc:
+            print(
+                f"Error: image was promoted, but query status could not be "
+                f"updated: {exc}",
+                file=sys.stderr,
+            )
+            return 1
+        print(
+            f"  query status updated: {queries_manifest_path}",
+            file=sys.stderr,
+        )
+
+    review = _write_review_copy(dst_path, output_dir / ".review", target_filename)
+    if review is not None:
+        print(f"  review copy: {review}", file=sys.stderr)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Manual URL replacement (model-agnostic)

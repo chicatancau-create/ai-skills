@@ -1,0 +1,87 @@
+            expected_master_name = master_names.get(spec.master_key)
+            if expected_master_name != spec.master_name:
+                errors.append(
+                    f"{spec.svg_path.name}: data-pptx-master-name="
+                    f"{spec.master_name!r} does not match spec_lock Master "
+                    f"{spec.master_key!r} name {expected_master_name!r}"
+                )
+        return errors
+
+    def _duplicate_layout_key_warnings(self, specs) -> List[str]:
+        """Flag distinct layout keys whose static contracts are identical.
+
+        Keys split by page topic over one shared skeleton compile into
+        duplicate PowerPoint Layouts; the fingerprint compares the
+        id-insensitive layout-layer drawing plus the placeholder contract.
+        """
+        prototypes: Dict[Tuple[str, str], Path] = {}
+        for spec in specs:
+            prototypes.setdefault(
+                (getattr(spec, 'master_key', ''), spec.layout_key),
+                spec.svg_path,
+            )
+        if len(prototypes) < 2:
+            return []
+        fingerprint_keys: Dict[tuple, List[str]] = {}
+        for (master_key, layout_key), svg_path in prototypes.items():
+            fingerprint = self._layout_contract_fingerprint(svg_path)
+            if fingerprint is None:
+                continue
+            fingerprint_keys.setdefault(
+                (master_key, fingerprint),
+                [],
+            ).append(layout_key)
+        messages = []
+        for keys in fingerprint_keys.values():
+            if len(keys) < 2:
+                continue
+            joined = ', '.join(sorted(keys))
+            messages.append(
+                f"layout keys {joined} declare identical static Layout framing "
+                "and placeholder contracts; they compile to duplicate Layouts. "
+                "Either merge them into one reusable key (spec_lock.md "
+                "pptx_layouts + each SVG root), or — when their reusable "
+                "contracts genuinely differ — assign distinct explicit default "
+                "placeholder bounds and/or mark only truly stable framing as "
+                'data-pptx-layer="layout". Slide-local content geometry does not '
+                "define a Layout. This recommendation is advisory; no change or "
+                "disposition is required."
+            )
+        return messages
+
+    @classmethod
+    def _shared_fixed_layer_errors(cls, specs) -> List[str]:
+        """Reject fixed atoms whose payload varies inside one reuse scope."""
+        master_groups = defaultdict(list)
+        layout_groups = defaultdict(list)
+        for spec in specs:
+            master_groups[spec.master_key].append(spec)
+            layout_groups[(spec.master_key, spec.layout_key)].append(spec)
+
+        try:
+            errors = cls._fixed_layer_group_errors(master_groups, 'master')
+            errors.extend(cls._fixed_layer_group_errors(layout_groups, 'layout'))
+        except _TemplateStructureError as exc:
+            return [str(exc)]
+        return errors
+
+    @classmethod
+    def _fixed_layer_group_errors(cls, groups, layer: str) -> List[str]:
+        """Compare fixed atom payloads across grouped slide specifications."""
+        errors = []
+        for scope_key, group_specs in groups.items():
+            if len(group_specs) < 2:
+                continue
+            variants = defaultdict(lambda: defaultdict(list))
+            for spec in group_specs:
+                payloads = cls._fixed_layer_payloads(spec, layer)
+                for element_id, payload in payloads.items():
+                    variants[element_id][payload].append(spec)
+            for element_id, payload_specs in variants.items():
+                if len(payload_specs) < 2:
+                    continue
+                slide_names = ', '.join(
+                    spec.svg_path.name
+                    for spec in sorted(group_specs, key=lambda item: item.slide_num)
+                )
+                if layer == 'master':

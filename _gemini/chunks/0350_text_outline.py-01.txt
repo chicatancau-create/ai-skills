@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""
+PPT Master - Text Outline Materialization
+
+Resolve one supported SVG ``<text>`` operand into closed glyph-outline path
+commands for the Shape Boolean geometry pipeline.
+
+Usage:
+    Import text_element_to_path_commands from svg_to_pptx.text_outline.
+
+Dependencies:
+    uharfbuzz and local PPT Master modules
+"""
+
+from __future__ import annotations
+
+import bisect
+import math
+import os
+import sys
+import unicodedata
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
+from typing import Any
+from xml.etree import ElementTree as ET
+
+from .drawingml.paths import PathCommand, normalize_path_commands
+from .drawingml.text_properties import (
+    normalize_project_text_segments,
+    parse_project_font_style,
+    parse_project_font_weight,
+    parse_project_letter_spacing,
+    parse_project_text_anchor,
+    parse_project_text_decoration,
+    resolve_project_xml_space,
+)
+from .drawingml.utils import (
+    font_px_to_hpt,
+    parse_inline_style,
+    parse_project_geometry_length,
+    parse_svg_length,
+    split_project_text_clusters,
+)
+
+
+_FONT_EXTENSIONS = frozenset({".otc", ".otf", ".ttc", ".ttf"})
+_FAMILY_NAME_IDS = (16, 1, 21)
+_GENERIC_FAMILIES = {
+    "sans-serif": (
+        "Segoe UI",
+        "Arial",
+        "Helvetica",
+        "Noto Sans",
+        "Liberation Sans",
+        "DejaVu Sans",
+        "Nimbus Sans",
+        "Noto Sans CJK SC",
+        "Source Han Sans SC",
+        "Droid Sans Fallback",
+    ),
+    "system-ui": (
+        "Segoe UI",
+        "SF Pro",
+        "Helvetica Neue",
+        "Noto Sans",
+        "Liberation Sans",
+        "DejaVu Sans",
+        "Noto Sans CJK SC",
+        "Droid Sans Fallback",
+    ),
+    "serif": (
+        "Times New Roman",
+        "Noto Serif",
+        "Liberation Serif",
+        "DejaVu Serif",
+        "Nimbus Roman",
+        "Noto Serif CJK SC",
+        "Source Han Serif SC",
+    ),
+    "monospace": (
+        "Consolas",
+        "Courier New",
+        "Noto Sans Mono",
+        "Liberation Mono",
+        "DejaVu Sans Mono",
+        "Nimbus Mono PS",
+        "Noto Sans Mono CJK SC",
+    ),
+}
+_GENERIC_FAMILIES["ui-sans-serif"] = _GENERIC_FAMILIES["system-ui"]
+_GENERIC_FAMILIES["ui-serif"] = _GENERIC_FAMILIES["serif"]
+_GENERIC_FAMILIES["ui-monospace"] = _GENERIC_FAMILIES["monospace"]
+_UNSUPPORTED_TEXT_PROPERTIES = frozenset({
+    "alignment-baseline",
+    "baseline-shift",
+    "direction",
+    "dominant-baseline",
+    "font-feature-settings",
+    "font-kerning",
+    "font-size-adjust",
+    "font-stretch",
+    "font-synthesis",
+    "font-variant",
+    "font-variation-settings",
+    "font",
+    "hyphens",
+    "kerning",
+    "line-height",
+    "overflow-wrap",
+    "text-align",
+    "text-align-last",
+    "text-indent",
+    "text-orientation",
+    "text-rendering",
+    "text-transform",
+    "unicode-bidi",
+    "vertical-align",
+    "white-space",
+    "word-spacing",
+    "word-break",
+    "writing-mode",
+})
+_UNSUPPORTED_TEXT_ATTRIBUTES = frozenset({
+    "dx",
+    "dy",
+    "lengthAdjust",
+    "rotate",
+    "textLength",
+})
+_UNSUPPORTED_BIDI_CLASSES = frozenset({
+    "AL",
+    "FSI",
+    "LRE",
+    "LRI",
+    "LRO",
+    "PDF",
+    "PDI",
+    "R",
+    "RLE",
+    "RLI",
+    "RLO",
+})
+@dataclass(frozen=True)
+class _FontFace:
+    path: Path
+    index: int
+    families: tuple[str, ...]
+    weight: int
+    italic: bool
+    weight_range: tuple[float, float] | None
+    italic_range: tuple[float, float] | None
+    coverage: frozenset[int]
+    order: int
+
+
+@dataclass(frozen=True)
+class _TextStyle:
+    families: tuple[str, ...]
+    font_size: float
+    font_weight: int
+    italic: bool
+    anchor: str
+    letter_spacing: float
+
+
+@dataclass(frozen=True)
+class _FontRun:
+    face: _FontFace
+    clusters: tuple[str, ...]
+    global_cluster_start: int
+
+    @property
+    def text(self) -> str:
+        return "".join(self.clusters)
+
+
+@dataclass
+class _ShapedRun:
+    run: _FontRun
+    font: Any

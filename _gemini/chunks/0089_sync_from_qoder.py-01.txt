@@ -1,0 +1,120 @@
+# -*- coding: utf-8 -*-
+"""sync_from_qoder.py — 单向导入：Qoder 国际版全局记忆 → D:\\Skills\\global-memory（全机共享）。
+
+规则（依据手册《规则-国内版与国际版Qoder两套记忆目录完全独立只能单向拷入并校验》）：
+  - no-clobber：绝不覆盖共享库里已存在的文件（保护各 AI 本地追加的内容）
+  - 每个新拷文件做 sha256 双端校验
+  - orphan 检查：每个内容文件必须出现在 MEMORY.md 索引里；漏的自动按 frontmatter description 补索引行
+  - MEMORY.md 是合并索引，允许与源不同，永不覆盖
+  - 源库只读，不做任何修改
+
+用法（本机 python3 是坏存根，必须用绝对路径解释器 + -X utf8）：
+  C:\\Users\\Admin\\.dsh\\dsh-runtimes\\dsh-primary-runtime\\dependencies\\python\\python.exe -X utf8 D:\\Skills\\global-memory\\sync_from_qoder.py [--report 报告.json]
+"""
+import argparse
+import datetime
+import hashlib
+import json
+import os
+import re
+import shutil
+import sys
+
+DEFAULT_SRC = r"C:\Users\Admin\.qoder\memory"
+DST = os.path.dirname(os.path.abspath(__file__))
+NOTE_MARKER = "共享快照说明"
+
+
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def frontmatter_desc(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read(4096)
+    except OSError:
+        return ""
+    m = re.match(r"^---\r?\n(.*?)\r?\n---", text, re.S)
+    if m:
+        dm = re.search(r"^description:\s*(.+?)\s*$", m.group(1), re.M)
+        if dm:
+            return dm.group(1).strip().strip("\"'")
+    for line in text.splitlines():
+        s = line.strip()
+        if s and not s.startswith("#") and not s.startswith("---"):
+            return s[:160]
+    return ""
+
+
+def index_targets(index_text):
+    return set(re.findall(r"\(([A-Za-z0-9_\-\.]+\.md)\)", index_text))
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--source", default=DEFAULT_SRC)
+    ap.add_argument("--report", default="")
+    args = ap.parse_args()
+    src = os.path.abspath(args.source)
+    dst = DST
+    if not os.path.isdir(src):
+        print("SOURCE MISSING: %s" % src)
+        return 2
+    # 拷贝守卫：目标不得在源内部（防自嵌套拷贝）
+    assert not os.path.abspath(dst).startswith(src + os.sep) and dst != src, "dst inside src!"
+    os.makedirs(dst, exist_ok=True)
+
+    src_files = sorted(
+        f for f in os.listdir(src)
+        if f.endswith(".md") and os.path.isfile(os.path.join(src, f))
+    )
+    copied, identical, conflicts, index_kept = [], [], [], []
+    for name in src_files:
+        s, d = os.path.join(src, name), os.path.join(dst, name)
+        if os.path.exists(d):
+            if name == "MEMORY.md":
+                index_kept.append(name)  # 合并索引，允许与源不同
+            elif sha256(s) == sha256(d):
+                identical.append(name)
+            else:
+                conflicts.append(name)  # 同名不同内容：不覆盖，只报告
+            continue
+        shutil.copy2(s, d)
+        if sha256(s) != sha256(d):
+            print("HASH MISMATCH AFTER COPY: %s" % name)
+            return 3
+        copied.append(name)
+
+    # 索引：补 provenance 说明（幂等）+ orphan 修复
+    idx_path = os.path.join(dst, "MEMORY.md")
+    if not os.path.exists(idx_path):
+        print("FATAL: MEMORY.md missing in dst")
+        return 4
+    with open(idx_path, encoding="utf-8") as f:
+        idx = f.read()
+    changed = False
+    if NOTE_MARKER not in idx:
+        note = (
+            "\n> %s（%s 导入）：本库是 Qoder 国际版全局记忆（C:\\Users\\Admin\\.qoder\\memory）的单向导入副本，\n"
+            "> 供全机所有 AI 使用；实体在 D:\\Skills\\global-memory，随技能库自动双远端私有备份。\n"
+            "> 源库只读、不改动；本索引 = 源索引 + 补全的漏条目 + 各 AI 追加的新条目（只追加，不改写已有行）。\n"
+            "> 判来源用文件 diff/哈希，不要按索引位置猜。刷新用同目录 sync_from_qoder.py（no-clobber）。\n"
+            % (NOTE_MARKER, datetime.date.today().isoformat())
+        )
+        lines = idx.split("\n")
+        idx = lines[0] + "\n" + note + "\n".join(lines[1:])
+        changed = True
+    linked = index_targets(idx)
+    content_files = sorted(
+        f for f in os.listdir(dst)
+        if f.endswith(".md") and f != "MEMORY.md" and f != "README.md"
+        and os.path.isfile(os.path.join(dst, f))
+    )
+    orphans = [f for f in content_files if f not in linked]
+    if orphans:
+        add = []

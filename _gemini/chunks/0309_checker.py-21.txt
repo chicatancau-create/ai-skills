@@ -1,0 +1,103 @@
+            if _local_name(current_child) != _local_name(baseline_child):
+                break
+            current = current_child
+            baseline = baseline_child
+        return baseline
+
+    @classmethod
+    def _roundtrip_changed_font_families(
+        cls,
+        root: ET.Element,
+        baseline_root: ET.Element,
+        included_text_ids: set[int],
+    ) -> List[str]:
+        """Return resolved edited fonts that differ from the source baseline."""
+        from svg_authoring_view import SOURCE_REF_ATTRIBUTE
+
+        parent_by_id = {
+            id(child): parent
+            for parent in root.iter()
+            for child in list(parent)
+        }
+        baseline_parent_by_id = {
+            id(child): parent
+            for parent in baseline_root.iter()
+            for child in list(parent)
+        }
+        baseline_by_ref = {
+            source_ref: element
+            for element in baseline_root.iter()
+            if (source_ref := element.get(SOURCE_REF_ATTRIBUTE))
+        }
+        changed: List[str] = []
+        seen: set[str] = set()
+        for text_element in root.iter(f'{{{SVG_NS}}}text'):
+            if id(text_element) not in included_text_ids:
+                continue
+            current_owner: ET.Element | None = text_element
+            source_ref: str | None = None
+            while current_owner is not None:
+                source_ref = current_owner.get(SOURCE_REF_ATTRIBUTE)
+                if source_ref:
+                    break
+                current_owner = parent_by_id.get(id(current_owner))
+            baseline_owner = (
+                baseline_by_ref.get(source_ref)
+                if source_ref is not None
+                else None
+            )
+            for carrier in text_element.iter():
+                if _local_name(carrier) not in {'text', 'tspan'}:
+                    continue
+                if not re.sub(r'\s+', ' ', ''.join(carrier.itertext())).strip():
+                    continue
+                current_family = cls._roundtrip_resolved_font_family(
+                    carrier,
+                    parent_by_id,
+                )
+                if current_family is None:
+                    continue
+                baseline_context = baseline_root
+                if current_owner is not None and baseline_owner is not None:
+                    relative_path = cls._roundtrip_relative_path(
+                        carrier,
+                        current_owner,
+                        parent_by_id,
+                    )
+                    if relative_path is not None:
+                        baseline_context = cls._roundtrip_baseline_context(
+                            current_owner,
+                            baseline_owner,
+                            relative_path,
+                        )
+                baseline_family = cls._roundtrip_resolved_font_family(
+                    baseline_context,
+                    baseline_parent_by_id,
+                )
+                normalized = cls._normalize_font_stack(current_family)
+                if (
+                    baseline_family is not None
+                    and normalized
+                    == cls._normalize_font_stack(baseline_family)
+                ):
+                    continue
+                if normalized and normalized not in seen:
+                    changed.append(current_family)
+                    seen.add(normalized)
+        return changed
+
+    def _check_roundtrip_text_frames(
+        self,
+        root: ET.Element,
+        result: Dict,
+        included_text_ids: set[int],
+        unchanged_text_ids: set[int],
+        baseline_root: ET.Element | None = None,
+    ) -> None:
+        """Calibrate source text widths, then check edited owning frames."""
+        helpers = (
+            _estimate_single_line_text_frame_width,
+            _parse_project_font_weight,
+            _parse_project_geometry_length,
+            _parse_project_text_anchor,
+            _resolve_project_font_sizes,

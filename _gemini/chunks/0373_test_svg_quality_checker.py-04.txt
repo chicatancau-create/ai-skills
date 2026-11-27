@@ -1,0 +1,106 @@
+                '</text>',
+                1,
+            ),
+        }
+        for name, (text_svg, expected_lines) in cases.items():
+            with self.subTest(name=name):
+                root = _parse_svg(
+                    '<g id="module" data-pptx-bounds="0 0 1000 1000">'
+                    f'{text_svg}</g>'
+                )
+                text_element = root.find(f'.//{{{SVG_NS}}}text')
+                parent_by_id = {
+                    id(child): parent
+                    for parent in root.iter()
+                    for child in list(parent)
+                }
+                font_sizes = checker_module._resolve_project_font_sizes(root)
+                letter_spacings = checker_module._resolve_project_letter_spacings(
+                    root,
+                    font_sizes,
+                )
+                bounds = SVGQualityChecker._estimated_text_bounds(
+                    text_element,
+                    parent_by_id,
+                    font_sizes,
+                    letter_spacings,
+                )
+                self.assertIsNotNone(bounds)
+                if expected_lines == 2:
+                    lines = SVGQualityChecker._positioned_text_lines(
+                        text_element,
+                        parent_by_id,
+                        font_sizes,
+                        letter_spacings,
+                    )
+                    self.assertEqual(len(lines), expected_lines)
+                else:
+                    runs = SVGQualityChecker._resolved_single_line_text_runs(
+                        text_element,
+                        parent_by_id,
+                        font_sizes,
+                        letter_spacings,
+                    )
+                    self.assertIsNotNone(runs)
+
+    def test_module_bounds_use_headroom_but_page_bounds_do_not(self) -> None:
+        root = _parse_svg(
+            '<g id="module" data-pptx-bounds="0 0 100 100">'
+            '<text id="text" x="0" y="20" font-size="12">Text</text>'
+            '</g>'
+        )
+        include_headroom_calls = []
+
+        def estimated_bounds(*_args, include_headroom=True, **_kwargs):
+            include_headroom_calls.append(include_headroom)
+            right = 106.0 if include_headroom else 100.0
+            return (0.0, 0.0, right, 20.0)
+
+        result = _empty_result()
+        checker = SVGQualityChecker()
+        with patch.object(
+            checker,
+            '_estimated_text_bounds',
+            side_effect=estimated_bounds,
+        ):
+            checker._check_text_bounds(root, result)
+
+        self.assertEqual(include_headroom_calls, [True, False])
+        self.assertTrue(
+            any('data-pptx-bounds' in error for error in result['errors'])
+        )
+        self.assertFalse(
+            any('root viewBox' in error for error in result['errors'])
+        )
+
+    def test_horizontal_overflow_reports_per_cluster_width_and_capacity(
+        self,
+    ) -> None:
+        cjk_text = '天地玄黄宇宙洪荒日月盈昃辰宿列张寒来暑往秋收冬藏'
+        module_root = _parse_svg(
+            '<g id="module" data-pptx-bounds="0 0 540 100">'
+            f'<text x="0" y="30" font-size="24">{cjk_text}</text>'
+            '</g>'
+        )
+        module_result = _empty_result()
+        SVGQualityChecker()._check_text_bounds(module_root, module_result)
+        module_error = next(
+            error
+            for error in module_result['errors']
+            if 'data-pptx-bounds on the horizontal axis' in error
+        )
+        self.assertTrue(
+            module_error.endswith(
+                '≈25.4 px per CJK char at 24px incl. headroom; '
+                '≈21 chars fit in 540 px'
+            ),
+            module_error,
+        )
+
+        page_root = _parse_svg(
+            '<g id="module" data-pptx-bounds="0 0 1000 100">'
+            f'<text x="0" y="30" font-size="24">{cjk_text}</text>'
+            '</g>',
+            view_box='0 0 540 100',
+        )
+        page_result = _empty_result()

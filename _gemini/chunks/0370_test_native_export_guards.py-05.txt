@@ -1,0 +1,71 @@
+                    '<g display="inline" visibility="visible">'
+                    '<rect id="child" x="100" y="100" width="200" height="100" fill="#FF0000"/>'
+                    '</g></g>'
+                )
+                self.assertEqual(self._shape_colors(self._export()), [])
+                warnings = self._check()['warnings']
+                self.assertTrue(any('hidden-group' in warning and 'display:none' in warning
+                                    for warning in warnings), warnings)
+
+    def test_hidden_group_allows_explicitly_visible_descendant(self) -> None:
+        for hiding, showing in (
+            ('visibility="hidden"', 'visibility="visible"'),
+            ('style="visibility:hidden"', 'style="visibility:visible"'),
+        ):
+            with self.subTest(hiding=hiding):
+                self._svg(
+                    f'<g id="hidden-group" {hiding}>'
+                    '<rect id="hidden-child" x="100" y="100" width="200" height="100" fill="#FF0000"/>'
+                    f'<g><rect id="shown" {showing} x="400" y="100" width="200" height="100" fill="#00FF00"/>'
+                    '</g></g>'
+                )
+                self.assertEqual(self._shape_colors(self._export()), ['00FF00'])
+                warnings = self._check()['warnings']
+                self.assertTrue(any('hidden-child' in warning and 'visibility:hidden' in warning
+                                    for warning in warnings), warnings)
+                self.assertFalse(any('shown' in warning and 'not be exported' in warning for warning in warnings))
+
+    def test_style_visibility_overrides_presentation_attribute(self) -> None:
+        self._svg(
+            '<rect id="shown" x="100" y="100" width="200" height="100" fill="#123456" '
+            'visibility="hidden" style="visibility:visible"/>'
+        )
+        self.assertEqual(self._shape_colors(self._export()), ['123456'])
+
+    def test_hidden_background_is_not_promoted(self) -> None:
+        for body, attributes in (
+            ('<rect width="1280" height="720" fill="#FF0000" visibility="hidden"/>', ''),
+            ('<g display="none"><rect width="1280" height="720" fill="#FF0000"/></g>', ''),
+            ('<rect width="1280" height="720" fill="#FF0000"/>', 'display="none"'),
+        ):
+            with self.subTest(body=body, attributes=attributes):
+                self._svg(body, attributes)
+                slide = self._export()
+                self.assertIsNone(slide.find('p:cSld/p:bg', NS))
+                self.assertEqual(self._shape_colors(slide), [])
+
+    def test_native_geometry_carrier_survives_but_ancestor_can_hide_it(self) -> None:
+        carrier = (
+            '<path id="carrier" d="M 100 100 L 300 100 L 300 200 L 100 200 Z" '
+            'fill="#123456" data-pptx-prst="rect" data-pptx-frame="100 100 200 100" '
+            'data-pptx-object="shape" data-pptx-shape-id="2" data-pptx-part="geometry" '
+            'visibility="hidden" pointer-events="none"/>'
+        )
+        self._svg(carrier)
+        slide = self._export()
+        self.assertEqual(self._shape_colors(slide), ['123456'])
+        self.assertEqual(slide.find('.//p:sp/p:nvSpPr/p:cNvPr', NS).get('id'), '2')
+        self.assertFalse(any('carrier' in warning and 'not be exported' in warning
+                             for warning in self._check()['warnings']))
+        self._svg(f'<g visibility="hidden">{carrier}</g>')
+        self.assertEqual(self._shape_colors(self._export()), [])
+
+    def _pattern(self, paints: str, attributes: str = 'data-pptx-pattern="smGrid"') -> None:
+        self._svg(
+            f'<defs><pattern id="pat" {attributes} patternUnits="userSpaceOnUse" '
+            f'width="10" height="10">{paints}</pattern></defs>'
+            '<rect id="pattern-shape" x="100" y="100" width="200" height="100" fill="url(#pat)"/>'
+        )
+
+    def test_pattern_missing_foreground_fails_checker_and_export(self) -> None:
+        self._pattern('<rect width="10" height="10" fill="#FF0000"/>')

@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""Derive advisory text-slot capacity from SVG geometry and font metrics.
+
+Usage:
+    Via svg_quality_checker.py --template-mode --slot-capacity-report.
+
+Dependencies:
+    Standard library and the shared text estimator.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+from pathlib import Path
+from xml.etree import ElementTree as ET
+
+from text_measure import measure_text
+from template_text_slots import analyze_template_text_slots
+from svg_to_pptx.drawingml.text_properties import (
+    resolve_project_font_sizes,
+    resolve_project_letter_spacings,
+)
+
+from .checker import SVGQualityChecker, _effective_presentation_value, _parse_positive_bounds
+
+
+def _number(value: str | None, default: float) -> float:
+    try:
+        number = float((value or '').removesuffix('px'))
+    except ValueError:
+        return default
+    return number if math.isfinite(number) and number > 0 else default
+
+
+def _capacity(width: float, height: float, size: float, family: str,
+              weight: str, spacing: float, line_height: float, sample: str) -> dict:
+    # Binary search measures the whole line, including estimator headroom and
+    # tracking. Latin capacity describes this stated sample, not all strings.
+    def fits(count: int) -> bool:
+        text = (sample * (count // len(sample) + 1))[:count]
+        return measure_text(text, size=size, family=family, weight=weight,
+                            letter_spacing=spacing) <= width
+
+    low, high = 0, 1
+    while high < 1_000_000 and fits(high):
+        low, high = high, high * 2
+    while low + 1 < high:
+        middle = (low + high) // 2
+        if fits(middle):
+            low = middle
+        else:
+            high = middle
+    return {
+        'sample': sample, 'characters_per_line': low,
+        'lines': max(0, 1 + math.floor((height - size) / line_height)),
+    }
+
+
+def _mirror_text_bounds(carrier, parents, font_sizes, spacings):
+    """Use the source text frame, falling back to measured text geometry."""
+    owner = carrier
+    while owner is not None:
+        for name in ('data-pptx-bounds', 'data-pptx-frame'):
+            raw = owner.get(name)
+            if raw is None:
+                continue
+            try:
+                bounds = _parse_positive_bounds(raw)
+            except ValueError:
+                continue
+            if bounds is not None:
+                return bounds, name
+        owner = parents.get(id(owner))
+    estimated = SVGQualityChecker._estimated_text_bounds(carrier, parents, font_sizes, spacings)
+    if estimated is None:
+        return None, 'unresolved text geometry'
+    left, top, right, bottom = estimated
+    return (left, top, right - left, bottom - top), 'estimated text geometry'
+
+
+def _text_targets(path, root, parents, font_sizes, spacings):
+    for slot in root.iter():
+        placeholder = slot.get('data-pptx-placeholder')
+        if not placeholder:
+            continue
+        carriers = [child for child in slot
+                    if child.tag.rsplit('}', 1)[-1] == 'text'
+                    and child.get('data-pptx-carrier') == 'true']
+        if not carriers:
+            continue
+        try:
+            bounds = _parse_positive_bounds(slot.get('data-pptx-bounds', ''))
+        except ValueError:
+            bounds = None
+        yield {'file': str(path), 'slot_id': slot.get('id'), 'source': 'placeholder',
+               'placeholder': placeholder, 'bounds': bounds}, carriers[0]
+
+    manifest = path.parent / 'template_execution_manifest.json'
+    sidecar = path.parent / 'template_execution' / f'{path.stem}.text-slots.json'
+    if not manifest.is_file() or not sidecar.is_file():
+        return
+    manifest_data = json.loads(manifest.read_text(encoding='utf-8'))
+    if not isinstance(manifest_data, dict):
+        raise ValueError(f'{manifest}: expected a manifest object')
+    if manifest_data.get('replication_mode') != 'mirror':
+        return

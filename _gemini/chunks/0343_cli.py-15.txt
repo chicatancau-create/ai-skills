@@ -1,0 +1,99 @@
+            'font_portability': (
+                'passed'
+                if not generic_only_font_stacks and not unsafe_font_faces
+                else 'warning'
+            ),
+        },
+        'quality': quality,
+        'resources': source_audit,
+        'export_policy': {
+            'project_svg_contract': (
+                'strict-after-dangerous-normalization'
+                if dangerous_nonconforming_export
+                else 'strict'
+            ),
+            'dangerous_normalization_count': dangerous_normalization_count,
+        },
+        'deck_motion': deck_motion,
+        'backup_path': str(backup_path.resolve()) if backup_path else None,
+        'conversion_trace_path': (
+            str(conversion_trace_path.resolve())
+            if conversion_trace_path and conversion_trace_path.is_file()
+            else None
+        ),
+    }
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2) + '\n',
+        encoding='utf-8',
+    )
+    warnings = _postflight_warning_summaries(
+        quality_gate=quality_gate,
+        introduced_warning_count=introduced_warning_count,
+        unresolved_token_count=len(unresolved_tokens),
+        external_image_count=external_image_count,
+        generic_font_stack_count=len(generic_only_font_stacks),
+        unsafe_font_face_count=len(unsafe_font_faces),
+        dangerous_nonconforming_export=dangerous_nonconforming_export,
+        dangerous_normalization_count=dangerous_normalization_count,
+    )
+    return _PostflightReceipt(
+        output_path=output_path,
+        report_path=report_path,
+        status=report_status,
+        quality_gate=quality_gate,
+        slide_count=int(package['slides']),
+        warnings=warnings,
+    )
+
+
+def _load_deck_motion_handoff(
+    project_path: Path,
+    report_arg: str,
+    svg_files: list[Path],
+) -> dict[str, object]:
+    """Load source-bound deck motion from a successful base export report."""
+    report_path = Path(report_arg).expanduser()
+    if not report_path.is_absolute() and not report_path.is_file():
+        report_path = project_path / report_path
+    try:
+        report = json.loads(report_path.read_text(encoding='utf-8'))
+    except FileNotFoundError as exc:
+        raise ValueError(
+            f'deck-motion handoff report does not exist: {report_path}'
+        ) from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f'deck-motion handoff report is unreadable: {report_path}: {exc}'
+        ) from exc
+    if not isinstance(report, dict):
+        raise ValueError('deck-motion handoff report must be a JSON object')
+    if report.get('schema') != 'ppt-master.pptx-postflight-report.v1':
+        raise ValueError(
+            'deck-motion handoff requires a ppt-master postflight report'
+        )
+    if report.get('status') not in {'passed', 'passed-with-warnings'}:
+        raise ValueError('deck-motion handoff report is not a successful export')
+    source = _as_dict(report.get('source'))
+    current_fingerprint = (
+        roundtrip_source_fingerprint(project_path)
+        if source.get('authoring_roundtrip') is not None
+        else _svg_source_fingerprint(svg_files)
+    )
+    if source.get('fingerprint') != current_fingerprint:
+        raise ValueError(
+            'deck-motion handoff does not match the current source inputs; '
+            'run the base export again'
+        )
+    motion = report.get('deck_motion')
+    if not isinstance(motion, dict):
+        raise ValueError(
+            'deck-motion handoff is missing from the base export report; '
+            'run the base export again'
+        )
+    if motion.get('narration_timings') is True:
+        raise ValueError(
+            'deck-motion handoff must reference a base non-narrated export report'
+        )
+    if not isinstance(motion.get('transition'), dict):
+        raise ValueError('deck-motion handoff transition must be an object')

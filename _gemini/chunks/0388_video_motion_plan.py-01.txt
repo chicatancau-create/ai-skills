@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""
+PPT Master - Video Motion Plan
+
+Derive an effect-aware video motion plan from one resolved SVG-to-PPTX
+conversion trace. The plan preserves animation order, direction, duration,
+and timing anchors while adding deterministic video-only motion parameters.
+
+Usage:
+    python3 scripts/video_motion_plan.py <conversion_trace.json> [options]
+
+Examples:
+    python3 scripts/video_motion_plan.py validation/deck.trace.json --force
+    python3 scripts/video_motion_plan.py validation/deck.trace.json \
+        --style dynamic -o validation/video_motion_plan.json --force
+
+Dependencies:
+    None (standard library only)
+
+See scripts/docs/video-motion-plan.md for the downstream renderer contract.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import re
+import sys
+from pathlib import Path
+from typing import Any
+from xml.etree import ElementTree as ET
+
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from console_encoding import configure_utf8_stdio  # noqa: E402
+
+configure_utf8_stdio()
+
+
+VIDEO_MOTION_SCHEMA = "ppt-master.video-motion-plan.v1"
+VIDEO_MOTION_STYLES = ("adaptive", "restrained", "dynamic")
+_STYLE_MULTIPLIERS = {
+    "adaptive": 1.0,
+    "restrained": 0.72,
+    "dynamic": 1.28,
+}
+_VIDEO_EFFECT_ALIASES = {
+    "entrance_appear": "appear",
+    "entrance_fade": "fade",
+    "entrance_fly": "fly",
+    "entrance_zoom": "zoom",
+    "entrance_wipe": "wipe_down",
+    "entrance_split": "split",
+    "entrance_blinds": "blinds",
+    "entrance_checkerboard": "checkerboard",
+    "entrance_dissolve": "dissolve",
+    "entrance_random_bars": "random_bars",
+    "entrance_peek": "wipe_up",
+    "entrance_wheel": "wheel",
+    "entrance_box": "box",
+    "entrance_circle": "circle",
+    "entrance_diamond": "diamond",
+    "entrance_plus": "plus",
+    "entrance_strips": "strips",
+    "entrance_wedge": "wedge",
+    "entrance_stretch": "stretch",
+    "entrance_expand": "expand",
+    "entrance_swivel": "swivel",
+    "entrance_ascend": "fly_top",
+}
+_SVG_NS = "http://www.w3.org/2000/svg"
+_EMU_PER_PX = 9525
+_NUMBER_RE = re.compile(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?")
+
+
+def _read_json_object(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ValueError(f"conversion trace not found: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid conversion trace JSON: {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"conversion trace must be a JSON object: {path}")
+    return value
+
+
+def _positive_int(value: object, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{field} must be a positive integer: {value!r}")
+    return value
+
+
+def _non_negative_int(value: object, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{field} must be a non-negative integer: {value!r}")
+    return value
+
+
+def _finite_positive_float(value: object, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field} must be a finite positive number: {value!r}")
+    number = float(value)
+    if not math.isfinite(number) or number <= 0:
+        raise ValueError(f"{field} must be a finite positive number: {value!r}")
+    return number
+
+
+def _resolve_svg_path(raw: object, trace_path: Path) -> Path:
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError("conversion trace slide is missing its SVG path")
+    path = Path(raw)
+    if path.is_absolute() and path.is_file():
+        return path
+
+    candidates = [Path.cwd() / path, trace_path.parent / path]
+    candidates.extend(parent / path for parent in trace_path.parents)
+    for candidate in candidates:

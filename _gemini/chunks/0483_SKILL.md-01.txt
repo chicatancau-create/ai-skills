@@ -1,0 +1,95 @@
+---
+name: windows-gui-control
+description: 这台 Windows 上「操控电脑 / 操作 GUI / 截图看界面 / 点按钮 / 发快捷键 / 打开某软件里的文件」的唯一标准做法。**允许在前台操作，但不许抢用户的前台**：动手前先用 `useridle.py` 判用户是否正在用电脑——用户在操作就先停、先让路；用户没在用时可以正常激活窗口、点击、发快捷键。用户只要让你操控软件界面、看某个窗口里的内容、或在 Adobe XD 等桌面软件里做操作时，先加载本 skill 再动手。
+---
+
+# 本机 GUI 操控：唯一标准做法（能动前台，但不抢前台）
+
+## 这是被动技能：什么时候自动生效
+
+**任何**「要去看某个窗口长什么样」「要点某个软件里的按钮」「要用快捷键让它打开文件」「要证明某个界面状态」的任务，都必须走本 skill，不要临时另写一套。
+`~/.dsh/AGENTS.md` 已把这条写进常驻规则，用户不需要每次提醒。
+
+## 铁律 0：让路，不是禁止（用户 2026-11-11 的两次澄清）
+
+用户原话：
+
+> 「不要再去抢我的前台了，搞得我很难受！」
+> 「我不是不让你操作前台，我是不让你抢我的前台」
+> 「只要我在前台进行操作的时候，你就默认先停一下，先暂停」
+
+**允许**在前台操作（激活目标窗口、点击、发快捷键）；**禁止**把用户正在用的窗口挤下去、把焦点从他手里夺走。
+
+### 动手前必须先判「用户是不是在用电脑」
+
+```bash
+python "C:\Users\Admin\.dsh\tools\gui-control\useridle.py"
+#   idle    : 122.78s (threshold 5.0s)
+#   foregrnd: 787174  '用AI控制XD制作文件 — DeepSeekRuntime'
+#   verdict : USER_IDLE -> free to operate in the foreground
+```
+
+| verdict | 含义 | 该怎么做 |
+|---|---|---|
+| `USER_ACTIVE` | 最近 5 秒内有键鼠输入，前台是用户的窗口 | **先停**：等、或先问一句「现在可以动一下界面吗」。不许抢 |
+| `USER_IDLE` | 用户没在操作 | **直接做**：激活目标窗口、点击、发键都行，不必逐次申请 |
+
+`useridle.py --json` 给机器读，`--threshold N` 调灵敏度（聊天类场景 10–15 秒更稳）。
+
+### 绝对禁止的「抢」（与用户是否授权无关）
+
+| 禁止 | 为什么 |
+|---|---|
+| 用户正在用的窗口被挤到后面 / 焦点被夺走 | 这就是用户说的「抢」，最招人烦 |
+| `SetWindowPos(HWND_TOPMOST)` 盖住他的窗口 | XAML 应用还清不掉，一盖就赖着 |
+| 最小化用户的窗口腾地方 | 打断他；只有他同意时才短暂用并立刻恢复 |
+
+### 允许且推荐的（完全不碰焦点）
+
+- `pwcap.py` 的 `PrintWindow` 抓图——**能抓到被完全遮挡的窗口内容**，是 UWP 界面唯一可靠取证方式
+- 枚举窗口、读标题/类名/矩形/样式
+- 直接读写文件（`.xd`、`.docx`、配置、日志……）——**能文件级解决就绝不碰界面**
+- 启动程序（用户没在用时启动，别顺手把它顶到前台）
+
+### 真的动鼠标键盘时，仍必须
+
+1. 每次点击前用 `WindowFromPoint` + `GetAncestor(GA_ROOT)` 确认该像素**真的属于目标窗口**（防点歪打到用户窗口里，曾误关他的 HBuilderX / 浏览器标签页）；
+2. 抢不到前台就**中止并记录 NOFOCUS**，绝不盲点；
+3. 中途发现用户开始操作了 → **立刻让出**，不要硬顶。
+4. 做完把界面恢复到他原来的样子（他同意最小化过的窗口要还回去）。
+
+## 能力分层（从上往下选，能用上层就不用下层）
+
+| 层 | 手段 | 是否动前台 |
+|---|---|---|
+| T0 | 直接改文件 / 读文件（zip、docx、json、注册表、日志） | 否 |
+| T1 | `PrintWindow` 截图 + 窗口枚举取证 | 否 |
+| T2 | 启动/关闭进程、等待窗口出现 | 否 |
+| T3 | 激活窗口 + 键鼠注入（`SendKeys`、`mouse_event`） | **是**——用户 `USER_IDLE` 时可直接用；`USER_ACTIVE` 时先停 |
+
+## 工具（本机已装，别重写）
+
+机器级（任何项目都能用）：`C:\Users\Admin\.dsh\tools\gui-control\`
+XD 专用：`C:\Users\Admin\.dsh\tools\xd\`（`xd-open.ps1` 打开文件、`xd-accept.py` 预览窗点测；`.xd` 的格式与生成见 `xd-authoring` skill）
+Python：`C:\Users\Admin\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\python\python.exe`（含 Pillow；跑前设 `PYTHONIOENCODING=utf-8`）
+
+| 工具 | 用途 |
+|---|---|
+| `winlist.py` | 列全部可见顶层窗口：hwnd / pid / class / rect / title。**排查"窗口在哪"第一步** |
+| `pwcap.py <hwnd> [out.png] [maxw]` | **PrintWindow 后台抓图**（PW_RENDERFULLCONTENT）。被遮挡也能抓，是 UWP 内容唯一可靠截图法；`out` 默认落临时目录。也可当模块用：`from pwcap import capture; img = capture(hwnd)`（已加 `__main__` 保护，可安全 import） |
+| `useridle.py [--json] [--threshold N]` | **动手前第一步**：判用户是不是正在用电脑。输出 idle 秒数 / 前台窗口 / `USER_ACTIVE` 或 `USER_IDLE`；也可 `from useridle import user_is_active; user_is_active(5.0)` |
+| `maxcap.py <hwnd> <out.png>` | 先恢复+最大化再 PrintWindow（会短暂动窗口，`USER_ACTIVE` 时别用） |
+| `crop.py <src> <out> "x0,y0,x1,y1" <scale>` | PIL 裁剪放大，看细节用 |
+| `tapcalc.py <png> <ax> <ay> ...` | 从截图反推「画板坐标 → 屏幕坐标」的比例与原点 |
+| `docmin.py min\|restore` | 最小化/恢复文档窗口（会短暂动窗口；`USER_ACTIVE` 时先问，用完恢复） |
+| `shot.ps1` | 全屏截图（1500 宽，屏幕坐标 = 截图坐标 × 2048/宽） |
+| `pvact.ps1` / `focus.ps1` / `key.ps1` / `click.ps1` / `maximize.ps1` / `cleanlaunch.ps1` | **T3 键鼠与激活**：`USER_IDLE` 可直接用；`USER_ACTIVE` 先停 |
+
+## 已验证的硬事实（省得再踩）
+
+1. **DPI 虚拟化**：不声明 DPI 感知时 `GetWindowRect` 给逻辑坐标、`PrintWindow` 给物理像素，两套单位混用 → 点击全偏。所有脚本开头必须 `SetProcessDPIAware()`。
+2. **`ImageGrab` / `BitBlt` 抓不到 UWP（XAML）合成内容**，得到纯灰空图或黑图；`PrintWindow(hdc, PW_RENDERFULLCONTENT=2)` 可以。
+3. **窗口可能不属于应用进程**：XD 等 UWP 应用的窗口挂在 `ApplicationFrameHost` 上，按 `Get-Process <app>` 的 pid 过滤窗口会漏掉。用 `winlist.py` 按标题找。
+4. **`GetForegroundWindow()` 可能返回 0**（不是锁屏）。判断"前台是不是目标"不能用它单独下结论，用 `WindowFromPoint` 命中测试。
+5. **Windows 会拒绝 `SetForegroundWindow`**，而且 XAML 应用对 `SetWindowPos(HWND_TOPMOST)` 不敏感、`HWND_NOTOPMOST` 清不干净 → 一旦置顶就很难消掉，所以**别随手置顶**。
+6. **`PostMessage` 发快捷键对 XAML 应用无效**，`SendKeys` 只发给真正的前台窗口。

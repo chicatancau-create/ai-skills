@@ -1,0 +1,115 @@
+"""Extract native ChartEx payloads from PPTX chart parts.
+
+The parser is deliberately closed around the seven ChartEx data models that
+the native writer already emits.  Data topology and caches must be complete;
+unmodeled chart chrome, labels, axes, binning options, and style details are
+allowed to normalize during editable native reconstruction.
+"""
+
+from __future__ import annotations
+
+import math
+import re
+from typing import Any
+from xml.etree import ElementTree as ET
+
+from svg_to_pptx.native_objects.chart_data import validate_chart_payload
+from svg_to_pptx.native_objects.marker_common import CHART_COLOR_STYLE_REL_TYPE
+
+from .color_resolver import COLOR_TAGS, ColorPalette, resolve_color
+from .emu_units import NS, Xfrm
+from .ooxml_loader import OoxmlPackage, PartRef
+
+
+CHARTEX_URI = "http://schemas.microsoft.com/office/drawing/2014/chartex"
+
+CX_NS = {
+    **NS,
+    "cx": CHARTEX_URI,
+}
+
+_INT_TOKEN_RE = re.compile(r"[0-9]+")
+_HIERARCHY_LAYOUTS = {"sunburst", "treemap"}
+_FLAT_LAYOUTS = {"funnel", "waterfall"}
+_LEGEND_POSITIONS = {"b", "l", "r", "t"}
+
+
+class UnsupportedChartEx(RuntimeError):
+    """A ChartEx part cannot map to the current native authoring schema."""
+
+    def __init__(self, status: str) -> None:
+        super().__init__(status)
+        self.status = status
+
+
+def extract_native_chartex_payload(
+    graphic_data: ET.Element | None,
+    xfrm: Xfrm,
+    slide_part: PartRef,
+    pkg: OoxmlPackage,
+    palette: ColorPalette | None = None,
+) -> dict[str, Any]:
+    """Return a writer-valid payload for one supported ChartEx reference.
+
+    ``UnsupportedChartEx.status`` is suitable for
+    ``data-pptx-replacement-status`` when the reference, relationship, data
+    topology, or cache is unusable.
+    Style-part failures never reject an otherwise valid data payload.
+    """
+    if graphic_data is None:
+        raise UnsupportedChartEx("unsupported-chart-reference")
+    if xfrm.rot or xfrm.flip_h or xfrm.flip_v:
+        raise UnsupportedChartEx("unsupported-native-transform")
+
+    chart_ref = graphic_data.find("cx:chart", CX_NS)
+    if chart_ref is None:
+        raise UnsupportedChartEx("unsupported-chart-reference")
+    rid = chart_ref.attrib.get(f"{{{NS['r']}}}id")
+    if not rid:
+        raise UnsupportedChartEx("unsupported-chart-reference")
+
+    chart_path = slide_part.resolve_rel(rid)
+    if not chart_path:
+        raise UnsupportedChartEx("unsupported-chart-relationship")
+    chart_part = pkg.load_part(chart_path)
+    if chart_part is None:
+        raise UnsupportedChartEx("unsupported-chart-part")
+
+    try:
+        payload = _payload_from_chartex_xml(chart_part.xml, xfrm)
+        colors = _resolved_chart_colors(chart_part, pkg, palette)
+        if colors:
+            payload["style"] = {"colors": colors}
+        validate_chart_payload(payload)
+    except UnsupportedChartEx:
+        raise
+    except RuntimeError as exc:
+        raise UnsupportedChartEx("unsupported-chartex-schema") from exc
+    except (AttributeError, OverflowError, TypeError, ValueError) as exc:
+        raise UnsupportedChartEx("unsupported-chartex-parse") from exc
+    return payload
+
+
+def _payload_from_chartex_xml(
+    chart_root: ET.Element,
+    xfrm: Xfrm,
+) -> dict[str, Any]:
+    if chart_root.tag != f"{{{CHARTEX_URI}}}chartSpace":
+        raise UnsupportedChartEx("unsupported-chartex-part")
+
+    chart_data = _one_child(chart_root, "chartData", "unsupported-chartex-structure")
+    chart = _one_child(chart_root, "chart", "unsupported-chartex-structure")
+    plot_area = _one_child(chart, "plotArea", "unsupported-chartex-structure")
+    region = _one_child(plot_area, "plotAreaRegion", "unsupported-chartex-structure")
+
+    data_by_id = _data_parts(chart_data)
+    series_nodes = _children(region, "series")
+    if not series_nodes:
+        raise UnsupportedChartEx("unsupported-chartex-series")
+
+    chart_type = _chart_type(series_nodes)
+    payload: dict[str, Any] = {
+        **_bounds_payload(xfrm),
+        "type": chart_type,
+    }
+

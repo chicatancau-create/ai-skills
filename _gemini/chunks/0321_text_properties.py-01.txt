@@ -1,0 +1,182 @@
+"""Closed project grammar for SVG text presentation properties.
+
+The project accepts a deliberately small SVG text surface that maps
+deterministically to editable DrawingML.  This module is shared by the quality
+checker and the converter so unsupported values cannot be silently normalized
+by one route and rejected by the other.
+"""
+
+from __future__ import annotations
+
+import math
+import re
+from dataclasses import dataclass
+from xml.etree import ElementTree as ET
+
+from .utils import font_px_to_hpt, parse_svg_length
+
+
+_SVG_TEXT_PROPERTIES = frozenset({
+    'font-weight',
+    'font-style',
+    'text-anchor',
+    'letter-spacing',
+    'text-decoration',
+})
+
+_TEXT_DECLARATION_PROPERTIES = _SVG_TEXT_PROPERTIES | {
+    'baseline-shift',
+    'font-family',
+    'font-size',
+}
+
+_TEXT_INHERITANCE_TARGETS = frozenset({'svg', 'g', 'text', 'tspan'})
+
+_UNSUPPORTED_TEXT_PROPERTIES = frozenset({
+    'alignment-baseline',
+    'direction',
+    'dominant-baseline',
+    'font-kerning',
+    'font-feature-settings',
+    'font-size-adjust',
+    'font-stretch',
+    'font-synthesis',
+    'font-variant',
+    'font-variation-settings',
+    'font',
+    'hyphens',
+    'kerning',
+    'line-height',
+    'overflow-wrap',
+    'text-align',
+    'text-align-last',
+    'text-indent',
+    'text-rendering',
+    'text-shadow',
+    'text-transform',
+    'unicode-bidi',
+    'vertical-align',
+    'white-space',
+    'word-spacing',
+    'word-break',
+    'writing-mode',
+})
+
+_TEXT_DIRECT_ATTRIBUTES = frozenset({
+    'fill',
+    'fill-opacity',
+    'filter',
+    'font-family',
+    'font-size',
+    'font-style',
+    'font-weight',
+    'id',
+    'letter-spacing',
+    'opacity',
+    'stroke',
+    'stroke-opacity',
+    'stroke-width',
+    'style',
+    'text-anchor',
+    'text-decoration',
+    'transform',
+    'x',
+    'xml:space',
+    'y',
+})
+
+_TSPAN_DIRECT_ATTRIBUTES = frozenset({
+    'baseline-shift',
+    'dx',
+    'dy',
+    'fill',
+    'fill-opacity',
+    'font-family',
+    'font-size',
+    'font-style',
+    'font-weight',
+    'id',
+    'letter-spacing',
+    'opacity',
+    'stroke',
+    'stroke-opacity',
+    'stroke-width',
+    'style',
+    'text-decoration',
+    'x',
+    'xml:space',
+    'y',
+})
+
+_TEXT_INLINE_PROPERTIES = frozenset({
+    'fill',
+    'fill-opacity',
+    'font-family',
+    'font-size',
+    'font-style',
+    'font-weight',
+    'letter-spacing',
+    'opacity',
+    'shape-rendering',
+    'stroke',
+    'stroke-opacity',
+    'stroke-width',
+    'text-anchor',
+    'text-decoration',
+})
+
+_TSPAN_INLINE_PROPERTIES = _TEXT_INLINE_PROPERTIES - {'text-anchor'}
+
+_CANONICAL_DECIMAL_RE = re.compile(r'^-?(?:\d+(?:\.\d+)?|\.\d+)$')
+_COMPATIBLE_LETTER_SPACING_RE = re.compile(
+    r'(-?(?:\d+(?:\.\d+)?|\.\d+))(px|pt|em)',
+    re.IGNORECASE,
+)
+_XML_NAMESPACE = 'http://www.w3.org/XML/1998/namespace'
+_XML_SPACE_ATTRIBUTE = f'{{{_XML_NAMESPACE}}}space'
+_PROJECT_XML_SPACE_VALUES = frozenset({'default', 'preserve'})
+_DRAWINGML_TEXT_SPACING_MIN = -400_000
+_DRAWINGML_TEXT_SPACING_MAX = 400_000
+
+
+@dataclass(frozen=True)
+class ParsedTextProperty:
+    """One validated text-property value and its canonical representation."""
+
+    value: object
+    canonical: str
+    compatible: bool = False
+
+
+@dataclass(frozen=True)
+class TextPropertyDiagnostic:
+    """Stable checker/converter diagnostic for one text declaration."""
+
+    severity: str
+    label: str
+    source: str
+    name: str
+    raw: str
+    message: str
+    canonical: str | None = None
+
+
+def _local_name(value: object) -> str:
+    text = str(value)
+    return text.rsplit('}', 1)[-1] if '}' in text else text
+
+
+def _element_label(elem: ET.Element) -> str:
+    tag = _local_name(elem.tag)
+    elem_id = elem.get('id')
+    return f'<{tag} id="{elem_id}">' if elem_id else f'<{tag}>'
+
+
+def _attribute_name(raw_name: str) -> str:
+    if raw_name.startswith(f'{{{_XML_NAMESPACE}}}'):
+        return f'xml:{raw_name.rsplit("}", 1)[-1]}'
+    return _local_name(raw_name)
+
+
+def resolve_project_xml_space(
+    elem: ET.Element,

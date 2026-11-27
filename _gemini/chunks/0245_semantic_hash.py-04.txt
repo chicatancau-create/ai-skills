@@ -1,0 +1,62 @@
+    if _local_name(element.tag) in _NATIVE_FALLBACK_IGNORED_TAGS:
+        return True
+    # ``display:none`` suppresses the entire descendant subtree.  SVG
+    # ``visibility`` is different: a descendant may explicitly restore
+    # ``visibility:visible``.  Keep visibility-hidden content in the digest
+    # conservatively so such visible descendants cannot evade stale detection.
+    return _native_fallback_style_value(element, "display") == "none"
+
+
+def _normalize_native_fallback_id_refs(
+    name: str,
+    value: str,
+    id_tokens: dict[str, str],
+) -> str:
+    def replace_url(match: re.Match[str]) -> str:
+        token = id_tokens.get(match.group("id"))
+        return f"url(#{token})" if token is not None else match.group(0)
+
+    normalized = _URL_ID_RE.sub(replace_url, value)
+    if name in {"href", "xlink:href"} and normalized.startswith("#"):
+        token = id_tokens.get(normalized[1:])
+        if token is not None:
+            return f"#{token}"
+    return normalized
+
+
+def _native_fallback_style_value(element: ET.Element, name: str) -> str | None:
+    raw = element.get(name)
+    if raw is not None:
+        return raw.strip().lower()
+    style = element.get("style") or ""
+    for declaration in style.split(";"):
+        if ":" not in declaration:
+            continue
+        key, value = declaration.split(":", 1)
+        if key.strip().lower() == name:
+            return value.strip().lower()
+    return None
+
+
+def _element_payload(element: ET.Element) -> dict:
+    return {
+        "tag": _local_name(element.tag),
+        "attrs": sorted(
+            (name, value)
+            for name, value in element.attrib.items()
+            if not name.startswith("data-pptx-") and name != "id"
+        ),
+        "text": element.text or "",
+        "children": [
+            {
+                "node": _element_payload(child),
+                "tail": child.tail or "",
+            }
+            for child in element
+            if _local_name(child.tag) in {"text", "tspan"}
+        ],
+    }
+
+
+def _local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]

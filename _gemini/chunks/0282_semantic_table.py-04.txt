@@ -1,0 +1,130 @@
+        for index, paragraph in enumerate(paragraphs):
+            if (
+                isinstance(paragraph, dict)
+                and set(paragraph) == {"text"}
+                and isinstance(paragraph["text"], str)
+            ):
+                paragraphs[index] = paragraph["text"]
+
+
+def _cell_style_signature(cell: dict[str, Any]) -> dict[str, Any]:
+    return {
+        field: copy.deepcopy(cell[field])
+        for field in _CELL_FORMAT_FIELDS
+        if field in cell
+    }
+
+
+def _factor_cell_styles(
+    payload: dict[str, Any],
+    defaults: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    cells = list(_iter_cells(payload))
+    signatures: dict[str, dict[str, Any]] = {}
+    matching_cells: dict[str, list[dict[str, Any]]] = {}
+    order: list[str] = []
+    for cell in cells:
+        style = _cell_style_signature(cell)
+        if not style:
+            continue
+        signature = _canonical_json(style)
+        if signature not in signatures:
+            signatures[signature] = style
+            matching_cells[signature] = []
+            order.append(signature)
+        matching_cells[signature].append(cell)
+
+    cell_styles: dict[str, dict[str, Any]] = {}
+    for signature in order:
+        matched = matching_cells[signature]
+        if len(matched) < 2:
+            continue
+        name = f"cell-{len(cell_styles) + 1}"
+        before = len(
+            _canonical_json(
+                {"payload": payload, "defaults": defaults, "cell_styles": cell_styles}
+            )
+        )
+        style = signatures[signature]
+        cell_styles[name] = copy.deepcopy(style)
+        for cell in matched:
+            for field in style:
+                del cell[field]
+            cell["cell_style"] = name
+        after = len(
+            _canonical_json(
+                {"payload": payload, "defaults": defaults, "cell_styles": cell_styles}
+            )
+        )
+        if after < before:
+            continue
+        del cell_styles[name]
+        for cell in matched:
+            del cell["cell_style"]
+            cell.update(copy.deepcopy(style))
+    return cell_styles
+
+
+def compact_semantic_table_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return a deterministic, lossless semantic-table.v2 representation."""
+    source = _require_object(payload, "payload")
+    if "schema" in source:
+        working = expand_semantic_table_payload(source)
+    else:
+        working = copy.deepcopy(source)
+
+    defaults: dict[str, dict[str, Any]] = {
+        "cell": {},
+        "paragraph": {},
+        "run": {},
+    }
+    cells = list(_iter_cells(working))
+    total_cells = len(working.get("columns", [])) + sum(
+        len(row) for row in working.get("rows", []) if isinstance(row, list)
+    )
+    if cells and len(cells) == total_cells:
+        _promote_defaults(
+            working,
+            defaults,
+            "cell",
+            cells,
+            _CELL_FORMAT_FIELDS,
+        )
+
+    paragraphs = list(_iter_paragraphs(cells))
+    paragraph_count = sum(
+        len(cell["paragraphs"])
+        for cell in cells
+        if isinstance(cell.get("paragraphs"), list)
+    )
+    if paragraphs and len(paragraphs) == paragraph_count:
+        _promote_defaults(
+            working,
+            defaults,
+            "paragraph",
+            paragraphs,
+            _PARAGRAPH_DEFAULT_FIELDS,
+        )
+
+    runs = list(_iter_runs(paragraphs))
+    run_count = sum(
+        len(paragraph["runs"])
+        for paragraph in paragraphs
+        if isinstance(paragraph.get("runs"), list)
+    )
+    if runs and len(runs) == run_count:
+        _promote_defaults(
+            working,
+            defaults,
+            "run",
+            runs,
+            _RUN_DEFAULT_FIELDS,
+        )
+
+    _compact_plain_paragraphs(working)
+    cell_styles = _factor_cell_styles(working, defaults)
+    compact_defaults = {
+        section: values for section, values in defaults.items() if values
+    }
+
+    result: dict[str, Any] = {"schema": SEMANTIC_TABLE_SCHEMA}

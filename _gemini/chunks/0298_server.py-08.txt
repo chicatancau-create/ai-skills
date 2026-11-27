@@ -1,0 +1,91 @@
+    @app.route('/api/slide/<name>/annotate/<element_id>', methods=['DELETE'])
+    def delete_annotate(name: str, element_id: str):
+        annotations, error = _get_annotation_snapshot(name)
+        if error is not None:
+            return error
+        if element_id in annotations:
+            del annotations[element_id]
+
+        return jsonify({
+            'status': 'ok',
+            'annotations_count': len(annotations),
+        })
+
+    @app.route('/api/slide/<name>/edit', methods=['POST'])
+    def post_edit(name: str):
+        """Stage a direct (AI-free) edit to one element.
+
+        Body: ``{element_id, text?: str, attrs?: {fill, font-size, ...}}``.
+        The edit is visible in preview, but disk writes happen only in
+        /api/save-all alongside annotation persistence.
+        """
+        svg_file = _safe_svg_path(name)
+        if svg_file is None:
+            return jsonify({'error': 'Invalid slide name'}), 400
+        if not svg_file.exists():
+            return jsonify({'error': 'Slide not found'}), 404
+
+        data = request.get_json(silent=True) or {}
+        element_id = data.get('element_id')
+        if not isinstance(element_id, str) or not element_id or len(element_id) > 200:
+            return jsonify({'error': 'Missing or invalid element_id'}), 400
+
+        new_text = data.get('text')
+        attrs = data.get('attrs')
+        promote = data.get('promote_tspan')
+        if new_text is None and not attrs and not promote:
+            return jsonify({'error': 'Nothing to edit (no text or attrs)'}), 400
+
+        if new_text is not None:
+            if not isinstance(new_text, str) or len(new_text) > _MAX_EDIT_TEXT_LEN:
+                return jsonify({'error': 'Invalid or too-long text'}), 400
+        if attrs is not None:
+            if not isinstance(attrs, dict):
+                return jsonify({'error': 'attrs must be an object'}), 400
+        if promote is not None:
+            if not isinstance(promote, dict):
+                return jsonify({'error': 'promote_tspan must be an object'}), 400
+            for key in ('x', 'y'):
+                value = promote.get(key)
+                if not isinstance(value, str) or not re.fullmatch(r'-?\d+(?:\.\d+)?', value):
+                    return jsonify({'error': f'invalid promote_tspan.{key}'}), 400
+
+        try:
+            tree = ET.parse(str(svg_file))
+            root = tree.getroot()
+        except ET.ParseError as exc:
+            return jsonify({'error': f'Failed to parse SVG: {exc}'}), 500
+
+        try:
+            materialize_inline_geometry_properties(root)
+        except GeometryStyleError as exc:
+            return jsonify({'error': f'Invalid inline geometry: {exc}'}), 400
+
+        assign_temp_ids(root)
+        pending = app.config['PENDING_EDITS'].get(name) or []
+        ok, reason = _apply_edit_records(root, pending)
+        if not ok:
+            return jsonify({'error': f'Failed to replay pending edits: {reason}'}), 500
+
+        # Locate the target up front to capture old values before mutating —
+        # these feed the staged record and eventual edit log.
+        target = _find_by_id(root, element_id)
+        if target is None:
+            return jsonify({'error': 'Element not found'}), 404
+        if attrs is not None:
+            attr_err = _validate_edit_attrs(attrs, set(target.attrib.keys()))
+            if attr_err:
+                return jsonify({'error': attr_err}), 400
+
+        changes = []
+        staged: dict = {'element_id': element_id}
+        if new_text is not None:
+            old_text = target.text or ''
+            ok, reason = set_text(root, element_id, new_text)
+            if not ok:
+                return jsonify({'error': f'Text edit failed: {reason}'}), (
+                    404 if reason == 'not-found' else 400
+                )
+            changes.append({'kind': 'text', 'key': None, 'old': old_text, 'new': new_text})
+            staged['text'] = new_text
+        if attrs:

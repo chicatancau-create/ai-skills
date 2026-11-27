@@ -1,0 +1,70 @@
+| 操作 | 从返回中提取 | 用于 |
+|------|-------------|------|
+| `template list` | template 名称（result.items[].report_template_name） | `template get` 的 --name |
+| `template list` | `report_template_id` | `entry submit` 的 --template-id |
+| `template get` | `result.report_template_fields[].field_name` / `field_sort` / `field_type` | 拼 `entry submit` 的 --contents JSON（按下表映射）|
+| `entry submit` | `reportId`、`dingtalkOpenMarkdownLink`、`dingtalkOpenUrl`（CLI 自动反查详情后追加）| final reply 优先直接使用 `dingtalkOpenMarkdownLink`；需要结构化展示时用 `dingtalkOpenLink.title` + `dingtalkOpenLink.url` |
+| `inbox list` / `outbox list` | `reportId` | `entry get` / `entry stats` 的 --report-id |
+| `entry get` | `result.url`（`dingtalk://...`）| `entry submit` 未返回 `dingtalkOpenUrl` 或查看已有日志时，final reply 中以 markdown link 形式给用户：`[在钉钉中查看日志](result.url)` |
+
+**`template get` → `entry submit --contents` 字段映射**（必须严格对齐，不要自己改写字段名）：
+
+| `template get` 返回 | `entry submit --contents` 字段 |
+|------------------------|--------------------------|
+| `field_name`（string）| `key` |
+| `field_sort`（number）| `sort`（string，例如 `"0"`） |
+| `field_type`（number）| `type`（string，例如 `"1"`） |
+| —（用户填写）| `content` |
+| —（推断）| `contentType`（`type=1` 用 `markdown`，其余用 `origin`） |
+
+## 注意事项
+
+- `--start` / `--end` 使用 ISO-8601 格式（如 `2026-03-10T00:00:00+08:00`）
+- `template list` 不需要参数，直接返回当前用户可用的所有日志模版
+- `entry submit` 前必须先查模版（参见「提交链路硬约束」），勿猜测 `templateId` 或 `contents` 中的 `key`/`sort`；多控件时数组须覆盖模版必填项
+- `inbox list` / `outbox list` 默认用于筛选目标日志，不保证返回完整正文；读取正文请继续调用 `entry get`
+- `outbox list` 不传时间窗口默认最近 20 天（服务端单次查询跨度上限 20 天，超过会被拒绝），CLI 会在 stderr 输出 informational 提示；查更早数据需多次滚动调用，每次跨度 ≤ 20 天
+- `entry submit` 的 contents JSON 大小限制为 **10MB**，**不支持分批次提交**。超出限制时需精简内容或将内容拆分为多个独立日志分别提交
+
+## 常见错误诊断（CLI Code → 真实含义 → 建议动作）
+
+错误码均落到 errors.go 既有 `INPUT_*` / `MCP_*` / `RESOURCE_*` 体系，对应进程退出码见全局错误码文档。
+
+| Code | ExitCode | 真实含义 | 建议动作 |
+|------|---------|---------|---------|
+| `INPUT_INVALID_JSON` | 3 | `--contents` 或 `--contents-file` 内容非合法 JSON | 检查 JSON 数组结构，每项必须是 object，含 `key`/`sort`/`content`/`contentType`/`type` 五个字段 |
+| `INPUT_FILE_NOT_FOUND` | 3 | `--contents-file` 路径不存在 / sandbox OS 风格不匹配（macOS 路径在 Windows 沙箱）| 先确认 sandbox OS 与路径风格；改写到 `os.tmpdir()` 等可移植目录 |
+| `INPUT_MISSING_PARAM` | 3 | `--template-id` / `--contents` 必填缺失 | 显式传值；从 `template list` 取合法 templateId |
+| `INPUT_TOO_LARGE` | 3 | contents JSON 超过 10MB 限制 | **不支持分批次提交**。需精简内容或拆分为多个独立日志分别提交 |
+| `MCP_TOOL_ERROR` | 1 | 服务端业务错（含 `server_error_code: PARAM_ERROR`，覆盖 templateId 错 / 字段名错 / 字段值错 / contents 空等多种形态）| 查看 `server_error_code` / `technical_detail`；服务端不区分具体子错因，按提交链路重新走 `template list → template get → entry submit`；连续 ≥ 2 次仍失败必须停止重试，降级 final_reply |
+| `RESOURCE_NOT_FOUND` | 1 | reportId / templateId 在服务端找不到 | 用 `list` 或 `template list` 重新获取 |
+
+## 何时停止重试
+
+`dws report entry submit` 在以下情况下**必须停止重试**，转为降级 final_reply：
+
+1. 同一 templateId 连续 ≥ 3 次返回 PARAM_ERROR / INVALID_CONTENTS 类错误，且每次重试只是改 contents 字段名 / 格式而未重读 schema；
+2. 出现服务端不可读的 PARAM_ERROR（technical_detail 仅含 `root.success当前值`）—— 即使只 1 次也应停止；
+3. 出现 `INPUT_FILE_NOT_FOUND` 后下一次重试仍未先 `ls` 验证路径存在性。
+
+降级 final_reply 模板：
+
+> 当前 `dws report entry submit` 在该模版下持续返回不可恢复错误（已尝试 N 次，错误码 `<Code>`）。建议您：
+>
+> 1. 在钉钉客户端打开「日志」应用，选择「<模版名>」模版；
+> 2. 复制下面的内容粘贴到对应字段；
+> 3. 提交。
+>
+> 我已记录本次失败 trace，会同步给 dws 团队修复。
+
+## 自动化脚本
+
+| 脚本 | 场景 | 用法 |
+|------|------|------|
+
+
+
+## 相关产品
+
+- [doc](./doc.md) — 长文本文档创作（钉钉在线文档），不是日志模版
+- [todo](./todo.md) — 个人任务管理，不是日志汇报

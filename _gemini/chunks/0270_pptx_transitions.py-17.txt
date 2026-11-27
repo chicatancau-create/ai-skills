@@ -1,0 +1,109 @@
+    """Parse XML after registering its original namespace prefixes."""
+    data = xml_data.encode("utf-8") if isinstance(xml_data, str) else xml_data
+    register_source_namespaces(data)
+    return ET.fromstring(data)
+
+
+def _required_mce_prefixes(root: Any) -> set[str]:
+    prefixes = set(str(root.get(_qn(MC_NS, "Ignorable")) or "").split())
+    for element in root.iter():
+        if element.tag == _qn(MC_NS, "Choice"):
+            prefixes.update(str(element.get("Requires") or "").split())
+    return {prefix for prefix in prefixes if prefix}
+
+
+def _inject_root_namespace_declarations(
+    xml_data: bytes,
+    *,
+    bindings: dict[str, str],
+    prefixes: set[str],
+) -> bytes:
+    text = xml_data.decode("utf-8")
+    declaration_end = text.find("?>")
+    root_start = text.find("<", declaration_end + 2 if declaration_end >= 0 else 0)
+    root_end = text.find(">", root_start)
+    if root_start < 0 or root_end < 0:
+        raise ValueError("unable to locate serialized XML root element")
+
+    opening = text[root_start:root_end]
+    declarations: list[str] = []
+    for prefix in sorted(prefixes):
+        uri = bindings.get(prefix)
+        if not uri:
+            raise ValueError(
+                f"MCE prefix {prefix!r} has no namespace binding in source XML"
+            )
+        if re.search(rf"\bxmlns:{re.escape(prefix)}\s*=", opening):
+            continue
+        declarations.append(f" xmlns:{prefix}={quoteattr(uri)}")
+    if declarations:
+        text = text[:root_end] + "".join(declarations) + text[root_end:]
+    return text.encode("utf-8")
+
+
+def validate_mce_prefixes(xml_data: str | bytes) -> list[str]:
+    """Return unresolved MCE Requires/Ignorable prefix errors."""
+    if LET is None:
+        return []
+    data = xml_data.encode("utf-8") if isinstance(xml_data, str) else xml_data
+    try:
+        root = LET.fromstring(data)
+    except LET.XMLSyntaxError as exc:
+        return [f"invalid XML: {exc}"]
+
+    errors: list[str] = []
+    ignorable = str(root.get(_qn(MC_NS, "Ignorable")) or "").split()
+    for prefix in ignorable:
+        if prefix not in root.nsmap:
+            errors.append(f"mc:Ignorable prefix is not bound: {prefix}")
+    for choice in root.iter(_qn(MC_NS, "Choice")):
+        for prefix in str(choice.get("Requires") or "").split():
+            if prefix not in choice.nsmap:
+                errors.append(f"mc:Choice Requires prefix is not bound: {prefix}")
+    return errors
+
+
+def serialize_source_xml(root: ET.Element, source_xml: str | bytes) -> bytes:
+    """Serialize stdlib XML while retaining MCE prefix bindings."""
+    expected_transition = (
+        read_slide_transition(root)
+        if root.tag == _qn(PML_NS, "sld")
+        else None
+    )
+    source = (
+        source_xml.encode("utf-8")
+        if isinstance(source_xml, str)
+        else source_xml
+    )
+    bindings = register_source_namespaces(source)
+    prefixes = _required_mce_prefixes(root)
+    for prefix in prefixes:
+        namespace = TRANSITION_NAMESPACES.get(prefix)
+        if namespace is None:
+            continue
+        bindings[prefix] = namespace
+        ET.register_namespace(prefix, namespace)
+    serialized = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+    serialized = _inject_root_namespace_declarations(
+        serialized,
+        bindings=bindings,
+        prefixes=prefixes,
+    )
+    errors = validate_mce_prefixes(serialized)
+    if expected_transition is not None:
+        errors.extend(validate_slide_transition_xml(serialized))
+        actual_transition = read_slide_transition_xml(serialized)
+        if actual_transition != expected_transition:
+            errors.append("slide transition changed during XML serialization")
+    if errors:
+        raise ValueError("; ".join(errors))
+    return serialized
+
+
+def apply_slide_motion_xml(
+    slide_xml: str,
+    *,
+    enter: EnterUpdate,
+    advance: AdvanceUpdate,
+) -> tuple[str, bool]:
+    """Apply motion to source XML while preserving MCE namespace prefixes."""

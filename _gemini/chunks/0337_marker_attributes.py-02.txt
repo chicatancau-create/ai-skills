@@ -1,0 +1,69 @@
+                "metadata data-pptx-native conflicts with data-pptx-kind"
+            )
+    declared_raw = native_kind if native_kind is not None else compatible_kind
+    declared_kind = _normalized_token(declared_raw) if declared_raw is not None else None
+    if declared_kind is not None and declared_kind != parent_kind:
+        raise NativeMarkerAttributeError(
+            f"metadata kind {declared_kind!r} conflicts with parent "
+            f"replacement kind {parent_kind!r}"
+        )
+    metadata_type_raw = elem.get("type")
+    if metadata_type_raw is not None and metadata_type_raw != metadata_type_raw.strip():
+        raise NativeMarkerAttributeError(
+            "metadata type must not contain surrounding whitespace"
+        )
+    metadata_type = (metadata_type_raw or "").lower()
+    return metadata_type == "application/json" or declared_kind == parent_kind
+
+
+def native_marker_legacy_warnings(elem: ET.Element) -> list[str]:
+    """Return migration advice for compatible legacy marker spellings."""
+    tag = elem.tag.rsplit("}", 1)[-1]
+    if tag == "metadata":
+        native_kind = elem.get(LEGACY_REPLACE_WITH_ATTR)
+        compatible_kind = elem.get("data-pptx-kind")
+        if (
+            native_kind is not None
+            and compatible_kind is not None
+            and _normalized_token(native_kind) != _normalized_token(compatible_kind)
+        ):
+            return []
+        warnings = []
+        for legacy in (LEGACY_REPLACE_WITH_ATTR, "data-pptx-kind"):
+            if elem.get(legacy) is not None:
+                warnings.append(
+                    f"legacy metadata attribute {legacy} is compatible; use "
+                    'type="application/json" because the parent replacement '
+                    "marker determines the payload kind. No change is required "
+                    "for export."
+                )
+        return warnings
+
+    try:
+        native_replacement_kind(elem)
+        native_replacement_status(elem)
+        native_import_source(elem)
+        native_fallback_kind(elem)
+    except NativeMarkerAttributeError:
+        return []
+
+    warnings = []
+    replacements = (
+        (LEGACY_REPLACE_WITH_ATTR, REPLACE_WITH_ATTR),
+        (LEGACY_REPLACEMENT_STATUS_ATTR, REPLACEMENT_STATUS_ATTR),
+        (LEGACY_IMPORT_SOURCE_ATTR, IMPORT_SOURCE_ATTR),
+        (LEGACY_FALLBACK_KIND_ATTR, FALLBACK_KIND_ATTR),
+    )
+    for legacy, canonical in replacements:
+        if elem.get(legacy) is not None:
+            warnings.append(
+                f"legacy attribute {legacy} is compatible; use {canonical} "
+                "for project-canonical SVG. No change is required for export."
+            )
+    if elem.get(LEGACY_ROUTE_STATUS_ATTR) is not None:
+        warnings.append(
+            f"legacy attribute {LEGACY_ROUTE_STATUS_ATTR} is compatible; omit it "
+            f"because {FALLBACK_KIND_ATTR}='placeholder' already implies the "
+            "reconstruction-only route. No change is required for export."
+        )
+    return warnings

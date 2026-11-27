@@ -1,0 +1,91 @@
+        raise RuntimeError("Native PPTX combo category_numeric must be a boolean")
+    primary_axis_is_date = _category_axis_is_date(axes)
+    if primary_axis_is_date and raw_category_numeric is False:
+        raise RuntimeError("Native PPTX combo date-axis categories must remain numeric")
+    category_is_numeric = primary_axis_is_date or raw_category_numeric is True
+    raw_categories = _chart_list(payload.get("categories", []), "categories")
+    categories = (
+        [_chart_number(item) for item in raw_categories]
+        if category_is_numeric
+        else [str(item) for item in raw_categories]
+    )
+    if not categories:
+        raise RuntimeError("Native PPTX combo chart categories must be non-empty")
+    raw_plots = payload.get("plots", payload.get("chart_plots"))
+    plots: list[dict[str, Any]] = []
+
+    if raw_plots is not None:
+        for item in _chart_list(raw_plots, "plots"):
+            if not isinstance(item, dict):
+                raise RuntimeError("Native PPTX combo plots must be objects")
+            plots.append(_combo_plot_entry(
+                item,
+                categories,
+                category_is_numeric=category_is_numeric,
+                axes=axes,
+            ))
+    else:
+        raw_series = _chart_list(payload.get("series", []), "series")
+        if not raw_series:
+            raise RuntimeError("Native PPTX combo chart requires plots or typed series")
+        for idx, item in enumerate(raw_series, start=1):
+            if not isinstance(item, dict):
+                raise RuntimeError("Native PPTX chart series entries must be objects")
+            if not (item.get("type") or item.get("chart_type")):
+                raise RuntimeError("Native PPTX combo series entries require type")
+            if any(
+                field in item
+                for field in ("categories", "category_numeric", "series_indices")
+            ):
+                raise RuntimeError(
+                    "Native PPTX combo typed series with plot-scoped metadata "
+                    "must use plots"
+                )
+            typed_chart_type, typed_grouping_alias, _typed_style = _combo_plot_type(item)
+            typed_grouping = (
+                _chart_grouping(typed_chart_type, item, typed_grouping_alias)
+                if typed_chart_type in {"area", "column", "line"}
+                else None
+            )
+            one_series = _category_series(
+                {"series": [item]},
+                categories,
+                chart_type=typed_chart_type,
+                grouping=typed_grouping,
+                typed_combo=True,
+            )
+            plot = _combo_plot_entry(
+                item,
+                categories,
+                category_is_numeric=category_is_numeric,
+                axes=axes,
+                fallback_series=one_series,
+            )
+            signature = (
+                plot["axis"],
+                plot.get("grouping"),
+                plot.get("line_style"),
+                plot["type"],
+            )
+            previous = plots[-1] if plots else None
+            previous_signature = (
+                previous.get("axis"),
+                previous.get("grouping"),
+                previous.get("line_style"),
+                previous.get("type"),
+            ) if previous else None
+            if (
+                previous is not None
+                and signature == previous_signature
+                and plot.get("data_labels") == previous.get("data_labels")
+            ):
+                previous["series"].extend(plot["series"])
+            else:
+                plots.append(plot)
+
+    if not plots:
+        raise RuntimeError("Native PPTX combo chart requires at least one plot")
+    if not any(plot["axis"] == "primary" for plot in plots):
+        raise RuntimeError("Native PPTX combo chart requires a primary-axis plot")
+    has_secondary_plot = any(plot["axis"] == "secondary" for plot in plots)
+    if not has_secondary_plot and {

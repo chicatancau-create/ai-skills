@@ -1,0 +1,93 @@
+# 日历 (calendar) 命令参考
+
+## CLI 命令树与黄金路径
+
+- **二级子命令（必选其一）**：`event`（日程）、`attendee`（参会人）、`room`（会议室）、`busy`（闲忙）、`attachment`（日程附件）、`book`（用户日历列表）。`dws calendar` 后**必须**紧跟上述之一；**禁止**只执行 `dws calendar`（无子命令）。
+- **个人日程 / 给自己留时间块 / 专注时段**：统一走 **`dws calendar event create`**。当前**没有**单独的 `personal schedule create` / `calendar create` 命令。
+- **查日程列表**：`dws calendar event list --start "<ISO-8601>" --end "<ISO-8601>" --format json`，或优先使用脚本 `python scripts/calendar_today_agenda.py [today|tomorrow|week]`（见文末「自动化脚本」）。
+- **查用户日历本列表**：`dws calendar book list`（返回主日历 `id == "primary"` 等）。**重要**可以查询他人共享给自己的日历本，根据日历本id可以进一步查询对方的日程信息。
+- **CLI 不存在**独立的 `dws calendar list`；若误跑无子命令的 `dws calendar`，会打印整段 Usage，**切勿**将该段 help 当作工具结果再次塞进对话（会急剧增加 token 与首字延迟）。
+- **必须**遵循指令说明进行调用。**绝对禁止**使用虚构指令，使用虚构参数。
+
+## 反模式（禁止）
+1. **禁止**执行 `dws calendar` 且不带二级子命令（会刷出大量帮助文本）。合法二级子命令：`event` / `attendee` / `room` / `busy` / `attachment` / `book`。
+2. **禁止**使用不存在的子命令试探（如臆造 `dws calendar list`）；需要日程列表时一律使用 **`dws calendar event list`**（带 `--start` / `--end`，见下文「查询日程列表」示例）；需要日历本列表时使用 **`dws calendar book list`**。
+3. **禁止**将完整 `--help`/Usage 输出作为「观察」重复提交给模型；若误触，应直接改用本节黄金路径中的合法命令并重试。
+4. **禁止**继续使用已弃用的 `--max-results` 参数 —— 它们仍可被解析但**会被丢弃**，不再透传到 MCP，模型生成命令时也不要再带。
+5. **禁止**为已有日程重新创建日程来预订会议室。若日程已存在（同一会话中刚创建、或用户明确指向某日程），必须使用 `room add --event <已有EVENT_ID> --rooms <ROOM_ID>` 追加会议室，**绝不能**再调一次 `event create --rooms`（会创建重复日程）。
+6. **禁止**用 `--location` 替代会议室预订。`--location` 是纯文本地点备注字段，填入会议室名称**不会**完成任何预订或占用。预订会议室必须通过 `room add --rooms <roomId>` 或 `event create --rooms <roomId>`，roomId 来自 `room search` 返回；`--location` 与 `--rooms` 是两个独立字段，用途完全不同。
+7. **禁止**只传 `--recurrence-*` 部分 flag **并不是彼此独立的参数**：只传其中一项（比如只改 `--recurrence-count`、只设 `--recurrence-type`）会让服务端收到不完整的 recurrence 结构，CLI 现已前置校验并直接拒绝这类调用。**修改已有周期日程的任何一个循环字段时，都必须重新提供完整的 pattern+range 字段集合**——必要时先 `event get` 读取现有 `recurrence`，再在命令中整体重传。
+8. **禁止**用一条 指令 实现串行调用。比如当用户要求一次性安排多场不同的日程（例如「上午 10 点开项目评审、下午 2 点开复盘会、晚上 7 点聚餐」）时，必须**拆解成 N 条独立的 `event create`，依次串行执行**；每条命令自己写完整的 `--title` / `--start` / `--end`，绝不能把多个标题或多段时间塞进同一行。
+
+
+## 核心概念
+日历（calendar）：日程的容器。每个用户有一个主日历（我的日历，id: primary），还可以订阅公共/团队日历，以及他人共享的日历。
+日程（event）：日历中的单个日程，包含起止时间、地点、标题、参会人等属性。支持单次日程和重复日程(有recurrence rule的日程，又称SeriesMaster)，遵循RFC5545 iCalendar国际标准。
+日程实例（event instance）：日程的具体时间实例，可以通过event list指令查询时间段内的所有实例。1个普通日程和对应1个Instance，而1个重复性日程(SeriesMaster)对应N个Instance（同属一个日程序列）。
+  - 同一个日程序列具有相同的iCalUid，并且重复性日程，其eventId和iCalUid的值相同。因此可以通过重复性日程实例的iCalUid得到重复性日程(SeriesMaster)的eventId
+重复规则（recurrence rule）：定义重复性日程的重复规则。
+参会人（attendee）：日程的参与者。常用通讯录工具查询userId，dws contact user search --keyword "姓名"。
+响应状态（response）：参会人对日程的回应，包括：未响应、接受、待定、拒绝。
+忙闲时间（busy）：查询用户在指定时间段的忙闲状态，查询会议室在指定时间段的预定状态，用于会议时间协调。
+会议室（room）：room是 会议室 ，room可视为日程的资源类参会人，需要加入日程完成预订。注意和location区分，location只是地点，和room不同。
+
+## 命令概览
+
+### event 相关三级子命令
+```
+# 针对单个日程： 创建 ｜ 修改 ｜ 单查询 ｜ 删除 ｜ 响应日程(接受、暂定、拒绝)
+dws calendar event [create|update|get|delete|respond] [flags]
+# 按时间范围批量查询
+dws calendar event list [flags]
+# 对于非明确时间或一段时间范围的约会场景，可基于所有参会人的忙闲状态，推荐多个可用的时间块方案
+dws calendar event suggest [flags]
+```
+
+### attendee 相关三级子命令
+```
+# 日程中参会人操作：添加 ｜ 删除 ｜ 查询
+dws calendar attendee [add|delete|list] [flags]
+```
+
+### room 相关三级子命令
+```
+# 查询分组
+dws calendar room list-groups [flags]
+# 会议室搜索
+dws calendar room search [flags]
+# 预定会议室
+dws calendar room add [flags]
+# 释放会议室
+dws calendar room delete [flags]
+```
+> room是会议室，用于线下开会场景。
+
+### busy 相关三级子命令
+```
+# 按用户 / 会议室 + 时间窗查闲忙状态（--users 与 --rooms 至少其一），会议室的忙闲等同于预定记录
+dws calendar busy search [flags]
+```
+
+### attachment 相关三级子命令
+```
+# 把已上传到钉盘的文件挂到日程上（不负责上传，只负责挂载）
+dws calendar attachment add [flags]
+```
+
+### book 相关三级子命令
+```
+# 查询当前用户的所有日历，结果范围：用户自己的日历、已订阅的公共/团队日历、他人共享的日历。
+dws calendar book list [flags]
+```
+> **说明**: 可以通过 --help 进一步查看指令明细，也可以继续查看下一节 命令总览
+
+## 命令总览
+
+### 查询日程列表
+```
+Usage:
+  dws calendar event list [flags]
+Example:
+  dws calendar event list --start "2026-03-10T14:00:00+08:00" --end "2026-03-10T18:00:00+08:00"
+  dws calendar event list --calendar-id primary
+Flags:

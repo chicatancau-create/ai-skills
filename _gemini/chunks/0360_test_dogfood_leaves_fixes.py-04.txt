@@ -1,0 +1,81 @@
+            "body": {"latin": "Verdana", "ea": "微软雅黑"},
+        })
+        self.assertEqual(refs["+mn-ea"], "微软雅黑")
+        self.assertEqual(refs["+mj-lt"], "Verdana")
+
+
+class DataLabelPointTests(unittest.TestCase):
+    @staticmethod
+    def _xml(config: dict) -> str:
+        return _data_labels_xml(
+            config, chart_type="column", grouping="clustered", point_count=4,
+            font_size=1400, default_color="#000000", default_font_face=None,
+        )
+
+    def test_show_flag_makes_points_overrides(self) -> None:
+        xml = self._xml({"show_value": True, "points": [{"idx": 2, "delete": True}]})
+        self.assertEqual(xml.count('<c:delete val="1"/>'), 1)
+        self.assertIn('<c:showVal val="1"/><c:showCatName', xml.split("</c:dLbl>")[-1])
+
+    def test_points_without_flag_list_the_only_labels(self) -> None:
+        xml = self._xml({"points": [{"idx": 3}]})
+        self.assertEqual(xml.count('<c:delete val="1"/>'), 3)
+
+    def test_all_deleted_points_are_refused(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "no label remains"):
+            _chart_data_labels(
+                {"data_labels": {"points": [{"idx": 1, "delete": True}]}},
+                "column", "clustered", 4,
+            )
+
+
+class JapaneseTypographyTests(unittest.TestCase):
+    def test_small_kana_and_long_vowel_never_open_a_line(self) -> None:
+        units = text_measure._protected_units("スーパーっゃ・")
+        self.assertTrue(all(unit[0] not in "ーっゃ・" for unit in units))
+
+    def test_wrapped_pdf_lines_join_without_space_between_cjk(self) -> None:
+        self.assertEqual(pdf_to_md.join_wrapped_text("約６８億", "人ものお客様"), "約６８億人ものお客様")
+        self.assertEqual(pdf_to_md.join_wrapped_text("新幹", "線"), "新幹線")
+        self.assertEqual(pdf_to_md.join_wrapped_text("the high", "speed"), "the high speed")
+
+    def test_ea_fallback_follows_deck_language(self) -> None:
+        self.assertEqual(parse_font_family("'Georgia', serif", "ja-JP")["ea"], "Yu Mincho")
+        self.assertEqual(parse_font_family("Arial", "ja")["ea"], "Yu Gothic")
+        self.assertEqual(parse_font_family("'Hiragino Sans'", "ja-JP")["latin"], "Yu Gothic")
+        self.assertEqual(parse_font_family("Arial", "zh-CN")["ea"], "Microsoft YaHei")
+        self.assertEqual(parse_font_family("Arial")["ea"], "Microsoft YaHei")
+
+
+class TraditionalChineseIntakeTests(unittest.TestCase):
+    def test_office_language_tag_uses_region_form_for_chinese(self) -> None:
+        self.assertEqual(office_language_tag("zh-Hant-TW"), "zh-TW")
+        self.assertEqual(office_language_tag("zh-Hant-HK"), "zh-HK")
+        self.assertEqual(office_language_tag("zh-Hans"), "zh-CN")
+        self.assertEqual(office_language_tag("ja-JP"), "ja-JP")
+
+    def test_table_cells_keep_links(self) -> None:
+        html = (
+            '<table><tr><td>報告</td><td><ul><li><a href="/a.pdf">pdf</a></li>'
+            '<li><a href="/a.docx">docx</a></li></ul></td></tr></table>'
+        )
+        markdown = web_to_md.simple_html_to_markdown_traversal(
+            web_to_md.BeautifulSoup(html, "html.parser"), "https://example.gov.tw/x",
+        )
+        self.assertIn("[pdf](https://example.gov.tw/a.pdf)", markdown)
+        self.assertIn("[docx](https://example.gov.tw/a.docx)", markdown)
+
+    def test_downloaded_document_profile_records_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            markdown = Path(tmp) / "report.md"
+            markdown.write_text("# r\n", encoding="utf-8")
+            write_conversion_profile(
+                input_path=str(Path(tmp) / "report.pdf"), markdown_path=markdown,
+                converter="pdf_to_md.py", conversion_type="pdf",
+            )
+            record_source_url(markdown, "https://example.gov.tw/report.pdf")
+            profile = json.loads(profile_path_for(markdown).read_text(encoding="utf-8"))
+        self.assertEqual(profile["source"]["url"], "https://example.gov.tw/report.pdf")
+
+
+class DocxIntakeTests(unittest.TestCase):

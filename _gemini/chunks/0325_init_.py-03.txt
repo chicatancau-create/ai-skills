@@ -1,0 +1,97 @@
+                    "Native PPTX chart source_package relationship has no target"
+                )
+            resolved = posixpath.normpath(
+                posixpath.join(posixpath.dirname(owner), target)
+            ).lstrip("/")
+            if resolved not in parts:
+                raise RuntimeError(
+                    "Native PPTX chart source_package relationship target is missing"
+                )
+
+    frame_payload = _decode_source_chart_blob(
+        source.get("frame"),
+        "source_package.frame",
+    )
+    try:
+        frame = ET.fromstring(frame_payload)
+    except ET.ParseError as exc:
+        raise RuntimeError("Native PPTX chart source frame is malformed") from exc
+    pml_ns = "http://schemas.openxmlformats.org/presentationml/2006/main"
+    if frame.tag != f"{{{pml_ns}}}graphicFrame":
+        raise RuntimeError("Native PPTX chart source frame must be p:graphicFrame")
+    return chart_part, frame, parts, content_types
+
+
+def _source_chart_frame_xml(
+    frame: ET.Element,
+    *,
+    shape_id: int,
+    rel_id: str,
+) -> str:
+    pml_ns = "http://schemas.openxmlformats.org/presentationml/2006/main"
+    rel_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    c_nv_pr = frame.find(f"{{{pml_ns}}}nvGraphicFramePr/{{{pml_ns}}}cNvPr")
+    chart_refs = list(frame.iter(f"{{{CHART_URI}}}chart"))
+    if c_nv_pr is None or len(chart_refs) != 1:
+        raise RuntimeError("Native PPTX chart source frame structure is invalid")
+    relationship_attrs = [
+        (node, name)
+        for node in frame.iter()
+        for name in node.attrib
+        if isinstance(name, str) and name.startswith(f"{{{rel_ns}}}")
+    ]
+    if len(relationship_attrs) != 1 or relationship_attrs[0][0] is not chart_refs[0]:
+        raise RuntimeError(
+            "Native PPTX chart source frame has unsupported relationships"
+        )
+    c_nv_pr.set("id", str(shape_id))
+    chart_refs[0].set(f"{{{rel_ns}}}id", rel_id)
+    return ET.tostring(frame, encoding="unicode")
+
+
+_AXIS_LABEL_MARGIN_EM = 2.0  # PowerPoint's own auto layout reserves about this much for tick labels
+
+
+def _vertical_label_sides(chart_data: dict[str, Any]) -> set[str]:
+    """Frame sides (top/bottom) where a classic chart draws tick labels."""
+    kind = chart_data.get("kind")
+    chart_type = chart_data.get("type")
+    if kind == "combo":
+        horizontal_roles = ["category"]
+    elif kind == "category" and chart_type in {"area", "column", "line"}:
+        horizontal_roles = ["category"]
+    elif kind == "category" and chart_type == "bar":
+        horizontal_roles = ["value"]
+    else:
+        return set()
+    axes = chart_data.get("axes") if isinstance(chart_data.get("axes"), dict) else {}
+    sides: set[str] = set()
+    for role in horizontal_roles:
+        config = axes.get(role) if isinstance(axes.get(role), dict) else {}
+        if config.get("visible") is False or config.get("label_position") == "none":
+            continue
+        if role == "value" and not chart_data.get("show_value_axis_labels", True):
+            continue
+        sides.add(str(config.get("position") or "bottom"))
+    return sides
+
+
+def _grow_chart_frame_for_axis_labels(
+    chart_data: dict[str, Any] | None,
+    bounds: tuple[int, int, int, int],
+    *,
+    axis_font_px: float,
+) -> tuple[int, int, int, int]:
+    """Extend the chart frame past the plot so PowerPoint keeps the manual layout.
+
+    PowerPoint reads the plot area's manual y/h but discards them when the
+    strip between the plot edge and the frame edge cannot hold the tick
+    labels it lays out (about two em); it then auto-fits the plot to the
+    frame top and covers whatever was drawn above the plot. The frame is
+    invisible, so growing it outward on the label side costs nothing and
+    keeps the plot where the fallback drew it.
+    """
+    off_x, off_y, ext_cx, ext_cy = bounds
+    if chart_data is None:
+        return bounds
+    plot_area = chart_data.get("plot_area")

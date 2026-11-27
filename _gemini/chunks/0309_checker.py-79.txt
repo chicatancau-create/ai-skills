@@ -1,0 +1,100 @@
+                    scope = f"Master {scope_key!r}"
+                else:
+                    master_key, layout_key = scope_key
+                    scope = (
+                        f"Layout {layout_key!r} under Master {master_key!r}"
+                    )
+                if element_id is None:
+                    subject = "fixed visual resources"
+                    verb = "differ"
+                else:
+                    subject = f"fixed element {element_id!r}"
+                    verb = "differs"
+                errors.append(
+                    f"{scope} {subject} {verb} across slides: "
+                    f"{slide_names}. Values marked data-pptx-layer={layer!r} must "
+                    "remain identical throughout their reuse scope; move variable "
+                    "text or images into a placeholder slot or keep them Slide-local."
+                )
+        return errors
+
+    @staticmethod
+    def _fixed_layer_payloads(spec, layer: str) -> Dict[object, tuple]:
+        """Return resolved fixed-layer visual payloads keyed by SVG id."""
+        elements = (
+            spec.master_elements if layer == 'master' else spec.layout_elements
+        )
+        if not elements:
+            return {}
+        signature = _structure_subtree_signature(
+            spec.svg_path,
+            elements,
+            include_skin=True,
+            include_text=True,
+            asset_identity=True,
+        )
+        return {
+            None if element_id == '__visual_resources__' else element_id: payload
+            for element_id, payload in signature
+        }
+
+    @staticmethod
+    def _layout_contract_fingerprint(svg_path: Path):
+        """Id-insensitive static contract: layout-layer XML + placeholder slots."""
+        try:
+            root = ET.parse(str(svg_path)).getroot()
+        except (OSError, ET.ParseError):
+            return None
+        layout_parts = []
+        placeholder_parts = []
+        for child in list(root):
+            if child.get('data-pptx-layer') == 'layout':
+                clone = copy.deepcopy(child)
+                for elem in clone.iter():
+                    elem.attrib.pop('id', None)
+                xml = ET.tostring(clone, encoding='unicode')
+                layout_parts.append(re.sub(r'\s+', ' ', xml).strip())
+            placeholder = child.get('data-pptx-placeholder')
+            if placeholder is not None:
+                carrier_tags = tuple(
+                    grandchild.tag.rsplit('}', 1)[-1]
+                    for grandchild in list(child)
+                    if (
+                        grandchild.get('data-pptx-carrier') or ''
+                    ).strip().lower() == 'true'
+                )
+                placeholder_parts.append((
+                    placeholder,
+                    child.tag.rsplit('}', 1)[-1],
+                    child.get('data-pptx-bounds') or '',
+                    child.get('data-pptx-idx') or '',
+                    (
+                        child.get('data-pptx-binding') or 'carrier'
+                    ).strip().lower(),
+                    carrier_tags,
+                ))
+        return (
+            tuple(layout_parts),
+            tuple(sorted(placeholder_parts)),
+        )
+
+    def _check_illustration_resource_contract(self, dir_path: Path) -> None:
+        """Project-level planned-image and illustration resource checks."""
+        project_path = self._resolve_project_path(dir_path)
+        spec_path = project_path / 'design_spec.md'
+        if not spec_path.exists():
+            return
+
+        try:
+            spec_text = spec_path.read_text(encoding='utf-8')
+        except OSError as exc:
+            self._illustration_issues.append((
+                'warning',
+                'spec_unreadable',
+                f"could not read {spec_path}: {exc}",
+            ))
+            return
+
+        current_contract = (
+            '<!-- ppt-master-schema: design-spec/v1 -->' in spec_text
+        )

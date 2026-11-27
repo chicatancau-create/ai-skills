@@ -1,0 +1,106 @@
+# Parsing helpers
+# ---------------------------------------------------------------------------
+
+def _read_emu_attr(elem: ET.Element | None, attr: str, default_emu: int) -> float:
+    """Read an EMU integer attribute and return px."""
+    if elem is None:
+        return emu_to_px(default_emu)
+    val = elem.attrib.get(attr)
+    if val is None:
+        return emu_to_px(default_emu)
+    try:
+        return emu_to_px(int(val))
+    except ValueError:
+        return emu_to_px(default_emu)
+
+
+def _parse_paragraphs(
+    tx_body: ET.Element,
+    palette: ColorPalette | None,
+    theme_fonts: dict[str, str],
+    *,
+    default_fill: str = DEFAULT_FILL_HEX,
+    default_font_size_px: float = DEFAULT_FONT_SIZE_PX,
+    fallback_lst_styles: tuple[ET.Element, ...] = (),
+    fallback_run_props: tuple[ET.Element, ...] = (),
+    slide_number: int | None = None,
+    id_prefix: str = "txt",
+    id_seq: list[int] | None = None,
+    hyperlink_resolver: HyperlinkResolver | None = None,
+    inline_formula_resolver: InlineFormulaResolver | None = None,
+    strict: bool = False,
+    diagnostic_sink: TextDiagnosticSink | None = None,
+) -> list[TextParagraph]:
+    """Walk <a:p> children producing TextParagraph objects."""
+    paragraphs: list[TextParagraph] = []
+    autonum_state: dict[int, int] = {}
+    lst_style = tx_body.find("a:lstStyle", NS)
+    lst_styles = (
+        (lst_style,) + fallback_lst_styles
+        if lst_style is not None else fallback_lst_styles
+    )
+
+    for p_elem in tx_body.findall("a:p", NS):
+        para = _parse_paragraph(
+            p_elem, palette, theme_fonts, autonum_state,
+            lst_styles=lst_styles,
+            fallback_run_props=fallback_run_props,
+            default_fill=default_fill,
+            default_font_size_px=default_font_size_px,
+            slide_number=slide_number,
+            id_prefix=id_prefix, id_seq=id_seq,
+            hyperlink_resolver=hyperlink_resolver,
+            inline_formula_resolver=inline_formula_resolver,
+            strict=strict,
+            diagnostic_sink=diagnostic_sink,
+        )
+        paragraphs.append(para)
+
+    return paragraphs
+
+
+def _parse_paragraph(
+    p_elem: ET.Element,
+    palette: ColorPalette | None,
+    theme_fonts: dict[str, str],
+    autonum_state: dict[int, int],
+    *,
+    lst_styles: tuple[ET.Element, ...] = (),
+    fallback_run_props: tuple[ET.Element, ...] = (),
+    default_fill: str = DEFAULT_FILL_HEX,
+    default_font_size_px: float = DEFAULT_FONT_SIZE_PX,
+    slide_number: int | None = None,
+    id_prefix: str = "txt",
+    id_seq: list[int] | None = None,
+    hyperlink_resolver: HyperlinkResolver | None = None,
+    inline_formula_resolver: InlineFormulaResolver | None = None,
+    strict: bool = False,
+    diagnostic_sink: TextDiagnosticSink | None = None,
+) -> TextParagraph:
+    para = TextParagraph()
+
+    p_pr = p_elem.find("a:pPr", NS)
+    if p_pr is not None:
+        try:
+            para.level = int(p_pr.attrib.get("lvl", "0"))
+        except ValueError:
+            para.level = 0
+
+    para_style_chain = (p_pr,) + _lst_style_level_prs(lst_styles, para.level)
+    para.align = _attr_chain(para_style_chain, "algn") or "l"
+    para.margin_left_px = _emu_px_attr_chain(para_style_chain, "marL", 0.0)
+    para.indent_px = _emu_px_attr_chain(para_style_chain, "indent", 0.0)
+    para.line_height_ratio = _line_height_ratio(para_style_chain)
+    para.space_before_px = _spacing_points_px(para_style_chain, "a:spcBef/a:spcPts")
+    para.space_after_px = _spacing_points_px(para_style_chain, "a:spcAft/a:spcPts")
+    para.bullet_prefix = _resolve_bullet_prefix(
+        para_style_chain, para.level, autonum_state,
+    )
+    para.bullet_fill, para.bullet_fill_opacity = _resolve_bullet_fill(
+        para_style_chain, palette,
+    )
+
+    # Default endParaRPr style (applies if a run has no rPr)
+    end_rpr = p_elem.find("a:endParaRPr", NS)
+    # defRPr from pPr and txBody/lstStyle, both optional.
+    def_rpr = p_pr.find("a:defRPr", NS) if p_pr is not None else None

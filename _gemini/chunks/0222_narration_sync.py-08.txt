@@ -1,0 +1,112 @@
+                f'SVG slide "{slide_name}" has duplicate top-level group id(s): '
+                + ", ".join(duplicate_ids)
+            )
+        for item in anonymous_groups:
+            print(
+                f"Warning: {item} has no id and cannot participate in narration timing",
+                file=sys.stderr,
+            )
+
+        targets_by_id = {target.group_id: target for target in targets}
+        referenced_ids = set(groups_cfg)
+        if plan_entries is not None:
+            referenced_ids.update(entry.group_id for entry in plan_entries)
+        missing_ids = sorted(referenced_ids - set(targets_by_id))
+        if missing_ids:
+            raise ValueError(
+                f'Animation mapping for slide "{slide_name}" references missing '
+                f"top-level group(s): {', '.join(missing_ids)}"
+            )
+        structural_ids = sorted(
+            group_id
+            for group_id in referenced_ids
+            if targets_by_id[group_id].structurally_static
+            and (
+                group_id not in groups_cfg
+                or _group_is_animated(
+                    slide_name,
+                    group_id,
+                    groups_cfg[group_id],
+                    settings.effect,
+                )
+            )
+        )
+        if structural_ids:
+            raise ValueError(
+                f'Animation mapping for slide "{slide_name}" targets structural '
+                f"group(s): {', '.join(structural_ids)}"
+            )
+
+        candidate_ids = []
+        for target in targets:
+            if target.structurally_static:
+                continue
+            group_cfg = groups_cfg.get(target.group_id, {})
+            explicitly_animated = (
+                target.group_id in groups_cfg
+                and _group_is_animated(
+                    slide_name,
+                    target.group_id,
+                    group_cfg,
+                    settings.effect,
+                )
+            )
+            if target.chrome and not explicitly_animated:
+                continue
+            candidate_ids.append(target.group_id)
+    elif plan_entries is not None:
+        candidate_ids = list(
+            dict.fromkeys(
+                [
+                    *(entry.group_id for entry in plan_entries),
+                    *groups_cfg,
+                ]
+            )
+        )
+    else:
+        candidate_ids = list(groups_cfg)
+
+    preliminaries: list[
+        tuple[
+            int,
+            int,
+            int,
+            str,
+            int | None,
+            str,
+            dict[str, Any],
+            str,
+        ]
+    ] = []
+    for source_index, group_id in enumerate(candidate_ids):
+        group_cfg = groups_cfg.get(group_id, {})
+        effect_entries = _active_group_effect_entries(
+            slide_name,
+            group_id,
+            group_cfg,
+            settings.effect,
+        )
+        for effect_position, (
+            effect_index,
+            effect_path,
+            effect_cfg,
+        ) in enumerate(effect_entries):
+            order = effect_cfg.get("order", source_index + 1)
+            if isinstance(order, bool) or not isinstance(order, int) or order <= 0:
+                raise ValueError(
+                    f'Canonical animation order for "{effect_path}" '
+                    f"must be a positive integer: {order!r}"
+                )
+            if effect_cfg.get("trigger_shape") is not None:
+                raise ValueError(
+                    f'Recorded narration cannot synchronize trigger-shape '
+                    f'animation "{effect_path}" on slide "{slide_name}"'
+                )
+            effect_trigger = normalize_animation_trigger(
+                effect_cfg.get("trigger", settings.trigger)
+            )
+            if effect_trigger == "on-click":
+                raise ValueError(
+                    f'Recorded narration cannot synchronize on-click animation '
+                    f'"{effect_path}" on slide "{slide_name}"'
+                )

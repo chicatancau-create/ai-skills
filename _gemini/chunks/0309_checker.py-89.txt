@@ -1,0 +1,94 @@
+                    if path.is_relative_to(project_root)
+                    else str(path)
+                    for path in sorted(unexpected_paths)
+                )
+                self._illustration_issues.append((
+                    'error',
+                    'locked_image_reference_mismatch',
+                    f"{filename} is referenced from {shown}, not exclusively "
+                    "from its locked project path.",
+                ))
+
+            should_be_referenced = (
+                acquire != 'placeholder'
+                and asset_exists
+                and status
+                in {
+                    'existing',
+                    'generated',
+                    'sourced',
+                    'rendered',
+                    'needs-manual',
+                }
+            )
+            if should_be_referenced and not (actual_paths & expected_paths):
+                self._illustration_issues.append((
+                    'error',
+                    'locked_image_unreferenced',
+                    f"{filename} has usable terminal content but its locked "
+                    "file is not referenced by any svg_output <image> element.",
+                ))
+
+            effective_no_crop = (
+                crop_policy == 'no-crop'
+                or acquire == 'formula'
+                or any(entry.get('crop') == 'no-crop' for entry in entries)
+            )
+            if effective_no_crop:
+                placements_by_svg: Dict[
+                    Path,
+                    List[Tuple[
+                        str,
+                        Tuple[str, ...],
+                        Tuple[float, float, float, float] | None,
+                    ]],
+                ] = defaultdict(list)
+                for svg_path, raw_aspect, mechanisms, geometry in (
+                    image_placements.get(filename, [])
+                ):
+                    placements_by_svg[svg_path].append((
+                        raw_aspect,
+                        mechanisms,
+                        geometry,
+                    ))
+                source_size = self._measure_image_pixels(
+                    referenced_paths.get(filename),
+                )
+
+                for svg_path, placements in placements_by_svg.items():
+                    parsed_placements = []
+                    for raw_aspect, mechanisms, geometry in placements:
+                        try:
+                            align, mode = (
+                                _parse_project_image_aspect_ratio(raw_aspect or None)
+                                if _parse_project_image_aspect_ratio is not None
+                                else ('', '')
+                            )
+                        except ValueError:
+                            # The per-SVG aspect-ratio validator owns malformed syntax.
+                            continue
+                        parsed_placements.append((
+                            raw_aspect,
+                            mechanisms,
+                            align,
+                            mode,
+                            geometry,
+                        ))
+
+                    has_complete_placement = any(
+                        align != 'none'
+                        and mode == 'meet'
+                        and not mechanisms
+                        for _raw_aspect, mechanisms, align, mode, _geometry
+                        in parsed_placements
+                    )
+
+                    for raw_aspect, _mechanisms, align, _mode, geometry in (
+                        parsed_placements
+                    ):
+                        if align != 'none':
+                            continue
+                        # ``none`` is the mandated form inside the nested crop
+                        # transport and is harmless on a frame that keeps the
+                        # source aspect; only measured distortion is a stretch.
+                        deviation = self._stretch_deviation(geometry, source_size)

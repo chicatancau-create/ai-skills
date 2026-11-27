@@ -1,0 +1,118 @@
+    sp_tree = root.find(f".//{{{PML_NS}}}cSld/{{{PML_NS}}}spTree")
+    if sp_tree is None:
+        return {}
+    shapes: dict[str, ET.Element] = {}
+    for child in list(sp_tree):
+        if child.tag not in _TOP_LEVEL_SHAPE_TAGS:
+            continue
+        shape_id = _shape_id(child)
+        if shape_id:
+            shapes[shape_id] = child
+    return shapes
+
+
+def _timing_shape_ids(root: ET.Element) -> set[str]:
+    """Return slide-local shape ids referenced by animation timing."""
+    return {
+        elem.attrib["spid"]
+        for elem in root.findall(f".//{{{PML_NS}}}timing//{{{PML_NS}}}spTgt")
+        if elem.attrib.get("spid")
+    }
+
+
+def _relationship_ids_in_shape(elem: ET.Element) -> set[str]:
+    rel_ids: set[str] = set()
+    for node in elem.iter():
+        for attr_name, value in node.attrib.items():
+            if attr_name in _REL_ATTRS and value:
+                rel_ids.add(value)
+    return rel_ids
+
+
+def _shape_relationships_supported(
+    elem: ET.Element,
+    rels: dict[str, dict[str, str]],
+) -> bool:
+    """Return whether every shape relation can move to Master/Layout parts."""
+    for rel_id in _relationship_ids_in_shape(elem):
+        attrs = rels.get(rel_id)
+        if not attrs:
+            return False
+        rel_type = attrs.get("Type")
+        target_mode = attrs.get("TargetMode")
+        if rel_type == IMAGE_REL_TYPE and not target_mode:
+            continue
+        if rel_type == HYPERLINK_REL_TYPE and target_mode == "External":
+            continue
+        if rel_type == SLIDE_REL_TYPE and not target_mode:
+            continue
+        return False
+    return True
+
+
+def _canonical_shape_xml(
+    elem: ET.Element,
+    rels: dict[str, dict[str, str]],
+) -> bytes:
+    """Canonicalize ids and relationship ids for cross-slide equality."""
+    clone = ET.fromstring(ET.tostring(elem, encoding="utf-8"))
+    for cnv in clone.iter(f"{{{PML_NS}}}cNvPr"):
+        cnv.set("id", "ID")
+        # Generated names include the slide-local shape id (for example,
+        # ``Image 2`` versus ``Image 8``) but do not affect rendering.
+        if "name" in cnv.attrib:
+            cnv.set("name", "NAME")
+    for fld in clone.iter(f"{{{DML_NS}}}fld"):
+        # The literal inside a slide-number field is a per-slide render
+        # cache that PowerPoint recomputes from the slide position.
+        if fld.attrib.get("type") == "slidenum":
+            cached = fld.find(f"{{{DML_NS}}}t")
+            if cached is not None:
+                cached.text = ""
+    for node in clone.iter():
+        for attr_name, value in list(node.attrib.items()):
+            if attr_name not in _REL_ATTRS:
+                continue
+            attrs = rels.get(value, {})
+            node.set(
+                attr_name,
+                f"{attrs.get('Type', '')}|{attrs.get('Target', '')}|"
+                f"{attrs.get('TargetMode', '')}",
+            )
+    return ET.tostring(clone, encoding="utf-8")
+
+
+def _ensure_relationship(
+    rels_path: Path,
+    rel_type: str,
+    target: str,
+    target_mode: str | None = None,
+) -> str:
+    existing = _find_relationship_id(
+        rels_path,
+        rel_type,
+        target,
+        target_mode,
+    )
+    if existing:
+        return existing
+    return _append_relationship(
+        rels_path,
+        rel_type,
+        target,
+        target_mode=target_mode,
+    )
+
+
+def _part_name_for_relationships_path(rels_path: Path) -> str:
+    """Recover one ``ppt/...`` package part from its relationship sidecar."""
+    if rels_path.parent.name != "_rels" or not rels_path.name.endswith(".rels"):
+        raise RuntimeError(f"Invalid PPTX relationship path: {rels_path}")
+    part_path = rels_path.parent.parent / rels_path.name.removesuffix(".rels")
+    parts = part_path.parts
+    try:
+        ppt_index = len(parts) - 1 - tuple(reversed(parts)).index("ppt")
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Relationship path is not under a ppt package: {rels_path}"
+        ) from exc

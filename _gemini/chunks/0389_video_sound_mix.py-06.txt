@@ -1,0 +1,104 @@
+    target_key = resolve_internal_opc_target(rels_part, target)
+    if target_key is None:
+        raise ValueError(
+            f"PPTX sound relationship target is invalid: {rels_part}#{relationship_id}"
+        )
+    package_part = package_parts.get(target_key)
+    if package_part is None:
+        raise ValueError(
+            f"PPTX sound relationship target is missing: {target!r}"
+        )
+    cached = extracted.get(package_part)
+    if cached is not None:
+        return cached
+
+    payload = package.read(package_part)
+    media_sha256 = hashlib.sha256(payload).hexdigest()
+    extension = Path(package_part).suffix.lower()
+    if extension not in {".m4a", ".mp3", ".wav"}:
+        raise ValueError(
+            f"PPTX animation sound uses an unsupported media type: {package_part}"
+        )
+    media_path = temp_dir / f"{media_sha256}{extension}"
+    media_path.write_bytes(payload)
+    source_duration_ms = _duration_ms(
+        _probe_media(media_path, ffprobe_path),
+        f"PPTX sound {package_part}",
+    )
+    resolved = (package_part, media_sha256, media_path, source_duration_ms)
+    extracted[package_part] = resolved
+    return resolved
+
+
+def _require_equal(actual: object, expected: object, field: str) -> None:
+    if actual != expected:
+        raise ValueError(
+            f"Final narrated trace does not match the PPTX at {field}: "
+            f"trace={actual!r}, pptx={expected!r}"
+        )
+
+
+def _resolve_sound_cues(
+    *,
+    pptx_path: Path,
+    trace_slides: list[dict[str, Any]],
+    calibration: VideoTimelineCalibration,
+    transition_gain_db: float,
+    animation_gain_db: float,
+    video_duration_ms: int,
+    temp_dir: Path,
+    ffprobe_path: str,
+) -> list[SoundCue]:
+    cues: list[SoundCue] = []
+    extracted: dict[str, tuple[str, str, Path, int]] = {}
+    with zipfile.ZipFile(pptx_path) as package:
+        slide_members = presentation_slide_members(package)
+        if len(slide_members) != len(trace_slides):
+            raise ValueError(
+                f"Final narrated PPTX has {len(slide_members)} slides, but "
+                f"the trace has {len(trace_slides)}"
+            )
+        package_parts = _package_part_map(package)
+
+        for slide_num, (slide_part, trace_slide, calibrated) in enumerate(
+            zip(slide_members, trace_slides, calibration.slides),
+            1,
+        ):
+            slide_xml = package.read(slide_part)
+            transition = read_slide_transition_xml(slide_xml)
+            animation = read_slide_animation_sequence(
+                slide_xml,
+                require_supported_effects=True,
+            )
+            trace_motion = trace_slide.get("motion")
+            trace_animation = trace_slide.get("animation")
+            if not isinstance(trace_motion, dict) or not isinstance(
+                trace_animation, dict
+            ):
+                raise ValueError(
+                    f"Conversion trace slide {slide_num} lacks resolved motion"
+                )
+
+            _require_equal(
+                trace_motion.get("duration_ms"),
+                transition.duration_ms,
+                f"slide {slide_num} transition duration",
+            )
+            _require_equal(
+                trace_motion.get("advance_after_ms"),
+                transition.advance_after_ms,
+                f"slide {slide_num} recorded advance",
+            )
+            _require_equal(
+                trace_motion.get("sound_relationship_id"),
+                transition.sound_relationship_id,
+                f"slide {slide_num} transition sound relationship",
+            )
+            _require_equal(
+                trace_motion.get("sound_name"),
+                transition.sound_name,
+                f"slide {slide_num} transition sound name",
+            )
+            _require_equal(
+                trace_motion.get("fallback_sound_relationship_id"),
+                transition.fallback_sound_relationship_id,

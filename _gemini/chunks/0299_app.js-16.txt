@@ -1,0 +1,92 @@
+        return out;  // top → bottom in paint order
+    }
+
+    function closeOverlapPicker() {
+        if (!overlapPickerEl) return;
+        var svg = svgContent.querySelector("svg");
+        if (svg) {
+            svg.querySelectorAll(".overlap-hover").forEach(function (e) {
+                e.classList.remove("overlap-hover");
+            });
+        }
+        overlapPickerEl.remove();
+        overlapPickerEl = null;
+    }
+
+    function showOverlapPicker(clientX, clientY, candidates) {
+        closeOverlapPicker();
+        var menu = document.createElement("div");
+        menu.id = "overlap-picker";
+        var cap = document.createElement("div");
+        cap.className = "overlap-caption";
+        cap.textContent = t("overlap_caption");
+        menu.appendChild(cap);
+        candidates.forEach(function (el) {
+            var item = document.createElement("div");
+            item.className = "overlap-item";
+            var tag = el.tagName.toLowerCase();
+            var txt = (tag === "text" || tag === "tspan")
+                ? (el.textContent || "").trim().slice(0, 28) : "";
+            item.innerHTML = '<span class="overlap-tag">&lt;' + escapeHtml(tag) +
+                '&gt;</span><span class="overlap-id">' + escapeHtml(el.id) + '</span>' +
+                (txt ? '<span class="overlap-txt">' + escapeHtml(txt) + '</span>' : '');
+            item.addEventListener("mouseenter", function () { el.classList.add("overlap-hover"); });
+            item.addEventListener("mouseleave", function () { el.classList.remove("overlap-hover"); });
+            item.addEventListener("click", function (ev) {
+                ev.stopPropagation();
+                selectElement(el, ev.ctrlKey || ev.metaKey);
+                closeOverlapPicker();
+            });
+            menu.appendChild(item);
+        });
+        document.body.appendChild(menu);
+        // Keep the menu inside the viewport.
+        var x = Math.min(clientX, window.innerWidth - menu.offsetWidth - 8);
+        var y = Math.min(clientY, window.innerHeight - menu.offsetHeight - 8);
+        menu.style.left = Math.max(8, x) + "px";
+        menu.style.top = Math.max(8, y) + "px";
+        overlapPickerEl = menu;
+    }
+
+    function initRubberBand() {
+        var overlay = document.getElementById("rubber-band-overlay");
+        var container = document.getElementById("svg-container");
+
+        container.addEventListener("mousedown", function (e) {
+            // Only left mouse button
+            if (e.button !== 0) return;
+
+            // Pressing on an already-selected element arms a drag of the whole
+            // selection instead of a rubber band. Selecting stays a separate
+            // click, so the background is never dragged by accident.
+            if (hitSelectedAncestor(e.target)) {
+                dragStart = { x: e.clientX, y: e.clientY };
+                dragMoved = false;
+                return;
+            }
+
+            // Always start tracking — rubber band only activates when
+            // mousemove exceeds the threshold. This allows clicking on any
+            // element (including SVG background rects) to still trigger
+            // the element's click handler for selection.
+            rubberBandStart = { x: e.clientX, y: e.clientY };
+            rubberBandUsed = false;
+        });
+
+        document.addEventListener("mousemove", function (e) {
+            if (dragStart) {
+                var ddx = e.clientX - dragStart.x;
+                var ddy = e.clientY - dragStart.y;
+                if (!dragMoved && Math.sqrt(ddx * ddx + ddy * ddy) < RUBBER_BAND_THRESHOLD) {
+                    return;  // below threshold — still a click, let selection stand
+                }
+                if (!dragMoved) {
+                    dragMoved = true;
+                    beginDrag();
+                }
+                updateDragPreview(ddx, ddy);
+                return;
+            }
+            if (!rubberBandStart) return;
+
+            var dx = e.clientX - rubberBandStart.x;

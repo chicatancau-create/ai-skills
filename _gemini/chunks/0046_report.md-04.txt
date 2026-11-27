@@ -1,0 +1,102 @@
+`inbox list` 默认返回 JSON-first 结构：不会把 Markdown 表作为裸文本直接输出，但 JSON 里会返回 `agentDisplayMarkdown`。Agent 必须在 final reply 直接原样输出 `agentDisplayMarkdown`，让客户端按 Markdown 渲染出表格；不要基于个人偏好重新摘要。表头固定且必须逐字为 `| 日期 | 标题 | 发送人 | 状态 | 钉钉链接 |`，并按返回顺序展示（CLI 已按创建时间从近到远排序）。返回 JSON 中的 `agentDisplayRequired=true`、`agentDisplayRequiredColumns`、`agentDisplayLinkColumn=钉钉链接`、`agentDisplayMarkdownRequired=true`、`agentDisplayMarkdownHeader` 都是强制展示合同。凡用户说"列出 / 找到 / 查询 / 搜索 / 看看日志"，final reply 默认必须渲染这张 Markdown 表；只有用户明确表示"不关心列表内容 / 只要原始 JSON / 只要数量 / 只要 ID"时，才可以不渲染表。`result[]` 每项都包含且只展示这五个字段：`日期`、`标题`、`发送人`、`状态`、`钉钉链接`。`钉钉链接` 是强制可点击 markdown 链接列，禁止省略、改名、合并到标题里；`inbox list` 禁止返回或展示 `日志内容` / `日志内容摘要`。`reportId` 不在主结果里，只通过 `_internalDetailCommands` 保留给 Agent 后续调用 `entry get` / `entry stats`；final reply 禁止展示 `_internalDetailCommands`、毫秒时间戳、raw ID 或日志正文。
+
+### 读取单份日报的已读统计
+```
+Usage:
+  dws report entry stats [flags]
+Example:
+  dws report entry stats --report-id <reportId>
+Flags:
+      --report-id string   日志 ID (必填)
+```
+
+
+### 发件箱：列出我发出的日报
+```
+Usage:
+  dws report outbox list [flags]
+Example:
+  dws report outbox list --cursor 0 --size 20
+  dws report outbox list --cursor 0 --size 20 --start "2026-03-10T00:00:00+08:00" --end "2026-03-10T23:59:59+08:00"
+  dws report outbox list --cursor 0 --size 20 --template-name "日报"
+  # 从列表结果提取 reportId 后，再查正文
+  dws report entry get --report-id <reportId>
+Flags:
+      --cursor int            分页游标，首次传 0 (默认 0)
+      --size int              每页条数，最大 20 (默认 20)，别名: --limit
+      --start string          创建开始时间 ISO-8601 (默认最近 20 天；服务端单次查询跨度上限 20 天)
+      --end string            创建结束时间 ISO-8601 (默认最近 20 天；服务端单次查询跨度上限 20 天)
+      --modified-start string 修改开始时间 ISO-8601 (可选)
+      --modified-end string   修改结束时间 ISO-8601 (可选)
+      --template-name string  日志模版名称 (可选，不传查全部)
+```
+
+
+`outbox list` 同样主要返回已发送日志的 ID 和摘要；要查看正文，继续用 `entry get`。
+
+**默认时间窗口**：`--start` / `--end` 未传时，CLI 自动回退到最近 20 天（服务端 `get_send_report_list` 单次查询跨度**上限 20 天**，超过会被服务端拒绝），并在 stderr 输出一行 informational：
+
+```
+# info: --start / --end not provided, defaulting to last 20 days (<start_iso> ~ <end_iso>); server caps single-query span at 20 days, pass explicit --start to shift the window
+```
+
+查更早数据需**多次调用**并显式滚动 `--start` / `--end`（每次跨度 ≤ 20 天），不能一次性传超过 20 天范围；不要假定 `outbox list` 不传时间窗口就是全量。
+
+## 两步读取正文
+
+读取已有日志内容时，统一按下面两步走，不要把列表接口当正文接口：
+
+1. `dws report inbox list ...` 或 `dws report outbox list ...`，先拿到目标日志的 `reportId`
+2. `dws report entry get --report-id <reportId>`，再读取正文和字段明细
+
+适用场景：
+
+- "看我今天收到的某条周报正文"
+- "把我发过的日报正文拉出来继续汇总"
+- "先按时间范围筛日志，再读取具体内容"
+
+## 意图判断
+
+用户说"查日志/看日报/看正文" → `inbox list` 或 `outbox list` 获取列表，再 `entry get`
+用户说"写日报/提交周报/发日志/填日志" → 先 `template list` / `template get` 取 `templateId` 与各控件 `key`/`sort`/类型，拼 `--contents` JSON，再 `entry submit`
+用户说"日志统计/已读统计" → `entry stats`
+用户说"有什么日志模版" → `template list` 或 `template get`
+用户说"我发过的日志/我创建的日志" → `outbox list`
+用户说"别人发给我的日志/我收到的日志" → `inbox list`
+
+关键区分: report(钉钉日志模版汇报，含提交) vs doc(文档编辑) vs todo(待办任务)
+
+## 核心工作流
+
+```bash
+# 1. 获取当前用户可用的日志模版
+dws report template list --format json
+
+# 2. 按名称读取模版字段定义
+dws report template get --name "日报" --format json
+
+# 2b. 提交日志（从步骤 1/2 取 templateId 与 contents 字段）— 推荐 --contents-file 传入避免 shell 引号
+dws report entry submit --template-id <templateId> --contents-file ./report.json --format json
+# submit 成功会自动反查详情并追加 dingtalkOpenMarkdownLink / dingtalkOpenUrl；
+# final reply 直接使用 dingtalkOpenMarkdownLink: [在钉钉中查看日志](dingtalk://...)
+
+# 2c. 仅当 submit 返回中缺少 dingtalkOpenUrl 时，手动补取 dingtalk:// 跳转链接
+dws report entry get --report-id <submit 返回的 reportId> --format json
+# → 取 result.url，final reply: [在钉钉中查看日志](result.url)
+
+# 3. 查看收到的日报列表 — 提取 reportId
+dws report inbox list --start "2026-03-10T00:00:00+08:00" --end "2026-03-10T23:59:59+08:00" \
+  --cursor 0 --size 20 --format json
+
+# 4. 查看日报详情（正文/字段明细）
+dws report entry get --report-id <reportId> --format json
+
+# 5. 查看日报已读统计
+dws report entry stats --report-id <reportId> --format json
+
+# 6. 查看我发出的日报列表
+dws report outbox list --cursor 0 --size 20 --format json
+```
+
+## 上下文传递表
+

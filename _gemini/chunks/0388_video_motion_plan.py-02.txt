@@ -1,0 +1,123 @@
+        if candidate.is_file():
+            return candidate.resolve()
+    raise ValueError(
+        f"SVG referenced by conversion trace was not found: {raw}; "
+        "run the command from the repository root or regenerate the trace"
+    )
+
+
+def _parse_canvas_emu(svg_path: Path) -> tuple[int, int]:
+    try:
+        root = ET.parse(svg_path).getroot()
+    except (OSError, ET.ParseError) as exc:
+        raise ValueError(f"cannot read SVG canvas: {svg_path}: {exc}") from exc
+
+    values = [
+        float(match)
+        for match in _NUMBER_RE.findall(root.get("viewBox") or "")
+    ]
+    if len(values) != 4 or values[2] <= 0 or values[3] <= 0:
+        raise ValueError(f"SVG must have a positive four-number viewBox: {svg_path}")
+    return (
+        max(1, round(values[2] * _EMU_PER_PX)),
+        max(1, round(values[3] * _EMU_PER_PX)),
+    )
+
+
+def _event_score(event: dict[str, Any]) -> int:
+    score = 0
+    if event.get("tag") == "g":
+        score += 4
+    if isinstance(event.get("id"), str) and event["id"].strip():
+        score += 2
+    if event.get("decision") == "native":
+        score += 1
+    return score
+
+
+def _shape_events(slide: dict[str, Any]) -> dict[int, dict[str, Any]]:
+    events = slide.get("events", [])
+    if not isinstance(events, list):
+        raise ValueError("conversion trace slide events must be a list")
+    selected: dict[int, dict[str, Any]] = {}
+    for raw_event in events:
+        if not isinstance(raw_event, dict):
+            continue
+        shape_id = raw_event.get("shape_id")
+        bounds = raw_event.get("bounds_emu")
+        if (
+            isinstance(shape_id, int)
+            and shape_id > 0
+            and isinstance(bounds, list)
+            and len(bounds) == 4
+            and all(isinstance(value, int) for value in bounds)
+        ):
+            current = selected.get(shape_id)
+            if current is None or _event_score(raw_event) >= _event_score(current):
+                selected[shape_id] = raw_event
+    return selected
+
+
+def _direction_for_effect(
+    effect: str,
+    filter_name: object,
+    effect_options: object,
+) -> str | None:
+    if isinstance(effect_options, dict):
+        raw_direction = effect_options.get("direction")
+        if isinstance(raw_direction, str) and raw_direction:
+            return raw_direction.replace("_", "-")
+    effect = _VIDEO_EFFECT_ALIASES.get(effect, effect)
+    explicit = {
+        "fly": "down",
+        "fly_left": "left",
+        "fly_right": "right",
+        "fly_top": "up",
+        "cut": "left",
+        "wipe": "left",
+        "wipe_left": "left",
+        "wipe_right": "right",
+        "wipe_up": "up",
+        "wipe_down": "down",
+        "peek": "down",
+    }
+    if effect in explicit:
+        return explicit[effect]
+    if isinstance(filter_name, str):
+        match = re.search(
+            r"\((?:from)?(TopLeft|TopRight|BottomLeft|BottomRight|"
+            r"UpLeft|UpRight|DownLeft|DownRight|Top|Bottom|Left|Right|Up|Down)\)",
+            filter_name,
+            re.IGNORECASE,
+        )
+        if match:
+            value = match.group(1).lower()
+            return {
+                "top": "up",
+                "bottom": "down",
+                "topleft": "up-left",
+                "topright": "up-right",
+                "bottomleft": "down-left",
+                "bottomright": "down-right",
+                "upleft": "up-left",
+                "upright": "up-right",
+                "downleft": "down-left",
+                "downright": "down-right",
+            }.get(value, value)
+    return None
+
+
+def _area_ratio(bounds: list[int], canvas_emu: tuple[int, int]) -> float:
+    width = max(0, bounds[2] - bounds[0])
+    height = max(0, bounds[3] - bounds[1])
+    canvas_area = canvas_emu[0] * canvas_emu[1]
+    return (width * height / canvas_area) if canvas_area else 0.0
+
+
+def _adaptive_multiplier(
+    style: str,
+    page_role: object,
+    object_count: int,
+    area_ratio: float,
+) -> float:
+    multiplier = _STYLE_MULTIPLIERS[style]

@@ -1,0 +1,106 @@
+        '<a:close/>',
+    ]
+
+    path_xml = '\n'.join(parts)
+    return (
+        '<a:custGeom>'
+        '<a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/>'
+        '<a:rect l="l" t="t" r="r" b="b"/>'
+        f'<a:pathLst><a:path w="{width_emu}" h="{height_emu}">'
+        f'\n{path_xml}\n'
+        '</a:path></a:pathLst>'
+        '</a:custGeom>'
+    )
+
+
+def convert_rect(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
+    """Convert SVG <rect> to DrawingML shape.
+
+    Symmetric rounded corners (rx == ry) are emitted as ``prstGeom roundRect``
+    so PowerPoint treats them as a native rounded-rectangle shape: the yellow
+    adjustment handle stays draggable, and "Reset Picture / Shape" works as
+    expected. Elliptical corners (rx != ry) fall back to plain rect geometry
+    for now — current corpora contain none, but the branch keeps callers from
+    silently producing distorted custom geometry if one ever appears.
+    """
+    raw_x = svg_length_x(elem.get('x'), ctx)
+    raw_y = svg_length_y(elem.get('y'), ctx)
+    raw_w = svg_length_x(elem.get('width'), ctx)
+    raw_h = svg_length_y(elem.get('height'), ctx)
+    x = ctx_x(raw_x, ctx)
+    y = ctx_y(raw_y, ctx)
+    w = ctx_w(raw_w, ctx)
+    h = ctx_h(raw_h, ctx)
+    preset_geom = _build_preset_geom_from_meta(elem)
+
+    if w <= 0 or h <= 0:
+        return None
+
+    # SVG spec: when only one of rx/ry is specified, the other inherits its
+    # value. Real-world svg_output decks always write only `rx`, so ry must
+    # be inferred to keep round corners from collapsing to zero on one axis.
+    rx_attr = elem.get('rx')
+    ry_attr = elem.get('ry')
+    rx_raw = svg_length_x(rx_attr, ctx) if rx_attr is not None else 0.0
+    ry_raw = svg_length_y(ry_attr, ctx) if ry_attr is not None else 0.0
+    if rx_attr is not None and ry_attr is None:
+        ry_raw = rx_raw
+    elif ry_attr is not None and rx_attr is None:
+        rx_raw = ry_raw
+    rx = rx_raw * ctx.scale_x
+    ry = ry_raw * ctx.scale_y
+
+    fill_op = get_fill_opacity(elem, ctx)
+    stroke_op = get_stroke_opacity(elem, ctx)
+    fill = build_fill_xml(elem, ctx, fill_op)
+    stroke = build_stroke_xml(elem, ctx, stroke_op)
+
+    effect = ''
+    filt_id = get_effective_filter_id(elem, ctx)
+    if filt_id and filt_id in ctx.defs:
+        effect = build_effect_xml(
+            ctx.defs[filt_id],
+            get_element_opacity(elem, ctx),
+        )
+
+    transform = elem.get('transform')
+
+    if preset_geom is not None:
+        geom = preset_geom
+    elif rx > 0 and abs(rx - ry) < 0.5:
+        # Symmetric corners → native PowerPoint rounded rectangle. adj is
+        # the corner radius as a fraction of the shorter side, in 1/1000-
+        # percent units, capped at 50000 (= radius equals half the shorter
+        # side, i.e. capsule end).
+        short_side = min(w, h)
+        radius = min(rx, short_side / 2)
+        adj = max(0, min(50000, int(round(radius / short_side * 100000))))
+        geom = (
+            '<a:prstGeom prst="roundRect">'
+            f'<a:avLst><a:gd name="adj" fmla="val {adj}"/></a:avLst>'
+            '</a:prstGeom>'
+        )
+    elif rx > 0 or ry > 0:
+        # Asymmetric corners (rx != ry) → DrawingML has no preset for
+        # elliptical-corner rectangles, so emit a custGeom with one cubic
+        # Bézier per 90° arc. We lose the prstGeom roundRect adjustment
+        # handle, but symmetric and asymmetric cases now both render with
+        # rounded corners instead of one of them silently flattening to
+        # a hard rectangle.
+        geom = _build_round_rect_custgeom(w, h, rx, ry)
+    else:
+        geom = '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>'
+
+    shape_id = _claim_element_shape_id(elem, ctx)
+    if preset_geom is not None:
+        xfrm = _shape_xfrm_from_preset_frame(
+            elem,
+            ctx,
+            (raw_x, raw_y, raw_w, raw_h),
+            (x, y, w, h),
+            transform,
+        )
+    else:
+        xfrm = _shape_xfrm_from_svg_rect(
+            ctx,
+            raw_x,

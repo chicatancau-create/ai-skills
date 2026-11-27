@@ -1,0 +1,93 @@
+                        f"{label}: {count} pixel(s) on the "
+                        f"{'/'.join(touched_edges)} cell edge(s) exceed the key "
+                        f"tolerance but all stay within {distance} of key {hex_bg}; "
+                        f"this is key noise (JPEG compression or a slightly off "
+                        f"key), not content — rerun with --tolerance "
+                        f"{distance + _KEY_DRIFT_MARGIN} or higher"
+                    )
+            else:
+                findings.append(
+                    f"{label}: content reaches the {'/'.join(touched_edges)} "
+                    f"cell edge(s) (key background {hex_bg})"
+                )
+
+    return findings
+
+
+def _haze_finding(
+    label: str,
+    alpha_mask: Image.Image,
+    bbox: tuple[int, int, int, int],
+    bg: tuple[int, int, int],
+    *,
+    cell: Image.Image,
+    tolerance: int,
+) -> Optional[str]:
+    """Report semi-transparent haze only when the key-only margins are off-key.
+
+    Soft-alpha recovery assumes the key field lies at the stated key; when the
+    real ground sits farther than the tolerance, the whole field comes back as
+    faint half-foreground that reads as a glowing rectangle on a dark slide.
+    A shadow or glow can fill most of the trimmed box. Check all four margins
+    at the sheet contract's 10% width before diagnosing the field itself.
+    """
+    box = alpha_mask.crop(bbox)
+    total = box.width * box.height
+    if total == 0:
+        return None
+    histogram = box.histogram()
+    hazy = sum(histogram[_HAZE_ALPHA_LOW:_HAZE_ALPHA_HIGH + 1])
+    share = hazy / total
+    if share <= _HAZE_MAX_SHARE:
+        return None
+    dominant, spread, distance = _sample_sheet_border(
+        cell, border_ratio=0.10, key=bg,
+    )
+    dominant_distance = max(abs(dominant[index] - bg[index]) for index in range(3))
+    if max(dominant_distance, spread, distance) <= tolerance:
+        return None
+    hex_bg = "#{:02X}{:02X}{:02X}".format(*bg)
+    measured_bg = "#{:02X}{:02X}{:02X}".format(*dominant)
+    return (
+        f"{label}: {share:.0%} of the trimmed element box is semi-transparent "
+        f"(alpha {_HAZE_ALPHA_LOW}-{_HAZE_ALPHA_HIGH}) and its four 10% key-only "
+        f"margins differ from {hex_bg} (dominant {measured_bg}; key spread "
+        f"{spread}; farthest pixel {distance} from key): the ground or an effect "
+        "occupies the key-only margin; regenerate with clear margins or rerun "
+        "with --bg set to the measured ground colour when it is flat"
+    )
+
+
+def _backing_panel_notice(
+    label: str,
+    alpha_mask: Image.Image,
+    bbox: tuple[int, int, int, int],
+    cell_size: tuple[int, int],
+) -> Optional[str]:
+    """Flag a trimmed element whose corners are opaque: a painted backing panel.
+
+    A cut-out silhouette almost never fills all four corners of its own
+    bounding box; a rectangle behind it does. The key cannot see the panel
+    (the gutters are clean), so this is advisory, never a strict failure.
+    """
+    left, top, right, bottom = bbox
+    if right - left < 2 * _PANEL_CORNER_INSET + 1 or bottom - top < 2 * _PANEL_CORNER_INSET + 1:
+        return None
+    cell_width, cell_height = cell_size
+    fill_w = (right - left) / cell_width if cell_width else 0.0
+    fill_h = (bottom - top) / cell_height if cell_height else 0.0
+    if min(fill_w, fill_h) < _PANEL_MIN_FILL:
+        return None
+    px = alpha_mask.load()
+    corners = (
+        (left + _PANEL_CORNER_INSET, top + _PANEL_CORNER_INSET),
+        (right - 1 - _PANEL_CORNER_INSET, top + _PANEL_CORNER_INSET),
+        (left + _PANEL_CORNER_INSET, bottom - 1 - _PANEL_CORNER_INSET),
+        (right - 1 - _PANEL_CORNER_INSET, bottom - 1 - _PANEL_CORNER_INSET),
+    )
+    opaque = sum(1 for x, y in corners if px[x, y] > _BOUNDARY_OPAQUE_ALPHA)
+    if opaque < 3:
+        return None
+    return (
+        f"{label}: the trimmed element fills {fill_w:.0%} x {fill_h:.0%} of its "
+        f"cell and is opaque in {opaque} of 4 corners; it "

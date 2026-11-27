@@ -1,0 +1,106 @@
+            return True, TextPropertyDiagnostic(
+                'error', label, source, name, raw,
+                f'{label} must declare baseline-shift as a direct attribute; '
+                'inline style is not supported',
+            )
+        if tag != 'tspan':
+            return True, TextPropertyDiagnostic(
+                'error', label, source, name, raw,
+                f'{label} can use baseline-shift only on <tspan>',
+            )
+        try:
+            parse_project_baseline_shift(raw)
+        except ValueError as exc:
+            return True, TextPropertyDiagnostic(
+                'error', label, source, name, raw,
+                f'{label} attribute baseline-shift={raw!r}: {exc}',
+            )
+        return True, None
+    if _is_unregistered_prefixed_text_property(name):
+        return True, TextPropertyDiagnostic(
+            'error', label, source, name, raw,
+            f'{label} uses unregistered inherited text property {name!r}; '
+            'native PPTX export would ignore it',
+        )
+    if (
+        name in _TEXT_DECLARATION_PROPERTIES
+        and tag not in _TEXT_INHERITANCE_TARGETS
+    ):
+        return True, TextPropertyDiagnostic(
+            'error', label, source, name, raw,
+            f'{label} cannot carry text property {name!r}; place it on '
+            '<svg>, <g>, <text>, or <tspan>',
+        )
+    if name in _UNSUPPORTED_TEXT_PROPERTIES:
+        return True, TextPropertyDiagnostic(
+            'error', label, source, name, raw,
+            f'{label} uses unsupported text property {name!r}; '
+            'it has no registered DrawingML mapping',
+        )
+    if name not in _SVG_TEXT_PROPERTIES:
+        return name in _TEXT_DECLARATION_PROPERTIES, None
+    if tag == 'tspan' and name == 'text-anchor':
+        return True, TextPropertyDiagnostic(
+            'error', label, source, name, raw,
+            f'{label} cannot use text-anchor on <tspan>; place it on the '
+            'containing <text> or an ancestor group',
+        )
+    try:
+        parsed = parse_project_text_property(
+            name,
+            raw,
+            font_size=font_size,
+        )
+    except ValueError as exc:
+        return True, TextPropertyDiagnostic(
+            'error', label, source, name, raw,
+            f'{label} {source} {name}={raw!r}: {exc}',
+        )
+    if parsed.compatible:
+        return True, TextPropertyDiagnostic(
+            'warning', label, source, name, raw,
+            f'{label} {source} {name}={raw!r} is compatible; '
+            f'prefer {name}={parsed.canonical!r}',
+            parsed.canonical,
+        )
+    return True, None
+
+
+def project_text_property_diagnostics(
+    root: ET.Element,
+) -> list[TextPropertyDiagnostic]:
+    """Validate the closed text attribute/value surface for one SVG tree."""
+    font_sizes, diagnostics = _resolve_font_sizes(root)
+
+    for elem in root.iter():
+        tag = _local_name(elem.tag)
+        label = _element_label(elem)
+        direct_allowlist = {
+            'text': _TEXT_DIRECT_ATTRIBUTES,
+            'tspan': _TSPAN_DIRECT_ATTRIBUTES,
+        }.get(tag)
+        inline_allowlist = {
+            'text': _TEXT_INLINE_PROPERTIES,
+            'tspan': _TSPAN_INLINE_PROPERTIES,
+        }.get(tag)
+
+        for raw_name, raw in elem.attrib.items():
+            name = _attribute_name(raw_name)
+            if name == 'style' or name.startswith('data-'):
+                continue
+            handled, diagnostic = _diagnose_text_declaration(
+                elem,
+                tag=tag,
+                source='attribute',
+                name=name,
+                raw=raw,
+                font_size=font_sizes[id(elem)],
+            )
+            if diagnostic is not None:
+                diagnostics.append(diagnostic)
+            elif (
+                not handled
+                and direct_allowlist is not None
+                and name not in direct_allowlist
+            ):
+                diagnostics.append(TextPropertyDiagnostic(

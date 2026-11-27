@@ -1,0 +1,119 @@
+            shape = _normalized_shape_paint(
+                series.find("c:spPr", C_NS),
+                palette,
+            )
+            if not shape.fill_explicit:
+                first_point = series.find("c:dPt/c:spPr", C_NS)
+                point_shape = _normalized_shape_paint(first_point, palette)
+                if point_shape.fill_explicit:
+                    shape = _ShapePaint(
+                        point_shape.fill,
+                        point_shape.fill_opacity,
+                        True,
+                        shape.line,
+                    )
+            styles.append(
+                _series_visual_style(
+                    shape,
+                    _normalized_marker_paint(
+                        series.find("c:marker", C_NS),
+                        palette,
+                    ),
+                    chart_type=chart_type,
+                    auto_color=_automatic_color(palette, index),
+                )
+            )
+    colors = [
+        style.fill
+        or style.stroke
+        or style.marker_fill
+        or _automatic_color(palette, index)
+        for index, style in enumerate(styles)
+    ]
+    if colors:
+        payload["style"] = {"colors": colors}
+    return styles
+
+
+def _strict_axis_bool(elem: ET.Element | None, default: bool) -> bool:
+    if elem is None:
+        return default
+    raw = elem.attrib.get("val")
+    if raw is None:
+        return default
+    key = raw.strip().lower()
+    if key in {"1", "on", "true"}:
+        return True
+    if key in {"0", "false", "off"}:
+        return False
+    raise _UnsupportedChart("unsupported-chart-axis-options")
+
+
+def _validate_canonical_series_order(
+    plots: list[ET.Element],
+    status: str,
+) -> None:
+    expected_index = 0
+    for plot in plots:
+        for series in plot.findall("c:ser", C_NS):
+            expected = str(expected_index)
+            for child_name in ("idx", "order"):
+                child = series.find(f"c:{child_name}", C_NS)
+                if (
+                    child is None
+                    or set(child.attrib) != {"val"}
+                    or list(child)
+                    or _element_val(child) != expected
+                ):
+                    raise _UnsupportedChart(status)
+            expected_index += 1
+
+
+def _plot_series_identifiers(
+    plot: ET.Element,
+    status: str,
+) -> tuple[list[int], list[int]]:
+    indices: list[int] = []
+    orders: list[int] = []
+    for series in plot.findall("c:ser", C_NS):
+        values: list[int] = []
+        for child_name in ("idx", "order"):
+            child = series.find(f"c:{child_name}", C_NS)
+            raw_value = _element_val(child)
+            if (
+                child is None
+                or set(child.attrib) != {"val"}
+                or list(child)
+                or raw_value is None
+                or re.fullmatch(r"[0-9]+", raw_value) is None
+            ):
+                raise _UnsupportedChart(status)
+            values.append(int(raw_value))
+        indices.append(values[0])
+        orders.append(values[1])
+    if (
+        not indices
+        or len(set(indices)) != len(indices)
+        or len(set(orders)) != len(orders)
+    ):
+        raise _UnsupportedChart(status)
+    return indices, orders
+
+
+def _axis_number(elem: ET.Element | None) -> int | float | None:
+    if elem is None:
+        return None
+    raw = elem.attrib.get("val")
+    try:
+        number = float(raw) if raw is not None else math.nan
+    except (TypeError, ValueError, OverflowError):
+        raise _UnsupportedChart("unsupported-chart-axis-options") from None
+    if not math.isfinite(number):
+        raise _UnsupportedChart("unsupported-chart-axis-options")
+    return int(number) if number.is_integer() else number
+
+
+def _axis_nodes_by_id(plot_area: ET.Element) -> dict[str, ET.Element]:
+    if plot_area.find("c:serAx", C_NS) is not None:
+        raise _UnsupportedChart("unsupported-chart-axis-options")
+    axes: dict[str, ET.Element] = {}

@@ -1,0 +1,101 @@
+                f"spec_lock.md P{reference.slide_num:02d} layout name "
+                f"{reference.layout_name!r} does not match source name {layout.name!r}"
+            )
+
+    master_contracts: dict[str, tuple[tuple[object, ...], ...]] = {}
+    layout_contracts: dict[str, tuple[tuple[object, ...], ...]] = {}
+    for spec in specs:
+        reference = references.get(spec.slide_num)
+        if reference is None:
+            continue
+        layout = contract_layouts.get(reference.layout_key)
+        if layout is None:
+            continue
+        master_contract = tuple(
+            item.contract_signature() for item in spec.master_elements
+        )
+        expected_master = master_contracts.setdefault(
+            layout.master_key,
+            master_contract,
+        )
+        if master_contract != expected_master:
+            errors.append(
+                f"{spec.svg_path.name}: preview master layer differs from another "
+                f"page using source master {layout.master_key!r}"
+            )
+        expected_layout = layout_contracts.setdefault(
+            layout.key,
+            spec.layout_contract,
+        )
+        if spec.layout_contract != expected_layout:
+            errors.append(
+                f"{spec.svg_path.name}: preview layout/placeholder contract differs "
+                f"from another page using source layout {layout.key!r}"
+            )
+        try:
+            match_native_placeholders(spec, layout)
+        except TemplateStructureError as exc:
+            errors.append(str(exc))
+    return errors
+
+
+def _placement_lint_errors(svg_path: Path) -> list[str]:
+    """Enumerate every placement/paint-order violation in one pass.
+
+    ``parse_template_slide`` fails fast on the first error, which discloses
+    violations one whole fix-cycle at a time. The quality checker runs this
+    pre-lint first so a single run reports every offender of the two
+    highest-frequency classes: structure metadata below the root, and
+    template paint-order violations.
+    """
+    try:
+        root = _parse_svg_root(svg_path)
+    except (OSError, ET.ParseError, NativePayloadError):
+        return []
+    if _local_tag(root) != "svg":
+        return []
+    errors: list[str] = []
+    direct_children = set(root)
+    allowed_carriers = {
+        carrier
+        for slot in root
+        if (slot.get("data-pptx-placeholder") or "").strip()
+        for carrier in slot
+        if carrier.get("data-pptx-carrier") is not None
+    }
+    for elem in root.iter():
+        if elem is root or elem in direct_children:
+            continue
+        attrs = _structure_attrs(elem)
+        if elem in allowed_carriers:
+            attrs = [
+                attr for attr in attrs
+                if attr != "data-pptx-carrier"
+            ]
+        if attrs:
+            element_id = elem.get("id") or _local_tag(elem) or "<unnamed>"
+            errors.append(
+                f"{svg_path.name}: {element_id} uses template metadata below the SVG "
+                "root; only a direct slot child may declare its carrier marker"
+            )
+    try:
+        canvas = _svg_canvas(root)
+    except CanvasContractError:
+        # Root-canvas validation is owned by parse_template_slide and the
+        # page Checker; placement lint should not duplicate that diagnosis.
+        return errors
+    last_order_rank = -1
+    for elem in root:
+        tag = _local_tag(elem)
+        if tag in _NON_VISUAL_TAGS:
+            continue
+        layer = (elem.get("data-pptx-layer") or "").strip().lower() or None
+        if layer not in _LAYERS:
+            layer = None
+        is_background = _is_full_canvas_solid_rect(elem, canvas, root=root)
+        effective_layer = layer or ("slide" if is_background else None)
+        if is_background and effective_layer is not None:
+            order_rank = {"master": 0, "layout": 1, "slide": 2}[effective_layer]
+        elif effective_layer == "master":
+            order_rank = 3
+        elif effective_layer == "layout":

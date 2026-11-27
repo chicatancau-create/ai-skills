@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+"""Regression tests for fixes reported by the September 2026 dogfood runs.
+
+Document URLs route to their own converter, bullet glyphs never promote a PDF
+line to a heading, clause numbers stay text, a scanned PDF warns, ``<polygon>``
+carries a filter, the exported slide size type token follows the canvas, and
+``init`` keeps a pinned directory name.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+import tempfile
+import unittest
+import zipfile
+from pathlib import Path
+from xml.etree import ElementTree as ET
+
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+BACKEND_DIR = SCRIPTS_DIR / "source_to_md"
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
+import pdf_to_md  # noqa: E402
+import doc_to_md  # noqa: E402
+import ppt_to_md  # noqa: E402
+import web_to_md  # noqa: E402
+from svg_to_pptx.drawingml.converter import convert_svg_to_slide_shapes  # noqa: E402
+from svg_to_pptx.drawingml.utils import project_filter_errors  # noqa: E402
+from svg_to_pptx.pptx_package.builder import _slide_size_type  # noqa: E402
+from project_management.cli import _is_project_tree, PROJECTS_ROOT  # noqa: E402
+from narration_sync import _project_input_path  # noqa: E402
+from tts_backends import backend_edge  # noqa: E402
+from compact_svg_styles import compact_svg_style_tree  # noqa: E402
+from pptx_to_svg.preset_authoring import validate_authored_preset_tree  # noqa: E402
+from pptx_ooxml.analyzer import _classify_page_type  # noqa: E402
+from beautify_identity import _theme_font_refs  # noqa: E402
+from svg_to_pptx.native_objects.chart_data import _chart_data_labels  # noqa: E402
+from svg_to_pptx.native_objects.chart_xml import _data_labels_xml  # noqa: E402
+from svg_to_pptx.drawingml.utils import parse_font_family  # noqa: E402
+import text_measure  # noqa: E402
+from language_tags import office_language_tag  # noqa: E402
+from _conversion_profile import profile_path_for, record_source_url, write_conversion_profile  # noqa: E402
+
+PDF_URL = "https://www.example.gov/content/pkg/report/pdf/report.pdf"
+
+
+class RemoteDocumentSuffixTests(unittest.TestCase):
+    def test_pdf_url_with_pdf_content_type(self) -> None:
+        self.assertEqual(
+            web_to_md.remote_document_suffix(PDF_URL, "application/pdf", b"%PDF-1.4"), ".pdf")
+
+    def test_suffixless_download_answering_pdf(self) -> None:
+        self.assertEqual(
+            web_to_md.remote_document_suffix(
+                "https://example.org/download?id=7", "application/pdf; charset=binary", b"%PDF-1.7"),
+            ".pdf")
+
+    def test_body_magic_wins_over_wrong_content_type(self) -> None:
+        self.assertEqual(
+            web_to_md.remote_document_suffix(
+                "https://example.org/files/report", "application/octet-stream", b"%PDF-1.7"),
+            ".pdf")
+
+    def test_docx_url_by_suffix(self) -> None:
+        self.assertEqual(
+            web_to_md.remote_document_suffix(
+                "https://example.org/a/brief.docx", "application/octet-stream", b"PK\x03\x04"),
+            ".docx")
+
+    def test_html_viewer_at_document_url_stays_web(self) -> None:
+        self.assertIsNone(
+            web_to_md.remote_document_suffix(PDF_URL, "text/html; charset=utf-8", b"<!doctyp"))
+
+    def test_ordinary_page_is_not_a_document(self) -> None:
+        self.assertIsNone(
+            web_to_md.remote_document_suffix(
+                "https://example.org/article", "text/html", b"<html>"))
+        self.assertIsNone(
+            web_to_md.remote_document_suffix(
+                "https://example.org/page.html", "", b"<html>"))
+
+
+class PdfBulletTests(unittest.TestCase):
+    def test_middot_bullet_is_a_list_item(self) -> None:
+        is_list, kind, content = pdf_to_md.detect_list_item("·\x01 Oaks turn red, brown, or russet;")
+        self.assertTrue(is_list)
+        self.assertEqual(kind, "ul")

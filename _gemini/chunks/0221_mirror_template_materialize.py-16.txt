@@ -1,0 +1,131 @@
+        source_token = source_ref.split(":", 1)[-1] if source_ref else str(serial + 1)
+        for part, atom in enumerate(expanded, start=1):
+            serial += 1
+            atom.set(
+                "id",
+                f"{scope}-{_safe_prefix(key)}-{_safe_prefix(source_token)}-{part}",
+            )
+            atom.set("data-pptx-layer", scope)
+            atom.set("data-pptx-editable", "false")
+            atom.attrib.pop("data-ph-type", None)
+            atoms.append(atom)
+    return atoms
+
+
+def _frame(element: ET.Element | None) -> tuple[float, float, float, float] | None:
+    if element is None:
+        return None
+    raw = (element.get("data-pptx-frame") or "").replace(",", " ").split()
+    if len(raw) != 4:
+        return None
+    try:
+        values = tuple(float(item) for item in raw)
+    except ValueError:
+        return None
+    if not all(math.isfinite(item) for item in values) or values[2] <= 0 or values[3] <= 0:
+        return None
+    return values
+
+
+def _element_by_ref(root: ET.Element, source_ref: str) -> ET.Element | None:
+    matches = [
+        element
+        for element in root.iter()
+        if element.get(SOURCE_REF_ATTRIBUTE) == source_ref
+    ]
+    if len(matches) > 1:
+        raise MirrorMaterializationError(f"Duplicate source ref in document: {source_ref}")
+    return matches[0] if matches else None
+
+
+def _placeholder_guide_by_semantic(
+    root: ET.Element,
+    semantic_role: str,
+) -> ET.Element | None:
+    matches = []
+    for element in root.iter():
+        placeholder_type = element.get("data-ph-type")
+        if not placeholder_type:
+            continue
+        if _semantic_role({"type": placeholder_type}) == semantic_role:
+            matches.append(element)
+    if len(matches) == 1:
+        return matches[0]
+    if matches or semantic_role != "object":
+        return None
+
+    body_matches = [
+        element
+        for element in root.iter()
+        if element.get("data-ph-type") == "body"
+    ]
+    return body_matches[0] if len(body_matches) == 1 else None
+
+
+def _placeholder_idx(raw: object) -> int | None:
+    if raw is None:
+        return None
+    try:
+        value = int(str(raw))
+    except ValueError as exc:
+        raise MirrorMaterializationError(f"Invalid placeholder idx: {raw!r}") from exc
+    if value < 0:
+        raise MirrorMaterializationError(f"Placeholder idx must be non-negative: {raw!r}")
+    return value
+
+
+def _semantic_role(placeholder: dict[str, Any]) -> str:
+    role = str(placeholder.get("semanticRole") or "").strip()
+    placeholder_type = str(placeholder.get("type") or "").strip()
+    mapping = {
+        "ctrTitle": "title",
+        "title": "title",
+        "subTitle": "subtitle",
+        "body": "body",
+        "dt": "date",
+        "ftr": "footer",
+        "sldNum": "slide-number",
+        "pic": "picture",
+        "chart": "chart",
+        "tbl": "table",
+        "media": "media",
+        "obj": "object",
+    }
+    normalized = role or mapping.get(placeholder_type, "object")
+    if normalized not in {
+        "title",
+        "subtitle",
+        "body",
+        "picture",
+        "chart",
+        "table",
+        "object",
+        "media",
+        "date",
+        "footer",
+        "slide-number",
+    }:
+        raise MirrorMaterializationError(
+            f"Unsupported placeholder semantic role: {normalized!r}"
+        )
+    return normalized
+
+
+def _placeholder_match(
+    candidate: dict[str, Any],
+    target: dict[str, Any],
+) -> bool:
+    candidate_idx = _placeholder_idx(candidate.get("idx"))
+    target_idx = _placeholder_idx(target.get("idx"))
+    if candidate_idx == target_idx and _semantic_role(candidate) == _semantic_role(target):
+        return True
+    return (
+        candidate_idx == target_idx
+        and str(candidate.get("type") or "") == str(target.get("type") or "")
+    )
+
+
+def _placeholder_with_semantic_fallback(
+    candidates: Iterable[dict[str, Any]],
+    target: dict[str, Any],
+) -> dict[str, Any] | None:

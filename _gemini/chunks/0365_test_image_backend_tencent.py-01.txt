@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""Regression tests for the Tencent Cloud TokenHub image backend."""
+
+import base64
+import io
+import os
+import sys
+import tempfile
+import unittest
+from contextlib import ExitStack, redirect_stdout
+from pathlib import Path
+from unittest.mock import Mock, patch
+
+
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+import image_gen  # noqa: E402
+from image_backends import backend_tencent  # noqa: E402
+
+
+class TencentBackendTests(unittest.TestCase):
+    def setUp(self) -> None:
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(patch.dict(os.environ, {"TENCENT_API_KEY": "test-key"}, clear=True))
+        self.stdout = stack.enter_context(redirect_stdout(io.StringIO()))
+        self.response = Mock(status_code=200)
+        self.response.json.return_value = {
+            "data": [{"url": "https://example.invalid/result.png"}],
+            "request_id": "test-request",
+        }
+        self.post = stack.enter_context(patch.object(
+            backend_tencent.requests, "post", return_value=self.response,
+        ))
+        stack.enter_context(patch.object(
+            backend_tencent.requests, "get", side_effect=AssertionError("Unexpected network request"),
+        ))
+        self.download = stack.enter_context(patch.object(
+            backend_tencent, "download_image", side_effect=lambda url, path: path,
+        ))
+        self.save = stack.enter_context(patch.object(
+            backend_tencent, "save_image_bytes", side_effect=lambda data, path, **kwargs: path,
+        ))
+        self.sleep = stack.enter_context(patch.object(backend_tencent.time, "sleep"))
+
+    def test_hy_endpoint_payload_and_download(self) -> None:
+        result = backend_tencent.generate("A mountain", aspect_ratio="16:9", filename="hero.png")
+
+        self.post.assert_called_once_with(
+            "https://tokenhub.tencentmaas.com/v1/wand/hunyuan-image/v3-generation",
+            headers={"Authorization": "Bearer test-key", "Content-Type": "application/json"},
+            json={
+                "model": "hy-image-v3", "prompt": "A mountain",
+                "size": "1360x768", "revise": True,
+            },
+            timeout=300,
+        )
+        self.download.assert_called_once_with("https://example.invalid/result.png", "hero.png")
+        self.save.assert_not_called()
+        self.assertEqual(result, "hero.png")
+        self.assertIn("Resolution:   1360x768", self.stdout.getvalue())
+
+    def test_seedream_endpoints_and_payloads(self) -> None:
+        for model, resolution in (
+            ("seedream-image-v5.0-pro", "1024x1024"),
+            ("seedream-image-v5.0-lite", "2048x2048"),
+        ):
+            with self.subTest(model=model):
+                self.post.reset_mock()
+                backend_tencent.generate("A mountain", model=model)
+                self.post.assert_called_once_with(
+                    "https://tokenhub.tencentmaas.com/v1/wand/si-image/generation",
+                    headers={"Authorization": "Bearer test-key", "Content-Type": "application/json"},
+                    json={
+                        "model": model, "prompt": "A mountain", "size": resolution,
+                        "watermark": False, "response_format": "url", "output_format": "png",
+                    },
+                    timeout=300,
+                )
+
+    def test_hy_area_limit_and_orientation(self) -> None:
+        for ratio in ("16:9", "1:1", "9:16"):
+            with self.subTest(ratio=ratio):
+                resolution = backend_tencent._resolve_size(ratio, "1K")
+                width, height = map(int, resolution.split("x"))
+                expected_width, expected_height = map(int, ratio.split(":"))
+                self.assertLessEqual(width * height, 1024 * 1024)
+                self.assertGreater(width * height, 0.97 * 1024 * 1024)

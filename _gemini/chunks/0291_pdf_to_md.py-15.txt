@@ -1,0 +1,96 @@
+            if not isinstance(bbox, fitz.Rect):
+                continue
+            page_elements.append({
+                "y0": bbox.y0,
+                "type": 2,
+                "content": table["content"]
+            })
+            print(f"  [OK] Found table: P{page_num} ({table['method']})")
+
+        if render_vector_figures:
+            for figure_rect in detect_vector_figure_rects(page, tab_rects):
+                page_elements.append({
+                    "y0": figure_rect.y0,
+                    "type": 3,
+                    "content": figure_rect,
+                })
+                print(f"  [OK] Found vector figure region: P{page_num} {tuple(round(v, 1) for v in figure_rect)}")
+
+        blocks = page.get_text("dict")["blocks"]
+
+        for block in blocks:
+            block_rect = fitz.Rect(block["bbox"])
+
+            # Check if this is table content
+            is_in_table = False
+            for tab_rect in tab_rects:
+                intersect = block_rect & tab_rect
+                if intersect.get_area() > 0.6 * block_rect.get_area():
+                    is_in_table = True
+                    break
+
+            if is_in_table:
+                continue
+
+            if block["type"] == 0:
+                # Check if this is noise text to be filtered (whole block match)
+                block_text_full = "".join([span["text"] for line in block["lines"] for span in line["spans"]]).strip()
+                if block_text_full in noise_texts:
+                    continue
+
+                for line in block["lines"]:
+                    line_text = ""
+                    line_size = 0
+                    line_flags = 0
+                    span_count = 0
+                    is_code_line = False
+
+                    formatted_spans = []
+                    for span in line["spans"]:
+                        span_text = CONTROL_CHARS_RE.sub('', span["text"])
+                        if not span_text.strip():
+                            if span_text:
+                                formatted_spans.append(span_text)
+                            continue
+
+                        span_size = span["size"]
+                        span_flags = span["flags"]
+
+                        # A bullet glyph set in its own larger span must not
+                        # promote the line to a heading; it is a list marker.
+                        if is_bullet_glyph_span(span_text):
+                            formatted_spans.append(span_text)
+                            continue
+
+                        line_size = max(line_size, span_size)
+                        line_flags |= span_flags
+                        span_count += 1
+
+                        heading_level = get_heading_level(span_size, size_map, span_text, span_flags)
+
+                        # Detect code font
+                        font_name = span.get("font", "")
+                        if is_monospace_font(font_name):
+                            is_code_line = True
+                            formatted_spans.append(span_text)  # No formatting for code
+                        elif heading_level > 0:
+                            formatted_spans.append(span_text.strip())
+                        else:
+                            formatted_spans.append(format_span_text(span_text, span_flags))
+
+                    line_text = ''.join(formatted_spans).strip()
+                    if not line_text:
+                        continue
+
+                    # Secondary check: line-level noise match (sometimes blocks are split)
+                    if line_text in noise_texts:
+                        continue
+
+                    line_text = merge_adjacent_formatting(line_text)
+
+                    heading_level = get_heading_level(line_size, size_map, line_text, line_flags)
+
+                    is_list, list_type, list_content = detect_list_item(line_text)
+                    if is_list and not list_content.split(' ', 1)[-1].strip():
+                        continue
+

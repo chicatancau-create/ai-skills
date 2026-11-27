@@ -1,0 +1,104 @@
+        raw = base64.b64decode((metadata.text or '').strip(), validate=True)
+        frame = ET.fromstring(raw)
+    except (ValueError, binascii.Error, ET.ParseError) as exc:
+        raise SvgNativeConversionError(
+            f'Invalid round-trip graphic-frame metadata: {exc}'
+        ) from exc
+    if hashlib.sha256(raw).hexdigest() != expected_hash:
+        raise SvgNativeConversionError(
+            'round-trip graphic-frame metadata hash does not match its payload'
+        )
+    pml_namespace = (
+        'http://schemas.openxmlformats.org/presentationml/2006/main'
+    )
+    if frame.tag != f'{{{pml_namespace}}}graphicFrame':
+        raise SvgNativeConversionError(
+            'round-trip graphic-frame payload must be p:graphicFrame'
+        )
+    if has_relationship_attributes(frame):
+        raise SvgNativeConversionError(
+            'round-trip graphic-frame payload cannot contain relationships'
+        )
+    shape_id = ctx.claim_shape_id(
+        elem.get('data-pptx-shape-id'),
+        elem.get('data-pptx-shape-scope'),
+    )
+    c_nv_pr = frame.find(
+        f'{{{pml_namespace}}}nvGraphicFramePr/'
+        f'{{{pml_namespace}}}cNvPr'
+    )
+    if c_nv_pr is None:
+        raise SvgNativeConversionError(
+            'round-trip graphic-frame payload has no p:cNvPr'
+        )
+    c_nv_pr.set('id', str(shape_id))
+    raw_frame = elem.get('data-pptx-frame')
+    try:
+        values = tuple(
+            float(value)
+            for value in re.split(r'[\s,]+', (raw_frame or '').strip())
+        )
+    except ValueError as exc:
+        raise SvgNativeConversionError(
+            f'Invalid round-trip graphic-frame bounds: {raw_frame!r}'
+        ) from exc
+    if (
+        len(values) != 4
+        or not all(math.isfinite(value) for value in values)
+        or values[2] <= 0
+        or values[3] <= 0
+    ):
+        raise SvgNativeConversionError(
+            f'Invalid round-trip graphic-frame bounds: {raw_frame!r}'
+        )
+    bounds = (
+        round(values[0] * EMU_PER_PX),
+        round(values[1] * EMU_PER_PX),
+        round((values[0] + values[2]) * EMU_PER_PX),
+        round((values[1] + values[3]) * EMU_PER_PX),
+    )
+    return ShapeResult(
+        xml=ET.tostring(frame, encoding='unicode'),
+        bounds_emu=bounds,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Group handling
+# ---------------------------------------------------------------------------
+
+def convert_g(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
+    """Convert SVG <g> to DrawingML group shape <p:grpSp>.
+
+    Preserves group structure so elements can be selected and moved together
+    in PowerPoint. Single-child groups are flattened to avoid unnecessary nesting.
+
+    Uses identity coordinate mapping (chOff/chExt == off/ext) so child shapes
+    keep their absolute slide coordinates unchanged.
+    """
+    ctx.parent_by_id.update({id(child): elem for child in elem})
+    hidden_reason = svg_hidden_reason(elem, ctx.parent_by_id, preserve_native_carriers=True)
+    if hidden_reason == 'display:none':
+        return None
+    exact_graphic_frame = _roundtrip_graphic_frame(elem, ctx) if hidden_reason is None else None
+    if exact_graphic_frame is not None:
+        return exact_graphic_frame
+
+    transform = elem.get('transform', '')
+    native_subtree_active = _contains_enabled_native_replacement(elem, ctx)
+    if native_subtree_active:
+        dx, dy, sx, sy = native_marker_transform(transform)
+        angle_deg = 0.0
+    else:
+        dx, dy, sx, sy, angle_deg = parse_transform(transform)
+
+    filter_id = resolve_url_id(elem.get('filter', ''))
+    style_overrides = _extract_inheritable_styles(elem)
+    local_opacity = get_element_opacity(elem)
+    if local_opacity is None:
+        local_opacity = 1.0
+
+    elem_id = usable_animation_group_id(elem.get('id'))
+    semantic_role = elem.get('data-pptx-role')
+    placeholder = elem.get('data-pptx-placeholder')
+    has_explicit_semantics = (

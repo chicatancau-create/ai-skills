@@ -1,0 +1,119 @@
+    for text in positional_texts:
+        try:
+            if not _normalize_semantic_text_lines(copy.deepcopy(text)):
+                return False
+        except ValueError:
+            return False
+    if element.get("data-pptx-object") == "connector" and visible_texts:
+        return False
+    if len(visible_texts) > 1:
+        if any(text.get("transform") is not None for text in visible_texts):
+            return False
+        anchors = {
+            (item.get("x"), item.get("text-anchor", "start"))
+            for item in visible_texts
+        }
+        if len(anchors) != 1:
+            return False
+        try:
+            baselines = [_semantic_text_baseline(text) for text in visible_texts]
+        except ValueError:
+            return False
+        if any(current <= previous for previous, current in zip(
+            baselines,
+            baselines[1:],
+        )):
+            return False
+    for child in element:
+        tag = _local_name(child.tag)
+        part = child.get("data-pptx-part")
+        if child is carriers[0] or tag in {"metadata", "text", "a"}:
+            continue
+        if part in {"geometry-preview", "placeholder-sppr"}:
+            continue
+        if tag == "g" and all(
+            _local_name(item.tag) in {"g", "text", "tspan", "a"}
+            for item in child.iter()
+        ):
+            continue
+        return False
+    return True
+
+
+def _mark_semantic_objects(root: ET.Element, stats: ProjectionStats) -> None:
+    """Mark source objects whose authoring truth has a closed semantic IR."""
+    for element in root.iter():
+        if element.get("data-pptx-replace-with") == SEMANTIC_TABLE_KIND:
+            element.set(SEMANTIC_OBJECT_ATTRIBUTE, SEMANTIC_TABLE_KIND)
+            stats.semantic_tables += 1
+            continue
+        if _is_semantic_shape_candidate(element):
+            element.set(SEMANTIC_OBJECT_ATTRIBUTE, SEMANTIC_SHAPE_KIND)
+            stats.semantic_shapes += 1
+
+
+def _make_geometry_carrier_visible(element: ET.Element) -> int:
+    """Turn one import-only hidden carrier into the authored geometry surface."""
+    changed = 0
+    for name in ("visibility", "display", "pointer-events"):
+        if name in element.attrib:
+            del element.attrib[name]
+            changed += 1
+
+    style = element.get("style")
+    if style is not None:
+        declarations = [
+            declaration.strip()
+            for declaration in style.split(";")
+            if declaration.strip()
+        ]
+        retained = [
+            declaration
+            for declaration in declarations
+            if declaration.split(":", 1)[0].strip().lower()
+            not in {"display", "pointer-events", "visibility"}
+        ]
+        normalized = "; ".join(retained)
+        if normalized:
+            if normalized != style:
+                element.set("style", normalized)
+                changed += 1
+        else:
+            del element.attrib["style"]
+            changed += 1
+    return changed
+
+
+def _semantic_text_baseline(element: ET.Element) -> float:
+    raw = element.get("y")
+    if raw is None:
+        raise ValueError("Semantic shape text requires an explicit y baseline")
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"Semantic shape text has a non-numeric y baseline: {raw!r}"
+        ) from exc
+    if not math.isfinite(value):
+        raise ValueError(
+            f"Semantic shape text has a non-finite y baseline: {raw!r}"
+        )
+    return value
+
+
+def _semantic_text_font_size(element: ET.Element) -> float:
+    raw = element.get("font-size")
+    if raw is None:
+        return 16.0
+    try:
+        value = float(raw)
+    except ValueError:
+        return 16.0
+    return value if math.isfinite(value) and value > 0 else 16.0
+
+
+def _semantic_text_has_content(element: ET.Element) -> bool:
+    return bool("".join(element.itertext()))
+
+
+def _normalize_semantic_text_lines(text: ET.Element) -> bool:

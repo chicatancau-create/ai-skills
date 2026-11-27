@@ -1,0 +1,123 @@
+        children[0],
+        palette,
+        placeholder_hex=placeholder_hex,
+    )
+    if hex_ is None:
+        raise ValueError("DrawingML solid fill color cannot be resolved")
+    return hex_, alpha
+
+
+def find_color_elem(parent: ET.Element | None) -> ET.Element | None:
+    """Return the sole direct registered color, rejecting ambiguous aliases."""
+    if parent is None:
+        return None
+    colors: list[ET.Element] = []
+    for child in list(parent):
+        if not isinstance(child.tag, str):
+            continue
+        name = child.tag.rsplit("}", 1)[-1]
+        if name not in COLOR_TAGS:
+            continue
+        if child.tag not in _COLOR_QNAMES:
+            raise ValueError(
+                f"Invalid DrawingML color child namespace: {child.tag!r}"
+            )
+        colors.append(child)
+    if len(colors) > 1:
+        raise ValueError(
+            "DrawingML color container has multiple direct color children"
+        )
+    return colors[0] if colors else None
+
+
+def resolve_color(
+    color_elem: ET.Element | None,
+    palette: ColorPalette | None,
+    *,
+    placeholder_hex: str | None = None,
+    strict: bool | None = None,
+) -> tuple[str | None, float]:
+    """Resolve a color element to (#RRGGBB, alpha).
+
+    Args:
+        color_elem: a:srgbClr / a:schemeClr / etc. May be None.
+        palette: ColorPalette for resolving schemeClr.
+        placeholder_hex: when a child uses schemeClr val="phClr" (placeholder
+            color used inside theme styles), substitute this hex.
+
+    Returns:
+        (hex string with leading '#', alpha in [0,1]) or (None, 1.0) on failure.
+    """
+    if color_elem is None:
+        return None, 1.0
+
+    effective_strict = palette.strict if strict is None and palette is not None else strict
+    if effective_strict is None:
+        effective_strict = True
+    try:
+        return _resolve_color_closed(
+            color_elem,
+            palette,
+            placeholder_hex=placeholder_hex,
+        )
+    except ValueError as exc:
+        if effective_strict:
+            raise
+        if palette is not None:
+            palette._diagnose(
+                "color-structure-normalized",
+                str(exc),
+                "retain recognized color attributes and modifiers",
+            )
+        compatible = _compatible_color_element(color_elem)
+        if compatible is None:
+            return None, 1.0
+        try:
+            return _resolve_color_closed(
+                compatible,
+                palette,
+                placeholder_hex=placeholder_hex,
+            )
+        except (KeyError, TypeError, ValueError):
+            return None, 1.0
+
+
+def _resolve_color_closed(
+    color_elem: ET.Element,
+    palette: ColorPalette | None,
+    *,
+    placeholder_hex: str | None = None,
+) -> tuple[str | None, float]:
+    """Resolve the registered closed DrawingML color grammar."""
+
+    tag = color_elem.tag.split("}", 1)[-1]
+    base_hex: str | None = None
+    alpha: float = 1.0
+
+    if tag == "srgbClr":
+        base_hex = _srgb_hex_value(color_elem)
+    elif tag == "schemeClr":
+        name = _scheme_color_name(color_elem)
+        if name == "phClr":
+            base_hex = _normalize_hex(placeholder_hex) if placeholder_hex else None
+        elif palette is not None:
+            base_hex = palette.resolve_scheme(name)
+    elif tag == "sysClr":
+        base_hex = _system_color_fallback(color_elem)
+    elif tag == "prstClr":
+        base_hex = _preset_color_hex(color_elem)
+    elif tag == "hslClr":
+        base_hex = _hsl_color_hex(color_elem)
+    elif tag == "scrgbClr":
+        base_hex = _scrgb_color_hex(color_elem)
+
+    if base_hex is None:
+        return None, 1.0
+
+    # Apply modifiers (children of the color element).
+    base_hex, alpha = _apply_modifiers(base_hex, color_elem)
+    return f"#{base_hex}", alpha
+
+
+def _compatible_color_element(color_elem: ET.Element) -> ET.Element | None:
+    """Return a canonical clone containing only recognized color semantics."""

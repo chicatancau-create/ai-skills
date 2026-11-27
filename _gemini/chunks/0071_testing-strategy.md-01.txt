@@ -1,0 +1,116 @@
+# Backend Testing Strategy
+
+Comprehensive testing guide for backend and full-stack applications. Covers the full testing pyramid with deep focus on API integration tests, database testing, contract testing, and performance testing.
+
+## Quick Start Checklist
+
+- [ ] **Test runner configured** (Jest/Vitest, Pytest, Go test)
+- [ ] **Test database** ready (Docker container or in-memory)
+- [ ] **Database isolation** per test (transaction rollback or truncation)
+- [ ] **Test factories** for common entities (user, order, product)
+- [ ] **Auth helper** to generate tokens for tests
+- [ ] **CI pipeline** runs tests with real database service
+- [ ] **Coverage threshold** enforced (≥ 80%)
+
+---
+
+## The Testing Pyramid
+
+```
+         ╱╲        E2E (few, slow) — full flows across services
+        ╱  ╲
+       ╱────╲       Integration (moderate) — API + DB + external
+      ╱      ╲
+     ╱────────╲      Unit (many, fast) — pure business logic
+    ╱__________╲
+```
+
+| Level | What | Speed | Count |
+|-------|------|-------|-------|
+| Unit | Pure functions, business logic, no I/O | < 10ms | 70%+ of tests |
+| Integration | API routes + real database + mocked externals | 50-500ms | ~20% |
+| E2E | Full user flow across deployed services | 1-30s | ~10% |
+| Contract | API compatibility between services | < 100ms | Per API boundary |
+| Performance | Load, stress, soak | Minutes | Per critical path |
+
+---
+
+## 1. API Integration Testing (CRITICAL)
+
+### What to Test for Every Endpoint
+
+| Aspect | Tests to Write |
+|--------|---------------|
+| Happy path | Correct input → expected response + correct DB state |
+| Auth | No token → 401, bad token → 401, expired → 401 |
+| Authorization | Wrong role → 403, not owner → 403 |
+| Validation | Missing fields → 422, bad types → 422, boundary values |
+| Not found | Invalid ID → 404, deleted resource → 404 |
+| Conflict | Duplicate create → 409, stale update → 409 |
+| Idempotency | Same request twice → same result |
+| Side effects | DB state changed, events emitted, cache invalidated |
+| Error format | All errors match RFC 9457 envelope |
+
+### TypeScript (Jest + Supertest)
+
+```typescript
+describe('POST /api/orders', () => {
+  let token: string;
+  let product: Product;
+
+  beforeAll(async () => {
+    await resetDatabase();
+    const user = await createTestUser({ role: 'customer' });
+    token = await getAuthToken(user);
+    product = await createTestProduct({ price: 29.99, stock: 10 });
+  });
+
+  it('creates order → 201 + correct DB state', async () => {
+    const res = await request(app)
+      .post('/api/orders')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ items: [{ productId: product.id, quantity: 2 }] });
+
+    expect(res.status).toBe(201);
+    expect(res.body.data.total).toBe(59.98);
+
+    const updated = await db.product.findUnique({ where: { id: product.id } });
+    expect(updated!.stock).toBe(8);
+  });
+
+  it('rejects without auth → 401', async () => {
+    const res = await request(app).post('/api/orders').send({ items: [] });
+    expect(res.status).toBe(401);
+  });
+
+  it('rejects empty items → 422', async () => {
+    const res = await request(app)
+      .post('/api/orders')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ items: [] });
+    expect(res.status).toBe(422);
+    expect(res.body.errors[0].field).toBe('items');
+  });
+});
+```
+
+### Python (Pytest + FastAPI TestClient)
+
+```python
+@pytest.fixture
+def client(db_session):
+    def override_get_db():
+        yield db_session
+    app.dependency_overrides[get_db] = override_get_db
+    yield TestClient(app)
+    app.dependency_overrides.clear()
+
+def test_create_order_success(client, auth_headers, test_product):
+    response = client.post("/api/orders", json={
+        "items": [{"product_id": test_product.id, "quantity": 2}]
+    }, headers=auth_headers)
+    assert response.status_code == 201
+    assert response.json()["data"]["total"] == 59.98
+
+def test_create_order_no_auth(client):
+    response = client.post("/api/orders", json={"items": []})

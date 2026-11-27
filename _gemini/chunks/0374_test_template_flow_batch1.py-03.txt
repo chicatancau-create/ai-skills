@@ -1,0 +1,62 @@
+        with self.assertRaises((ValueError, apply_template.ApplyTemplateError)):
+            server._read_template_selection(self.project / 'confirm_ui' / server.TEMPLATE_SELECTION_NAME)
+
+    def test_n6_options_drift_is_still_rejected(self) -> None:
+        _confirm(self.project, [self.layout])
+        options_path = self.project / 'confirm_ui' / server.RECOMMENDATION_STAGE_NAMES[1]
+        options = json.loads(options_path.read_text(encoding='utf-8'))
+        options['template_options']['lang'] = 'ja'
+        previous_time = options_path.stat().st_mtime_ns
+        server._write_json_atomic(options_path, options)
+        os.utime(options_path, ns=(previous_time, previous_time))
+        with self.assertRaisesRegex(ValueError, 'options_sha256'):
+            server._read_template_selection(self.project / 'confirm_ui' / server.TEMPLATE_SELECTION_NAME)
+
+    def test_n6_external_asset_drift_is_rejected_after_install(self) -> None:
+        brand = _workspace(self.tmp / 'brand', 'brand', 'identity')
+        (brand / 'images').mkdir()
+        (brand / 'images' / 'logo.bin').write_bytes(b'logo')
+        _confirm(self.project, [self.project, brand])
+        apply_template.apply_templates(self.project, [str(self.project), str(brand)], validate=False)
+        (brand / 'images' / 'logo.bin').write_bytes(b'drift')
+        self.assertIsNotNone(server._stage2_ready_error(self.project, self.project / 'confirm_ui'))
+
+    def test_n8_unrelated_installed_spec_cannot_complete_handoff(self) -> None:
+        _confirm(self.project, [TEMPLATES / 'brands' / 'zcare-rescue', TEMPLATES / 'layouts' / 'report_core'])
+        self.assertIsNotNone(server._stage2_ready_error(self.project, self.project / 'confirm_ui'))
+
+    def test_n8_correct_filenames_without_installer_receipt_are_rejected(self) -> None:
+        _confirm(self.project, [self.layout])
+        shutil.copy2(self.layout / 'templates' / 'design_spec.layout.new.md', self.project / 'templates')
+        self.assertIsNotNone(server._stage2_ready_error(self.project, self.project / 'confirm_ui'))
+
+    def test_n8_installed_asset_drift_invalidates_ready_handoff(self) -> None:
+        _confirm(self.project, [self.project, TEMPLATES / 'brands' / 'zcare-rescue'])
+        apply_template.apply_templates(
+            self.project, [str(self.project), str(TEMPLATES / 'brands' / 'zcare-rescue')], validate=False,
+        )
+        self.assertIsNone(server._stage2_ready_error(self.project, self.project / 'confirm_ui'))
+        (self.project / 'icons' / 'keep.bin').write_bytes(b'changed')
+        with self.assertRaises((ValueError, apply_template.ApplyTemplateError)):
+            server._read_template_installation(self.project)
+
+    def test_n8_receipt_for_another_selection_cannot_authorize_handoff(self) -> None:
+        apply_template.apply_templates(self.project, [str(self.project)], validate=False)
+        _confirm(self.project, [self.layout])
+        self.assertIsNotNone(server._stage2_ready_error(self.project, self.project / 'confirm_ui'))
+
+    def test_n8_installed_spec_and_roster_changes_are_rejected(self) -> None:
+        _confirm(self.project, [self.project])
+        apply_template.apply_templates(self.project, [str(self.project)], validate=False)
+        for relative in ('templates/design_spec.deck.old.md', 'templates/deck.svg'):
+            with self.subTest(relative=relative):
+                path = self.project / relative
+                before = path.read_bytes()
+                path.write_bytes(before + b'changed')
+                self.assertIsNotNone(server._stage2_ready_error(self.project, self.project / 'confirm_ui'))
+                path.write_bytes(before)
+        (self.project / 'images' / 'later-project-asset.bin').write_bytes(b'new project material')
+        self.assertIsNone(server._stage2_ready_error(self.project, self.project / 'confirm_ui'))
+
+    def test_free_design_still_completes_without_installation(self) -> None:
+        _confirm(self.project, [], mode='free_design')

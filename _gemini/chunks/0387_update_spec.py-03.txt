@@ -1,0 +1,106 @@
+                ) from publish_error
+            raise
+    finally:
+        if not preserve_transaction:
+            shutil.rmtree(transaction_dir, ignore_errors=True)
+
+
+def replace_color_in_svgs(
+    svg_dir: Path, old_hex: str, new_hex: str, *, dry_run: bool = False
+) -> list[tuple[Path, int]]:
+    """Replace old_hex with new_hex in every .svg under svg_dir.
+
+    Returns a list of (path, replacement_count) for each changed file. The
+    count comes straight from re.subn so callers can spot anomalies —
+    e.g. one file with 50 hits when the rest have 4-8 is likely a stray
+    HEX literal inside <text> content rather than a styling attribute.
+
+    Two-phase: plan all file updates in memory, then publish them with rollback.
+    If planning or publishing fails, the original files are retained.
+
+    When dry_run=True, the planning phase still runs (so bad HEX still raises
+    and callers see which files would change), but no disk writes happen. The
+    returned list describes the would-change files.
+    """
+    planned = _plan_color_updates(svg_dir, old_hex, new_hex)
+    if not dry_run:
+        _publish_text_updates([
+            (svg, new_text)
+            for svg, new_text, _count in planned
+        ])
+    return [(path, count) for path, _text, count in planned]
+
+
+def replace_font_family_in_svgs(
+    svg_dir: Path, new_value: str, *, dry_run: bool = False
+) -> list[tuple[Path, int]]:
+    """Replace the inner value of every `font-family="..."` / `font-family='...'`
+    attribute in every .svg under svg_dir.
+
+    Returns a list of (path, replacement_count) for each changed file.
+
+    Preserves the outer quote character when possible; if the new value contains
+    that same quote type, switches the outer quote to the other kind.
+
+    Two-phase: plan all file updates in memory, then publish them with rollback.
+    A conflicting quote style fails during planning, before files are touched.
+
+    When dry_run=True, the planning phase still runs (so the ValueError still
+    fires and callers see which files would change), but no disk writes happen.
+    The returned list describes the would-change files.
+    """
+    planned = _plan_font_family_updates(svg_dir, new_value)
+    if not dry_run:
+        _publish_text_updates([
+            (svg, new_text)
+            for svg, new_text, _count in planned
+        ])
+    return [(path, count) for path, _text, count in planned]
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("project_path", type=Path, help="project folder containing spec_lock.md and svg_output/")
+    ap.add_argument(
+        "assignment",
+        help=(
+            "section.key=value (e.g. colors.primary=#0066AA, "
+            "typography.font_family='Arial, \"Microsoft YaHei\", sans-serif'). "
+            "Bare key=value is treated as colors.key=value."
+        ),
+    )
+    ap.add_argument(
+        "--dry-run",
+        "-n",
+        action="store_true",
+        help="preview which SVGs would change; do not write anything to disk.",
+    )
+    args = ap.parse_args()
+
+    project = args.project_path.resolve()
+    lock = project / "spec_lock.md"
+    svg_dir = project / "svg_output"
+
+    if not lock.exists():
+        print(f"error: spec_lock.md not found at {lock}", file=sys.stderr)
+        return 2
+    if not svg_dir.exists():
+        print(f"error: svg_output/ not found at {svg_dir}", file=sys.stderr)
+        return 2
+
+    if "=" not in args.assignment:
+        print("error: assignment must be [section.]key=value", file=sys.stderr)
+        return 2
+    lhs, new_value = args.assignment.split("=", 1)
+    lhs = lhs.strip()
+    new_value = new_value.strip()
+    if "." in lhs:
+        section, key = lhs.split(".", 1)
+        section = section.strip()
+        key = key.strip()
+    else:
+        section, key = "colors", lhs
+
+    sections = parse_lock(lock)
+    section_map = sections.get(section, {})
+    if key not in section_map:

@@ -1,0 +1,80 @@
+            var el = svgContent.querySelector("#" + CSS.escape(eid));
+            if (el) {
+                var tag = el.tagName.toLowerCase();
+                selectedElementEl.innerHTML =
+                    '<span class="el-tag">&lt;' + escapeHtml(tag) + '&gt;</span>' +
+                    '<span class="el-id">' + escapeHtml(eid) + '</span>';
+                propsEl.innerHTML = renderEditableProps(el);
+                attachPropEditors(el);
+            }
+        } else {
+            selectedElementEl.innerHTML =
+                '<span class="multi-count">' + escapeHtml(t("multi_selected", { count: count })) + '</span>';
+            propsEl.innerHTML = renderMultiSelectSummary(Array.from(selectedElementIds));
+            attachMultiSelectionEditors(Array.from(selectedElementIds));
+        }
+
+        annotationInput.style.display = "block";
+        annotationText.placeholder = count > 1
+            ? t("placeholder_annotation_multi", { count: count })
+            : t("placeholder_annotation");
+        annotationText.value = count === 1
+            ? (slideAnnotations[selectedElementIds.values().next().value] || "")
+            : "";
+    }
+
+    // ---- Rubber band selection ----
+    var rubberBandEl = null;
+    var rubberBandStart = null;
+    var rubberBandUsed = false;
+    var suppressNextSvgClick = false;
+    var RUBBER_BAND_THRESHOLD = 5;
+
+    // ---- Drag-to-move (direct geometry edit on the canvas) ----
+    // Pressing on an already-selected element drags the whole selection. Frames
+    // only update the preview; one staged edit per element is written on release,
+    // reusing attrsForMove + stageEditRequest (and backend coalescing).
+    var dragStart = null;       // {x, y} screen coords at mousedown on a selection
+    var dragMoved = false;      // crossed the move threshold this gesture
+    var dragEls = [];           // top-level selected elements being moved
+    var dragStartAttrs = {};    // {id: startGeometryAttrs} for drift-free preview
+
+    function hitSelectedAncestor(target) {
+        // Walk up from the pressed node to the first element already in the
+        // selection, so a press on a selected shape (or its inner preview
+        // children) starts a drag regardless of how it was selected.
+        var svg = svgContent.querySelector("svg");
+        var node = target;
+        while (node && node !== svg && node.nodeType === 1) {
+            if (node.id && selectedElementIds.has(node.id)) return node;
+            node = node.parentNode;
+        }
+        return null;
+    }
+
+    function screenDeltaToLocal(el, dxScreen, dyScreen) {
+        // Map a screen-pixel delta into the coordinate space computeRenderBox /
+        // attrsForMove use for THIS element (its getCTM() output space). Using the
+        // element's own getCTM ∘ getScreenCTM⁻¹ is robust to how a browser splits
+        // the viewBox scale between getCTM and getScreenCTM, and naturally accounts
+        // for each element's own group transform (correct under multi-select).
+        var sctm = el.getScreenCTM ? el.getScreenCTM() : null;
+        var ctm = el.getCTM ? el.getCTM() : null;
+        if (!sctm || !ctm) return { x: dxScreen, y: dyScreen };
+        try {
+            var n = ctm.multiply(sctm.inverse());  // linear part: screen → local delta
+            var lx = n.a * dxScreen + n.c * dyScreen;
+            var ly = n.b * dxScreen + n.d * dyScreen;
+            // Singular CTM → SVGMatrix.inverse() throws, DOMMatrix yields NaN.
+            // Either way, fall back to the raw delta rather than wedge the drag.
+            if (!isFinite(lx) || !isFinite(ly)) return { x: dxScreen, y: dyScreen };
+            return { x: lx, y: ly };
+        } catch (err) {
+            return { x: dxScreen, y: dyScreen };
+        }
+    }
+
+    function beginDrag() {
+        dragEls = topLevelSelectedElements(Array.from(selectedElementIds));
+        dragStartAttrs = {};
+        dragEls.forEach(function (el) {

@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""Install selected Brand / Style / Layout / Deck workspaces into a project.
+
+Runs the install half of ``workflows/stages/apply-template-workspace.md`` §4
+as one command: validate every root, map each spec to its kind-qualified
+project name, resolve the structural owner (Layout over Deck), copy the owner's
+roster and every root's ``images/`` / ``icons/`` once, refuse destination
+collisions and duplicate kinds before writing anything, prepend one provenance
+line under each copied spec's H1, and print the §5.3 completion receipt.
+
+Usage::
+
+    python3 scripts/apply_template.py <project_path> --root <workspace_root> [--root ...] [--dry-run]
+
+A root is a workspace directory exposing ``templates/design_spec.md`` (library
+shape) or one ``templates/design_spec.<kind>.<id>.md`` per kind (project
+shape). A root that resolves to the target project is consumed in place. The
+tool selects nothing: which roots to pass is the Stage-1 / Quick decision.
+"""
+
+from __future__ import annotations
+
+import argparse
+import filecmp
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass, field
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from attribution_guard import require_skill_integrity  # noqa: E402
+from console_encoding import configure_utf8_stdio  # noqa: E402
+from register_template import (  # noqa: E402
+    KIND_CONFIG,
+    SpecParseError,
+    _read_spec,
+    _validate_spec_shape,
+    validate_qualified_spec_identity,
+)
+
+configure_utf8_stdio()
+
+SKILL_DIR = SCRIPT_DIR.parent
+REPO_ROOT = SKILL_DIR.parent.parent
+CHECKER = SCRIPT_DIR / "svg_quality_checker.py"
+KINDS = ("brand", "style", "layout", "deck")
+STRUCTURAL_KINDS = ("layout", "deck")
+ASSET_DIRS = ("images", "icons")
+INSTALL_RECEIPT_NAME = "template_install.json"
+BITMAP_SUFFIXES = {
+    ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp",
+}
+
+
+class ApplyTemplateError(ValueError):
+    """A contract violation that blocks installation."""
+
+
+@dataclass
+class SpecRecord:
+    kind: str
+    template_id: str
+    path: Path
+    frontmatter: dict
+
+
+@dataclass
+class RootRecord:
+    supplied: str
+    root: Path
+    source: str  # library | explicit
+    specs: list[SpecRecord]
+    in_place: bool = False
+
+    @property
+    def kinds(self) -> list[str]:
+        return [spec.kind for spec in self.specs]
+
+    @property
+    def templates_dir(self) -> Path:
+        return self.root / "templates"
+
+    @property
+    def display(self) -> str:
+        if self.source == "library":
+            kind = self.specs[0].kind
+            kind_dir = KIND_CONFIG[kind]["dir"].name
+            return f"skills/ppt-master/templates/{kind_dir}/{self.specs[0].template_id}/"
+        return f"{self.root}/"
+
+
+@dataclass
+class Mapping:
+    src: Path
+    dst: Path
+    content: bytes | None = None  # rewritten specs carry their bytes
+    status: str = "copy"  # copy | identical | in-place
+
+
+@dataclass
+class InstallPlan:
+    project: Path
+    roots: list[RootRecord]
+    owner: RootRecord | None
+    owner_kind: str | None
+    mappings: list[Mapping] = field(default_factory=list)
+    removals: list[Path] = field(default_factory=list)
+    root_snapshots: list[dict] = field(default_factory=list)
+    selection_sha256: str | None = None
+
+    @property
+    def installed_specs(self) -> list[str]:
+        return [
+            f"design_spec.{spec.kind}.{spec.template_id}.md"
+            for root in self.roots
+            for spec in root.specs
+        ]
+
+
+# ---------------------------------------------------------------------------
+# Discovery and validation
+# ---------------------------------------------------------------------------
+
+
+def _frontmatter_identity(spec_path: Path) -> tuple[str, str, dict]:
+    frontmatter, _body = _read_spec(spec_path)
+    fm = frontmatter or {}
+    kind = str(fm.get("kind") or "").strip()

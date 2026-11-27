@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""
+PPT Master - Image Treatment
+
+Create a non-destructive PNG derivative from one project-local bitmap while
+preserving its display dimensions, alpha mask, and any matching web provenance.
+
+Usage:
+    python3 scripts/image_treat.py <project_path> <source> --output <filename.png> [options]
+
+Examples:
+    python3 scripts/image_treat.py projects/demo hero.jpg --output hero_soft.png --blur 12
+    python3 scripts/image_treat.py projects/demo hero.jpg --output hero_duotone.png \
+        --contrast 1.1 --duotone "#14213D" "#FCA311"
+
+Dependencies:
+    Pillow; project image-search dependencies when copying web provenance
+
+Treatments run in this fixed order: brightness, contrast, tone treatment
+(desaturate / grayscale / duotone), Gaussian blur, then --fit downscaling.
+"""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import math
+import os
+import re
+import sys
+import tempfile
+from io import BytesIO
+from pathlib import Path
+from typing import Optional
+
+from PIL import (
+    Image,
+    ImageCms,
+    ImageEnhance,
+    ImageFilter,
+    ImageOps,
+    UnidentifiedImageError,
+)
+
+
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from console_encoding import configure_utf8_stdio  # noqa: E402
+
+configure_utf8_stdio()
+
+
+_HEX_COLOR_RE = re.compile(r"^#?([0-9A-Fa-f]{6})$")
+
+
+def _read_sources_manifest(path: Path) -> dict:
+    from image_search import _read_existing_manifest
+
+    return _read_existing_manifest(path)
+
+
+def _write_sources_manifest(path: Path, item: dict) -> Path:
+    from image_search import write_sources_manifest
+
+    return write_sources_manifest(path, item)
+
+
+def _finite_float(value: str) -> float:
+    try:
+        number = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"expected a number, got {value!r}") from exc
+    if not math.isfinite(number):
+        raise argparse.ArgumentTypeError("value must be finite")
+    return number
+
+
+def _nonnegative_float(value: str) -> float:
+    number = _finite_float(value)
+    if number < 0:
+        raise argparse.ArgumentTypeError("value must be greater than or equal to 0")
+    return number
+
+
+def _positive_float(value: str) -> float:
+    number = _finite_float(value)
+    if number <= 0:
+        raise argparse.ArgumentTypeError("value must be greater than 0")
+    return number
+
+
+def _unit_float(value: str) -> float:
+    number = _finite_float(value)
+    if not 0 <= number <= 1:
+        raise argparse.ArgumentTypeError("value must be between 0 and 1")
+    return number
+
+
+_FIT_RE = re.compile(r"^(\d+)x(\d+)$")
+
+
+def _fit_box(value: str) -> tuple[int, int]:
+    match = _FIT_RE.fullmatch(value.strip().lower())
+    if match is None:
+        raise argparse.ArgumentTypeError("fit box must be WIDTHxHEIGHT in pixels, e.g. 920x228")
+    width, height = int(match.group(1)), int(match.group(2))
+    if width <= 0 or height <= 0:
+        raise argparse.ArgumentTypeError("fit box dimensions must be positive")
+    return width, height
+
+
+def _hex_color(value: str) -> str:
+    match = _HEX_COLOR_RE.fullmatch(value)
+    if match is None:
+        raise argparse.ArgumentTypeError("color must be #RRGGBB or RRGGBB")
+    return f"#{match.group(1).upper()}"
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Create a project-local PNG derivative. Processing order: brightness -> "
+            "contrast -> desaturate/grayscale/duotone -> blur."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("project_path", help="Project root containing an images/ directory.")
+    parser.add_argument(
+        "source",
+        help="Existing bare bitmap filename under <project_path>/images (no path components).",
+    )
+    parser.add_argument(
+        "--output",
+        required=True,

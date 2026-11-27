@@ -1,0 +1,122 @@
+    if match is not None:
+        return tag[:match.start("value")] + encoded_digest + tag[match.end("value"):]
+    close = re.search(rb"(?P<space>\s*)(?P<slash>/?)>$", tag)
+    if close is None:
+        raise NativeFallbackStampError("Unable to locate SVG start-tag terminator")
+    insertion = (
+        b" "
+        + _FALLBACK_ATTR_BYTES
+        + b'="'
+        + encoded_digest
+        + b'"'
+    )
+    return tag[:close.start()] + insertion + tag[close.start():]
+
+
+def _patch_document(
+    source: bytes,
+    root: ET.Element,
+    digests: dict[ET.Element, str],
+) -> tuple[bytes, int]:
+    elements = list(root.iter())
+    spans = _start_tag_spans(source)
+    if len(elements) != len(spans):
+        raise NativeFallbackStampError(
+            "Parsed SVG element roster does not match raw start-tag roster"
+        )
+
+    patches: list[tuple[int, int, bytes]] = []
+    for element, (start, end, raw_name) in zip(elements, spans):
+        if _local_name(element.tag) != raw_name:
+            raise NativeFallbackStampError(
+                "Parsed SVG element order does not match raw start-tag order"
+            )
+        digest = digests.get(element)
+        if digest is None:
+            continue
+        current_tag = source[start:end]
+        replacement = _patch_start_tag(current_tag, digest)
+        if replacement != current_tag:
+            patches.append((start, end, replacement))
+
+    patched = source
+    for start, end, replacement in reversed(patches):
+        patched = patched[:start] + replacement + patched[end:]
+    return patched, len(patches)
+
+
+def _validated_svg_first_digests(
+    root: ET.Element,
+    path: Path,
+) -> tuple[dict[ET.Element, str], int]:
+    parent_map = {
+        child: parent
+        for parent in root.iter()
+        for child in parent
+    }
+    status_errors: list[str] = []
+    for element in root.iter():
+        if _local_name(element.tag) == "metadata":
+            continue
+        marker_id = element.get("id") or element.get("data-name") or "<unnamed>"
+        status_errors.extend(
+            f"{marker_id}: {error}"
+            for error in native_marker_status_errors(element)
+        )
+    if status_errors:
+        raise NativeFallbackStampError(
+            f"{path.name}: invalid native marker status: "
+            + "; ".join(status_errors)
+        )
+
+    digests: dict[ET.Element, str] = {}
+    json_authoritative = 0
+    for marker in root.iter():
+        kind = native_replacement_kind(marker)
+        if kind not in {"chart", "table"}:
+            continue
+        marker_id = marker.get("id") or marker.get("data-name") or "<unnamed>"
+        try:
+            validate_native_object_marker(
+                marker,
+                ancestors=_marker_ancestors(marker, root, parent_map),
+            )
+        except RuntimeError as exc:
+            raise NativeFallbackStampError(
+                f"{path.name}: invalid {kind} marker {marker_id}: {exc}"
+            ) from exc
+        if native_json_is_authoritative(marker):
+            json_authoritative += 1
+            continue
+        digests[marker] = stamp_native_fallback_baseline(
+            marker,
+            document_root=root,
+        )
+    return digests, json_authoritative
+
+
+def _atomic_write(path: Path, payload: bytes) -> None:
+    mode = stat.S_IMODE(path.stat().st_mode)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary_path, mode)
+        os.replace(temporary_path, path)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
+
+
+def prepare_native_fallback_baselines(
+    source: bytes,
+    path: Path,

@@ -1,0 +1,104 @@
+            warnings.append(f"{series_name}: series XML is unavailable for X data")
+        else:
+            x_values, x_error = _chart_numeric_cache_values(
+                element.find(qn("c:xVal"))
+            )
+            if x_error:
+                warnings.append(f"{series_name}: X data {x_error}")
+        try:
+            y_values = list(item.values)
+        except (ValueError, TypeError, AttributeError, KeyError):
+            y_values = []
+            warnings.append(f"{series_name}: Y values are unavailable")
+
+        size_values: list[object | None] | None = None
+        if family == "bubble":
+            if element is None:
+                size_error = "missing series XML"
+            else:
+                size_values, size_error = _chart_numeric_cache_values(
+                    element.find(qn("c:bubbleSize"))
+                )
+            if size_error:
+                warnings.append(f"{series_name}: bubble sizes {size_error}")
+
+        x_values = x_values or []
+        point_count = max(
+            len(x_values),
+            len(y_values),
+            len(size_values or []),
+        )
+        if point_count == 0:
+            warnings.append(f"{series_name}: no readable points")
+            continue
+
+        point_counts = {len(x_values), len(y_values)}
+        if family == "bubble":
+            point_counts.add(len(size_values or []))
+        if len(point_counts) > 1:
+            dimensions = "X/Y/size" if family == "bubble" else "X/Y"
+            warnings.append(
+                f"{series_name}: {dimensions} point counts differ; "
+                "missing cells are blank"
+            )
+
+        for point_index in range(point_count):
+            x_value = x_values[point_index] if point_index < len(x_values) else None
+            y_value = y_values[point_index] if point_index < len(y_values) else None
+            row = [
+                series_name,
+                str(point_index + 1),
+                _chart_value_cell(x_value),
+                _chart_value_cell(y_value),
+            ]
+            if family == "bubble":
+                size_value = (
+                    size_values[point_index]
+                    if size_values is not None and point_index < len(size_values)
+                    else None
+                )
+                row.append(_chart_value_cell(size_value))
+            rows.append(row)
+
+    if not rows:
+        return _chart_data_unavailable(
+            header,
+            "chart has no readable XY points",
+            warnings=warnings,
+        )
+    lines = [header]
+    lines.extend(_chart_warning_lines(warnings))
+    lines.extend([
+        "",
+        "| " + " | ".join(table_header) + " |",
+        "| " + " | ".join(["---"] * len(table_header)) + " |",
+    ])
+    lines.extend("| " + " | ".join(row) + " |" for row in rows)
+    return "\n".join(lines)
+
+
+def _category_chart_to_markdown(chart: object, series: list[object], header: str) -> str:
+    """Render a conventional category chart through python-pptx's public API."""
+    categories: list[str] = []
+    warnings: list[str] = []
+    has_category_xml = any(
+        (element := _chart_series_element(item)) is not None
+        and element.find(qn("c:cat")) is not None
+        for item in series
+    )
+    try:
+        plots = list(chart.plots)
+        if plots:
+            categories = [
+                escape_table_cell(str(category)) if category is not None else ""
+                for category in plots[0].categories
+            ]
+    except (ValueError, TypeError, IndexError, AttributeError, KeyError):
+        if has_category_xml:
+            warnings.append("chart categories are unavailable; using point numbers")
+    if not has_category_xml and not categories:
+        warnings.append("chart categories are missing; using point numbers")
+    elif has_category_xml and not categories:
+        warnings.append("chart categories are empty; using point numbers")
+
+    series_data: list[tuple[str, list[object]]] = []

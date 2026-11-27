@@ -1,0 +1,92 @@
+    if stem_path.suffix.lower() != ".wav":
+        raise ValueError(f"SFX stem output must use .wav: {stem_path}")
+    if report_path.suffix.lower() != ".json":
+        raise ValueError(f"Sound mix report must use .json: {report_path}")
+
+    outputs = [output_path, stem_path, report_path]
+    if len(set(outputs)) != len(outputs):
+        raise ValueError("Mixed video, SFX stem, and report paths must differ")
+    invalid_outputs = [
+        path for path in outputs if path.exists() and not path.is_file()
+    ]
+    if invalid_outputs:
+        raise ValueError(
+            "Sound mix outputs must be regular files or unused paths: "
+            + ", ".join(str(path) for path in invalid_outputs)
+        )
+    existing = [path for path in outputs if path.exists()]
+    if existing and not force:
+        raise FileExistsError(
+            "Sound mix output already exists; use --force to replace it: "
+            + ", ".join(str(path) for path in existing)
+        )
+    for label, value in (
+        ("transition gain", transition_gain_db),
+        ("animation gain", animation_gain_db),
+    ):
+        if not math.isfinite(value) or value < -60 or value > 0:
+            raise ValueError(f"{label} must be finite and between -60 and 0 dB")
+    if not math.isfinite(limiter_dbfs) or not -12 <= limiter_dbfs < 0:
+        raise ValueError("limiter ceiling must be finite, at least -12, and below 0 dBFS")
+
+    ffmpeg_path = _require_tool("ffmpeg")
+    ffprobe_path = _require_tool("ffprobe")
+    trace = _read_json_object(trace_path, "Conversion trace")
+    trace_slides, slide_names = _trace_slides(trace)
+    raw_probe = _probe_media(video_path, ffprobe_path)
+    raw_format_duration_ms = _duration_ms(raw_probe, "raw PowerPoint video")
+    raw_video_streams = _streams(raw_probe, "video")
+    raw_audio_streams = _streams(raw_probe, "audio")
+    if len(raw_video_streams) != 1 or len(raw_audio_streams) != 1:
+        raise ValueError(
+            "Raw PowerPoint video must contain one video stream and one "
+            "narration audio stream"
+        )
+    raw_duration_ms = _stream_duration_ms(
+        raw_video_streams[0],
+        fallback_ms=raw_format_duration_ms,
+    )
+    raw_video_start_ms = _stream_start_ms(raw_video_streams[0])
+    raw_audio_start_ms = _stream_start_ms(raw_audio_streams[0])
+    start_delta_ms = abs(raw_video_start_ms - raw_audio_start_ms)
+    frame_duration_ms = _frame_duration_ms(raw_video_streams[0])
+    if (
+        abs(raw_video_start_ms) > _START_TIME_TOLERANCE_MS
+        or abs(raw_audio_start_ms) > _START_TIME_TOLERANCE_MS
+        or start_delta_ms > _START_TIME_TOLERANCE_MS
+    ):
+        raise ValueError(
+            "Raw PowerPoint video audio and video streams must both start at "
+            f"zero: video={raw_video_start_ms}ms, audio={raw_audio_start_ms}ms"
+        )
+    raw_video_timing = _stream_timing_signature(raw_video_streams[0])
+
+    calibration = calibrate_video_timeline(
+        slide_names=slide_names,
+        pptx_path=pptx_path,
+        audio_dir=audio_dir,
+        video_path=video_path,
+        subtitle_dir=subtitle_dir,
+    )
+    protected_inputs = {
+        pptx_path,
+        trace_path,
+        video_path,
+        *(slide.audio_path.resolve() for slide in calibration.slides),
+    }
+    aliases = protected_inputs.intersection(outputs)
+    if aliases:
+        raise ValueError(
+            "Sound mix outputs must not overwrite inputs: "
+            + ", ".join(str(path) for path in sorted(aliases))
+        )
+    temporary_stem = _temporary_output(stem_path, ".wav")
+    temporary_video = _temporary_output(output_path, ".mp4")
+    temporary_report = _temporary_output(report_path, ".json")
+    try:
+        with tempfile.TemporaryDirectory(prefix="ppt-master-video-sounds-") as raw_dir:
+            cues = _resolve_sound_cues(
+                pptx_path=pptx_path,
+                trace_slides=trace_slides,
+                calibration=calibration,
+                transition_gain_db=transition_gain_db,

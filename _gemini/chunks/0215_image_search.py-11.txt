@@ -1,0 +1,113 @@
+                            f"{candidate_total} available candidate(s)"
+                        ),
+                    )
+            continue
+
+        # --- Pick the best downloadable candidate ---
+        for _score, provider_name, candidate in sorted_ranked:
+            try:
+                staged_path, actual_dimensions = _stage_validated_image(
+                    candidate.download_url,
+                    output_path,
+                    min_width=request.min_width,
+                    min_height=request.min_height,
+                )
+                return SearchDownloadResult(
+                    candidate=candidate,
+                    provider_name=provider_name,
+                    stage=stage,
+                    actual_dimensions=actual_dimensions,
+                    staged_path=staged_path,
+                    output_path=output_path,
+                )
+            except DownloadQualityError:
+                quality_rejections += 1
+                continue
+            except Exception as exc:
+                if not _is_recoverable_image_error(exc):
+                    raise
+                print(
+                    f"    download failed for {candidate.title!r}: {exc}",
+                    file=sys.stderr,
+                )
+                download_errors.append(f"{provider_name}/{candidate.title}: {exc}")
+                continue
+
+    retryable_errors = provider_errors + download_errors
+    if retryable_errors:
+        return SearchDownloadResult(
+            failure_kind=SEARCH_FAILURE_RETRYABLE,
+            error="; ".join(retryable_errors)[:500],
+        )
+
+    detail = "no acceptable candidate across all providers/stages"
+    if quality_rejections:
+        detail += f" ({quality_rejections} candidate(s) failed actual-size/readability gates)"
+    return SearchDownloadResult(
+        failure_kind=SEARCH_FAILURE_NO_MATCH,
+        error=detail,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Manifest
+# ---------------------------------------------------------------------------
+
+
+def default_manifest_path(output_dir: str) -> Path:
+    return Path(output_dir) / "image_sources.json"
+
+
+def _validate_bare_filename(value: str, *, field_name: str = "filename") -> str:
+    """Require a bare filename with no absolute or parent path components."""
+    if (
+        not value.strip()
+        or value in {".", ".."}
+        or "/" in value
+        or "\\" in value
+        or ":" in value
+        or Path(value).is_absolute()
+    ):
+        raise ValueError(
+            f"{field_name} must be a bare filename without path components: {value!r}"
+        )
+    return value
+
+
+def _measure_actual_image(path: Path) -> Optional[tuple[int, int]]:
+    """Return ``(width, height)`` of the file actually saved at ``path``.
+
+    Upstream metadata (``candidate.width``/``height``) describes the
+    original image on the provider's server, which may differ from what
+    we are allowed to download — for example, second-tier sources
+    aggregated by Openverse (rawpixel etc.) often only expose a
+    1024px-wide preview. The Executor needs to know what is actually on
+    disk for layout purposes; this function provides that ground truth.
+
+    Returns ``None`` if Pillow is unavailable or the file is unreadable.
+    """
+    try:
+        from PIL import Image, ImageOps  # type: ignore
+    except ImportError:
+        return None
+    try:
+        with Image.open(path) as im:
+            oriented = ImageOps.exif_transpose(im)
+            try:
+                return int(oriented.width), int(oriented.height)
+            finally:
+                if oriented is not im:
+                    oriented.close()
+    except Exception as exc:
+        if not _is_recoverable_image_error(exc):
+            raise
+        return None
+
+
+def _candidate_to_manifest_item(
+    candidate: AssetCandidate,
+    args: argparse.Namespace,
+    *,
+    provider_name: str,
+    stage: str,
+    actual_dimensions: Optional[tuple[int, int]] = None,

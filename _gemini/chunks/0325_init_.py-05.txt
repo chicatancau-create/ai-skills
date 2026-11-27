@@ -1,0 +1,98 @@
+        ctx.content_type_overrides[style_part] = CHART_STYLE_CONTENT_TYPE
+        ctx.content_type_overrides[colors_part] = CHART_COLOR_STYLE_CONTENT_TYPE
+    else:
+        chart_name = f"chart{part_index}.xml"
+        chart_part = f"ppt/charts/{chart_name}"
+        chart_rels_part = f"ppt/charts/_rels/{chart_name}.rels"
+        graphic_uri = CHART_URI
+        chart_ref_xml = (
+            '<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" '
+            f'r:id="{rel_id}"/>'
+        )
+        ctx.rel_entries.append({
+            "id": rel_id,
+            "type": CHART_REL_TYPE,
+            "target": f"../charts/{chart_name}",
+        })
+        ctx.package_files[chart_part] = _chart_xml(
+            elem,
+            payload,
+            chart_rels_id="rId1",
+            chart_data=chart_data,
+            inherited_styles=ctx.inherited_styles,
+            primary_language=ctx.primary_language,
+            chart_bounds=(off_x, off_y, ext_cx, ext_cy),
+        )
+        ctx.package_files[chart_rels_part] = _chart_rels_xml(f"../embeddings/{workbook_name}")
+        assert chart_data is not None
+        if chart_data["kind"] == "xy":
+            ctx.package_files[workbook_part] = _minimal_xy_chart_workbook(chart_data)
+        else:
+            ctx.package_files[workbook_part] = _minimal_category_chart_workbook(chart_data)
+        ctx.content_type_overrides[chart_part] = CHART_CONTENT_TYPE
+
+    name = _xml_escape(str(payload.get("name") or elem.get("id") or f"Native Chart {shape_id}"))
+    chart_frame_xml = (
+        _source_chart_frame_xml(
+            source_frame,
+            shape_id=shape_id,
+            rel_id=rel_id,
+        )
+        if source_package is not None
+        else f'''<p:graphicFrame>
+<p:nvGraphicFramePr>
+<p:cNvPr id="{shape_id}" name="{name}"/>
+<p:cNvGraphicFramePr><a:graphicFrameLocks noGrp="1"/></p:cNvGraphicFramePr>
+<p:nvPr/>
+</p:nvGraphicFramePr>
+<p:xfrm><a:off x="{off_x}" y="{off_y}"/><a:ext cx="{ext_cx}" cy="{ext_cy}"/></p:xfrm>
+<a:graphic>
+<a:graphicData uri="{graphic_uri}">
+{chart_ref_xml}
+</a:graphicData>
+</a:graphic>
+</p:graphicFrame>'''
+    )
+    chart_bounds = (off_x, off_y, off_x + ext_cx, off_y + ext_cy)
+    if source_package is not None:
+        return ShapeResult(xml=chart_frame_xml, bounds_emu=chart_bounds)
+
+    assert chart_data is not None
+    text_sizes = _chart_text_sizes(payload, elem, ctx.inherited_styles)
+    chart_style = _classic_chart_style(payload, elem, ctx.inherited_styles)
+    companions = _chart_companion_shapes(
+        ctx,
+        payload,
+        chart_bounds=(off_x, off_y, ext_cx, ext_cy),
+        chart_style=chart_style,
+        note_font_size=text_sizes["note"],
+        title_font_size=text_sizes["title"],
+        include_title=(
+            chart_data["kind"] == "chartex"
+            or _chart_title_is_bounded(payload)
+        ),
+        include_subtitle_as_caption=chart_data["kind"] == "chartex",
+        fallback=None if native_json_is_authoritative(elem) else elem,
+    )
+    if not companions:
+        return ShapeResult(xml=chart_frame_xml, bounds_emu=chart_bounds)
+
+    min_x, min_y, max_x, max_y = chart_bounds
+    for companion in companions:
+        assert companion.bounds_emu is not None
+        x0, y0, x1, y1 = companion.bounds_emu
+        min_x, min_y = min(min_x, x0), min(min_y, y0)
+        max_x, max_y = max(max_x, x1), max(max_y, y1)
+    group_w, group_h = max_x - min_x, max_y - min_y
+    validate_ooxml_xfrm(min_x, min_y, group_w, group_h)
+    group_id = ctx.next_id()
+    companion_xml = "".join(companion.xml for companion in companions)
+    # The marker owns one selectable/animatable unit. Identity mapping keeps
+    # the chart and labels at their already resolved slide coordinates.
+    xml = f'''<p:grpSp>
+<p:nvGrpSpPr>
+<p:cNvPr id="{group_id}" name="{name}"/>
+<p:cNvGrpSpPr/><p:nvPr/>
+</p:nvGrpSpPr>
+<p:grpSpPr><a:xfrm>
+<a:off x="{min_x}" y="{min_y}"/><a:ext cx="{group_w}" cy="{group_h}"/>

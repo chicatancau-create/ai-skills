@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""
+SVG Image Embedding Tool
+Converts externally referenced images in SVG files to Base64 inline format.
+
+Usage:
+    python3 scripts/svg_finalize/embed_images.py <svg_file> [svg_file2] ...
+    python3 scripts/svg_finalize/embed_images.py *.svg
+
+Examples:
+    python3 scripts/svg_finalize/embed_images.py projects/ppt169_demo/svg_output/01_cover.svg
+    python3 scripts/svg_finalize/embed_images.py projects/ppt169_demo/svg_output/*.svg
+"""
+
+import os
+import base64
+import re
+import sys
+import argparse
+from pathlib import Path
+
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from console_encoding import configure_utf8_stdio  # noqa: E402
+
+configure_utf8_stdio()
+
+
+_SVG_DOCUMENT_START_RE = re.compile(
+    br"\A(?:\xef\xbb\xbf)?[ \t\r\n]*"
+    br"(?:<\?xml(?=[ \t\r\n])(?:[^?]|\?(?!>))*\?>[ \t\r\n]*)?"
+    br"(?:(?:"
+    br"<!--(?:[^-]|-(?!-))*-->"
+    br"|<!DOCTYPE[ \t\r\n]+svg(?=[ \t\r\n\[>])"
+    br"(?:[^>\"']|\"[^\"]*\"|'[^']*')*>"
+    br")[ \t\r\n]*)*"
+    br"<svg(?:[ \t\r\n:]|/?>|\Z)"
+)
+
+
+def get_mime_type(filename: str, file_bytes: bytes | None = None) -> str:
+    """Return the MIME type based on file bytes first, then extension."""
+    if file_bytes:
+        if file_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+            return 'image/png'
+        if file_bytes.startswith(b"\xff\xd8\xff"):
+            return 'image/jpeg'
+        if file_bytes.startswith((b"GIF87a", b"GIF89a")):
+            return 'image/gif'
+        if file_bytes.startswith(b"RIFF") and file_bytes[8:12] == b"WEBP":
+            return 'image/webp'
+        if _SVG_DOCUMENT_START_RE.match(file_bytes):
+            return 'image/svg+xml'
+
+    ext = filename.lower().split('.')[-1]
+    mime_map = {
+        'png': 'image/png',
+        'jpg': 'image/jpeg',
+        'jpeg': 'image/jpeg',
+        'gif': 'image/gif',
+        'webp': 'image/webp',
+        'svg': 'image/svg+xml',
+    }
+    return mime_map.get(ext, 'application/octet-stream')
+
+def get_file_size_str(size_bytes: int) -> str:
+    """Convert byte count to a human-readable file size string."""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    else:
+        return f"{size_bytes / (1024 * 1024):.1f} MB"
+
+def _optimize_image_bytes(img_bytes: bytes, mime_type: str,
+                          compress: bool = False,
+                          max_dimension: int | None = None) -> bytes:
+    """Optionally compress and/or downscale image bytes.
+
+    Returns the (possibly optimized) image bytes. Falls back to the
+    original bytes if PIL is not available or optimization fails.
+    """
+    if not compress and not max_dimension:
+        return img_bytes
+
+    try:
+        from PIL import Image as PILImage
+        from PIL import ImageOps
+        import io
+    except ImportError:
+        return img_bytes
+
+    try:
+        img = PILImage.open(io.BytesIO(img_bytes))
+    except Exception:
+        return img_bytes
+
+    # Multi-frame images (animated GIF / WebP / APNG): resize/re-save below
+    # keeps frame 0 only, silently flattening the animation. Pass the
+    # original bytes through — animations are exempt from compression and
+    # the size cap.
+    if getattr(img, 'is_animated', False):
+        if max_dimension:
+            w, h = img.size
+            if w > max_dimension or h > max_dimension:
+                print(f"  [WARN] Animated image kept as-is ({w}x{h} exceeds "
+                      f"max dimension {max_dimension}px); animations are "
+                      f"exempt from size limits")
+        return img_bytes
+
+    source_format = img.format
+    img = ImageOps.exif_transpose(img)
+    changed = False
+
+    # Downscale if exceeding max_dimension
+    if max_dimension:
+        w, h = img.size
+        if w > max_dimension or h > max_dimension:
+            ratio = min(max_dimension / w, max_dimension / h)

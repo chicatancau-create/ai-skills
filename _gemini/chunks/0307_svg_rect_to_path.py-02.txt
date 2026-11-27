@@ -1,0 +1,116 @@
+            # If only one is specified, the other takes the same value
+            if rx == 0 and ry > 0:
+                rx = ry
+            elif ry == 0 and rx > 0:
+                ry = rx
+            
+            if rx > 0 or ry > 0:
+                x = parse_float(elem.get('x', '0'))
+                y = parse_float(elem.get('y', '0'))
+                width = parse_float(elem.get('width', '0'))
+                height = parse_float(elem.get('height', '0'))
+                
+                if width > 0 and height > 0:
+                    # Generate path
+                    path_d = rect_to_rounded_path(x, y, width, height, rx, ry)
+                    
+                    # rect-specific attributes
+                    rect_attrs = {'x', 'y', 'width', 'height', 'rx', 'ry'}
+                    
+                    # Change element to path
+                    elem.tag = ns + 'path' if ns else 'path'
+                    elem.set('d', path_d)
+                    
+                    # Remove rect-specific attributes
+                    for attr in rect_attrs:
+                        if attr in elem.attrib:
+                            del elem.attrib[attr]
+                    
+                    converted_count += 1
+                    if verbose:
+                        print(f"    Converted rounded rect: rx={rx}, ry={ry}")
+        
+        # Recursively process child elements
+        for child in elem:
+            process_element(child)
+    
+    # Process all elements
+    process_element(root)
+    
+    # Convert back to string
+    result = ET.tostring(root, encoding='unicode')
+    
+    # Add XML declaration (if originally present)
+    if xml_declaration:
+        result = xml_declaration + result
+    
+    return result, converted_count
+
+
+def process_svg_file(input_path: Path, output_path: Path, verbose: bool = False) -> tuple[bool, int]:
+    """Process a single SVG file."""
+    try:
+        with open(input_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        processed, count = process_svg(content, verbose)
+        
+        # Ensure output directory exists
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(processed)
+        
+        return True, count
+        
+    except Exception as e:
+        if verbose:
+            print(f"  Error: {e}")
+        return False, 0
+
+
+def find_svg_files(project_path: Path, source: str = 'output') -> tuple[list[Path], str]:
+    """Find SVG files in a project."""
+    dir_map = {
+        'output': 'svg_output',
+        'final': 'svg_final',
+        'flat': 'svg_output_flattext',
+        'final_flat': 'svg_final_flattext',
+    }
+    
+    dir_name = dir_map.get(source, source)
+    svg_dir = project_path / dir_name
+    
+    if not svg_dir.exists():
+        if (project_path / 'svg_output').exists():
+            dir_name = 'svg_output'
+            svg_dir = project_path / dir_name
+        elif project_path.is_dir():
+            svg_dir = project_path
+            dir_name = project_path.name
+    
+    if not svg_dir.exists():
+        return [], ''
+    
+    return sorted(svg_dir.glob('*.svg')), dir_name
+
+
+def main() -> None:
+    """Run the CLI entry point."""
+    parser = argparse.ArgumentParser(
+        description='PPT Master - Legacy SVG Rounded Rectangle Diagnostic',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+    %(prog)s projects/ppt169_demo
+    %(prog)s projects/ppt169_demo -s final
+    %(prog)s projects/ppt169_demo/svg_output/01_cover.svg
+
+What it does:
+    Converts <rect> elements with rx/ry to equivalent <path> elements.
+    Legacy diagnostic only; the standard pipeline preserves SVG rounded rectangles.
+'''
+    )
+    
+    parser.add_argument('path', type=str, help='SVG file or project directory path')
+    parser.add_argument('-s', '--source', type=str, default='output',

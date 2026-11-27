@@ -1,0 +1,128 @@
+            if token in skip_tokens:
+                negative_score += 6
+
+        if positive_score:
+            matched_tags.append(tag)
+        score += positive_score - negative_score
+
+    return score, matched_tags
+
+
+def _candidate_payload(
+    entry: VisualizationEntry,
+    score: int,
+    matched_tags: list[str],
+    *,
+    legacy_output: bool,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "key": entry.key,
+        "path": entry.display_path,
+        "summary": entry.summary,
+        "score": score,
+        "matched_tags": matched_tags,
+    }
+    if not legacy_output:
+        payload.update(
+            {
+                "family": entry.family,
+                "reference": entry.reference,
+            }
+        )
+    return payload
+
+
+def _validation_payload(entry: VisualizationEntry) -> dict[str, object]:
+    """Describe one resolution without inventing an asset for intent-only keys."""
+    payload: dict[str, object] = {
+        "family": entry.family,
+        "key": entry.key,
+        "kind": entry.kind,
+    }
+    if entry.kind == VISUALIZATION_SVG_KIND:
+        payload.update(
+            {
+                "path": entry.display_path,
+                "reference": entry.reference,
+            }
+        )
+    elif entry.kind != LEGACY_STRUCTURE_INTENT_KIND:
+        raise VisualizationCatalogError(
+            f"{entry.key!r} resolves to unsupported kind {entry.kind!r}"
+        )
+    return payload
+
+
+def recall_candidates(
+    page: str,
+    tags: list[str],
+    limit: int,
+    *,
+    family: str = "all",
+    force_semantic_fallback: bool = False,
+    legacy_output: bool = False,
+) -> dict[str, object]:
+    """Recall a deterministic shortlist for one page."""
+    entries = load_catalog(family)
+    scored: list[tuple[int, VisualizationEntry, list[str]]] = []
+    for entry in entries.values():
+        score, matched_tags = _score_candidate(entry.key, entry.summary, tags)
+        if score > 0 and matched_tags:
+            scored.append((score, entry, matched_tags))
+    scored.sort(key=lambda item: (-item[0], item[1].family, item[1].key))
+
+    candidates = [
+        _candidate_payload(
+            entry,
+            score,
+            matched_tags,
+            legacy_output=legacy_output,
+        )
+        for score, entry, matched_tags in scored[:limit]
+    ]
+
+    top_score = candidates[0]["score"] if candidates else 0
+    if top_score >= 35:
+        confidence = "high"
+    elif top_score >= 15:
+        confidence = "medium"
+    elif top_score > 0:
+        confidence = "low"
+    else:
+        confidence = "none"
+
+    fallback_required_before_no_match = (
+        confidence in {"low", "none"} and not force_semantic_fallback
+    )
+    if fallback_required_before_no_match:
+        no_match_instruction = (
+            f"Lexical confidence is {confidence}. Select a bounded candidate when one "
+            "fits; otherwise rerun the same recall with --semantic-fallback before "
+            "keeping no-template-match. Keep the final negative result out of Design "
+            "Spec Section VII and describe the chosen fallback in the page's Section "
+            "IX block."
+        )
+    else:
+        no_match_instruction = (
+            "Use when none of the reviewed candidates fits the page structure. Keep "
+            "this result out of Design Spec Section VII and describe the chosen fallback "
+            "in the page's Section IX block."
+        )
+
+    result: dict[str, object] = {
+        "page": page,
+        "semantic_tags": tags,
+        "confidence": confidence,
+        "candidates": candidates,
+        "no_template_match": {
+            "allowed": not fallback_required_before_no_match,
+            "key": "no-template-match",
+            "instruction": no_match_instruction,
+        },
+    }
+    if not legacy_output:
+        result["family_filter"] = family
+    if force_semantic_fallback:
+        if legacy_output:
+            catalog: object = {
+                entry.key: entry.summary

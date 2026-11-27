@@ -1,0 +1,113 @@
+                    )
+            if len(opacity_values) != 1:
+                errors.append('emphasis_transparency row has an invalid opacity')
+            else:
+                try:
+                    values[name] = 1 - float(str(opacity_values[0]))
+                except ValueError:
+                    errors.append(
+                        'emphasis_transparency row has a non-numeric opacity'
+                    )
+        elif name == 'color':
+            color = _read_animation_color(
+                row,
+                errors,
+                f'animation effect {effect!r} color option',
+            )
+            if color is not None:
+                values[name] = color
+        elif name == 'font_name':
+            fonts = []
+            for node in row.iter(_qn(PML_NS, 'set')):
+                attributes = {
+                    (attribute.text or '').strip()
+                    for attribute in node.iter(_qn(PML_NS, 'attrName'))
+                }
+                if 'style.fontFamily' in attributes:
+                    fonts.extend(
+                        value.get('val')
+                        for value in node.iter(_qn(PML_NS, 'strVal'))
+                    )
+            if len(fonts) != 1:
+                errors.append(
+                    'emphasis_change_font row must contain one font name'
+                )
+                continue
+            try:
+                values[name] = _normalize_powerpoint_font_name(
+                    fonts[0],
+                    'emphasis_change_font row font name',
+                )
+            except ValueError as exc:
+                errors.append(str(exc))
+        elif name == 'relative':
+            motions = list(row.iter(_qn(PML_NS, 'animMotion')))
+            if len(motions) != 1:
+                errors.append(f'motion-path effect {effect!r} has no single path')
+            else:
+                values[name] = motions[0].get('pathEditMode') != 'fixed'
+        elif name == 'size':
+            scales = list(row.iter(_qn(PML_NS, 'animScale')))
+            targets = (
+                scales[0].findall(_qn(PML_NS, 'to'))
+                if len(scales) == 1
+                else []
+            )
+            raw = (
+                targets[0].get('x')
+                if len(targets) == 1
+                else '100000' if not targets and len(scales) == 1 else None
+            )
+            if raw is None or not re.fullmatch(r'\d+', raw):
+                errors.append('emphasis_grow_shrink row has an invalid size')
+            else:
+                values[name] = int(raw) / 1000
+        else:
+            errors.append(
+                f'animation effect {effect!r} option {name!r} has no reader'
+            )
+    return values
+
+
+def _timing_summary(
+    row: ET.Element,
+    duration_ms: int | None,
+    errors: list[str],
+) -> tuple[
+    float | None,
+    int | None,
+    bool,
+    bool,
+    float,
+    float,
+    float,
+    str,
+    int | None,
+]:
+    raw_repeat_count = row.get('repeatCount')
+    repeat_count = None
+    if raw_repeat_count is not None:
+        if not re.fullmatch(r'\d+', raw_repeat_count):
+            errors.append(
+                f'object-animation repeatCount must be numeric; found '
+                f'{raw_repeat_count!r}'
+            )
+        else:
+            repeat_count = int(raw_repeat_count) / 1000
+    raw_repeat_duration = row.get('repeatDur')
+    repeat_duration_ms = None
+    if raw_repeat_duration is not None:
+        if not re.fullmatch(r'\d+', raw_repeat_duration):
+            errors.append(
+                f'object-animation repeatDur must be numeric; found '
+                f'{raw_repeat_duration!r}'
+            )
+        else:
+            repeat_duration_ms = int(raw_repeat_duration)
+    if repeat_count is not None and repeat_duration_ms is not None:
+        errors.append('object-animation row sets both repeatCount and repeatDur')
+
+    def ratio(attribute: str) -> float:
+        raw = row.get(attribute)
+        if raw is None:
+            return 0.0

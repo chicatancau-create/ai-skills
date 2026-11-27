@@ -1,0 +1,109 @@
+        # frame omits them so it stays relationship-free on a regenerated slide.
+        nv_pr.remove(custom_data)
+    if has_relationship_attributes(native_frame):
+        return "", []
+    raw = ET.tostring(native_frame, encoding="utf-8")
+    transform = node.xfrm.to_svg_transform()
+    fallback_hash = svg_native_fallback_markup_fingerprint(
+        visible_markup,
+        root_transform=transform,
+        external_markup="".join(ctx.defs),
+    )
+    metadata = (
+        '<metadata data-pptx-part="roundtrip-graphic-frame" '
+        'data-pptx-encoding="base64" '
+        f'data-pptx-ooxml-sha256="{hashlib.sha256(raw).hexdigest()}">'
+        f'{base64.b64encode(raw).decode("ascii")}</metadata>'
+    )
+    return metadata, [
+        'data-pptx-roundtrip-object="graphic-frame"',
+        f'{NATIVE_FALLBACK_SHA256_ATTR}="{fallback_hash}"',
+    ]
+
+
+def _render_graphic_table(
+    node: ShapeNode,
+    ctx: AssemblyContext,
+    graphic_data: ET.Element | None,
+) -> tuple[str, list[str], str]:
+    """Convert the <a:tbl> child of a graphicFrame to SVG plus metadata."""
+    if graphic_data is None:
+        return "", [], ""
+    tbl = graphic_data.find("a:tbl", NS)
+    if tbl is None:
+        return "", [], ""
+    table_styles_part = ctx.pkg.resolve_table_styles()
+    result = convert_tbl(
+        tbl, node.xfrm, ctx.palette,
+        table_styles=(
+            table_styles_part.xml if table_styles_part is not None else None
+        ),
+        theme_fonts=ctx.theme_fonts,
+        slide_number=ctx.slide_number,
+        id_prefix=f"tbl{ctx.shape_seq[0]}",
+        grad_seq=ctx.grad_seq,
+        marker_seq=ctx.marker_seq,
+        hyperlink_resolver=lambda rid, action: _resolve_svg_hyperlink(
+            ctx,
+            rid,
+            action,
+        ),
+        strict=ctx.strict,
+        diagnostic_sink=ctx.diagnose,
+    )
+    if result.defs:
+        ctx.defs.extend(result.defs)
+    replacement_attrs: list[str] = ['data-pptx-import-source="pptx"']
+    payload_metadata = ""
+    if result.native_payload:
+        if node.name and not result.native_payload.get("name"):
+            result.native_payload["name"] = node.name
+        payload_metadata = _replacement_payload_metadata(result.native_payload)
+        replacement_attrs.append('data-pptx-replace-with="table"')
+        replacement_attrs.append('data-pptx-native-authority="json"')
+    elif result.native_status:
+        replacement_attrs.append(
+            'data-pptx-replacement-status="'
+            f'{_xml_escape(result.native_status)}"'
+        )
+    if result.effect_reason:
+        effect_metadata = unsupported_effect_metadata(result.effect_reason)
+        _diagnose_unsupported_effect(ctx, effect_metadata)
+        replacement_attrs.extend(_metadata_group_attrs(effect_metadata))
+    return result.svg, replacement_attrs, payload_metadata
+
+
+def _render_graphic_chart(
+    node: ShapeNode,
+    ctx: AssemblyContext,
+    graphic_data: ET.Element | None,
+    preview_svg: str,
+) -> tuple[str, list[str], str]:
+    """Return a chart fallback plus native Chart replacement metadata."""
+    result = extract_native_chart_payload(
+        graphic_data,
+        node.xfrm,
+        ctx.slide_part,
+        ctx.pkg,
+        ctx.palette,
+    )
+    replacement_attrs: list[str] = ['data-pptx-import-source="pptx"']
+    payload_metadata = ""
+    source_package = _roundtrip_chart_package(
+        node,
+        ctx,
+        graphic_data,
+    )
+    if result.native_payload or source_package is not None:
+        payload = result.native_payload or {
+            "height": round(node.xfrm.h, 3),
+            "width": round(node.xfrm.w, 3),
+            "x": round(node.xfrm.x, 3),
+            "y": round(node.xfrm.y, 3),
+        }
+        if node.name and not payload.get("name"):
+            payload["name"] = node.name
+        if source_package is not None:
+            payload["source_package"] = source_package
+            replacement_attrs.append(
+                'data-pptx-roundtrip-object="source-chart-package"'

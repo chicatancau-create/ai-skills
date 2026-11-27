@@ -1,0 +1,104 @@
+            use_native_shapes
+            and pptx_structure == "flat"
+            and success_count == len(svg_files)
+        ):
+            _prepare_flat_structure(
+                extract_dir,
+                structure,
+                len(svg_files),
+                master_text_style_spec,
+                structure_name,
+                verbose=verbose,
+            )
+
+        if (
+            use_native_shapes
+            and pptx_structure == "structured"
+            and success_count == len(svg_files)
+        ):
+            _convert_page_number_texts_to_fields(
+                extract_dir,
+                len(svg_files),
+                conversion_trace if conversion_trace is not None else structure_trace,
+                context="Structured",
+                verbose=verbose,
+            )
+            if template_specs is None:
+                raise TemplateStructureError(
+                    "Structured metadata was not parsed before export"
+                )
+            (
+                template_background_expectations,
+                template_shape_roster_expectations,
+                template_layout_parts_by_key,
+                template_master_parts_by_key,
+            ) = _apply_explicit_layout_structure(
+                extract_dir,
+                structure,
+                template_specs,
+                conversion_trace if conversion_trace is not None else structure_trace,
+                active_theme_font_spec,
+                use_layout_placeholder_frames=use_layout_placeholder_frames,
+                public_slide_count=public_slide_count,
+                verbose=verbose,
+            )
+            if source_theme_xml_by_master is not None:
+                _install_source_themes_by_master(
+                    extract_dir,
+                    template_master_parts_by_key,
+                    source_theme_xml_by_master,
+                )
+            master_count = apply_master_text_style_spec(
+                extract_dir,
+                master_text_style_spec,
+            )
+            if verbose:
+                print(
+                    "  Structured master text styles: "
+                    f"{master_count} master(s), "
+                    f"title {master_text_style_spec.title_hpt / 100:g}pt, "
+                    "body levels "
+                    f"{master_text_style_spec.body_levels_hpt[0] / 100:g}–"
+                    f"{master_text_style_spec.body_levels_hpt[-1] / 100:g}pt"
+                )
+            _prune_unused_slide_layouts(
+                extract_dir,
+                structure,
+                len(svg_files),
+                verbose=verbose,
+            )
+
+        if (
+            use_native_shapes
+            and pptx_structure == "preserve"
+            and success_count == len(svg_files)
+        ):
+            _convert_page_number_texts_to_fields(
+                extract_dir,
+                len(svg_files),
+                conversion_trace if conversion_trace is not None else structure_trace,
+                context="Preserve",
+                verbose=verbose,
+            )
+            if template_specs is None or native_structure_contract is None:
+                raise TemplateStructureError(
+                    "Preserved structure metadata was not parsed before export"
+                )
+            rebuilt_specs = [
+                spec
+                for spec in template_specs
+                if spec.slide_num not in passthrough_slides | overlay_slides
+            ]
+            if rebuilt_specs:
+                _apply_preserved_structure(
+                    extract_dir,
+                    rebuilt_specs,
+                    native_structure_contract,
+                    conversion_trace if conversion_trace is not None else structure_trace,
+                    verbose=verbose,
+                )
+
+        if roundtrip_export:
+            pruned_roundtrip_payloads = (
+                _prune_unreferenced_definition_payload_parts(
+                    extract_dir,

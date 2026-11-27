@@ -1,0 +1,119 @@
+            return scope, resolved.relative_to(root.resolve()).as_posix()
+        except ValueError:
+            continue
+    raise PageContextError(f"input escapes project and Skill roots: {path}")
+
+
+def _resolve_input_location(
+    project_path: Path,
+    scope: str,
+    relative_path: str,
+) -> Path | None:
+    """Resolve one recorded input without accepting arbitrary filesystem roots."""
+    roots = {"project": project_path, "skill": _SKILL_DIR}
+    root = roots.get(scope)
+    if root is None:
+        return None
+    resolved = (root / relative_path).resolve()
+    try:
+        resolved.relative_to(root.resolve())
+    except ValueError:
+        return None
+    return resolved
+
+
+def _token_counter() -> tuple[Callable[[str], int] | None, str]:
+    try:
+        import tiktoken
+    except ImportError:
+        return None, "unavailable"
+    try:
+        encoder = tiktoken.get_encoding(TOKEN_ENCODING)
+    except Exception:
+        return None, "unavailable"
+    return (
+        lambda text: len(encoder.encode(text, disallowed_special=())),
+        "exact",
+    )
+
+
+def _payload_measurement(
+    read: PageRead,
+    count_tokens: Callable[[str], int] | None,
+) -> dict[str, object]:
+    payload = read.payload.encode("utf-8")
+    measurement: dict[str, object] = {
+        "kind": read.kind,
+        "scope": "component" if read.kind == "lock-projection" else "page",
+        "path": read.path,
+        "sha256": _sha256_bytes(payload),
+        "utf8_bytes": len(payload),
+        "characters": len(read.payload),
+        "tokens": count_tokens(read.payload) if count_tokens else None,
+    }
+    return measurement
+
+
+def record_page_context_usage(
+    result: PageContextResult,
+    output: str,
+    measured_reads: tuple[PageRead, ...],
+) -> tuple[Path, str]:
+    """Write one deterministic, derived token snapshot for the current page."""
+    count_tokens, token_status = _token_counter()
+    lock_read = PageRead(
+        kind="lock-projection",
+        path="stdout:global",
+        payload=_compact_json(result.context["global"]),
+    )
+    documents = [
+        _payload_measurement(read, count_tokens)
+        for read in (*measured_reads, lock_read)
+    ]
+    output_bytes = output.encode("utf-8")
+    input_records: list[dict[str, object]] = []
+    for path in result.inputs:
+        scope, relative_path = _input_location(result.project_path, path)
+        input_records.append(
+            {
+                "scope": scope,
+                "path": relative_path,
+                "exists": True,
+                "sha256": _file_sha256(path),
+            }
+        )
+    by_kind = {
+        str(item["kind"]): item.get("tokens")
+        for item in documents
+    }
+    route = dict(result.context["global"].get("pptx_structure", {}))
+    template = result.context["page_context"].get("template")
+    if isinstance(template, dict):
+        if isinstance(value := template.get("reuse_scope"), str):
+            route["template_reuse_scope"] = value
+    usage = {
+        "schema": PAGE_CONTEXT_USAGE_SCHEMA,
+        "page": result.page,
+        "output_mode": "compact",
+        "route": route,
+        "encoding": TOKEN_ENCODING,
+        "token_status": token_status,
+        "image_selection": result.context["page_context"]["image_selection"],
+        "inputs": input_records,
+        "references": result.context.get("reference_set", []),
+        "documents": documents,
+        "controlled_output": {
+            "sha256": _sha256_bytes(output_bytes),
+            "utf8_bytes": len(output_bytes),
+            "characters": len(output),
+            "tokens": count_tokens(output) if count_tokens else None,
+        },
+        "totals": {
+            "page_context": by_kind.get("page-context"),
+            "lock_projection": by_kind.get("lock-projection"),
+        },
+        "targets": {
+            "page_context_max_tokens": PAGE_CONTEXT_TOKEN_TARGET,
+            "lock_projection_max_tokens": LOCK_PROJECTION_TOKEN_TARGET,
+        },
+        "untracked": [

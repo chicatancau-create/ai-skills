@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""
+PPT Master - Preset Shape SVG Markup
+
+Serialize evaluated DrawingML preset layers for lossless transport or compact
+project authoring.
+
+Usage:
+    Import serialize_preset_layers from pptx_to_svg.preset_svg_markup.
+
+Examples:
+    markup = serialize_preset_layers(layers, semantic_attrs, style_attrs)
+
+Dependencies:
+    None (only uses standard library and local PPT Master modules)
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Mapping, Sequence
+from xml.etree import ElementTree as ET
+
+from pptx_shapes import svg_preset_preview_fingerprint
+
+from .preset_registry_to_svg import SvgPresetPath
+
+
+@dataclass(frozen=True)
+class PresetSvgMarkup:
+    """Lossless hidden-carrier and visible-preview markup for one preset."""
+
+    carrier: str
+    preview: str
+    preview_hash: str
+
+    @property
+    def markup(self) -> str:
+        """Return the carrier and preview in canonical document order."""
+        return f"{self.carrier}\n{self.preview}"
+
+
+def serialize_preset_layers(
+    layers: Sequence[SvgPresetPath],
+    semantic_attrs: Mapping[str, str],
+    style_attrs: Mapping[str, str],
+) -> PresetSvgMarkup:
+    """Serialize one preset without duplicating its native PowerPoint object."""
+    detail_style_attrs = dict(style_attrs)
+    preview_group_attrs = {"data-pptx-part": "geometry-preview"}
+    for name in ("filter", "opacity"):
+        value = detail_style_attrs.pop(name, None)
+        if value is not None:
+            preview_group_attrs[name] = value
+
+    detail_layers: list[str] = []
+    for layer in layers:
+        attrs = dict(detail_style_attrs)
+        apply_preset_path_fill(attrs, layer.fill)
+        if not layer.stroke:
+            remove_stroke_attrs(attrs)
+            attrs["stroke"] = "none"
+        attrs["data-pptx-part"] = "geometry-detail"
+        detail_layers.append(
+            f'<path d="{_xml_escape(layer.d)}"{attrs_to_xml(attrs)}/>'
+        )
+
+    preview = (
+        f'<g{attrs_to_xml(preview_group_attrs)}>\n'
+        + "\n".join(detail_layers)
+        + "\n</g>"
+    )
+    preview_root = ET.fromstring(
+        f'<svg xmlns="http://www.w3.org/2000/svg">{preview}</svg>'
+    )
+    preview_hash = svg_preset_preview_fingerprint(preview_root)
+    carrier_attrs = {
+        **style_attrs,
+        **semantic_attrs,
+        "data-pptx-preview-sha256": preview_hash,
+        "data-pptx-part": "geometry",
+        "visibility": "hidden",
+        "pointer-events": "none",
+    }
+    combined_path = " ".join(layer.d for layer in layers)
+    carrier = (
+        f'<path d="{_xml_escape(combined_path)}"'
+        f'{attrs_to_xml(carrier_attrs)}/>'
+    )
+    return PresetSvgMarkup(
+        carrier=carrier,
+        preview=preview,
+        preview_hash=preview_hash,
+    )
+
+
+def serialize_compact_preset_layers(
+    layers: Sequence[SvgPresetPath],
+    style_attrs: Mapping[str, str],
+) -> str:
+    """Serialize visible preset layers without transport-only duplication.
+
+    Base paint lives once on the logical authored group and is inherited by
+    each path.  A path writes only the fill/stroke override required by its
+    DrawingML layer.  The authored-preset validator regenerates this exact
+    markup from the registry, so no serialized fingerprint is needed.
+    """
+    base_fill = style_attrs.get("fill", "none")
+    base_stroke = style_attrs.get("stroke", "none")
+    detail_layers: list[str] = []
+    for layer in layers:
+        attrs: dict[str, str] = {}
+        if layer.fill == "none":
+            if base_fill != "none":
+                attrs["fill"] = "none"
+        elif layer.fill != "norm":
+            derived_fill = {"fill": base_fill}
+            apply_preset_path_fill(derived_fill, layer.fill)
+            if derived_fill.get("fill") != base_fill:
+                attrs["fill"] = derived_fill["fill"]
+        if not layer.stroke and base_stroke != "none":
+            attrs["stroke"] = "none"
+        detail_layers.append(

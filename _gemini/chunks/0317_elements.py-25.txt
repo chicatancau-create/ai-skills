@@ -1,0 +1,123 @@
+    elif tspan_attr('letter-spacing'):
+        run_attrs['letter_spacing'] = parse_project_letter_spacing(
+            tspan_attr('letter-spacing'),
+            font_size=float(run_attrs.get('font_size', 16)),
+            scale_x=float(run_attrs.get('_scale_x', 1.0)),
+        ).value
+    return run_attrs
+
+
+def _collect_tspan_runs(
+    tspan: ET.Element,
+    inherited_attrs: dict[str, Any],
+    ctx: ConvertContext,
+    inherited_xml_space: str = 'default',
+) -> list[dict[str, Any]]:
+    """Recursively turn one inline SVG subtree into DrawingML text runs."""
+    return _collect_inline_runs(
+        tspan,
+        inherited_attrs,
+        ctx,
+        inherited_xml_space,
+    )
+
+
+def _collect_inline_runs(
+    container: ET.Element,
+    inherited_attrs: dict[str, Any],
+    ctx: ConvertContext,
+    inherited_xml_space: str = 'default',
+    inherited_hyperlink: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """Collect nested ``tspan``/``a`` content with style and link inheritance."""
+    runs: list[dict[str, Any]] = []
+    own_attrs = _override_run_attrs(inherited_attrs, container, ctx)
+    own_xml_space = resolve_project_xml_space(container, inherited_xml_space)
+    container_tag = container.tag.replace(f'{{{SVG_NS}}}', '')
+    own_hyperlink = inherited_hyperlink
+    if container_tag == 'a':
+        own_hyperlink = hyperlink_run_metadata(
+            ctx,
+            svg_hyperlink_href(container),
+        )
+
+    if container_tag == 'tspan' and container.get('dx') is not None:
+        dx = parse_svg_length(
+            container.get('dx'),
+            percent_base=ctx.viewport_width,
+            font_size=float(own_attrs.get('font_size', 16)) / (ctx.scale_y or 1.0),
+        ) * ctx.scale_x
+        if dx:
+            runs.append({**own_attrs, 'text': '', '_inline_dx': dx})
+
+    if container.text:
+        run = {
+            **own_attrs,
+            'text': container.text,
+            '_xml_space': own_xml_space,
+        }
+        if own_hyperlink is not None:
+            run.update(own_hyperlink)
+        inline_formula = container.get(_INLINE_FORMULA_ATTR)
+        if inline_formula is not None:
+            run[_INLINE_FORMULA_KEY] = inline_formula
+        runs.append(run)
+
+    for child in container:
+        child_tag = child.tag.replace(f'{{{SVG_NS}}}', '')
+        if child_tag in {'tspan', 'a'}:
+            runs.extend(
+                _collect_inline_runs(
+                    child,
+                    own_attrs,
+                    ctx,
+                    own_xml_space,
+                    own_hyperlink,
+                )
+            )
+            if child.tail:
+                tail_run = {
+                    **own_attrs,
+                    'text': child.tail,
+                    '_xml_space': own_xml_space,
+                }
+                if own_hyperlink is not None:
+                    tail_run.update(own_hyperlink)
+                runs.append(tail_run)
+
+    return runs
+
+
+def _build_text_runs(
+    elem: ET.Element,
+    parent_attrs: dict[str, Any],
+    ctx: ConvertContext,
+) -> list[dict[str, Any]]:
+    """Build a list of text runs from a <text> element, handling <tspan> children.
+
+    Each run carries text plus resolved paint, typography, tracking, and baseline
+    shift. Nested tspans are walked recursively so inline format changes still
+    produce distinct runs.
+    """
+    runs: list[dict[str, Any]] = []
+    xml_space = resolve_project_xml_space(elem)
+
+    if elem.text:
+        runs.append({
+            **parent_attrs,
+            'text': elem.text,
+            '_xml_space': xml_space,
+        })
+
+    for child in elem:
+        child_tag = child.tag.replace(f'{{{SVG_NS}}}', '')
+        if child_tag in {'tspan', 'a'}:
+            runs.extend(_collect_inline_runs(
+                child,
+                parent_attrs,
+                ctx,
+                xml_space,
+            ))
+            if child.tail:
+                runs.append({
+                    **parent_attrs,

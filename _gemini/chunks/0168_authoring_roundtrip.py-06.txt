@@ -1,0 +1,95 @@
+                    not proxy_asset.is_file()
+                    or proxy_asset.suffix.lower() != ".svg"
+                    or _sha256_file(proxy_asset) != proxy_asset_sha256_raw
+                ):
+                    raise AuthoringRoundtripError(
+                        f"{authoring_name} source proxy asset is missing or changed: "
+                        f"{proxy_asset}"
+                    )
+                proxy_asset_sha256 = proxy_asset_sha256_raw
+            source_path_tuple = tuple(source_path_raw)
+            source_element = _source_element(flat_root, source_path_tuple)
+            if _source_identity(source_element) != source_ref:
+                raise AuthoringRoundtripError(
+                    f"{authoring_name} source ref {source_ref!r} resolves to "
+                    f"{_source_identity(source_element)!r}"
+                )
+            refs[source_ref] = SourceRefRecord(
+                source_path=source_path_tuple,
+                initial_authoring_subtree_sha256=initial_hash,
+                representation=representation,
+                proxy_asset=proxy_asset,
+                proxy_asset_sha256=proxy_asset_sha256,
+            )
+        documents[authoring_name] = AuthoringDocument(
+            name=authoring_name,
+            source_name=authoring_name,
+            source_slide=source_slide,
+            authoring_path=authoring_path,
+            flat_source_path=flat_source_path,
+            layered_source_path=layered_source_path,
+            initial_authoring_sha256=initial_authoring_sha,
+            source_refs=refs,
+        )
+
+    if set(documents) != set(source_slide_by_name):
+        raise AuthoringRoundtripError(
+            "Authoring manifest/source slide roster differs; missing="
+            f"{sorted(set(source_slide_by_name) - set(documents))}, "
+            f"extra={sorted(set(documents) - set(source_slide_by_name))}"
+        )
+    if manifest.get("file_count") != len(documents):
+        raise AuthoringRoundtripError(
+            "authoring_manifest.json file_count does not match documents"
+        )
+    expected_ref_count = sum(len(item.source_refs) for item in documents.values())
+    if manifest.get("source_ref_count") != expected_ref_count:
+        raise AuthoringRoundtripError(
+            "authoring_manifest.json source_ref_count does not match documents"
+        )
+    return source_root, proxy_root, documents, manifest, roundtrip_manifest
+
+
+def _identity_pages(
+    documents: dict[str, AuthoringDocument],
+) -> tuple[RoundtripPage, ...]:
+    by_slide = {
+        document.source_slide: document
+        for document in documents.values()
+    }
+    return tuple(
+        RoundtripPage(
+            output_index=index,
+            source_slide=index,
+            svg_name=by_slide[index].name,
+            source_svg_name=by_slide[index].name,
+        )
+        for index in range(1, len(by_slide) + 1)
+    )
+
+
+def _load_page_plan(
+    project_path: Path,
+    authoring_dir: Path,
+    documents: dict[str, AuthoringDocument],
+) -> tuple[tuple[RoundtripPage, ...], bool]:
+    """Load the optional strict page plan or return the identity page order."""
+    plan_path = project_path / ROUNDTRIP_PAGE_PLAN_PATH
+    if not plan_path.exists():
+        actual_files = {
+            path.relative_to(authoring_dir).as_posix()
+            for path in authoring_dir.rglob("*.svg")
+            if path.is_file()
+        }
+        if actual_files != set(documents):
+            raise AuthoringRoundtripError(
+                "Authoring manifest/file roster differs; missing="
+                f"{sorted(set(documents) - actual_files)}, "
+                f"extra={sorted(actual_files - set(documents))}"
+            )
+        return _identity_pages(documents), False
+    if not plan_path.is_file():
+        raise AuthoringRoundtripError(
+            f"Round-trip page plan must be a file: {plan_path}"
+        )
+    payload = _load_json(plan_path, context="round-trip page plan")

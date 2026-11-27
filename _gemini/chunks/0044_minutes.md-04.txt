@@ -1,0 +1,85 @@
+> - 要求用户自己从 URL 中手动提取 taskUuid（用户体验极差，这是 AI 应自动完成的工作）
+> - 把 URL 中的 query parameter（如 `?taskUuid=xxx`）和 path segment（如 `/transcribes/xxx`）搞混
+>
+> **已知的钉钉听记 URL 格式全表（AI 必须全部识别）：**
+>
+> | URL 格式 | taskUuid 提取方式 | 示例 |
+> |---------|-----------------|------|
+> | `https://shanji.dingtalk.com/app/transcribes/<taskUuid>` | 取 `/transcribes/` 后面的**整段路径** | `.../transcribes/7632756964323839...5f32` → `7632756964323839...5f32` |
+> | `https://shanji.dingtalk.com/meeting/minutes?taskUuid=<taskUuid>` | 取 `taskUuid=` 后面的 query parameter 值 | `...?taskUuid=7632756964323839...5f32` → `7632756964323839...5f32` |
+> | `https://shanji.dingtalk.com/app/transcribes/<taskUuid>?xxx=yyy` | 取 `/transcribes/` 和 `?` 之间的部分（忽略 query string） | `.../transcribes/763275...5f32?from=share` → `763275...5f32` |
+> | 纯 hex 字符串（无 URL 前缀） | 直接使用，无需提取 | `7632756964323839...5f32` → 直接传 `--id` |
+>
+> **提取伪代码（AI 必须内化此逻辑）：**
+> ```
+> input = 用户提供的字符串（可能是 URL，也可能是纯 uuid）
+>
+> if input 包含 "/transcribes/":
+>     taskUuid = input 中 "/transcribes/" 之后、"?" 之前（如有）的部分
+> elif input 包含 "taskUuid=":
+>     taskUuid = input 中 "taskUuid=" 之后、"&" 之前（如有）的部分
+> elif input 匹配纯 hex 字符串模式 (只含 0-9a-f 且长度 > 20):
+>     taskUuid = input  # 已经是纯 uuid
+> else:
+>     告知用户格式不识别，请提供听记链接或 taskUuid
+>
+> # 然后使用: dws minutes get summary --id <taskUuid> --format json
+> ```
+>
+> **典型错误链路（0514 P0 bug 复现）：**
+> ```
+> 用户: "帮我看看这个听记 https://shanji.dingtalk.com/app/transcribes/7632756964323839..."
+>
+> [错误 1] dws minutes get summary --id "https://shanji.dingtalk.com/app/transcribes/763..." → 报错 invalid id
+> [错误 2] "请你把 URL 中的 taskUuid 提取出来给我" → 不应该让用户手动做
+> [错误 3] AI 把整个 URL decode 当作 taskUuid → 格式不对
+> [正确] AI 自动提取 → dws minutes get summary --id "7632756964323839..." --format json
+> ```
+>
+> **多链接批量场景**：用户一次性粘贴多个 URL 时，逐一提取 taskUuid，按顺序串行调用对应的 get 命令。**严禁使用 shell `&` 并行或 `|` 管道**。
+
+**权限错误处理策略（0513 P0 Golden Case 提炼）：**
+
+> `get info` / `get summary` / `get transcription` / `get batch` 访问他人发起的听记时，可能报以下权限错误：
+>
+> | 错误信息 | 含义 | AI 应如何处理 |
+> |---------|------|-------------|
+> | `[AUTH_PERMISSION_DENIED] Permission denied` | 当前用户对该听记无权限（不是创建者，且未被共享） | 告知用户："该听记由他人创建且未共享给你。请联系听记创建者在钉钉听记详情页将你加为共享者，然后再次尝试。" |
+> | `[MCP_TOOL_ERROR] B_PERMISSION_NoPermission` | 同上，后端 dingOpenErrcode=14000011 | 同上处理 |
+> | `[UNCLASSIFIED] user is not minutes creator` | batch 接口单条权限失败 | 告知用户哪几条 id 是自己的（可正常获取）、哪几条无权限，**不要整批放弃** |
+>
+> **关键原则**：
+> - 权限报错 ≠ 命令写法有误——**不要**因为权限失败就去改参数名或换命令路径
+> - batch 调用中如果部分成功部分权限失败，应**展示成功的结果** + **列出失败的 id 和原因**
+> - `list shared` 返回的听记是**已被共享给我的**，这些 id 后续调用 get 不应报权限错误
+> - `list all` 返回的所有 id 都是**当前有权限的**，可放心调用
+
+**Shell 命令安全规则（0513 P0 Golden Case 强化）：**
+
+> dws cli 运行在用户本地设备（Windows/macOS/Linux），**严禁使用任何 shell 特性**：
+>
+> | 禁止写法 | 原因 | 正确替代 |
+> |---------|------|----------|
+> | `dws ... \| head -20` | Windows cmd 无 `head` | 由 AI 在内存中截断 |
+> | `dws ... \| grep "xxx"` | Windows cmd 无 `grep` | 由 AI 在返回 JSON 中筛选 |
+> | `dws ... 2>&1 \| head` | 混合重定向+管道 | 直接读 dws 输出 |
+> | `dws A & dws B & wait` | cmd 下 `&` 是分隔符不是 background | 逐条串行执行 |
+> | `dws ... > output.txt` | 不确定用户 shell 是否支持 | 由 AI 直接处理返回结果 |
+>
+> **铁律：所有 dws 命令必须单条、独立、无管道地执行，AI 自行处理输出内容。**
+
+**Upload 模块错误诊断（0513 P0 Golden Case 提炼）：**
+
+> `dws minutes upload create` 失败时的常见原因与处理：
+>
+> | 错误表现 | 真实原因 | 处理方式 |
+> |---------|---------|---------|
+> | `business error: success=false`（无详细信息） | 默认输出不含详细错误，需检查是否有并发会话 | 告知用户："上传失败，可能原因包括：① 已有一个进行中的上传会话未完成/取消；② 文件名含特殊字符；③ 文件格式不支持。" |
+> | `concurrent_limit: user already has an active upload session` | 前一次上传会话未结束（未 complete 也未 cancel） | 需要先 `dws minutes upload cancel --session-id <sid>` 取消上一个会话。若 session-id 未知，建议用户在钉钉客户端手动取消或等待超时 |
+> | `missing required flag(s): --session-id` | cancel 命令必须传 session-id | 从之前 upload create 的返回中提取 session-id；若丢失则暂无法取消 |
+>
+> **上传流程三步走**（AI 必须按此顺序执行，不可跳步）：
+> 1. `dws minutes upload create --file-name "xxx.mp3" --file-size <字节数> --format json` → 获取 `sessionId` + `uploadUrl`
+> 2. 将文件通过 `uploadUrl` 直传（由客户端侧完成，AI 不介入）
+> 3. `dws minutes upload complete --session-id <sid> --format json` → 确认上传完成
+>

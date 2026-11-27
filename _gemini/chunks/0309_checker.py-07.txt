@@ -1,0 +1,96 @@
+                    *_PPTX_ROOT_STRUCTURE_ATTRS,
+                    *_PPTX_ROOT_VISIBILITY_ATTRS,
+                )
+                if elem.get(attr) is not None
+            ]
+            if nested_root_attrs:
+                errors.append(
+                    f"{svg_path.name}: {element_id} carries root-only metadata "
+                    + ', '.join(nested_root_attrs)
+                )
+
+        if elem.get('data-pptx-layout-kind') is not None:
+            errors.append(
+                f"{svg_path.name}: data-pptx-layout-kind is a legacy distillation "
+                "attribute; restore the page to the structured contract"
+            )
+
+        layer = (elem.get('data-pptx-layer') or '').strip().lower()
+        placeholder = (elem.get('data-pptx-placeholder') or '').strip().lower()
+        if layer in {'master', 'layout'}:
+            if parent is not root:
+                errors.append(
+                    f"{svg_path.name}: {element_id} data-pptx-layer={layer!r} "
+                    "must be a direct child of the root <svg>"
+                )
+            if tag == 'g' and not (
+                _is_authored_preset_atom is not None
+                and _is_authored_preset_atom(elem)
+            ):
+                errors.append(
+                    f"{svg_path.name}: {element_id} is a <g> marked as {layer}; "
+                    "Master/Layout fixed visuals must be root-level atomic elements"
+                )
+            if placeholder:
+                errors.append(
+                    f"{svg_path.name}: {element_id} cannot be both a fixed "
+                    f"{layer} element and a placeholder slot"
+                )
+
+        detail_attrs = [
+            attr for attr in _PPTX_PLACEHOLDER_DETAIL_ATTRS
+            if elem.get(attr) is not None
+        ]
+        if detail_attrs and not placeholder:
+            errors.append(
+                f"{svg_path.name}: {element_id} uses placeholder detail metadata "
+                "without data-pptx-placeholder"
+            )
+
+        if placeholder:
+            if parent is not root:
+                errors.append(
+                    f"{svg_path.name}: placeholder slot {element_id} must be a "
+                    "direct child of the root <svg>"
+                )
+            if tag != 'g':
+                errors.append(
+                    f"{svg_path.name}: placeholder slot {element_id} must be a "
+                    "root-level <g>"
+                )
+            if not (elem.get('id') or '').strip():
+                errors.append(
+                    f"{svg_path.name}: every placeholder slot <g> requires a stable id"
+                )
+            wrapper_attrs = sorted(
+                attr.rsplit('}', 1)[-1]
+                for attr in elem.attrib
+                if attr != 'id'
+                and not attr.rsplit('}', 1)[-1].startswith('data-pptx-')
+            )
+            if wrapper_attrs:
+                errors.append(
+                    f"{svg_path.name}: placeholder slot {element_id} is an "
+                    "authoring boundary and may carry only id/data-pptx-*; remove "
+                    + ', '.join(wrapper_attrs)
+                )
+            bounds = (elem.get('data-pptx-bounds') or '').strip()
+            if not bounds:
+                errors.append(
+                    f"{svg_path.name}: placeholder slot {element_id} requires "
+                    "data-pptx-bounds"
+                )
+            else:
+                bounds_error = _placeholder_bounds_error(bounds)
+                if bounds_error:
+                    errors.append(
+                        f"{svg_path.name}: placeholder slot {element_id} bounds "
+                        + bounds_error
+                    )
+
+            binding = (
+                elem.get('data-pptx-binding') or 'carrier'
+            ).strip().lower()
+            if binding not in {'carrier', 'proxy'}:
+                errors.append(
+                    f"{svg_path.name}: placeholder slot {element_id} has unknown "

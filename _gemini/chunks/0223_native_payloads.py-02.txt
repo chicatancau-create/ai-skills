@@ -1,0 +1,113 @@
+def _register_payload(payloads: dict[str, bytes], raw: bytes) -> str:
+    digest = _sha256(raw)
+    existing = payloads.get(digest)
+    if existing is not None and existing != raw:
+        raise NativePayloadError(
+            f"SHA-256 collision while registering native payload {digest}"
+        )
+    payloads[digest] = raw
+    return PAYLOAD_STORE_REFERENCE_PREFIX + digest
+
+
+def _is_native_record_attribute(name: str) -> bool:
+    return (
+        name in _NATIVE_RECORD_ATTRIBUTES
+        or name.startswith(_NATIVE_RECORD_PREFIXES)
+    )
+
+
+def _native_record_attributes(element: ET.Element) -> dict[str, str]:
+    return {
+        name: value
+        for name, value in element.attrib.items()
+        if _is_native_record_attribute(name)
+    }
+
+
+def _native_record_key(attributes: dict[str, str]) -> str:
+    return json.dumps(
+        attributes,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def collect_native_attribute_record_keys(root: ET.Element) -> set[str]:
+    """Return canonical record keys for compressible native attributes."""
+    keys: set[str] = set()
+    for element in root.iter():
+        if NATIVE_RECORD_REF_ATTRIBUTE in element.attrib:
+            raise NativePayloadError(
+                "native metadata is already externalized; source attributes "
+                "must be hydrated before building a new store"
+            )
+        attributes = _native_record_attributes(element)
+        if attributes:
+            keys.add(_native_record_key(attributes))
+    return keys
+
+
+def build_native_attribute_records(
+    record_keys: set[str],
+) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
+    """Assign deterministic short ids to canonical native-attribute records."""
+    ids_by_key: dict[str, str] = {}
+    records: dict[str, dict[str, str]] = {}
+    for index, key in enumerate(sorted(record_keys)):
+        try:
+            attributes = json.loads(key)
+        except json.JSONDecodeError as exc:
+            raise NativePayloadError(
+                f"Cannot decode canonical native-attribute record: {exc}"
+            ) from exc
+        if not isinstance(attributes, dict) or not attributes:
+            raise NativePayloadError(
+                "Canonical native-attribute record must be a non-empty object"
+            )
+        if any(
+            not isinstance(name, str)
+            or not isinstance(value, str)
+            or not _is_native_record_attribute(name)
+            for name, value in attributes.items()
+        ):
+            raise NativePayloadError(
+                "Canonical native-attribute record contains an unsupported field"
+            )
+        record_id = f"r{index}"
+        ids_by_key[key] = record_id
+        records[record_id] = attributes
+    return ids_by_key, records
+
+
+def externalize_native_attribute_records(
+    root: ET.Element,
+    ids_by_key: dict[str, str],
+) -> NativePayloadStats:
+    """Replace supported native-attribute groups with deterministic short ids."""
+    stats = NativePayloadStats()
+    for element in root.iter():
+        if NATIVE_RECORD_REF_ATTRIBUTE in element.attrib:
+            raise NativePayloadError(
+                "native metadata is already externalized; source attributes "
+                "must be hydrated before building a new store"
+            )
+        attributes = _native_record_attributes(element)
+        if not attributes:
+            continue
+        record_id = ids_by_key.get(_native_record_key(attributes))
+        if record_id is None:
+            raise NativePayloadError(
+                "Native-attribute record was not registered before externalization"
+            )
+        for name in attributes:
+            element.attrib.pop(name)
+        element.set(NATIVE_RECORD_REF_ATTRIBUTE, record_id)
+        stats.native_record_count += 1
+        stats.native_attribute_bytes += sum(
+            len(name) + len(value) + 4
+            for name, value in attributes.items()
+        )
+    return stats
+
+

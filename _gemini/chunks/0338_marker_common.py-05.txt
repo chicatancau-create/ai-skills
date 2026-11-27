@@ -1,0 +1,114 @@
+        # This intentionally approximates path geometry from command endpoints.
+        # Explicit metadata remains the precise path for complex arcs/curves.
+        return _path_bbox(elem.get("d"))
+
+    if tag == "text":
+        x = _project_geometry_number(elem, "x")
+        y = _project_geometry_number(elem, "y")
+        font_size = _maybe_number(elem.get("font-size")) or 16.0
+        text = "".join(elem.itertext())
+        width = max(len(text), 1) * font_size * 0.55
+        height = font_size * 1.25
+        return x, y - height * 0.8, x + width, y + height * 0.2
+
+    return None
+
+
+def _fallback_bbox(
+    elem: ET.Element,
+    matrix: tuple[float, float, float, float, float, float] = IDENTITY_MATRIX,
+) -> tuple[float, float, float, float] | None:
+    local_matrix = matrix
+    transform = elem.get("transform")
+    if transform:
+        local_matrix = matrix_multiply(matrix, parse_transform_matrix(transform))
+
+    tag = _local_tag(elem)
+    if tag in {"g", "svg", "a"}:
+        bbox = None
+        for child in elem:
+            bbox = _bbox_union(bbox, _fallback_bbox(child, local_matrix))
+        return bbox
+
+    local_bbox = _element_local_bbox(elem)
+    if local_bbox is None:
+        return None
+    return _apply_matrix_bbox(local_bbox, local_matrix)
+
+
+def _inferred_bounds(elem: ET.Element) -> tuple[float, float, float, float] | None:
+    bbox = None
+    for child in elem:
+        bbox = _bbox_union(bbox, _fallback_bbox(child))
+    return bbox
+
+
+def _fallback_element_labels(elem: ET.Element) -> tuple[str, ...]:
+    labels: list[str] = []
+    for attribute in ("id", "class", "data-name"):
+        raw = elem.get(attribute)
+        if raw:
+            labels.append(str(raw).strip().lower())
+    return tuple(labels)
+
+
+def _fallback_shape_records(
+    elem: ET.Element,
+    matrix: tuple[float, float, float, float, float, float] = IDENTITY_MATRIX,
+    inherited_fill: str | None = "000000",
+    inherited_stroke: str | None = None,
+    inherited_labels: tuple[str, ...] = (),
+) -> list[_FallbackShapeRecord]:
+    """Collect visible painted fallback geometry with resolved bounds and ancestry."""
+    tag = _local_tag(elem)
+    if tag == "metadata" or tag in {"defs", "clipPath", "mask", "filter", "style"}:
+        return []
+    if (
+        _style_attr(elem, "display") == "none"
+        or _style_attr(elem, "visibility") == "hidden"
+    ):
+        return []
+
+    local_matrix = matrix
+    transform = elem.get("transform")
+    if transform:
+        local_matrix = matrix_multiply(matrix, parse_transform_matrix(transform))
+
+    own_fill = _style_attr(elem, "fill")
+    own_stroke = _style_attr(elem, "stroke")
+    fill = own_fill if own_fill is not None else inherited_fill
+    stroke = own_stroke if own_stroke is not None else inherited_stroke
+    labels = inherited_labels + _fallback_element_labels(elem)
+
+    records: list[_FallbackShapeRecord] = []
+    if tag in {
+        "circle", "ellipse", "line", "path", "polygon", "polyline", "rect",
+    }:
+        fill_color = (
+            _hex_or_none(fill)
+            if fill and _paint_visible(elem, "fill") and tag != "line"
+            else None
+        )
+        stroke_color = (
+            _hex_or_none(stroke)
+            if stroke and _paint_visible(elem, "stroke")
+            else None
+        )
+        if fill_color is not None or stroke_color is not None:
+            local_bbox = _element_local_bbox(elem)
+            if local_bbox is not None:
+                records.append(
+                    _FallbackShapeRecord(
+                        tag=tag,
+                        bounds=_apply_matrix_bbox(local_bbox, local_matrix),
+                        fill=fill_color,
+                        stroke=stroke_color,
+                        labels=labels,
+                        fill_opacity=_own_fill_opacity(elem) if fill_color else None,
+                    )
+                )
+
+    for child in elem:
+        records.extend(
+            _fallback_shape_records(
+                child,

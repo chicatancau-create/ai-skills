@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""
+Tencent Cloud TokenHub image generation backend.
+
+Configuration keys:
+  TENCENT_API_KEY / TOKENHUB_API_KEY   (required)
+  TENCENT_BASE_URL                    (optional; domestic base or full endpoint)
+  TENCENT_MODEL                       (optional; defaults to hy-image-v3)
+  TENCENT_REVISE                      (optional; Hy only, defaults to true)
+  TENCENT_WATERMARK                   (optional; Seedream only, defaults to false)
+  TENCENT_OUTPUT_FORMAT               (optional; Seedream only, png or jpeg)
+"""
+
+import sys
+from pathlib import Path
+
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from console_encoding import configure_utf8_stdio  # noqa: E402
+
+configure_utf8_stdio()
+
+if __name__ == "__main__":
+    print(__doc__)
+    print("Use via: python3 skills/ppt-master/scripts/image_gen.py \"prompt\" --backend tencent")
+    raise SystemExit(0 if any(arg in {"-h", "--help", "help"} for arg in sys.argv[1:]) else 1)
+
+import base64
+import math
+import os
+import time
+
+import requests
+
+from image_backends.backend_common import (  # noqa: E402
+    MAX_RETRIES,
+    download_image,
+    http_error,
+    is_permanent_error,
+    is_rate_limit_error,
+    normalize_image_size,
+    require_api_key,
+    resolve_output_path,
+    retry_delay,
+    save_image_bytes,
+)
+
+
+DEFAULT_BASE_URL = "https://tokenhub.tencentmaas.com"
+DEFAULT_MODEL = "hy-image-v3"
+MODEL_ENDPOINTS = {
+    DEFAULT_MODEL: "/v1/wand/hunyuan-image/v3-generation",
+    "seedream-image-v5.0-pro": "/v1/wand/si-image/generation",
+    "seedream-image-v5.0-lite": "/v1/wand/si-image/generation",
+}
+SUPPORTED_MODELS = set(MODEL_ENDPOINTS)
+IMAGE_SIZE_PIXELS = {"512px": 512, "1K": 1024, "2K": 2048, "4K": 4096}
+
+
+def _validate_model(model: str) -> str:
+    """Limit the backend to the synchronous TokenHub image contracts."""
+    resolved = model.strip()
+    if resolved not in SUPPORTED_MODELS:
+        detail = ""
+        if resolved.startswith("vidu"):
+            detail = " Vidu uses an asynchronous submit/query API that is not supported."
+        raise ValueError(
+            f"Unsupported Tencent model '{model}'. Supported: {sorted(SUPPORTED_MODELS)}.{detail}"
+        )
+    return resolved
+
+
+def _resolve_url(base_url: str, model: str = DEFAULT_MODEL) -> str:
+    """Resolve the model endpoint while accepting a full TokenHub URL."""
+    base = base_url.strip().rstrip("/")
+    if "/v1/wand/" in base:
+        return base
+    return base + MODEL_ENDPOINTS[model]
+
+
+def _resolve_size(aspect_ratio: str, image_size: str, model: str = DEFAULT_MODEL) -> str:
+    """Resolve a pixel size from the requested area and aspect ratio."""
+    normalized = normalize_image_size(image_size)
+    pixels = IMAGE_SIZE_PIXELS.get(normalized)
+    if pixels is None:
+        raise ValueError(
+            f"Unsupported image size '{image_size}' for Tencent backend. "
+            f"Supported logical sizes: {list(IMAGE_SIZE_PIXELS)}."
+        )
+    try:
+        ratio_width, ratio_height = (int(value) for value in aspect_ratio.split(":"))
+        if ratio_width <= 0 or ratio_height <= 0:
+            raise ValueError
+    except ValueError as exc:
+        raise ValueError(
+            f"Unsupported aspect ratio '{aspect_ratio}' for Tencent backend. "
+            "Use positive width:height integers, such as 16:9."
+        ) from exc
+
+    if model == "seedream-image-v5.0-lite":
+        pixels = max(pixels, 2048)
+    elif model == "seedream-image-v5.0-pro" and normalized not in {"1K", "2K"}:
+        raise ValueError(
+            f"Unsupported image size '{image_size}' for Seedream pro. "
+            "Use 1K or 2K; 4K requires seedream-image-v5.0-lite."
+        )
+
+    ratio = ratio_width / ratio_height
+    step = 16 if model == DEFAULT_MODEL else 1
+    width = math.floor(pixels * math.sqrt(ratio) / step) * step
+    height = math.floor(pixels / math.sqrt(ratio) / step) * step
+    if model == DEFAULT_MODEL and (

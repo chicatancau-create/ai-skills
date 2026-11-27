@@ -1,0 +1,57 @@
+Finish and commit every edit under `tools/visual/*.mjs` **before** the run. Both runners hash their own sources and print `toolChangedDuringRun`; true demotes the batch to a process artifact no matter how green it looks (this voided two ten-section batches on 2026-09-23: `ten79` all-green, `final81` bookkeeping). Same for the shared ruler files — `probes.mjs` and `layout-record.mjs` changes make old numbers non-comparable; if you must touch them, record their sha256 against both batches (§17.2 recipe).
+
+## Step 2 — Isolate the batch (never write into the shared directory)
+
+`tools/visual/paths.mjs` derives the evidence root from one variable:
+
+```js
+export const OUT = process.env.VC_OUT || join(dirname(REPO_ROOT), 'CodeWeave-recovery', 'tmp-m6-visual')
+```
+
+`VC_SHOTS` / `VC_REPORT` / `VC_DATA_DIR` / the browser profile all default to paths under `OUT`, so **one `VC_OUT` isolates a whole batch**. Pick a fresh tag (the batch number you are about to name):
+
+```bash
+cd G:/CodeWeave/workspace
+export VC_OUT=G:/CodeWeave-recovery/tmp-m6-visual-<tag> VC_DATA_TAG=<tag>
+```
+
+Hard rules:
+
+- Never let a re-run write into the shared `tmp-m6-visual\shots\` — it is shared by the matrix and the extra sections, and same-name files collide 1:1. `#87` lost it that way: 76 PNGs of the terminal batch were overwritten one by one, numbers kept from the old build, images from the new one.
+- The full-matrix run does `rmSync` on its shots dir; it now prints `shotsClearedBeforeRun` first. With a private `VC_OUT` that number must be **0** — that field is your proof you isolated it.
+- The recovery tree is outside Git and wipeable. The reports are the durable record only once their numbers are written into M6; the PNGs are disposable by design.
+
+## Step 3 — Pre-flight without a browser
+
+```bash
+node tools/visual/visual-check.mjs --plan
+node tools/visual/visual-states.mjs --plan
+node tools/visual/visual-check.mjs --selftest    # 17 段模板，解析失败 0 段
+node tools/visual/visual-states.mjs --selftest   # 14 段，明确打印「不写任何文件」
+```
+
+Treat `--selftest` as untrusted until you have read the dispatch line in the runner you are calling: the two runners were not symmetric, and `visual-states.mjs --selftest` used to fall through into a full write-to-disk batch (`#87`). Verify it writes nothing by counting PNGs and capturing report mtime before and after. Symmetry is now asserted in `visual-check.mjs`'s own comment block — check it still holds rather than trusting this sentence.
+
+## Step 4 — Run the two lines on an idle machine
+
+Kill the gates and any other agent first; LCP / INP / CLS on a busy machine are noise.
+
+```bash
+# line 1 — 60-cell matrix (10 pages x 6 viewports), ports 4273 / 9778
+node tools/visual/visual-check.mjs
+# line 2 — twelve sections, ports 4274 / 9779
+node tools/visual/visual-states.mjs
+```
+
+- Sections are: `loading empty longtext tab views editorfont escwalk chdetail writeback axtree inpstress datashape` (`visual-states.mjs:54`). Single sections: `--only=escwalk,chdetail`.
+- `VC_CACHE=cold` per-cell cold cache; a CLS number without a cache state is incomplete (§18 note: same cell can differ by an order of magnitude).
+- `inpstress` is tuned by `VC_INP_ROUNDS` / `VC_INP_GAP`; the observer's `durationThreshold: 40` means sub-40ms interactions are never recorded, so `count` is not "number of interactions".
+- Ports 4173 (user's own instance) and 9333 (Qoder debug) are never touched. `datashape` seeds localStorage — see the separate `localstorage-data-shape-seeding` skill, and keep its "seed is not an end-to-end chain" wording.
+- Each batch is minutes, not hours (matrix 19:10→19:14, states 20:39→20:43 on 09-23). Re-running is cheap; skirting it is what rots the docs.
+
+## Step 5 — Cross-batch compare, column by column
+
+Both scripts live in `G:/CodeWeave-recovery/tmp-m6-visual/` (outside the repo). If the directory is gone, recreate the matrix one from the block below — the column list *is* the knowledge.
+
+```bash
+cd G:/CodeWeave-recovery

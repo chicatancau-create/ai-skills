@@ -1,0 +1,131 @@
+    transform = xfrm.to_svg_transform()
+    if not transform:
+        return text_svg
+    return (
+        '<g data-pptx-text-flip-compensation="true" '
+        f'transform="{_xml_escape(transform)}">\n{text_svg}\n</g>'
+    )
+
+
+def _block_formula_zone(tx_body: ET.Element | None) -> ET.Element | None:
+    """Return the sole block-math zone from a canonical formula text body."""
+    if tx_body is None:
+        return None
+    paragraphs = tx_body.findall("a:p", NS)
+    if len(paragraphs) != 1:
+        return None
+    paragraph = paragraphs[0]
+    formula_zones = [
+        child
+        for child in paragraph
+        if child.tag == f"{{{A14_NS}}}m"
+    ]
+    allowed = {
+        f"{{{NS['a']}}}pPr",
+        f"{{{NS['a']}}}endParaRPr",
+        f"{{{A14_NS}}}m",
+    }
+    if len(formula_zones) != 1 or any(
+        child.tag not in allowed
+        for child in paragraph
+        if isinstance(child.tag, str)
+    ):
+        return None
+    root_children = [
+        child for child in formula_zones[0] if isinstance(child.tag, str)
+    ]
+    if (
+        len(root_children) != 1
+        or root_children[0].tag
+        != "{http://schemas.openxmlformats.org/officeDocument/2006/math}oMathPara"
+    ):
+        return None
+    return formula_zones[0]
+
+
+def _block_formula_carrier_error(
+    node: ShapeNode,
+    *,
+    top_level: bool,
+) -> str | None:
+    """Reject block carriers whose non-formula state would be discarded."""
+    if not top_level:
+        return "grouped block formula carrier is not reversible"
+    if (
+        node.xfrm.rot
+        or node.xfrm.flip_h
+        or node.xfrm.flip_v
+        or node.effective_rotation
+    ):
+        return "block formula carrier rotation or flip is not reversible"
+    if node.placeholder is not None:
+        return "block formula carrier cannot retain placeholder ownership"
+    if node.hyperlink_rid or node.hyperlink_action:
+        return "block formula carrier hyperlink is not reversible"
+    if node.xml.find("p:style", NS) is not None:
+        return "block formula carrier style reference is not reversible"
+
+    sp_pr = node.xml.find("p:spPr", NS)
+    if sp_pr is None:
+        return "block formula carrier is missing p:spPr"
+    preset = sp_pr.find("a:prstGeom", NS)
+    if preset is None or preset.get("prst") != "rect":
+        return "block formula carrier must use rectangular geometry"
+    if any(
+        sp_pr.find(path, NS) is not None
+        for path in (
+            "a:solidFill",
+            "a:gradFill",
+            "a:pattFill",
+            "a:blipFill",
+            "a:grpFill",
+            "a:effectLst",
+            "a:effectDag",
+            "a:scene3d",
+            "a:sp3d",
+        )
+    ):
+        return "block formula carrier paint or effect is not reversible"
+    line = sp_pr.find("a:ln", NS)
+    if line is not None and line.find("a:noFill", NS) is None:
+        return "block formula carrier line is not reversible"
+    return None
+
+
+def _prepare_inline_formula_resolver(
+    tx_body: ET.Element | None,
+    ctx: AssemblyContext,
+    *,
+    allow_native: bool,
+    force_opaque: bool = False,
+):
+    """Build one all-or-opaque resolver for formula runs in a text body."""
+    if tx_body is None:
+        return None
+    zones = [
+        child
+        for paragraph in tx_body.findall("a:p", NS)
+        for child in paragraph
+        if child.tag == f"{{{A14_NS}}}m"
+    ]
+    if not zones:
+        return None
+
+    imported: dict[int, FormulaImport] = {}
+    failed = force_opaque
+    if not allow_native:
+        failed = True
+        _diagnose_formula_fallback(
+            ctx,
+            FormulaImportError(
+                "formula reconstruction is not supported inside vertical text"
+            ),
+        )
+    elif not force_opaque:
+        for zone in zones:
+            try:
+                imported[id(zone)] = import_formula(zone, display=False)
+            except FormulaImportError as exc:
+                failed = True
+                _diagnose_formula_fallback(ctx, exc)
+

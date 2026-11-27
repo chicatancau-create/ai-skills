@@ -1,0 +1,102 @@
+        lines.append("=== SVG Position Validation Results ===")
+        lines.append(f"Tolerance: {self.tolerance}px")
+        lines.append("")
+        lines.append("Status Element_ID      Attr    Expected  Actual    Deviation")
+        lines.append("----  --------------  ------  --------  --------  ------")
+
+        passed_count = 0
+        for r in results:
+            status = "[OK]" if r.passed else "[X]"
+            if r.passed:
+                passed_count += 1
+
+            actual_str = f"{r.actual:.1f}" if not math.isnan(r.actual) else "N/A"
+            deviation_str = f"{r.deviation:.2f}" if not math.isinf(r.deviation) else "N/A"
+
+            lines.append(
+                f"{status}    {r.element_id:<14s}  {r.attribute:<6s}  "
+                f"{r.expected:>8.1f}  {actual_str:>8s}  {deviation_str:>6s}"
+            )
+
+        lines.append("")
+        pct = passed_count / len(results) * 100 if results else 0
+        lines.append(f"Passed: {passed_count}/{len(results)} ({pct:.1f}%)")
+
+        return "\n".join(lines)
+
+
+# =============================================================================
+# Command Line Interface
+# =============================================================================
+
+class _NonFiniteNumberError(ValueError):
+    """Reject a number before it can enter coordinate calculations."""
+
+
+def _finite_number(value: Any, location: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise _NonFiniteNumberError(
+            f"{location} must be finite; replace NaN or Infinity with a finite number: {value!r}"
+        )
+    return number
+
+
+def _validate_finite_json(value: Any, location: str) -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            _validate_finite_json(item, f"{location}.{key}")
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _validate_finite_json(item, f"{location}[{index}]")
+    elif isinstance(value, float):
+        _finite_number(value, location)
+
+
+def parse_data_string(data_str: str) -> Dict[str, float]:
+    """Parse data string in 'label1:value1,label2:value2' format"""
+    result = {}
+    for index, item in enumerate(data_str.split(','), start=1):
+        item = item.strip()
+        if not item:
+            continue
+        if ':' in item:
+            label, value = item.split(':', 1)
+            try:
+                result[label.strip()] = _finite_number(
+                    value.strip(), f"--data point {index} ({label.strip()!r}) value"
+                )
+            except _NonFiniteNumberError:
+                raise
+            except ValueError:
+                print(f"[Warning] Unable to parse value: '{value.strip()}', skipped")
+        else:
+            print(f"[Warning] Invalid format (expected 'label:value'): '{item}'")
+    return result
+
+
+def parse_xy_data_string(data_str: str) -> List[Tuple[float, float]]:
+    """Parse XY data string in 'x1:y1,x2:y2' format.
+
+    A categorical series (`K:45.6,1:38.7,…`, `2018-19:26.4,…`) maps its labels
+    to the ordinals 1..n, the same slot model `calc bar` uses, so a line or
+    area chart over school years or grades verifies as drawn. A value that
+    cannot be read is an error rather than a silently dropped point: a
+    verifier that changes the point count verifies a different chart.
+    """
+    pairs: List[Tuple[str, float]] = []
+    numeric_x = []
+    for index, item in enumerate(data_str.split(','), start=1):
+        item = item.strip()
+        if not item:
+            continue
+        if ':' not in item:
+            raise ValueError(f"Invalid format (expected 'x:y'): '{item}'")
+        x, y = item.rsplit(':', 1)
+        try:
+            pairs.append((x.strip(), _finite_number(
+                y.strip(), f"--data point {index} ({x.strip()!r}) y"
+            )))
+        except _NonFiniteNumberError:
+            raise
+        except ValueError as exc:

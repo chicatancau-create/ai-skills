@@ -1,0 +1,106 @@
+    if len(carriers) > 1:
+        errors.append(
+            f"slide has {len(carriers)} logical transition carriers; expected at most 1"
+        )
+    if carriers:
+        carrier_index = children.index(carriers[0])
+        common_slide = next(
+            (
+                child
+                for child in children
+                if child.tag == _qn(PML_NS, "cSld")
+            ),
+            None,
+        )
+        if common_slide is None:
+            errors.append("slide with transition carrier must contain p:cSld")
+        elif carrier_index < children.index(common_slide):
+            errors.append("transition carrier must follow p:cSld")
+        color_map = next(
+            (
+                child
+                for child in children
+                if child.tag == _qn(PML_NS, "clrMapOvr")
+            ),
+            None,
+        )
+        if color_map is not None and carrier_index < children.index(color_map):
+            errors.append("transition carrier must follow p:clrMapOvr")
+        for tag in ("timing", "extLst"):
+            element = next(
+                (
+                    child
+                    for child in children
+                    if child.tag == _qn(PML_NS, tag)
+                ),
+                None,
+            )
+            if element is not None and carrier_index > children.index(element):
+                errors.append(f"transition carrier must precede p:{tag}")
+
+    for carrier in carriers:
+        for transition in _transition_elements(carrier):
+            sound_actions = [
+                child
+                for child in list(transition)
+                if child.tag == _qn(PML_NS, "sndAc")
+            ]
+            if len(sound_actions) > 1:
+                errors.append(
+                    "p:transition must contain at most one p:sndAc; "
+                    f"found {len(sound_actions)}"
+                )
+            if sound_actions:
+                start_sounds = [
+                    child
+                    for child in list(sound_actions[0])
+                    if child.tag == _qn(PML_NS, "stSnd")
+                ]
+                if len(start_sounds) > 1:
+                    errors.append(
+                        "p:sndAc must contain at most one p:stSnd; "
+                        f"found {len(start_sounds)}"
+                    )
+                if start_sounds:
+                    sounds = [
+                        child
+                        for child in list(start_sounds[0])
+                        if child.tag == _qn(PML_NS, "snd")
+                    ]
+                    if len(sounds) != 1:
+                        errors.append(
+                            "p:stSnd must contain exactly one p:snd; "
+                            f"found {len(sounds)}"
+                        )
+        if carrier.tag != _qn(MC_NS, "AlternateContent"):
+            continue
+        choices = [
+            child
+            for child in list(carrier)
+            if child.tag == _qn(MC_NS, "Choice")
+        ]
+        if not choices:
+            errors.append("mc:AlternateContent transition must contain mc:Choice")
+        for branch_name in ("Choice", "Fallback"):
+            branches = [
+                child
+                for child in list(carrier)
+                if child.tag == _qn(MC_NS, branch_name)
+            ]
+            for branch in branches:
+                count = len(_transition_elements(branch))
+                if count != 1:
+                    errors.append(
+                        f"mc:{branch_name} must contain exactly one p:transition; "
+                        f"found {count}"
+                    )
+    return errors
+
+
+def validate_slide_transition_xml(slide_xml: str | bytes) -> list[str]:
+    """Validate raw slide transition structure and MCE prefix bindings."""
+    data = slide_xml.encode("utf-8") if isinstance(slide_xml, str) else slide_xml
+    try:
+        if LET is not None:
+            root = LET.fromstring(data)
+        else:

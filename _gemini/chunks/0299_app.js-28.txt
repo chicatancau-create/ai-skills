@@ -1,0 +1,93 @@
+        var m = String(value || "").match(/-?\d+(?:\.\d+)?/);
+        return m ? parseFloat(m[0]) : null;
+    }
+
+    function formatCoord(value) {
+        return String(Math.round(value * 1000) / 1000);
+    }
+
+    function tspanBaseline(tspan) {
+        var text = tspan && tspan.parentElement;
+        if (!text || localName(text) !== "text") return null;
+        var curX = firstNumber(text.getAttribute("x"));
+        var curY = firstNumber(text.getAttribute("y"));
+        var children = Array.from(text.children);
+        for (var i = 0; i < children.length; i++) {
+            var child = children[i];
+            if (localName(child) !== "tspan") continue;
+            var x = firstNumber(child.getAttribute("x"));
+            var y = firstNumber(child.getAttribute("y"));
+            var dx = firstNumber(child.getAttribute("dx"));
+            var dy = firstNumber(child.getAttribute("dy"));
+            if (x !== null) curX = x;
+            else if (dx !== null) curX = (curX || 0) + dx;
+            if (y !== null) curY = y;
+            else if (dy !== null) curY = (curY || 0) + dy;
+            if (child === tspan) break;
+        }
+        if (curX === null || curY === null) return null;
+        return { x: curX, y: curY };
+    }
+
+    function tspanPromotionPayload(tspan) {
+        if (localName(tspan) !== "tspan") return null;
+        var base = tspanBaseline(tspan);
+        if (!base) return null;
+        var own = ownMatrix(tspan);
+        var close = function (a, b) { return Math.abs(a - b) < 1e-6; };
+        if (!close(own.a, 1) || !close(own.b, 0) ||
+                !close(own.c, 0) || !close(own.d, 1)) return null;
+        return {
+            x: formatCoord(base.x + own.e),
+            y: formatCoord(base.y + own.f)
+        };
+    }
+
+    function copyTextAttrs(src, dst, skip) {
+        Array.from(src.attributes || []).forEach(function (attr) {
+            if (skip[attr.name]) return;
+            dst.setAttribute(attr.name, attr.value);
+        });
+    }
+
+    function adjustedDyValue(oldValue, nextY, prevY) {
+        var parsed = splitNumberUnit(oldValue);
+        if (!parsed) return formatCoord(nextY - prevY);
+        return formatCoord(nextY - prevY) + parsed.unit;
+    }
+
+    function promoteTspanDom(tspan, promoted) {
+        var text = tspan && tspan.parentElement;
+        if (!text || localName(tspan) !== "tspan" || localName(text) !== "text") return null;
+        var next = tspan.nextElementSibling;
+        var nextBase = next && localName(next) === "tspan" ? tspanBaseline(next) : null;
+        var prev = tspan.previousElementSibling;
+        var prevBase = prev && localName(prev) === "tspan" ? tspanBaseline(prev) : null;
+        var parentBaseY = firstNumber(text.getAttribute("y")) || 0;
+
+        var newText = document.createElementNS(tspan.namespaceURI, "text");
+        copyTextAttrs(text, newText, { id: true, x: true, y: true, dx: true, dy: true });
+        copyTextAttrs(tspan, newText, {
+            id: true, x: true, y: true, dx: true, dy: true, transform: true
+        });
+        newText.setAttribute("id", tspan.id);
+        newText.setAttribute("x", promoted.x);
+        newText.setAttribute("y", promoted.y);
+
+        Array.from(tspan.childNodes || []).forEach(function (node) {
+            newText.appendChild(node.cloneNode(true));
+        });
+        if (newText.childNodes.length === 0) {
+            newText.textContent = tspan.textContent || "";
+        }
+
+        var textParent = text.parentNode;
+        var textNext = text.nextSibling;
+        var textClone = text.cloneNode(true);
+        newText.__promotionRollback = function () {
+            if (newText.parentNode) newText.parentNode.removeChild(newText);
+            if (text.parentNode) text.parentNode.removeChild(text);
+            if (textParent) {
+                if (textNext && textNext.parentNode === textParent) {
+                    textParent.insertBefore(textClone, textNext);
+                } else {

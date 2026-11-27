@@ -1,0 +1,88 @@
+            match = re.fullmatch(r'url\(#([^)]+)\)', raw_reference.strip())
+            if match is None:
+                errors.add(
+                    f'{label} {attribute_name} must be an exact local '
+                    f'url(#id) reference; got {raw_reference!r}'
+                )
+                continue
+
+            marker_id = match.group(1)
+            marker = definitions.get(marker_id)
+            if marker is None or _svg_element_tag(marker) != 'marker':
+                errors.add(
+                    f'{label} {attribute_name}=url(#{marker_id}) has no '
+                    f'matching direct <defs><marker id="{marker_id}"> '
+                    'definition'
+                )
+                continue
+
+            visual_children = [
+                child
+                for child in list(marker)
+                if _svg_element_tag(child)
+                not in PROJECT_NON_VISUAL_DEFINITION_CHILD_TAGS
+            ]
+            shape = visual_children[0] if len(visual_children) == 1 else None
+            marker_shape_type = (
+                classify_project_marker_shape(marker)
+                if shape is not None
+                else None
+            )
+            if marker_id not in checked_markers:
+                checked_markers.add(marker_id)
+                marker_label = f'<marker id="{marker_id}">'
+                if marker.get('orient') not in {
+                    'auto',
+                    'auto-start-reverse',
+                }:
+                    errors.add(
+                        f'{marker_label} requires orient="auto" or '
+                        'orient="auto-start-reverse"'
+                    )
+                marker_units = marker.get('markerUnits', 'strokeWidth')
+                if marker_units not in {'strokeWidth', 'userSpaceOnUse'}:
+                    errors.add(
+                        f'{marker_label} has unsupported '
+                        f'markerUnits={marker_units!r}'
+                    )
+                for size_attribute in ('markerWidth', 'markerHeight'):
+                    raw_size = marker.get(size_attribute)
+                    if raw_size is None:
+                        continue
+                    try:
+                        size = float(raw_size)
+                    except ValueError:
+                        size = math.nan
+                    if not math.isfinite(size) or size <= 0:
+                        errors.add(
+                            f'{marker_label} {size_attribute} must be a '
+                            f'positive finite number; got {raw_size!r}'
+                        )
+
+                if shape is None:
+                    errors.add(
+                        f'{marker_label} must contain exactly one direct '
+                        'triangle, stealth, arrow, diamond, or oval shape'
+                    )
+                else:
+                    shape_tag = (_svg_element_tag(shape) or '').lower()
+                    if shape.get('transform'):
+                        errors.add(
+                            f'{marker_label} child <{shape_tag}> cannot use '
+                            'transform'
+                        )
+                    if marker_shape_type is None and shape_tag == 'path':
+                        errors.add(
+                            f'{marker_label} path must be a closed 3-vertex '
+                            'triangle, a simple closed 4-vertex '
+                            'diamond/stealth, or an open 3-vertex arrow, '
+                            'with one explicit M/L command per vertex'
+                        )
+                    elif (
+                        marker_shape_type is None
+                        and shape_tag == 'polygon'
+                    ):
+                        errors.add(
+                            f'{marker_label} polygon must contain exactly '
+                            '3 finite vertices or 4 finite vertices forming '
+                            'a simple diamond/stealth quadrilateral'

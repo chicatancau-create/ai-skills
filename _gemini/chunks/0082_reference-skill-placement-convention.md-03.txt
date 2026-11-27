@@ -1,0 +1,41 @@
+  A rejected 12,994-file package is the only measured data point; the actual file-count threshold is **not**
+  printed in the log, so don't state a number.
+- **The junction step often gets skipped.** Checked 2026-09-24: `verify-app-security-claims` had been left as
+  a plain real dir by `skill_manage`; it has since been migrated (moved to `D:\QoderToolkit\<name>` + junction
+  re-attached). Re-check with
+  `Get-ChildItem 'C:\Users\Admin\.qoder\skills' | Select Name,LinkType,Target` before claiming where a skill
+  lives. Migrating work **another** session left in place still needs the user's ask first; migrating a skill
+  this session just created is fine.
+- **One ledger only**: registration goes into `D:\QoderToolkit\README.md` (tree line + a bullet in 自建技能).
+  A separate `REGISTRY.md` was created once on 2026-09-24 and deleted for the same reason — two ledgers drift.
+- `skill_manage` (create/edit/patch) always targets `C:\Users\Admin\.qoder\skills`, which is a **real
+  directory**, not a junction to `D:\Skills`. Its `delete` refuses with `SKILL_TARGET_MISMATCH` when the
+  same skill name exists under two roots — so never leave a second copy behind.
+- **After a skill is migrated to a junction, `skill_manage` can no longer touch it at all.** Measured
+  2026-09-25: `patch` on `headless-cdp-visual-acceptance`, `patch` on `verify-app-security-claims`, and
+  `delete` on `verify-page-in-headless-edge` all returned bare `SKILL_PATH_INVALID` (while `old_string` was
+  confirmed present by `grep -c` = 1, so it is the link, not the content). Consequences to state up front
+  when planning any edit to an already-migrated skill: it needs direct file writes to
+  `D:\QoderToolkit\<name>\SKILL.md` **plus user authorization**, since the whole point of `skill_manage` is
+  its validation; and deleting means `cmd //c rmdir` the link + send the folder to the Recycle Bin
+  (`Microsoft.VisualBasic.FileIO.FileSystem::DeleteDirectory(...,'SendToRecycleBin')`) — take a per-file
+  backup with `md5sum` first, because nothing but the Trash/backup is left. Merging two skills this way also
+  means re-pointing every inbound reference: grep the name across both scan roots, `D:\QoderToolkit` and
+  `D:\Skills`, and expect the ledger (`README.md` tree line + bullet + 家族路由表) to name it too.
+- **`SKILL_TARGET_MISMATCH` is not limited to `delete`/duplicates, and is not always your fault.** Measured
+  2026-09-24 in a skill-authoring session: `edit`, a zero-diff `patch` (identical old/new string) and even
+  `create` of a name that exists nowhere all returned bare `SKILL_TARGET_MISMATCH`, while the target skill sat
+  untouched as a single plain dir in `~\.qoder\skills` (hash stable, no second copy under any root) and a
+  parallel session successfully created a skill minutes earlier. No app-log trace, no offset param, and
+  `session-env/<id>/` had no root override — **root cause unresolved**. Triage before rewriting content:
+  (1) no-op `patch` on the target, (2) `create` a throwaway name, (3) re-list every root for duplicates. If
+  both refusals persist with no duplicate, it is tool/session-side — retry in a fresh session rather than
+  falling back to Write/Bash on the skills dir.
+  **Follow-up same day**: the failed session never wrote anything (target file stayed byte-identical), and a
+  parallel session later migrated that skill to `D:\QoderToolkit\<name>` + junction. So a mid-flight migration by
+  another session is a plausible trigger — check `LinkType` on the entry before assuming content caused it, but
+  don't expect a confirmed root cause.
+- Skills stored under `D:\QoderToolkit` are visible **only to Qoder** (nothing junctions that folder into the
+  shared library). Say so rather than assuming other agents will see them.
+- Making the junction: `fsutil reparsepoint query` on a working one shows `0xa0000003`(装入点), so it must be a
+  **junction**, not a symlink. What works from this Bash (re-verified 2026-09-23, two junctions created):

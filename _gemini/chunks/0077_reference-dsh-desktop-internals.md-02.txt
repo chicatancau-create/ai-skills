@@ -1,0 +1,59 @@
+[[feedback-control-test-needs-restart]]、[[reference-gemini-desktop-internals]]（同类 asar 补丁经验）
+
+**2026-11-04 补：上面那套「钉到内核同版」有到期日，内核一升级就反过来炸。**
+本机 nightly 从 0.2.1-rc.5 自更新到 **0.2.2-rc.1** 后，profile 里钉着的 `dsh-* 0.2.1-rc.5` /
+`cordis 4.0.5` / `schemastery 3.18.5` / `cosmokit 1.8.6` 变成**降级**，崩溃日志里特征是
+**只有一个插件的版本号与同批不一致且 `state:"disabled"`**（本次是 `include:session`），
+随后 `startup failed: 1 required plugin did not activate` + 56 个插件排队。
+⇒ 判据顺序：读 crash 的插件清单找那个"异类版本"，别去读排队表。
+修法：从**新内核 asar** 里读它自带的 `node_modules/@deepseek-ai/*/package.json` 版本
+（本次 `cordis 4.1.0`、`schemastery 3.19.0`、`cosmokit 1.9.0`、`dsh-* = 0.2.2-rc.1`），
+照抄进 `pnpm-workspace.yaml` 的 overrides，再 `corepack pnpm@11.28.5 install --no-frozen-lockfile`，
+**装完回读 node_modules 逐个比版本**（本次结果：11 个包到位，`仍是旧版的包 = 无`）。
+`dsh-agent-presets` 仍是 super-agent 带的 `0.1.2-rc.1`，本次未致命但属同类隐患。
+
+**装桌面端更新前的三道闸**（本次实测有效）：① `pending` 里包的 SHA512 与 `update-info.json` 声明一致
+（「task inspection timed out」多半是 293 MB 大包下得慢，不是源坏——先看 `AppData\Local\@deepseek-aidsh-desktop-updater\pending`）；
+② `Get-AuthenticodeSignature` Valid 且**主体序列号与已装 exe 相同**（本机 `91330105MACPN4X08Y`，GlobalSign EV）；
+③ 应用确实空闲（ΔCPU≈0 + `~\.dsh` 近期零落盘）。三道过了才 `taskkill /F` + `installer.exe /S`（本次 25 秒，退出码 0）。
+更新配置在 `resources\app-update.yml`（provider generic、channel nightly）。
+装完用尽的 pending 包可直接删（本次删了 293,425,336 B）。
+
+**2026-11-04 晚：钉版漂移已改成自动对齐（启动守卫）。**
+`D:\DSH-Guard\dsh_kernel_sync.py`（纯标准库）+ `D:\DSH-Guard\start_dsh.bat`；
+桌面 `DeepSeek Harness（启动自动对齐）.lnk` 与开始菜单 `DeepSeek Harness.lnk` 都指向该 bat
+（原 TARGET 留档在 `~\.dsh\guard\原快捷方式目标.txt`，日志 `~\.dsh\guard\sync.log`，改盘前自动备份）。
+守卫从 **app.asar 的 `/dsh/node_modules/@deepseek-ai/*/package.json`** 读目标版本、
+从 `runtime/versions.json` 读 pnpm 版本，两层校验（YAML + `node_modules` 实装），
+rc：0=已对齐(0.1s) / 1=已自动修好 / 2=修失败(包装器 pause 报警)。
+**两个语义坑**：①「profile 里没装该包」是正常的（cordis 由内核提供），当故障会导致每次启动白跑安装；
+②只比 YAML 会漏「配置对但包旧」。
+**盲区**：electron-updater 装完直接重启主 exe，绕过包装器 ⇒ 升级后第一次自启仍可能崩一次。
+
+**2026-11-07：装/卸插件与 provider 的四个动作点（本轮实测）。**
+- **装插件**：`dsh plugin --profile desktop add <包名>`（转发 pnpm）。**包名一律不加引号**——`dsh.cmd` 会再包一层，
+  cmd 把引号烤进参数，pnpm 收到 `"@dsh-market/plugin"` 就写成垃圾别名（`plugin"` / `memsearch-dsh"`），
+  报 `ERR_PNPM_INVALID_DEPENDENCY_NAME` 并整条失败；**但已解析的包已经落盘**，留下「装了仨、坏俩」的混合态。
+  `add` 成功后**会自己把包追加进 `dsh.profile.bundles`**（不是只写 dependencies）；bundles 是加载顺序，
+  `@local/dsh-preset-switcher` 要留在最后。
+- **判包能不能装**：看 `package.json` 有没有 `dsh.bundle.patch`，再比 `@deepseek-ai/*` 依赖区间是否含本机内核 0.2.2-rc.1。
+  实测：`billion-context-dsh` 要求 `dsh-llm <0.2.1-0` ⇒ 不能装，`billion-context`（无宿主依赖）才对；
+  `dsh-memsearch` 无 `dsh` 字段且依赖旧版 `dsh-agent` ⇒ 用 `@zilliz/memsearch-dsh`。
+- **验证**：桌面 profile **不能** `dsh --profile desktop --dump-config`（`profile "desktop" is managed exclusively by the Electron application`），
+  `dsh plugin --profile desktop list` 可用；真正的证据是重启 GUI 后「插件 → 已安装插件」列表（可截图留证）。
+- **删 provider 插件**：它通常只是 `cordis.patch.yml` 里一段 `@deepseek-ai/dsh-llm-pi-ai` 的 `providers:`；
+  删整段 + 把 `agent-default-model` 和 `subagent-model-selection-settings.allowedModels` 指回官方。
+  **官方账号 provider id = `deepseek-account`**，模型 `deepseek-flash`（显示名 DeepSeek-V4.1-Flash）/ `deepseek-v4-pro`
+  （`deepseek-official` 只出现在 ACP 文档示例里，别拿它当 desktop 的 provider id）。
+  改前备份、改后用 SafeLoader（额外注册 `!!js` 构造器）解析、**关应用前后比 SHA256**确认退出不覆盖。
+
+**2026-11-07 晚：插件界面汉化 + 两个会炸启动的写法 + memsearch 依赖链。**
+- `@zilliz/memsearch-dsh` 这类插件**没有 i18n**，文案硬编码在 `node_modules/<包>/client.js`；
+  逐条换成中文后 `node --check`，重启 GUI 生效。汉化脚本已迁到 **`D:\DSH-Guard\_maintenance\localize_memsearch.py`**
+  （同目录 `_rollback\` 放了 5 个原件，`_backup\` 是它的备份目标），幂等，**插件升级覆盖后重跑一次即可**
+  （它同时把 `summarizeEnabled: false` 写回该插件自己的 bundle patch）。
+- **用户层 `cordis.patch.yml` 只写 `- id: xxx`（不带 `name`）会让应用起不来**：表现是 5 个进程在跑但
+  `MainWindowHandle=0`（无窗口），`crash-host.log` 里是 `host exited with 4294967295: 1 entry did not activate`，
+  被点名的却是 `experimental-inspector: globalThis.fetch is an accessor...`（**症状指向的插件不是元凶**）。
+  要改插件配置就改它自己的 `cordis.patch.yml`（带 id+name），别在用户层写裸 id。
+- memsearch 三层依赖：`uv tool install "memsearch[onnx]"`（本机落 `D:\uv\tools` + `D:\uv\bin`，PATH 已加）；

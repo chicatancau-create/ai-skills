@@ -1,0 +1,103 @@
+        f"resolved to {len(shape_ids)} top-level shapes; use one direct SVG element"
+    )
+
+
+def _shape_transform(shape: ET.Element) -> ET.Element | None:
+    """Return the direct DrawingML transform for one top-level shape."""
+    paths = {
+        f"{{{PML_NS}}}sp": f"{{{PML_NS}}}spPr/{{{DML_NS}}}xfrm",
+        f"{{{PML_NS}}}pic": f"{{{PML_NS}}}spPr/{{{DML_NS}}}xfrm",
+        f"{{{PML_NS}}}cxnSp": f"{{{PML_NS}}}spPr/{{{DML_NS}}}xfrm",
+        f"{{{PML_NS}}}graphicFrame": f"{{{PML_NS}}}xfrm",
+        f"{{{PML_NS}}}grpSp": f"{{{PML_NS}}}grpSpPr/{{{DML_NS}}}xfrm",
+    }
+    path = paths.get(shape.tag)
+    return shape.find(path) if path is not None else None
+
+
+def _int_attr(elem: ET.Element, name: str, context: str) -> int:
+    try:
+        return int(elem.attrib[name])
+    except (KeyError, ValueError) as exc:
+        raise TemplateStructureError(f"{context} has invalid {name!r}") from exc
+
+
+def _flatten_group_transform(
+    group: ET.Element,
+    carrier: ET.Element,
+    *,
+    context: str,
+) -> None:
+    """Map a single group's child transform into slide coordinates."""
+    group_xfrm = _shape_transform(group)
+    carrier_xfrm = _shape_transform(carrier)
+    if group_xfrm is None or carrier_xfrm is None:
+        raise TemplateStructureError(
+            f"{context} cannot be unwrapped because its DrawingML transform is missing"
+        )
+    if any(group_xfrm.get(name) is not None for name in ("rot", "flipH", "flipV")):
+        raise TemplateStructureError(
+            f"{context} wrapper carries an unsupported group rotation or flip"
+        )
+    group_off = group_xfrm.find(f"{{{DML_NS}}}off")
+    group_ext = group_xfrm.find(f"{{{DML_NS}}}ext")
+    child_off = group_xfrm.find(f"{{{DML_NS}}}chOff")
+    child_ext = group_xfrm.find(f"{{{DML_NS}}}chExt")
+    carrier_off = carrier_xfrm.find(f"{{{DML_NS}}}off")
+    carrier_ext = carrier_xfrm.find(f"{{{DML_NS}}}ext")
+    if any(value is None for value in (
+        group_off,
+        group_ext,
+        child_off,
+        child_ext,
+        carrier_off,
+        carrier_ext,
+    )):
+        raise TemplateStructureError(
+            f"{context} cannot be unwrapped because its group transform is incomplete"
+        )
+    child_width = _int_attr(child_ext, "cx", context)
+    child_height = _int_attr(child_ext, "cy", context)
+    if child_width <= 0 or child_height <= 0:
+        raise TemplateStructureError(f"{context} group child extent must be positive")
+    scale_x = _int_attr(group_ext, "cx", context) / child_width
+    scale_y = _int_attr(group_ext, "cy", context) / child_height
+    mapped_x = _int_attr(group_off, "x", context) + round(
+        (_int_attr(carrier_off, "x", context) - _int_attr(child_off, "x", context))
+        * scale_x
+    )
+    mapped_y = _int_attr(group_off, "y", context) + round(
+        (_int_attr(carrier_off, "y", context) - _int_attr(child_off, "y", context))
+        * scale_y
+    )
+    carrier_off.set("x", str(mapped_x))
+    carrier_off.set("y", str(mapped_y))
+    carrier_ext.set(
+        "cx",
+        str(round(_int_attr(carrier_ext, "cx", context) * scale_x)),
+    )
+    carrier_ext.set(
+        "cy",
+        str(round(_int_attr(carrier_ext, "cy", context) * scale_y)),
+    )
+
+
+def _unwrap_placeholder_carrier(
+    state: _TemplateRuntimeSlide,
+    item: TemplateElementSpec,
+) -> ET.Element:
+    """Remove one SVG-only slot wrapper and return its top-level carrier."""
+    wrapper = _template_shape_for_item(state, item)
+    if wrapper is None:
+        raise TemplateStructureError(
+            f"{state.spec.svg_path.name}: placeholder {item.element_id!r} cannot "
+            "be a slide background"
+        )
+    if item.tag != "g" or wrapper.tag != f"{{{PML_NS}}}grpSp":
+        return wrapper
+    carriers = [
+        child for child in wrapper if child.tag in _TOP_LEVEL_SHAPE_TAGS
+    ]
+    if len(carriers) != 1:
+        raise TemplateStructureError(
+            f"{state.spec.svg_path.name}: placeholder group {item.element_id!r} "

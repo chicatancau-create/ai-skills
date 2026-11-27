@@ -1,0 +1,117 @@
+    element: ET.Element,
+    width: float,
+    height: float,
+) -> bool:
+    if _local_name(element.tag) != "rect":
+        return False
+    try:
+        values = tuple(
+            float(element.get(name, default))
+            for name, default in (
+                ("x", "0"),
+                ("y", "0"),
+                ("width", "0"),
+                ("height", "0"),
+            )
+        )
+    except ValueError:
+        return False
+    fill = _paint_value(element, "fill")
+    return (
+        math.isclose(values[0], 0, abs_tol=0.01)
+        and math.isclose(values[1], 0, abs_tol=0.01)
+        and math.isclose(values[2], width, abs_tol=0.01)
+        and math.isclose(values[3], height, abs_tol=0.01)
+        and fill not in {None, "none", "transparent"}
+    )
+
+
+def _non_visual_nodes(roots: Iterable[ET.Element]) -> tuple[ET.Element | None, list[ET.Element]]:
+    definitions: list[ET.Element] = []
+    styles: list[ET.Element] = []
+    for root in roots:
+        for child in root:
+            tag = _local_name(child.tag)
+            if tag == "defs":
+                definitions.extend(copy.deepcopy(list(child)))
+            elif tag == "style":
+                styles.append(copy.deepcopy(child))
+    defs_node = ET.Element(f"{{{SVG_NS}}}defs") if definitions else None
+    if defs_node is not None:
+        for definition in definitions:
+            defs_node.append(definition)
+    return defs_node, styles
+
+
+def _slide_placeholder_map(slide: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        f"slide:{item['shapeId']}": item
+        for item in slide.get("placeholders", [])
+        if isinstance(item, dict) and item.get("shapeId") is not None
+    }
+
+
+def _matching_slide_placeholder(
+    slide: dict[str, Any],
+    layout_placeholder: dict[str, Any],
+) -> dict[str, Any] | None:
+    matches = [
+        item
+        for item in slide.get("placeholders", [])
+        if isinstance(item, dict) and _placeholder_match(item, layout_placeholder)
+    ]
+    if len(matches) > 1:
+        raise MirrorMaterializationError(
+            f"Slide {slide.get('index')} ambiguously matches Layout placeholder "
+            f"{layout_placeholder.get('shapeId')}"
+        )
+    return matches[0] if matches else None
+
+
+def _compose_template(
+    *,
+    native: dict[str, Any],
+    master: dict[str, Any],
+    layout: dict[str, Any],
+    master_root: ET.Element,
+    layout_root: ET.Element,
+    slide: dict[str, Any] | None,
+    slide_root: ET.Element | None,
+    slot_plans: list[SlotPlan],
+) -> ET.Element:
+    width = float(native["slideSize"]["width_px"])
+    height = float(native["slideSize"]["height_px"])
+    root = ET.Element(
+        f"{{{SVG_NS}}}svg",
+        {
+            "version": "1.1",
+            "width": format_coordinate(width),
+            "height": format_coordinate(height),
+            "viewBox": (
+                f"0 0 {format_coordinate(width)} {format_coordinate(height)}"
+            ),
+            "data-pptx-master": str(master["key"]),
+            "data-pptx-master-name": str(master["name"]),
+            "data-pptx-layout": str(layout["key"]),
+            "data-pptx-layout-name": str(layout["name"]),
+            "data-pptx-show-master-shapes": str(
+                _require_boolean(
+                    layout.get("showMasterShapes"),
+                    context=f"Layout {layout.get('key')!r} showMasterShapes",
+                )
+            ).lower(),
+            "data-pptx-show-inherited-shapes": str(
+                _require_boolean(
+                    slide.get("showInheritedShapes"),
+                    context=f"Slide {slide.get('index')} showInheritedShapes",
+                )
+                if slide
+                else True
+            ).lower(),
+        },
+    )
+
+    # Each layer/slide atom receives its own source inheritance below. A Slide
+    # root's compacted font must not become inheritance for Master atoms.
+    typography_roots = [master_root]
+    for name in _ROOT_TYPOGRAPHY_ATTRIBUTES:

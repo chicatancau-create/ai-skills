@@ -1,0 +1,126 @@
+    hex_ = PRST_COLORS.get(name)
+    if hex_ is None:
+        raise ValueError(f"Invalid DrawingML preset color value: {name!r}")
+    return hex_
+
+
+def _hsl_color_hex(color_elem: ET.Element) -> str:
+    """Resolve one closed DrawingML HSL base color."""
+    children = list(color_elem)
+    if (
+        color_elem.tag != f"{{{NS['a']}}}hslClr"
+        or set(color_elem.attrib) != {"hue", "sat", "lum"}
+        or (color_elem.text or "").strip()
+        or any((child.tail or "").strip() for child in children)
+    ):
+        raise ValueError("Invalid DrawingML HSL color structure")
+    hue = _bounded_integer_attribute(
+        color_elem,
+        "hue",
+        minimum=0,
+        maximum=21_599_999,
+        label="HSL color",
+    )
+    saturation = _bounded_integer_attribute(
+        color_elem,
+        "sat",
+        minimum=0,
+        maximum=100000,
+        label="HSL color",
+    )
+    luminance = _bounded_integer_attribute(
+        color_elem,
+        "lum",
+        minimum=0,
+        maximum=100000,
+        label="HSL color",
+    )
+    return _hsl_to_hex(
+        hue / 21_600_000.0,
+        saturation / 100000.0,
+        luminance / 100000.0,
+    )
+
+
+def _scrgb_color_hex(color_elem: ET.Element) -> str:
+    """Resolve one closed linear-light DrawingML scRGB base color."""
+    children = list(color_elem)
+    if (
+        color_elem.tag != f"{{{NS['a']}}}scrgbClr"
+        or set(color_elem.attrib) != {"r", "g", "b"}
+        or (color_elem.text or "").strip()
+        or any((child.tail or "").strip() for child in children)
+    ):
+        raise ValueError("Invalid DrawingML scRGB color structure")
+    channels = [
+        _bounded_integer_attribute(
+            color_elem,
+            attr,
+            minimum=0,
+            maximum=100000,
+            label="scRGB color",
+        )
+        / 100000.0
+        for attr in ("r", "g", "b")
+    ]
+    return _linear_rgb01_to_hex(*channels)
+
+
+def _bounded_integer_attribute(
+    elem: ET.Element,
+    attr: str,
+    *,
+    minimum: int,
+    maximum: int,
+    label: str,
+) -> int:
+    """Parse one required bounded DrawingML integer attribute."""
+    raw = elem.attrib[attr]
+    token = raw.strip()
+    if _OOXML_INTEGER_RE.fullmatch(token) is None:
+        raise ValueError(f"Invalid DrawingML {label} {attr}: {raw!r}")
+    value = int(token)
+    if not minimum <= value <= maximum:
+        raise ValueError(f"Invalid DrawingML {label} {attr}: {raw!r}")
+    return value
+
+
+def _parse_color_modifier(child: ET.Element) -> tuple[str, int | None]:
+    """Parse one modifier from the closed DrawingML color subset."""
+    tag = child.tag.split("}", 1)[-1]
+    if child.tag != f"{{{NS['a']}}}{tag}":
+        raise ValueError(f"invalid-color-modifier-namespace:{tag}")
+    if tag in _COLOR_MODIFIER_FLAG_NAMES:
+        if child.attrib or list(child) or (child.text or "").strip():
+            raise ValueError(f"invalid-color-modifier-structure:{tag}")
+        return tag, None
+
+    bounds = _COLOR_MODIFIER_PERCENT_RANGES.get(tag)
+    if tag == "hueOff":
+        bounds = (_OOXML_INT_MIN, _OOXML_INT_MAX)
+    elif bounds is None:
+        raise ValueError(f"unsupported-color-modifier:{tag}")
+    if (
+        set(child.attrib) != {"val"}
+        or list(child)
+        or (child.text or "").strip()
+    ):
+        raise ValueError(f"invalid-color-modifier-structure:{tag}")
+    try:
+        value = _bounded_integer_attribute(
+            child,
+            "val",
+            minimum=bounds[0],
+            maximum=bounds[1],
+            label=f"{tag} color modifier",
+        )
+    except ValueError:
+        raise ValueError(f"invalid-{tag}-val:{child.attrib['val']!r}") from None
+    return tag, value
+
+
+def _apply_modifiers(hex_color: str, color_elem: ET.Element) -> tuple[str, float]:
+    """Apply the registered DrawingML color modifiers in document order."""
+    r, g, b = _hex_to_rgb01(hex_color)
+    # Convert to HSL for luminance/saturation ops; convert back when emitting.
+    h, lum, sat = colorsys.rgb_to_hls(r, g, b)

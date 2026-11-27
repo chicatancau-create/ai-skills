@@ -1,0 +1,123 @@
+    if style_family is not None:
+        if not is_canonical_presentation_value(
+            style_family,
+            property_name="font-family",
+        ):
+            return
+        root.set("font-family", style_family)
+        retained = [
+            item for item in declarations
+            if item.name != "font-family"
+        ]
+        _write_style(root, retained)
+        stats.root_style_declarations_normalized += 1
+        return
+    if root.get("font-family") is not None:
+        return
+
+    parents = {
+        child: parent
+        for parent in root.iter()
+        for child in parent
+    }
+
+    # Include definition text conservatively. A local <use> can make it
+    # visible, and promoting a font while ignoring that text could change its
+    # inherited rendering. Unused definitions are pruned by import projection;
+    # legacy migration prefers no promotion over a visual change.
+    text_elements = [
+        element
+        for element in root.iter()
+        if _local_name(element.tag) == "text"
+        and "".join(element.itertext()).strip()
+    ]
+    if not text_elements:
+        return
+    cache: dict[tuple[int, str], str | None] = {}
+    families = [
+        _effective_value(
+            element,
+            "font-family",
+            parents,
+            cache,
+        )
+        for element in text_elements
+    ]
+    if any(family is None or not family.strip() for family in families):
+        return
+    counts = Counter(str(family) for family in families)
+    common = min(
+        counts,
+        key=lambda family: (-counts[family], len(family), family),
+    )
+    root.set("font-family", common)
+    stats.root_font_defaults += 1
+
+
+def _normalize_container_inherited_styles(
+    root: ET.Element,
+    stats: StyleCompactionStats,
+) -> None:
+    """Spell inherited root/group defaults as presentation attributes."""
+    for element in root.iter():
+        if _local_name(element.tag) not in {"svg", "g"}:
+            continue
+        declarations = _style_declarations(element.get("style"))
+        if declarations is None:
+            continue
+        retained: list[_StyleDeclaration] = []
+        for declaration in declarations:
+            if (
+                declaration.name not in INHERITABLE_ATTRIBUTES
+                or not is_canonical_presentation_value(
+                    declaration.value,
+                    property_name=declaration.name,
+                )
+            ):
+                retained.append(declaration)
+                continue
+            element.set(declaration.name, declaration.value)
+            stats.container_style_declarations_normalized += 1
+        _write_style(element, retained)
+
+
+def _promote_common_group_defaults(
+    element: ET.Element,
+    stats: StyleCompactionStats,
+) -> None:
+    """Factor proven direct-child repetition into an existing SVG group."""
+    if (
+        _local_name(element.tag) in _DEFINITION_SUBTREES
+        or _is_preset_atom(element)
+    ):
+        return
+    for child in element:
+        _promote_common_group_defaults(child, stats)
+    if _local_name(element.tag) != "g":
+        return
+
+    children = [
+        child for child in element
+        if isinstance(child.tag, str)
+        and _local_name(child.tag) not in {
+            "desc",
+            "metadata",
+            "title",
+        }
+    ]
+    if len(children) < 2:
+        return
+    # Helper-owned preset atoms and icon references keep their paint local;
+    # both contracts reject paint that only arrives from an ancestor group.
+    if any(_keeps_local_paint(child) for child in children):
+        return
+
+    element_styles = _style_declarations(element.get("style"))
+    if element_styles is None:
+        return
+    element_style_values = _style_values(element_styles)
+    for name in INHERITABLE_ATTRIBUTES:
+        if element.get(name) is not None or name in element_style_values:
+            continue
+        declarations_by_child: list[list[_StyleDeclaration]] = []
+        values: list[str] = []

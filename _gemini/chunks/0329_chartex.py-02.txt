@@ -1,0 +1,82 @@
+    return title or None
+
+
+def _chart_ex_series_name(
+    payload: dict[str, Any],
+    chart_data: dict[str, Any],
+) -> str:
+    return str(
+        _chart_ex_title_text(payload)
+        or payload.get("name")
+        or chart_data["type"].replace("_", " ").title()
+    )
+
+
+def _chart_ex_series_xml(
+    payload: dict[str, Any],
+    chart_data: dict[str, Any],
+) -> str:
+    chart_type = chart_data["type"]
+    series_name = _xml_escape(_chart_ex_series_name(payload, chart_data))
+    if chart_type in {"sunburst", "treemap"}:
+        layout_id = chart_type
+        label_pos = "ctr" if chart_type == "sunburst" else "inEnd"
+        layout_pr = ""
+        if chart_type == "treemap":
+            parent_labels = chart_data.get("parent_labels", "overlapping")
+            layout_pr = (
+                "<cx:layoutPr>"
+                f'<cx:parentLabelLayout val="{parent_labels}"/>'
+                "</cx:layoutPr>"
+            )
+        return (
+            f'<cx:series layoutId="{layout_id}" uniqueId="{{00000000-0000-4000-8000-000000000001}}">'
+            f'<cx:tx><cx:txData><cx:f>Sheet1!$A$1</cx:f><cx:v>{series_name}</cx:v></cx:txData></cx:tx>'
+            f'<cx:dataLabels pos="{label_pos}"><cx:visibility seriesName="0" categoryName="1" value="1"/></cx:dataLabels>'
+            '<cx:dataId val="0"/>'
+            f"{layout_pr}"
+            "</cx:series>"
+        )
+    if chart_type == "histogram":
+        return (
+            '<cx:series layoutId="clusteredColumn" uniqueId="{00000000-0000-4000-8000-000000000001}">'
+            f'<cx:tx><cx:txData><cx:f>Sheet1!$A$1</cx:f><cx:v>{series_name}</cx:v></cx:txData></cx:tx>'
+            '<cx:dataId val="0"/><cx:layoutPr><cx:binning intervalClosed="r"/></cx:layoutPr>'
+            "</cx:series>"
+        )
+    if chart_type == "pareto":
+        return (
+            '<cx:series layoutId="clusteredColumn" uniqueId="{00000000-0000-4000-8000-000000000001}">'
+            f'<cx:tx><cx:txData><cx:f>Sheet1!$B$1</cx:f><cx:v>{series_name}</cx:v></cx:txData></cx:tx>'
+            '<cx:dataId val="0"/><cx:layoutPr><cx:aggregation/></cx:layoutPr>'
+            '<cx:axisId val="1"/></cx:series>'
+            '<cx:series layoutId="paretoLine" ownerIdx="0" uniqueId="{00000000-0000-4000-8000-000000000002}">'
+            '<cx:axisId val="2"/></cx:series>'
+        )
+    if chart_type == "waterfall":
+        subtotals_xml = ""
+        if chart_data.get("subtotals"):
+            subtotal_items = "".join(f'<cx:idx val="{idx}"/>' for idx in chart_data["subtotals"])
+            subtotals_xml = f"<cx:subtotals>{subtotal_items}</cx:subtotals>"
+        return (
+            '<cx:series layoutId="waterfall" uniqueId="{00000000-0000-4000-8000-000000000001}">'
+            f'<cx:tx><cx:txData><cx:f>Sheet1!$B$1</cx:f><cx:v>{series_name}</cx:v></cx:txData></cx:tx>'
+            '<cx:dataLabels pos="outEnd"><cx:visibility seriesName="0" categoryName="0" value="1"/></cx:dataLabels>'
+            f'<cx:dataId val="0"/><cx:layoutPr>{subtotals_xml}</cx:layoutPr>'
+            "</cx:series>"
+        )
+    if chart_type == "funnel":
+        return (
+            '<cx:series layoutId="funnel" uniqueId="{00000000-0000-4000-8000-000000000001}">'
+            f'<cx:tx><cx:txData><cx:f>Sheet1!$B$1</cx:f><cx:v>{series_name}</cx:v></cx:txData></cx:tx>'
+            '<cx:dataLabels><cx:visibility seriesName="0" categoryName="0" value="1"/></cx:dataLabels>'
+            '<cx:dataId val="0"/></cx:series>'
+        )
+    if chart_type == "box_whisker":
+        parts: list[str] = []
+        for idx, item in enumerate(chart_data["series"]):
+            value_col = _excel_col(idx * 2 + 2)
+            parts.append(
+                f'<cx:series layoutId="boxWhisker" uniqueId="{{00000000-0000-4000-8000-{idx + 1:012d}}}">'
+                f'<cx:tx><cx:txData><cx:f>Sheet1!${value_col}$1</cx:f><cx:v>{_xml_escape(str(item["name"]))}</cx:v></cx:txData></cx:tx>'
+                f'<cx:dataId val="{idx}"/><cx:layoutPr>'

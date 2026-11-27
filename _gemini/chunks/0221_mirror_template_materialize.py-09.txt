@@ -1,0 +1,89 @@
+    for name, document in documents.items():
+        root = _parse_svg(document.authoring_path)
+        direct_counts[name] = _source_ref_counts(root)
+        referenced_icons.update(_imported_icon_refs(root))
+
+    unknown_icons = sorted(referenced_icons - set(vector_assets))
+    if unknown_icons:
+        raise MirrorMaterializationError(
+            "Authoring SVG references missing imported vector asset(s): "
+            + ", ".join(unknown_icons)
+        )
+
+    asset_counts_by_document: dict[str, dict[str, int]] = {
+        name: {} for name in documents
+    }
+    for icon in sorted(referenced_icons):
+        record = vector_assets[icon]
+        root = _parse_svg(record.asset_path)
+        counts = _source_ref_counts(root)
+        if set(counts) != set(record.source_refs):
+            raise MirrorMaterializationError(
+                f"Vector asset {icon!r} source-ref inventory is stale; expected "
+                f"{sorted(record.source_refs)}, found {sorted(counts)}"
+            )
+        duplicate_refs = sorted(ref for ref, count in counts.items() if count != 1)
+        if duplicate_refs:
+            raise MirrorMaterializationError(
+                f"Vector asset {icon!r} contains duplicate source refs: "
+                + ", ".join(duplicate_refs)
+            )
+        origin_counts = asset_counts_by_document[record.origin_document]
+        for source_ref, count in counts.items():
+            origin_counts[source_ref] = origin_counts.get(source_ref, 0) + count
+
+    for name, document in documents.items():
+        combined = dict(direct_counts[name])
+        for source_ref, count in asset_counts_by_document[name].items():
+            combined[source_ref] = combined.get(source_ref, 0) + count
+        expected = set(document.source_refs)
+        actual = set(combined)
+        duplicates = sorted(ref for ref, count in combined.items() if count != 1)
+        if actual != expected or duplicates:
+            raise MirrorMaterializationError(
+                f"{name} source-ref closure differs from its manifest; missing="
+                f"{sorted(expected - actual)}, extra={sorted(actual - expected)}, "
+                f"duplicates={duplicates}"
+            )
+    return referenced_icons
+
+
+def _load_native_graph(workspace: Path) -> dict[str, Any]:
+    native_path = native_structure_path(workspace)
+    if not native_path.is_file() or not (workspace / "sources" / "source.pptx").is_file():
+        raise MirrorMaterializationError(
+            "mirror publishes only pptx_template_import.py workspaces; "
+            "an SVG workspace is consumed as an exact root by apply_template.py "
+            "(requires analysis/native_structure.json and sources/source.pptx)"
+        )
+    native = _load_json(native_path, context="native structure")
+    if native.get("schema") != NATIVE_STRUCTURE_SCHEMA:
+        raise MirrorMaterializationError(
+            f"Unsupported native structure schema: {native.get('schema')!r}"
+        )
+    source = native.get("source")
+    if not isinstance(source, dict):
+        raise MirrorMaterializationError("native_structure.json source must be an object")
+    template_name = _require_string(
+        source.get("templateFile"),
+        context="native_structure.json source.templateFile",
+    )
+    template_path = _resolve_inside(
+        workspace,
+        template_name,
+        context="native source template",
+    )
+    if not template_path.is_file():
+        raise MirrorMaterializationError(f"Native source template is missing: {template_path}")
+    expected_sha = _require_string(
+        source.get("sha256"),
+        context="native_structure.json source.sha256",
+    )
+    actual_sha = _sha256_file(template_path)
+    if actual_sha != expected_sha:
+        raise MirrorMaterializationError(
+            f"Native source template changed; expected {expected_sha}, found {actual_sha}"
+        )
+
+    slide_size = native.get("slideSize")
+    if not isinstance(slide_size, dict):

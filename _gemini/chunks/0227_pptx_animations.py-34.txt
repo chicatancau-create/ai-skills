@@ -1,0 +1,108 @@
+                except ET.ParseError as exc:
+                    errors.append(f'{rels_name}: invalid XML: {exc}')
+                    continue
+                by_id = {
+                    rel.get('Id'): rel
+                    for rel in relationships.findall(
+                        _qn(_PACKAGE_REL_NS, 'Relationship')
+                    )
+                }
+                for relationship_id in sorted(sound_ids):
+                    relationship = by_id.get(relationship_id)
+                    if relationship is None:
+                        errors.append(
+                            f'{name}: animation sound relationship '
+                            f'{relationship_id} is missing'
+                        )
+                        continue
+                    if relationship.get('Type') != _AUDIO_REL_TYPE:
+                        errors.append(
+                            f'{name}: animation sound relationship '
+                            f'{relationship_id} is not an audio relationship'
+                        )
+                        continue
+                    target = relationship.get('Target')
+                    if not target:
+                        errors.append(
+                            f'{name}: animation sound relationship '
+                            f'{relationship_id} has no target'
+                        )
+                        continue
+                    target_part = posixpath.normpath(
+                        posixpath.join(posixpath.dirname(name), target)
+                    )
+                    if target_part not in package.namelist():
+                        errors.append(
+                            f'{name}: animation sound target is missing: '
+                            f'{target_part}'
+                        )
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise ValueError(f'unable to read PPTX package {path}: {exc}') from exc
+    if errors:
+        raise ValueError('; '.join(errors))
+
+
+def object_animation_fingerprint(slide_xml: str | bytes) -> str | None:
+    """Return a prefix/whitespace-independent fingerprint of object animation.
+
+    Narration audio is intentionally excluded.  Direct-PPTX routes use this
+    fingerprint before and after their allowed edits to prove that they did not
+    take ownership of or rewrite existing object animations.
+    """
+    data = slide_xml.encode('utf-8') if isinstance(slide_xml, str) else slide_xml
+    try:
+        root = ET.fromstring(data)
+    except ET.ParseError as exc:
+        raise ValueError(f'invalid slide XML: {exc}') from exc
+    root = _select_supported_timing_branch(root)
+    timings = [
+        child for child in list(root)
+        if child.tag == _qn(PML_NS, 'timing')
+    ]
+    if len(timings) > 1:
+        raise ValueError(
+            f'slide has {len(timings)} root p:timing elements; expected at most 1'
+        )
+    if not timings:
+        return None
+    timing = timings[0]
+    behavior_tags = {
+        _qn(PML_NS, name)
+        for name in (
+            'anim',
+            'animClr',
+            'animEffect',
+            'animMotion',
+            'animRot',
+            'animScale',
+            'cmd',
+            'set',
+        )
+    }
+    has_object_animation = any(
+        element.tag in behavior_tags
+        or (
+            element.tag == _qn(PML_NS, 'cTn')
+            and element.get('presetClass') is not None
+        )
+        for element in timing.iter()
+    )
+    if not has_object_animation:
+        return None
+
+    def without_audio(element: ET.Element) -> tuple[object, ...] | None:
+        if element.tag == _qn(PML_NS, 'audio'):
+            return None
+        children = tuple(
+            value
+            for child in list(element)
+            if (value := without_audio(child)) is not None
+        )
+        return (
+            element.tag,
+            tuple(sorted(element.attrib.items())),
+            (element.text or '').strip(),
+            children,
+        )
+
+    canonical = without_audio(timing)

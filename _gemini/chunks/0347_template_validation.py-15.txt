@@ -1,0 +1,93 @@
+                        errors.append(
+                            f"Master {master_part} has no pre-promotion p:bg payload "
+                            "for exact read-back"
+                        )
+                layout_id_entries = master_root.findall(
+                    f"{{{PML_NS}}}sldLayoutIdLst/"
+                    f"{{{PML_NS}}}sldLayoutId"
+                )
+                layout_ids = _validate_registered_part_roster(
+                    reader,
+                    master_part,
+                    SLIDE_LAYOUT_REL_TYPE,
+                    layout_id_entries,
+                    layout_parts,
+                    f"Master {master_part} p:sldLayoutIdLst",
+                )
+                for layout_id in sorted(layout_ids):
+                    previous_owner = layout_id_owners.setdefault(
+                        layout_id,
+                        master_part,
+                    )
+                    if previous_owner != master_part:
+                        errors.append(
+                            f"Slide Layout numeric id {layout_id} appears in both "
+                            f"{previous_owner} and {master_part}"
+                        )
+
+            expected_slide_parts = {
+                f"ppt/slides/slide{spec.slide_num}.xml"
+                for spec in specs
+            }
+            expected_layout_parts = set(layout_parts_by_key.values())
+            _validate_physical_part_roster(
+                reader,
+                expected_slide_parts,
+                "ppt/slides",
+                "slide",
+                "Slide",
+            )
+            _validate_physical_part_roster(
+                reader,
+                expected_layout_parts,
+                "ppt/slideLayouts",
+                "slideLayout",
+                "Layout",
+            )
+            _validate_physical_part_roster(
+                reader,
+                used_master_parts,
+                "ppt/slideMasters",
+                "slideMaster",
+                "Master",
+            )
+            _validate_content_type_part_roster(
+                overrides,
+                expected_slide_parts,
+                "ppt/slides",
+                "slide",
+                SLIDE_CONTENT_TYPE,
+                errors,
+                "Slide",
+            )
+            _validate_content_type_part_roster(
+                overrides,
+                expected_layout_parts,
+                "ppt/slideLayouts",
+                "slideLayout",
+                SLIDE_LAYOUT_CONTENT_TYPE,
+                errors,
+                "Layout",
+            )
+            _validate_content_type_part_roster(
+                overrides,
+                used_master_parts,
+                "ppt/slideMasters",
+                "slideMaster",
+                SLIDE_MASTER_CONTENT_TYPE,
+                errors,
+                "Master",
+            )
+            _validate_unique_creation_ids(
+                reader,
+                expected_slide_parts | expected_layout_parts | used_master_parts,
+            )
+            _validate_presentation_slide_registration(reader, expected_slide_parts)
+            _validate_presentation_master_registration(reader, used_master_parts)
+            _validate_master_theme_ownership(reader, used_master_parts)
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise ValueError(f"cannot read template PPTX package {path}: {exc}") from exc
+
+    if errors:
+        details = "\n".join(f"  - {error}" for error in errors)
+        raise ValueError(f"structured package read-back failed:\n{details}")

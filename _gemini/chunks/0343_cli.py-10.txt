@@ -1,0 +1,131 @@
+    'baseline',
+    'generated',
+    'preserve',
+    'template',
+})
+_RELEASE_PPTX_STRUCTURE_MODES = frozenset({'flat', 'structured'})
+_CSS_GENERIC_FONT_FAMILIES = frozenset({
+    'cursive',
+    'emoji',
+    'fangsong',
+    'fantasy',
+    'math',
+    'monospace',
+    'sans-serif',
+    'serif',
+    'system-ui',
+    'ui-monospace',
+    'ui-rounded',
+    'ui-sans-serif',
+    'ui-serif',
+})
+
+
+class PptxPostflightValidationError(RuntimeError):
+    """Reject a generated PPTX that fails package postflight validation."""
+
+
+def _load_diagnostic_import_source(
+    project_path: Path,
+) -> tuple[
+    ThemeColorSpec | None,
+    ThemeFontSpec | None,
+    bytes | None,
+    EmbeddedFontBundle | None,
+]:
+    """Load source-document evidence emitted for diagnostic round-trip."""
+    report_path = conversion_report_path(project_path)
+    if not report_path.is_file():
+        return None, None, None, None
+    try:
+        report = json.loads(report_path.read_text(encoding='utf-8'))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ThemeColorError(
+            f'Cannot read diagnostic import theme from {report_path}: {exc}'
+        ) from exc
+    if not isinstance(report, dict):
+        raise ThemeColorError(
+            f'Diagnostic import report must be a JSON object: {report_path}'
+        )
+    source_document = report.get('sourceDocument')
+    if not isinstance(source_document, dict):
+        return None, None, None, None
+    theme = source_document.get('theme')
+    if not isinstance(theme, dict):
+        color_spec = None
+        font_spec = None
+        theme_xml = None
+    else:
+        color_spec = _diagnostic_theme_color_spec(theme.get('colors'))
+        font_spec = _diagnostic_theme_font_spec(theme.get('fonts'))
+        theme_xml = _diagnostic_theme_xml(theme.get('ooxml'))
+    embedded_fonts = load_embedded_font_bundle(
+        project_path,
+        source_document.get('embeddedFonts'),
+    )
+    return color_spec, font_spec, theme_xml, embedded_fonts
+
+
+def _diagnostic_theme_color_spec(value: object) -> ThemeColorSpec | None:
+    """Build an exact source color scheme without semantic role promotion."""
+    if not isinstance(value, dict):
+        return None
+    required_slots = {
+        'dk1', 'lt1', 'dk2', 'lt2',
+        'accent1', 'accent2', 'accent3',
+        'accent4', 'accent5', 'accent6',
+        'hlink', 'folHlink',
+    }
+    slots: dict[str, str] = {}
+    for slot, raw_color in value.items():
+        if slot not in required_slots or not isinstance(raw_color, str):
+            continue
+        color = raw_color.strip().lstrip('#').upper()
+        if re.fullmatch(r'[0-9A-F]{6}', color):
+            slots[slot] = color
+    if not required_slots.issubset(slots):
+        return None
+    return ThemeColorSpec(
+        slots=slots,
+        roles={},
+        role_slots={},
+    )
+
+
+def _diagnostic_theme_font_spec(value: object) -> ThemeFontSpec | None:
+    """Build exact major/minor theme faces from importer evidence."""
+    if not isinstance(value, dict):
+        return None
+
+    def face(prefix: str) -> ThemeFontFace | None:
+        latin = value.get(f'{prefix}Latin')
+        east_asian = (
+            value.get(f'{prefix}EastAsia')
+            or value.get(f'{prefix}ScriptHans')
+            or latin
+        )
+        complex_script = value.get(f'{prefix}ComplexScript') or latin
+        if not all(
+            isinstance(item, str) and item.strip()
+            for item in (latin, east_asian, complex_script)
+        ):
+            return None
+        return ThemeFontFace(
+            latin=latin.strip(),
+            ea=east_asian.strip(),
+            cs=complex_script.strip(),
+        )
+
+    major = face('major')
+    minor = face('minor')
+    if major is None or minor is None:
+        return None
+    return ThemeFontSpec(
+        major=major,
+        minor=minor,
+        major_family=major.ea,
+        minor_family=minor.ea,
+    )
+
+
+def _diagnostic_theme_xml(value: object) -> bytes | None:

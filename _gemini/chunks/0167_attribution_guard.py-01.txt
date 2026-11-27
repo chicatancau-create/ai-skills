@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""
+PPT Master - Skill Attribution Guard
+
+Fail closed when the distributed Skill attribution bundle or its execution
+gates are missing or modified.
+
+Usage:
+    python3 "<absolute-skill-root>/scripts/attribution_guard.py"
+
+Examples:
+    python3 "/opt/agent-skills/ppt-master/scripts/attribution_guard.py"
+
+Dependencies:
+    None (only uses standard library)
+"""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import hashlib
+import re
+import sys
+from pathlib import Path
+
+
+_ERROR_MESSAGE = (
+    "PPT Master skill integrity check failed. Please use the complete official "
+    "distribution without removing its attribution files."
+)
+_SKILL_DIR = Path(__file__).resolve().parent.parent
+_EXACT_METADATA_VALUES = {
+    "copyright": '"Copyright (c) 2025-2026 Hugo He"',
+    "license": '"MIT"',
+    "official_repository": '"https://github.com/hugohe3/ppt-master"',
+}
+_REQUIRED_METADATA_FIELDS = ("sponsors",)
+_REQUIRED_ATTRIBUTION_FILES = ("LICENSE", "SPONSORS.md", "SPONSORS_CN.md")
+_LICENSE_DIGEST = "80cefc234c1ec12a8cece4344f16300c634fa03df7891686fcf979e3828f0921"
+_REQUIRED_GATE_FILES = (
+    "scripts/console_encoding.py",
+    "scripts/project_manager.py",
+    "scripts/project_management/cli.py",
+    "scripts/svg_quality_checker.py",
+    "scripts/svg_quality/cli.py",
+    "scripts/svg_to_pptx.py",
+    "scripts/svg_to_pptx/pptx_package/cli.py",
+    "scripts/register_template.py",
+    "scripts/template_preview_pptx.py",
+)
+_SKILL_GATE_MARKER = 'python3 "${SKILL_DIR}/scripts/attribution_guard.py"'
+_SECONDARY_GATE_FILE = "scripts/console_encoding.py"
+_SECONDARY_GATE_NAME = "_require_official_distribution_identity"
+
+
+def _normalized_bytes(path: Path) -> bytes:
+    """Return UTF-8 text bytes with platform line endings normalized."""
+    data = path.read_bytes()
+    if data.startswith(b"\xef\xbb\xbf"):
+        raise ValueError("UTF-8 BOM is not allowed")
+    text = data.decode("utf-8")
+    return text.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
+
+
+def _frontmatter(skill_text: str) -> str:
+    """Return the opening YAML frontmatter or reject malformed input."""
+    if not skill_text.startswith("---\n"):
+        raise ValueError("missing frontmatter")
+    end = skill_text.find("\n---\n", 4)
+    if end < 0:
+        raise ValueError("unterminated frontmatter")
+    return skill_text[4:end]
+
+
+def _metadata_is_valid() -> bool:
+    """Require fixed identity values and each structural attribution field."""
+    skill_text = _normalized_bytes(_SKILL_DIR / "SKILL.md").decode("utf-8")
+    metadata = _frontmatter(skill_text)
+    return (
+        all(
+            len(re.findall(
+                rf"(?m)^  {re.escape(field)}\s*:\s*{re.escape(value)}\s*$",
+                metadata,
+            )) == 1
+            for field, value in _EXACT_METADATA_VALUES.items()
+        )
+        and all(
+            len(re.findall(rf"(?m)^  {re.escape(field)}\s*:", metadata)) == 1
+            for field in _REQUIRED_METADATA_FIELDS
+        )
+        and skill_text.count(_SKILL_GATE_MARKER) == 1
+    )
+
+
+def _protected_files_are_valid() -> bool:
+    """Require all attribution paths and the exact MIT license text."""
+    for relative_path in _REQUIRED_ATTRIBUTION_FILES:
+        path = _SKILL_DIR / relative_path
+        if not path.is_file():
+            return False
+    license_digest = hashlib.sha256(_normalized_bytes(_SKILL_DIR / "LICENSE")).hexdigest()
+    return license_digest == _LICENSE_DIGEST
+
+
+def _is_zero_arg_call(node: ast.stmt, function_name: str) -> bool:
+    """Return whether one statement directly invokes the named function."""
+    return (
+        isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == function_name
+        and not node.value.args
+        and not node.value.keywords
+    )
+
+
+def _is_gate_call(node: ast.stmt) -> bool:
+    """Return whether one statement directly invokes the primary integrity gate."""

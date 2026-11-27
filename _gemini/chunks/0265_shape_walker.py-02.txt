@@ -1,0 +1,112 @@
+                idx=ph_elem.attrib.get("idx"),
+                sz=ph_elem.attrib.get("sz"),
+                orient=ph_elem.attrib.get("orient"),
+            )
+
+    return name, spid, hidden, ph, hyperlink_rid, hyperlink_action
+
+
+def _resolve_xfrm(shape: ET.Element, kind: str) -> ET.Element | None:
+    """Find the <a:xfrm> element under the right spPr / grpSpPr container."""
+    if kind == GROUP:
+        sp_pr = shape.find("p:grpSpPr", NS)
+    elif kind == GRAPHIC:
+        # graphicFrame uses p:xfrm directly (no a: namespace)
+        return shape.find("p:xfrm", NS)
+    else:
+        sp_pr = shape.find("p:spPr", NS)
+    if sp_pr is None:
+        return None
+    return sp_pr.find("a:xfrm", NS)
+
+
+def _adjust_for_group(child_xfrm: Xfrm, group_xfrm: Xfrm) -> Xfrm:
+    """Map a child shape's xfrm from group's child coordinate space into the
+    parent (group) coordinate space.
+
+    DrawingML group rule: a child's a:off/a:ext is in the group's chOff/chExt
+    coordinate system. We map to the group's actual off/ext on the slide.
+
+    If the group has no chOff/chExt, fall back to identity translation.
+    """
+    if (group_xfrm.ch_w is None or group_xfrm.ch_h is None
+            or group_xfrm.ch_w == 0 or group_xfrm.ch_h == 0):
+        # No child frame — children already in slide space; just translate.
+        return child_xfrm
+
+    # Linear map: child-frame -> group's (off..off+ext)
+    sx = group_xfrm.w / group_xfrm.ch_w if group_xfrm.ch_w else 1.0
+    sy = group_xfrm.h / group_xfrm.ch_h if group_xfrm.ch_h else 1.0
+    ch_x = group_xfrm.ch_x or 0.0
+    ch_y = group_xfrm.ch_y or 0.0
+
+    center_x = group_xfrm.x + (
+        child_xfrm.x + child_xfrm.w / 2.0 - ch_x
+    ) * sx
+    center_y = group_xfrm.y + (
+        child_xfrm.y + child_xfrm.h / 2.0 - ch_y
+    ) * sy
+
+    # A parent group's child-frame scaling is applied after the child's own
+    # rotation.  For a quarter-turn, the child's local x axis therefore lands
+    # on the parent's y axis (and vice versa).  Scaling the unrotated frame by
+    # ``sx``/``sy`` before retaining the rotation reverses that order and can
+    # visibly stretch nested 90-degree groups under a non-uniform parent.
+    quarter_turn = round(child_xfrm.rot / 90.0) % 2 == 1
+    exact_quarter_turn = abs(
+        child_xfrm.rot - round(child_xfrm.rot / 90.0) * 90.0
+    ) < 1e-7
+    if quarter_turn and exact_quarter_turn:
+        new_w = child_xfrm.w * sy
+        new_h = child_xfrm.h * sx
+    else:
+        new_w = child_xfrm.w * sx
+        new_h = child_xfrm.h * sy
+    new_x = center_x - new_w / 2.0
+    new_y = center_y - new_h / 2.0
+
+    return Xfrm(
+        x=new_x, y=new_y, w=new_w, h=new_h,
+        rot=child_xfrm.rot,
+        flip_h=child_xfrm.flip_h,
+        flip_v=child_xfrm.flip_v,
+        ch_x=child_xfrm.ch_x, ch_y=child_xfrm.ch_y,
+        ch_w=child_xfrm.ch_w, ch_h=child_xfrm.ch_h,
+    )
+
+
+# Mapping from element tag -> kind / nv tag.
+_KIND_MAP = {
+    "sp": (SHAPE, "nvSpPr"),
+    "pic": (PICTURE, "nvPicPr"),
+    "cxnSp": (CONNECTOR, "nvCxnSpPr"),
+    "grpSp": (GROUP, "nvGrpSpPr"),
+    "graphicFrame": (GRAPHIC, "nvGraphicFramePr"),
+}
+
+
+def _first_shape_child(container: ET.Element | None) -> ET.Element | None:
+    if container is None:
+        return None
+    for child in list(container):
+        if not isinstance(child.tag, str):
+            continue
+        if child.tag.split("}", 1)[-1] in _KIND_MAP:
+            return child
+    return None
+
+
+def _resolve_alternate_content(wrapper: ET.Element) -> ET.Element | None:
+    """Select an AlternateContent shape while retaining its baked preview."""
+    choice = wrapper.find("mc:Choice", NS)
+    fallback = wrapper.find("mc:Fallback", NS)
+    selected = _first_shape_child(choice)
+    selected_from_choice = selected is not None
+    if selected is None:
+        selected = _first_shape_child(fallback)
+    if selected is None:
+        return None
+
+    clone = ET.fromstring(ET.tostring(selected, encoding="utf-8"))
+    if (
+        selected_from_choice

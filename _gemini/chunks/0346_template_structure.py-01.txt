@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+"""
+PPT Master - Template Structure Metadata
+
+Parse and validate explicit SVG metadata consumed by structured PPTX export.
+
+Usage:
+    Imported by svg_to_pptx.pptx_package.builder and svg_quality_checker.py.
+
+Examples:
+    parse_template_slides([Path("projects/demo/svg_output/01_cover.svg")])
+
+Dependencies:
+    None (only uses standard library)
+"""
+
+from __future__ import annotations
+
+import base64
+import binascii
+import copy
+import hashlib
+import json
+import math
+import re
+import zipfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+from xml.etree import ElementTree as ET
+
+from native_payloads import NativePayloadError, hydrate_native_payload_refs
+from pptx_to_svg.preset_authoring import (
+    authored_preset_encoding,
+    validate_authored_preset_group,
+)
+
+from ..drawingml.utils import (
+    is_picture_effect_carrier,
+    parse_inline_style,
+    parse_opacity,
+    parse_project_geometry_length,
+    project_geometry_length_errors,
+)
+from ..canvas_contract import CanvasContractError, parse_project_viewbox
+from ..geometry_properties import (
+    GeometryStyleError,
+    materialize_inline_geometry_properties,
+)
+from ..native_objects import (
+    NativeMarkerAttributeError,
+    native_json_is_authoritative,
+    native_replacement_kind,
+)
+
+
+_NON_VISUAL_TAGS = frozenset({"defs", "title", "desc", "metadata", "style"})
+_STRUCTURE_ATTRS = frozenset({
+    "data-pptx-layer",
+    "data-pptx-layout",
+    "data-pptx-layout-kind",
+    "data-pptx-layout-name",
+    "data-pptx-master",
+    "data-pptx-master-name",
+    "data-pptx-show-inherited-shapes",
+    "data-pptx-show-master-shapes",
+    "data-pptx-placeholder",
+    "data-pptx-binding",
+    "data-pptx-carrier",
+    "data-pptx-idx",
+    "data-pptx-editable",
+})
+_FLAT_FORBIDDEN_STRUCTURE_ATTRS = frozenset(
+    _STRUCTURE_ATTRS - {"data-pptx-editable"}
+)
+_LAYERS = frozenset({"master", "layout", "slide"})
+_PLACEHOLDERS = frozenset({
+    "title",
+    "subtitle",
+    "body",
+    "picture",
+    "chart",
+    "table",
+    "object",
+    "media",
+    "date",
+    "footer",
+    "slide-number",
+})
+TEMPLATE_PLACEHOLDER_TYPES = {
+    "title": "title",
+    "subtitle": "subTitle",
+    "body": "body",
+    "picture": "pic",
+    "chart": "chart",
+    "table": "tbl",
+    "object": "obj",
+    "media": "media",
+    "date": "dt",
+    "footer": "ftr",
+    "slide-number": "sldNum",
+}
+_TEXT_PLACEHOLDERS = frozenset({
+    "title",
+    "subtitle",
+    "body",
+    "date",
+    "footer",
+    "slide-number",
+})
+_OBJECT_PLACEHOLDER_TAGS = frozenset({
+    "rect",
+    "circle",
+    "ellipse",
+    "line",
+    "path",
+    "polygon",
+    "polyline",
+    "text",
+    "image",
+    "svg",
+    "use",
+})
+_LAYOUT_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_MASTER_KEY_RE = _LAYOUT_KEY_RE
+# Parse Markdown row syntax before validating each section's key grammar. Keeping
+# those concerns separate prevents malformed keys from disappearing silently.
+_LOCK_ROW_RE = re.compile(r"^-\s+([^:]+?)\s*:\s*(.*?)\s*$")
+_LOCK_PAGE_RE = re.compile(r"^P(\d+)$")
+PPTX_STRUCTURE_MODES = frozenset({"structured", "preserve", "flat"})
+TEMPLATE_ADHERENCE_MODES = frozenset({"strict", "adaptive"})
+TEMPLATE_REUSE_SCOPES = frozenset({"mirror", "layout", "style"})
+PLACEHOLDER_BINDING_MODES = frozenset({"carrier", "proxy"})
+SOURCE_THEMES_FILENAME = "source_themes.json"
+SOURCE_THEMES_SCHEMA = "ppt-master.source-themes.v1"
+_DML_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+_TEMPLATE_SKIN_ATTRS = frozenset({
+    "baseline-shift",
+    "color",
+    "fill",
+    "fill-opacity",
+    "filter",
+    "font-family",
+    "font-size",
+    "font-style",
+    "font-weight",
+    "letter-spacing",
+    "opacity",
+    "paint-order",
+    "stop-color",
+    "stop-opacity",
+    "stroke",
+    "stroke-dasharray",
+    "stroke-dashoffset",
+    "stroke-linecap",
+    "stroke-linejoin",
+    "stroke-miterlimit",
+    "stroke-opacity",

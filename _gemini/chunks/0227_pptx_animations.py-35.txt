@@ -1,0 +1,103 @@
+    return hashlib.sha256(repr(canonical).encode('utf-8')).hexdigest()
+
+
+def entrance_animation_fingerprint(slide_xml: str | bytes) -> str | None:
+    """Compatibility alias for :func:`object_animation_fingerprint`."""
+    return object_animation_fingerprint(slide_xml)
+
+
+def get_available_transitions() -> list:
+    """Get native transition keys followed by compatibility inputs."""
+    return [*NATIVE_TRANSITION_KEYS, *LEGACY_TRANSITION_KEYS]
+
+
+def get_available_animations() -> list:
+    """Get canonical object-animation keys followed by compatibility inputs."""
+    return list(ANIMATIONS.keys())
+
+
+def get_transition_help() -> str:
+    """Get categorized native transitions plus legacy compatibility inputs."""
+    lines = ["Available transition effects:"]
+    for category in TRANSITION_CATEGORIES:
+        lines.append(f"  PowerPoint-native {category} effects:")
+        for key in NATIVE_TRANSITION_KEYS:
+            info = NATIVE_TRANSITIONS[key]
+            if info["category"] == category:
+                lines.append(f"    {key}: {info['name']}")
+    lines.append("  Legacy compatibility inputs (never selected for new output):")
+    for key in LEGACY_TRANSITION_KEYS:
+        canonical = TRANSITION_ALIASES[key]
+        implied = TRANSITION_ALIAS_OPTIONS.get(key)
+        option_suffix = f", implies {implied}" if implied else ""
+        lines.append(
+            f"    {key}: compatibility alias for {canonical} "
+            f"({NATIVE_TRANSITIONS[canonical]['name']}{option_suffix})"
+        )
+    return '\n'.join(lines)
+
+
+def get_animation_help() -> str:
+    """Get categorized help text for every object-animation effect."""
+    lines = ['Available object animations:']
+    for category in ANIMATION_CATEGORIES:
+        lines.append(f'  PowerPoint-native {category} effects:')
+        for key in NATIVE_ANIMATION_KEYS:
+            info = NATIVE_ANIMATIONS[key]
+            if info['category'] == category:
+                lines.append(f"    {key}: {info['name']}")
+    lines.append('  Legacy compatibility inputs (never selected for new output):')
+    for key in LEGACY_ANIMATION_KEYS:
+        canonical = ANIMATION_ALIASES[key]
+        implied = ANIMATION_ALIAS_OPTIONS.get(key)
+        option_suffix = (
+            f', implies {implied}'
+            if implied
+            else ''
+        )
+        lines.append(
+            f"    {key}: compatibility alias for {canonical} "
+            f"({NATIVE_ANIMATIONS[canonical]['name']}{option_suffix})"
+        )
+    return '\n'.join(lines)
+
+
+def describe_animation_effect(effect: object) -> dict[str, Any]:
+    """Return the author-facing option contract for one animation effect."""
+    canonical = normalize_animation_effect(
+        effect,
+        allow_none=False,
+        allow_modes=False,
+    )
+    assert canonical is not None
+    implied_options = (
+        dict(ANIMATION_ALIAS_OPTIONS.get(effect, {}))
+        if isinstance(effect, str)
+        else {}
+    )
+    option_contract: dict[str, Any] = {}
+    for name, raw_spec in NATIVE_ANIMATIONS[canonical]['effectOptions'].items():
+        spec = {
+            key: value
+            for key, value in raw_spec.items()
+            if key != 'values'
+        }
+        if raw_spec.get('type') == 'enum':
+            spec['values'] = list(raw_spec['values'])
+        if name == 'direction':
+            spec['note'] = (
+                'the direction the motion travels; PowerPoint names the origin '
+                'edge, so right = "From Left", left = "From Right", down = '
+                '"From Top", up = "From Bottom"'
+            )
+        option_contract[name] = spec
+    return {
+        'input': effect,
+        'effect': canonical,
+        'compatibility_alias': (
+            effect if isinstance(effect, str) and effect in ANIMATION_ALIASES else None
+        ),
+        'implied_effect_options': implied_options,
+        'effect_options': option_contract,
+        'timing': {
+            'duration': (

@@ -1,0 +1,71 @@
+        document_reports = [
+            _materialize_document(
+                project_path,
+                document,
+                baseline_root / document.source_name,
+                output_dir / document.name,
+                current_assets,
+                baseline_assets,
+                page=page,
+                pages=pages,
+            )
+            for page, document in zip(pages, output_documents)
+        ]
+    finally:
+        baseline_temporary.cleanup()
+
+    svg_files = (
+        tuple(output_dir / page.svg_name for page in pages)
+        if page_plan_present
+        else tuple(discover_slide_svgs(output_dir))
+    )
+    if len(svg_files) != len(pages):
+        raise AuthoringRoundtripError(
+            "Materialized slide roster does not match the output page plan"
+        )
+    totals = {
+        key: sum(int(item[key]) for item in document_reports)
+        for key in (
+            "source_ref_count",
+            "unchanged_refs",
+            "edited_refs",
+            "deleted_refs",
+            "authored_unreferenced",
+            "expanded_vector_uses",
+        )
+    }
+    report: dict[str, Any] = {
+        "schema": "ppt-master.authoring-roundtrip-materialization.v1",
+        "authoring_root": str(authoring_dir),
+        "manifest_schema": manifest.get("schema"),
+        "projection_kind": manifest.get("projection_kind"),
+        "materialized_slide_count": len(svg_files),
+        "page_plan": (
+            {
+                "schema": ROUNDTRIP_PAGE_PLAN_SCHEMA,
+                "output_pages": len(pages),
+                "pages": [
+                    {
+                        "output_index": page.output_index,
+                        "source_slide": page.source_slide,
+                        "svg": page.svg_name,
+                    }
+                    for page in pages
+                ],
+            }
+            if page_plan_present
+            else None
+        ),
+        "totals": totals,
+        "documents": document_reports,
+    }
+    return AuthoringRoundtripResult(
+        svg_files=svg_files,
+        authoring_files=tuple(
+            authoring_dir / page.svg_name
+            for page in pages
+        ),
+        pages=pages,
+        page_plan_present=page_plan_present,
+        report=report,
+    )

@@ -1,0 +1,58 @@
+    response = requests.post(url, headers={**common_headers,"X-ModelScope-Async-Mode": "true"}, json=payload, timeout=300)
+    
+    if (response.status_code != 200):
+        raise http_error(response, "ModelScope image generation")
+    
+    task_id = response.json()["task_id"]
+    data = poll_json(
+        url=f"{_resolve_url(base_url)}/v1/tasks/{task_id}",
+        headers={**common_headers, "X-ModelScope-Task-Type": "image_generation"},
+        status_label="task_status",
+        ready_values=["SUCCEED"],
+        failed_values=["FAILED"],
+    )
+    elapsed = time.time() - start
+    print(f"\n  [DONE] Response received ({elapsed:.1f}s)")
+    path = resolve_output_path(prompt, output_dir, filename, ".png")
+    return download_image(data["output_images"][0], path)
+    
+def generate(prompt: str,
+             aspect_ratio: str = "1:1", image_size: str = "1K",
+             output_dir: str = None, filename: str = None,
+             model: str = None, max_retries: int = MAX_RETRIES) -> str:
+    """Generate an image with retries using the ModelScope backend."""
+    resolved_model = _resolve_model(model)
+    normalized_size = normalize_image_size(image_size)
+    _resolve_size(aspect_ratio, normalized_size)
+    api_key = require_api_key(
+        "MODELSCOPE_API_KEY",
+        message="No API key found. Set MODELSCOPE_API_KEY in the current environment or the project-root .env.",
+    )
+    base_url = os.environ.get("MODELSCOPE_BASE_URL") or DEFAULT_ENDPOINT
+
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            return _generate_image(
+                api_key=api_key,
+                prompt=prompt,
+                aspect_ratio=aspect_ratio,
+                image_size=normalized_size,
+                output_dir=output_dir,
+                filename=filename,
+                model=resolved_model,
+                base_url=base_url,
+            )
+        except Exception as exc:
+            last_error = exc
+            if is_permanent_error(exc):
+                raise
+            if attempt >= max_retries:
+                break
+            limited = is_rate_limit_error(exc)
+            delay = retry_delay(attempt, rate_limited=limited)
+            label = "Rate limit hit" if limited else f"Error: {exc}"
+            print(f"\n  [WARN] {label}. Retrying in {delay}s...")
+            time.sleep(delay)
+
+    raise RuntimeError(f"Failed after {max_retries + 1} attempts. Last error: {last_error}")

@@ -1,0 +1,99 @@
+                        f'"{destination_group}" is assigned to both "{previous}" '
+                        f'and "{key}"'
+                    )
+
+    transition = slide_cfg.get('transition')
+    if not isinstance(transition, dict) or 'effect' not in transition:
+        errors.append(
+            f'animations.json {label} requires an explicit slide transition '
+            'effect "morph"'
+        )
+    else:
+        try:
+            effect, options = normalize_transition_effect_request(
+                transition.get('effect'),
+                transition.get('effect_options'),
+            )
+        except ValueError:
+            pass
+        else:
+            if effect != 'morph':
+                errors.append(
+                    f'animations.json {label} requires transition effect "morph"'
+                )
+            elif options.get('morph_by', 'object') != 'object':
+                errors.append(
+                    f'animations.json {label} requires Morph by object'
+                )
+    return errors
+
+
+def _resolve_morph_pairs(
+    slide_order: list[str],
+    config: dict[str, Any],
+) -> tuple[list[MorphPair], list[str]]:
+    """Resolve sidecar Morph declarations against the actual slide order."""
+    slides = config.get('slides', {})
+    if not isinstance(slides, dict):
+        return [], ['animations.json field "slides" must be an object']
+
+    order_by_slide = {slide_name: index for index, slide_name in enumerate(slide_order)}
+    pairs: list[MorphPair] = []
+    errors: list[str] = []
+    assignments: dict[str, dict[str, str]] = {}
+    keys: dict[str, dict[str, str]] = {}
+    declared_keys_by_destination: dict[str, set[str]] = {}
+
+    for destination_slide, slide_cfg in slides.items():
+        if not isinstance(slide_cfg, dict) or 'morph' not in slide_cfg:
+            continue
+        scope_errors = _morph_scope_errors(destination_slide, slide_cfg)
+        if scope_errors:
+            errors.extend(scope_errors)
+            continue
+        destination_index = order_by_slide.get(str(destination_slide))
+        if destination_index is None:
+            errors.append(
+                'animations.json morph destination slide is missing: '
+                f'{destination_slide}'
+            )
+            continue
+        if destination_index == 0:
+            errors.append(
+                'animations.json first slide cannot declare an incoming Morph: '
+                f'{destination_slide}'
+            )
+            continue
+
+        morph = slide_cfg['morph']
+        source_slide = str(morph['from'])
+        expected_source = slide_order[destination_index - 1]
+        if source_slide != expected_source:
+            errors.append(
+                f'animations.json slide "{destination_slide}" morph.from must '
+                f'reference the immediately preceding slide "{expected_source}", '
+                f'not "{source_slide}"'
+            )
+            continue
+
+        declared_keys_by_destination[str(destination_slide)] = set(
+            morph['pairs']
+        )
+        for key, pair in morph['pairs'].items():
+            resolved = MorphPair(
+                source_slide=source_slide,
+                destination_slide=str(destination_slide),
+                key=str(key),
+                source_group_id=str(pair['from']),
+                destination_group_id=str(pair['to']),
+            )
+            pair_conflict = False
+            for slide_name, group_id in (
+                (resolved.source_slide, resolved.source_group_id),
+                (resolved.destination_slide, resolved.destination_group_id),
+            ):
+                slide_assignments = assignments.setdefault(slide_name, {})
+                previous_key = slide_assignments.setdefault(group_id, resolved.key)
+                if previous_key != resolved.key:
+                    errors.append(
+                        f'animations.json Morph group "{slide_name}/{group_id}" '

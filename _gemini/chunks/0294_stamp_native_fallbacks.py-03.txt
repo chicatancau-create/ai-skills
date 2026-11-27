@@ -1,0 +1,106 @@
+) -> tuple[bytes, int, int, int]:
+    """Validate and plan fallback baselines for one in-memory SVG document."""
+    try:
+        root = ET.fromstring(source)
+    except ET.ParseError as exc:
+        raise NativeFallbackStampError(f"{path.name}: invalid SVG XML: {exc}") from exc
+    digests, json_authoritative = _validated_svg_first_digests(root, path)
+    patched, restamped = _patch_document(source, root, digests)
+    return patched, len(digests), json_authoritative, restamped
+
+
+def _prepare_file(path: Path) -> tuple[bytes, int, int, bool]:
+    patched, svg_first, json_authoritative, restamped = (
+        prepare_native_fallback_baselines(path.read_bytes(), path)
+    )
+    return patched, svg_first, json_authoritative, restamped > 0
+
+
+def stamp_file(path: Path, *, write: bool) -> tuple[int, int, bool]:
+    """Validate and optionally stamp one SVG without reformatting it."""
+    patched, svg_authoritative, json_authoritative, changed = _prepare_file(path)
+    if write and changed:
+        _atomic_write(path, patched)
+    return svg_authoritative, json_authoritative, changed
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Validate native Chart/Table payloads and stamp current visible "
+            "fallback hashes on SVG-authoritative markers."
+        ),
+    )
+    parser.add_argument(
+        "input",
+        type=Path,
+        help="One SVG file or a directory whose direct *.svg files are checked",
+    )
+    parser.add_argument(
+        "--write",
+        action="store_true",
+        help=(
+            "Atomically update SVG files. Omit for a read-only preview; use only "
+            "after visible fallback and embedded JSON were updated together."
+        ),
+    )
+    return parser
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    configure_utf8_stdio()
+    args = build_parser().parse_args(argv)
+    try:
+        files = _svg_files(args.input.resolve())
+    except (NativeFallbackStampError, OSError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    # Pages stamp independently: one malformed page is reported without
+    # leaving every valid page unstamped.
+    prepared = []
+    errors: list[str] = []
+    for path in files:
+        try:
+            prepared.append((path, *_prepare_file(path)))
+        except (NativeFallbackStampError, OSError) as exc:
+            errors.append(str(exc))
+    try:
+        if args.write:
+            for path, payload, _svg_first, _json_first, changed in prepared:
+                if changed:
+                    _atomic_write(path, payload)
+        total_svg_first = 0
+        total_json_first = 0
+        changed_files = 0
+        for path, _payload, svg_first, json_first, changed in prepared:
+            total_svg_first += svg_first
+            total_json_first += json_first
+            changed_files += int(changed)
+            if args.write and changed:
+                action = "updated"
+            elif changed:
+                action = "would-update"
+            else:
+                action = "unchanged"
+            print(
+                f"{path}: {action}; SVG-first={svg_first}, JSON-first={json_first}"
+            )
+    except (NativeFallbackStampError, OSError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    mode = "write" if args.write else "read-only"
+    print(
+        f"Native fallback baselines: mode={mode}, files={len(files)}, "
+        f"changed={changed_files}, SVG-first={total_svg_first}, "
+        f"JSON-first={total_json_first}"
+    )
+    if changed_files and not args.write:
+        print("Re-run with --write to apply these validated baseline updates.")
+    for error in errors:
+        print(f"Error: {error}", file=sys.stderr)
+    return 1 if errors else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

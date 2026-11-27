@@ -1,0 +1,86 @@
+    if xfrm is None:
+        xfrm = container.find(".//a:xfrm", NS)
+    if xfrm is None:
+        return {"x": None, "y": None, "width": None, "height": None}
+    off = xfrm.find("a:off", NS)
+    ext = xfrm.find("a:ext", NS)
+    try:
+        x = float(off.attrib["x"]) if off is not None else None
+        y = float(off.attrib["y"]) if off is not None else None
+        width = float(ext.attrib["cx"]) if ext is not None else None
+        height = float(ext.attrib["cy"]) if ext is not None else None
+    except (KeyError, ValueError):
+        return {"x": None, "y": None, "width": None, "height": None}
+    if slide_root is not None:
+        for group in _group_chain(container, slide_root):
+            group_xfrm = group.find("p:grpSpPr/a:xfrm", NS)
+            if group_xfrm is None:
+                continue
+            parts = [group_xfrm.find(name, NS) for name in ("a:off", "a:ext", "a:chOff", "a:chExt")]
+            if any(part is None for part in parts):
+                continue
+            g_off, g_ext, ch_off, ch_ext = parts
+            try:
+                ch_cx = float(ch_ext.attrib["cx"])
+                ch_cy = float(ch_ext.attrib["cy"])
+                scale_x = float(g_ext.attrib["cx"]) / ch_cx if ch_cx else 1.0
+                scale_y = float(g_ext.attrib["cy"]) / ch_cy if ch_cy else 1.0
+                if x is not None:
+                    x = float(g_off.attrib["x"]) + (x - float(ch_off.attrib["x"])) * scale_x
+                if y is not None:
+                    y = float(g_off.attrib["y"]) + (y - float(ch_off.attrib["y"])) * scale_y
+            except (KeyError, ValueError):
+                continue
+            if width is not None:
+                width *= scale_x
+            if height is not None:
+                height *= scale_y
+
+    def _px(value: float | None) -> int | None:
+        return None if value is None else round(value / EMU_PER_INCH * PX_PER_INCH)
+
+    return {"x": _px(x), "y": _px(y), "width": _px(width), "height": _px(height)}
+
+
+def _text_containers(slide_root: ET.Element) -> list[ET.Element]:
+    containers: list[ET.Element] = []
+    for tag in ("p:sp", "p:graphicFrame"):
+        for element in slide_root.findall(f".//{tag}", NS):
+            if element.find(".//p:txBody", NS) is not None or element.findall(".//a:t", NS):
+                containers.append(element)
+    return containers
+
+
+def _table_containers(slide_root: ET.Element) -> list[ET.Element]:
+    return [
+        frame
+        for frame in slide_root.findall(".//p:graphicFrame", NS)
+        if frame.find(".//a:tbl", NS) is not None
+    ]
+
+
+def _chart_containers(slide_root: ET.Element) -> list[ET.Element]:
+    return [
+        frame
+        for frame in slide_root.findall(".//p:graphicFrame", NS)
+        if frame.find(".//c:chart", NS) is not None
+    ]
+
+
+def _shape_identity(container: ET.Element, order: int) -> tuple[str, str]:
+    c_nv_pr = container.find(".//p:cNvPr", NS)
+    shape_id = c_nv_pr.attrib.get("id") if c_nv_pr is not None else str(order)
+    shape_name = c_nv_pr.attrib.get("name") if c_nv_pr is not None else ""
+    return shape_id, shape_name
+
+
+def _load_json(path: Path) -> dict[str, Any]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Invalid JSON: {path}: {exc}") from exc
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

@@ -1,0 +1,121 @@
+        if heading == "content outline" or heading.endswith(". content outline"):
+            return section
+    return None
+
+
+def _page_image_filenames(
+    design_sections: Iterable[dict[str, object]],
+    page_number: int,
+) -> tuple[set[str], set[str]]:
+    """Read explicit P<NN> usage from the canonical image-resource table."""
+    section = next(
+        (
+            item
+            for item in design_sections
+            if (
+                (heading := str(item.get("heading", "")).strip().casefold())
+                == "image resource list"
+                or heading.startswith("viii. image resource list")
+            )
+        ),
+        None,
+    )
+    if section is None:
+        return set(), set()
+    table_rows = [
+        [
+            cell.strip().replace(r"\|", "|")
+            for cell in re.split(r"(?<!\\)\|", line.strip().strip("|"))
+        ]
+        for line in str(section.get("body", "")).splitlines()
+        if line.strip().startswith("|") and line.strip().endswith("|")
+    ]
+    if not table_rows:
+        return set(), set()
+    header = {
+        name.casefold(): index
+        for index, name in enumerate(table_rows[0])
+    }
+    filename_index = header.get("filename")
+    purpose_index = header.get("purpose")
+    if filename_index is None or purpose_index is None:
+        return set(), set()
+    assigned: set[str] = set()
+    selected: set[str] = set()
+    for row in table_rows[1:]:
+        if len(row) <= max(filename_index, purpose_index):
+            continue
+        purpose = row[purpose_index]
+        pages = {int(match.group(1)) for match in _PAGE_TOKEN_RE.finditer(purpose)}
+        if not pages:
+            continue
+        filename = row[filename_index].strip().strip("`")
+        if not filename:
+            continue
+        basename = Path(filename).name
+        assigned.add(basename)
+        if page_number in pages:
+            selected.add(basename)
+    return assigned, selected
+
+
+def _locked_image_basename(value: str) -> str:
+    return Path(value.split("|", 1)[0].strip()).name
+
+
+def _outline_image_assignments(
+    design_sections: Iterable[dict[str, object]],
+    locked_images: dict[str, str],
+) -> set[str]:
+    outline = _outline_section(design_sections)
+    if outline is None:
+        return set()
+    body = str(outline.get("body", ""))
+    return {
+        _locked_image_basename(value)
+        for key, value in locked_images.items()
+        if any(
+            _contains_token(body, token)
+            for token in (
+                key,
+                value.split("|", 1)[0].strip(),
+                _locked_image_basename(value),
+            )
+        )
+    }
+
+
+def _slide_block(
+    design_sections: Iterable[dict[str, object]],
+    page_number: int,
+) -> tuple[str | None, str]:
+    outline = _outline_section(design_sections)
+    if outline is None:
+        raise PageContextError("design_spec.md has no Content Outline section")
+    body = str(outline.get("body", ""))
+    matches = [
+        match
+        for match in _SLIDE_HEADING_RE.finditer(body)
+        if int(match.group(1)) == page_number
+    ]
+    if not matches:
+        raise PageContextError(
+            f"design_spec.md Content Outline has no Slide {page_number:02d} block"
+        )
+    if len(matches) > 1:
+        raise PageContextError(
+            f"design_spec.md Content Outline repeats Slide {page_number:02d}"
+        )
+    match = matches[0]
+    next_boundary = _BLOCK_BOUNDARY_RE.search(body, match.end())
+    block_end = next_boundary.start() if next_boundary else len(body)
+    block = body[match.start():block_end].strip()
+    part_matches = list(_PART_HEADING_RE.finditer(body, 0, match.start()))
+    part = part_matches[-1].group(1).strip() if part_matches else None
+    return part, block
+
+
+def _relative_project_path(project_path: Path, path: Path) -> str:
+    try:
+        return path.resolve().relative_to(project_path).as_posix()
+    except ValueError as exc:

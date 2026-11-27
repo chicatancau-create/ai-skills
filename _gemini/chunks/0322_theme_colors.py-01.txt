@@ -1,0 +1,124 @@
+"""Theme-color contracts shared by SVG conversion and PPTX package assembly."""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from xml.etree import ElementTree as ET
+
+from .utils import parse_hex_color
+
+
+DML_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+_LOCK_ROW_RE = re.compile(r"^-\s+([A-Za-z0-9_]+)\s*:\s*(.+?)\s*$")
+_SRGB_PAIR_RE = re.compile(
+    r"<a:srgbClr\b(?P<attrs>[^>]*?)(?<!/)>(?P<body>.*?)</a:srgbClr>",
+    re.DOTALL,
+)
+_SRGB_EMPTY_RE = re.compile(r"<a:srgbClr\b(?P<attrs>[^>]*)/>")
+_VAL_RE = re.compile(r'\bval="(?P<color>[0-9A-Fa-f]{6})"')
+
+_OFFICE_DEFAULTS = {
+    "dk1": "000000",
+    "lt1": "FFFFFF",
+    "dk2": "1F497D",
+    "lt2": "EEECE1",
+    "accent1": "4F81BD",
+    "accent2": "C0504D",
+    "accent3": "9BBB59",
+    "accent4": "8064A2",
+    "accent5": "4BACC6",
+    "accent6": "F79646",
+    "hlink": "0000FF",
+    "folHlink": "800080",
+}
+_ROLE_SLOTS = {
+    "bg": "lt1",
+    "background": "lt1",
+    "master_bg": "lt1",
+    "secondary_bg": "lt2",
+    "bg_secondary": "lt2",
+    "text": "dk1",
+    "body_text": "dk1",
+    "text_secondary": "dk2",
+    "primary": "accent1",
+    "accent": "accent2",
+    "secondary_accent": "accent3",
+    "border": "accent4",
+}
+_USAGE_ROLE_ORDER = {
+    "background": (
+        "bg", "background", "master_bg", "secondary_bg", "bg_secondary",
+        "primary", "accent", "secondary_accent",
+    ),
+    "fill": (
+        "primary", "accent", "secondary_accent", "bg", "background",
+        "master_bg", "secondary_bg", "bg_secondary", "text", "body_text",
+        "text_secondary", "border",
+    ),
+    "text": (
+        "text", "body_text", "text_secondary", "primary", "accent",
+        "secondary_accent",
+    ),
+    "stroke": (
+        "border", "primary", "accent", "secondary_accent", "text",
+        "body_text", "text_secondary",
+    ),
+    "chart": ("primary", "accent", "secondary_accent"),
+}
+_BACKGROUND_ROLE_TOKENS = (
+    "bg", "background", "surface", "paper", "card", "panel", "tint",
+)
+_TEXT_ROLE_TOKENS = ("text", "ink", "muted")
+_STROKE_ROLE_TOKENS = ("border", "grid", "line", "stroke")
+_BACKGROUND_USAGES = frozenset({"background", "fill"})
+_TEXT_USAGES = frozenset({"text"})
+_STROKE_USAGES = frozenset({"stroke", "fill"})
+_SEMANTIC_USAGES = frozenset({"fill", "text", "stroke"})
+
+
+class ThemeColorError(RuntimeError):
+    """Raised when a project theme-color contract cannot be loaded or applied."""
+
+
+@dataclass(frozen=True)
+class ThemeColorSpec:
+    """PowerPoint color scheme derived from one project's color lock."""
+
+    slots: dict[str, str]
+    roles: dict[str, str]
+    role_slots: dict[str, str]
+    extra_roles: tuple[str, ...] = ()
+
+    def scheme_for(self, color: str, usage: str) -> str | None:
+        """Resolve one concrete color to a safe scheme slot for its usage."""
+        normalized = parse_hex_color(color)
+        if normalized is None:
+            return None
+        for role in _USAGE_ROLE_ORDER.get(usage, ()):
+            if self.roles.get(role) == normalized:
+                slot = self.role_slots[role]
+                if self.slots.get(slot) == normalized:
+                    return slot
+        for role in self.extra_roles:
+            if usage in _extra_role_usages(role) and self.roles.get(role) == normalized:
+                slot = self.role_slots[role]
+                if self.slots.get(slot) == normalized:
+                    return slot
+        return None
+
+
+def _extra_role_usages(role: str) -> frozenset[str]:
+    """Limit extra theme slots to contexts implied by their lock role name."""
+    normalized = role.lower()
+    if any(token in normalized for token in _BACKGROUND_ROLE_TOKENS):
+        return _BACKGROUND_USAGES
+    if any(token in normalized for token in _TEXT_ROLE_TOKENS):
+        return _TEXT_USAGES
+    if any(token in normalized for token in _STROKE_ROLE_TOKENS):
+        return _STROKE_USAGES
+    return _SEMANTIC_USAGES
+
+
+def _color_rows(lock_path: Path) -> dict[str, str]:

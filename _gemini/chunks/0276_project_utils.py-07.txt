@@ -1,0 +1,137 @@
+                                                                       {'file_name': svg_file.name})
+                    warnings.append(msg)
+
+    # Check directory naming format (``.`` has no name of its own)
+    dir_name = project_path.resolve().name
+    if not re.search(r'_\d{8}$', dir_name):
+        msg = f"Directory name missing date suffix (_YYYYMMDD): {dir_name}"
+        if use_helper and verbose:
+            msg += "\n" + \
+                ErrorHelper.format_error_message('missing_project_date')
+        warnings.append(msg)
+
+    is_valid = len(errors) == 0
+    return is_valid, errors, warnings
+
+
+def validate_svg_viewbox(svg_files: List[Path], expected_format: Optional[str] = None) -> List[str]:
+    """
+    Validate the viewBox settings of SVG files.
+
+    Args:
+        svg_files: List of SVG files
+        expected_format: Expected canvas format (e.g. 'ppt169')
+
+    Returns:
+        List of warnings
+    """
+    warnings = []
+    viewboxes = {}
+
+    # Determine expected viewBox
+    expected_viewbox = None
+    if expected_format and expected_format in CANVAS_FORMATS:
+        expected_viewbox = parse_project_viewbox(
+            CANVAS_FORMATS[expected_format]['viewbox'],
+            context=f"canvas format {expected_format!r}",
+        )
+
+    for svg_file in svg_files:
+        try:
+            viewbox = read_project_viewbox(svg_file)
+        except CanvasContractError as exc:
+            warnings.append(str(exc))
+            continue
+        viewboxes[svg_file.name] = viewbox
+        if expected_viewbox and viewbox != expected_viewbox:
+            warnings.append(
+                f"{svg_file.name}: root viewBox '{viewbox.canonical}' must match "
+                f"project format '{expected_format}' ({expected_viewbox.canonical})"
+            )
+
+    # Check for multiple different viewBoxes
+    distinct = {viewbox for viewbox in viewboxes.values()}
+    if len(distinct) > 1:
+        details = ", ".join(
+            f"{name}={viewbox.canonical}"
+            for name, viewbox in sorted(viewboxes.items())
+        )
+        warnings.append(
+            "All project SVG root viewBoxes must match; found " + details
+        )
+
+    return warnings
+
+
+def find_all_projects(base_dir: str) -> List[Path]:
+    """
+    Find all projects under the specified directory.
+
+    Args:
+        base_dir: Base directory path
+
+    Returns:
+        List of project directories
+    """
+    base_path = Path(base_dir)
+    if not base_path.exists():
+        return []
+
+    projects = []
+    for item in base_path.iterdir():
+        if item.is_dir() and not item.name.startswith('.'):
+            # Check if it's a valid project directory (contains svg_output or design spec)
+            has_svg_output = (item / 'svg_output').exists()
+            has_spec = any((item / f).exists() for f in
+                           ['design_spec.md', '设计规范与内容大纲.md', 'design_specification.md', '设计规范.md'])
+
+            if has_svg_output or has_spec:
+                projects.append(item)
+
+    return sorted(projects)
+
+
+def format_file_size(size_bytes: int) -> str:
+    """
+    Format file size.
+
+    Args:
+        size_bytes: File size in bytes
+
+    Returns:
+        Formatted file size string
+    """
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if size_bytes < 1024.0:
+            return f"{size_bytes:.1f} {unit}"
+        size_bytes /= 1024.0
+    return f"{size_bytes:.1f} TB"
+
+
+def get_project_stats(project_path: str) -> Dict:
+    """
+    Get project statistics.
+
+    Args:
+        project_path: Project directory path
+
+    Returns:
+        Statistics dictionary
+    """
+    project_path = Path(project_path)
+    stats = {
+        'total_files': 0,
+        'svg_files': 0,
+        'md_files': 0,
+        'html_files': 0,
+        'total_size': 0,
+        'svg_size': 0
+    }
+
+    if not project_path.exists():
+        return stats
+
+    for file in project_path.rglob('*'):
+        if file.is_file():
+            stats['total_files'] += 1
+            file_size = file.stat().st_size

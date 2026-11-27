@@ -1,0 +1,109 @@
+    """Describe the first Slide-local mirror difference."""
+    expected_root = _parse_svg_root(expected_spec.svg_path)
+    actual_root = _parse_svg_root(actual_spec.svg_path)
+    materialize_inline_geometry_properties(expected_root)
+    materialize_inline_geometry_properties(actual_root)
+
+    def selected(root: ET.Element) -> list[ET.Element]:
+        output: list[ET.Element] = []
+        for child in root:
+            if _local_tag(child) in _NON_VISUAL_TAGS:
+                continue
+            element_id = (child.get("id") or "").strip()
+            if element_id and element_id not in protected_ids:
+                continue
+            output.append(child)
+        return output
+
+    expected_children = selected(expected_root)
+    actual_children = selected(actual_root)
+    if len(expected_children) != len(actual_children):
+        return (
+            f"svg: expected {len(expected_children)} Slide-local top-level "
+            f"element(s), found {len(actual_children)}"
+        )
+    for index, (expected, actual) in enumerate(
+        zip(expected_children, actual_children),
+        start=1,
+    ):
+        difference = _mirror_element_difference(
+            expected,
+            actual,
+            expected_svg=expected_spec.svg_path,
+            actual_svg=actual_spec.svg_path,
+            path=f"svg/{_mirror_node_label(expected, index)}",
+            ignore_structure_attrs=True,
+        )
+        if difference:
+            return difference
+    if _scope_visual_resources_signature(
+        expected_root,
+        tuple(expected_children),
+        expected_spec.svg_path,
+        ignore_json_native_preview=True,
+    ) != _scope_visual_resources_signature(
+        actual_root,
+        tuple(actual_children),
+        actual_spec.svg_path,
+        ignore_json_native_preview=True,
+    ):
+        return "svg: referenced defs, CSS, root styling, or asset identity differs"
+    return None
+
+
+def _mirror_structure_difference(
+    expected_spec: TemplateSlideSpec,
+    actual_spec: TemplateSlideSpec,
+    elements: tuple[TemplateElementSpec, ...],
+) -> str | None:
+    """Describe the first mirror difference in named structural elements."""
+    expected_root = _parse_svg_root(expected_spec.svg_path)
+    actual_root = _parse_svg_root(actual_spec.svg_path)
+    materialize_inline_geometry_properties(expected_root)
+    materialize_inline_geometry_properties(actual_root)
+    expected_by_id = {
+        (child.get("id") or "").strip(): child
+        for child in expected_root
+        if (child.get("id") or "").strip()
+    }
+    actual_by_id = {
+        (child.get("id") or "").strip(): child
+        for child in actual_root
+        if (child.get("id") or "").strip()
+    }
+    for item in elements:
+        expected = expected_by_id.get(item.element_id)
+        actual = actual_by_id.get(item.element_id)
+        if expected is None or actual is None:
+            return (
+                f"svg/{item.element_id}: expected direct structural element is "
+                "missing from one side"
+            )
+        difference = _mirror_element_difference(
+            expected,
+            actual,
+            expected_svg=expected_spec.svg_path,
+            actual_svg=actual_spec.svg_path,
+            path=f"svg/{_mirror_node_label(expected, 1)}",
+            ignore_structure_attrs=False,
+        )
+        if difference:
+            return difference
+    return None
+
+
+def template_prototype_errors(
+    specs: list[TemplateSlideSpec],
+    structure_lock: PptxStructureLock,
+    *,
+    require_complete_roster: bool = True,
+) -> list[str]:
+    """Compare structured template pages with their selected SVG prototypes."""
+    if structure_lock.mode != "structured" or not structure_lock.prototypes:
+        return []
+    errors: list[str] = []
+    prototypes = {
+        reference.slide_num: reference
+        for reference in structure_lock.prototypes
+    }
+    adherence = structure_lock.template_adherence or "strict"

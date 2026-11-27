@@ -1,0 +1,84 @@
+   - normalize **仅在 attrs 槽完全缺失**（如 `["p", "text"]`）时才补 uuid；如果你写了 `["p", {}, ...]`，normalize 会尊重这个空 attrs 不再补 uuid（这一行为保证 `doc read → doc update` 不污染原文档）
+2. **文本必须用 span + leaf 三层结构**，不要直接写裸字符串
+   - ✅ `["p", {"uuid": "x"}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "hello"]]]`
+   - ❌ `["p", {"uuid": "x"}, "hello"]` — validator 会报错；默认模式下 CLI 会自动包成 ✅ 的形式并打印 `[FIX]` 行
+   - ⚠️ `["p", {"uuid": "x"}, ["text", {}, "hello"]]` — `text` 是历史 inline tag，validator 不会报错，但建议改写为 ✅ 形式以与 `dws doc read --content-format jsonml` 的输出保持一致
+3. **attrs 对象必须存在**（即使为空）：`["p", {}, ...]` 不能省略 `{}`
+
+> **自动修复 vs 严格模式**：CLI 默认 normalize 会把 ❌ 的裸字符串自动包成 ✅；如要 1:1 透传原始 JSONML（例如复现服务端报错），用 `--no-fix-jsonml`，此时 validator 会以 `JSONPath + Suggestion` 形式逐条报错。如果输入来自 LLM 且可能有 JSON 语法错误（缺括号/逗号），用 `--fix-jsonml` 启用全部修复。
+
+## 段落 (p)
+
+```bash
+# 纯文本段落
+dws doc block insert --node <DOC_ID> --content-format jsonml \
+  --element '["p", {"uuid": "new1"}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "这是一段普通文本"]]]'
+
+# 带格式文本（多个 leaf）
+dws doc block insert --node <DOC_ID> --content-format jsonml \
+  --element '["p", {"uuid": "new2"}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf", "bold": true}, "加粗"], ["span", {"data-type": "leaf"}, "普通"], ["span", {"data-type": "leaf", "italic": true}, "斜体"]]]'
+
+# 带链接（link 是与 text 并列的子节点）
+dws doc block insert --node <DOC_ID> --content-format jsonml \
+  --element '["p", {"uuid": "new3"}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "请访问"]], ["a", {"href": "https://example.com"}, "链接文字"]]'
+```
+
+**leaf 支持的格式属性**：
+- `bold: true` — 加粗
+- `italic: true` — 斜体
+- `underline: true` — 下划线
+- `strike: true` — 删除线
+- `color: "#ff0000"` — 文字颜色
+- `highlight: "#ffff00"` — 高亮背景色
+- `sz: 14` / `szUnit: "pt"` — 字号
+
+## 标题 (h1-h6)
+
+```bash
+dws doc block insert --node <DOC_ID> --content-format jsonml \
+  --element '["h1", {"uuid": "new4"}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "一级标题"]]]'
+
+dws doc block insert --node <DOC_ID> --content-format jsonml \
+  --element '["h2", {"uuid": "new5"}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "二级标题"]]]'
+
+# 更新已有标题
+dws doc block update --node <DOC_ID> --block-id <BLOCK_ID> --content-format jsonml \
+  --element '["h2", {"uuid": "<BLOCK_ID>"}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "修改后的标题"]]]'
+```
+
+## 列表 (list)
+
+列表在 JSONML 中是 **带 `list` 属性的 `p` 节点**，不是独立 tag。
+
+```bash
+# 无序列表项
+dws doc block insert --node <DOC_ID> --content-format jsonml \
+  --element '["p", {"uuid": "li1", "list": {"listId": "mylist1", "level": 0, "isOrdered": false}}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "无序列表第一项"]]]'
+
+# 有序列表项
+dws doc block insert --node <DOC_ID> --content-format jsonml \
+  --element '["p", {"uuid": "li2", "list": {"listId": "mylist2", "level": 0, "isOrdered": true, "start": 1}}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "有序列表第一项"]]]'
+
+# 缩进子项（level: 1）
+dws doc block insert --node <DOC_ID> --content-format jsonml \
+  --element '["p", {"uuid": "li3", "list": {"listId": "mylist2", "level": 1, "isOrdered": true}}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "子列表项"]]]'
+
+# 待办列表（checkbox）
+dws doc block insert --node <DOC_ID> --content-format jsonml \
+  --element '["p", {"uuid": "li4", "list": {"listId": "todo1", "level": 0, "isOrdered": false, "isTaskList": true, "isChecked": false}}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "待办事项"]]]'
+```
+
+## 引用 (blockquote)
+
+引用是 **带 `quote` 属性的 `p` 节点**。
+
+```bash
+dws doc block insert --node <DOC_ID> --content-format jsonml \
+  --element '["p", {"uuid": "q1", "quote": true}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "这是一段引用文字"]]]'
+```
+
+## 高亮块 / Callout (container)
+
+```bash
+# 蓝色高亮块
+dws doc block insert --node <DOC_ID> --content-format jsonml \

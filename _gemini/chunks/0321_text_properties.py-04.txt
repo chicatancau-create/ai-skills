@@ -1,0 +1,131 @@
+        'text-decoration': parse_project_text_decoration,
+    }
+    parser = parsers.get(name)
+    if parser is None:
+        raise ValueError(f'unsupported project text property {name!r}')
+    if name == 'letter-spacing':
+        return parser(raw, font_size=font_size)
+    return parser(raw)
+
+
+def _iter_style_declarations(
+    elem: ET.Element,
+) -> tuple[list[tuple[str, str]], list[str]]:
+    declarations: list[tuple[str, str]] = []
+    malformed: list[str] = []
+    for raw_fragment in (elem.get('style') or '').split(';'):
+        fragment = raw_fragment.strip()
+        if not fragment:
+            continue
+        if ':' not in fragment:
+            malformed.append(fragment)
+            continue
+        raw_name, raw_value = fragment.split(':', 1)
+        name = raw_name.strip().lower()
+        value = raw_value.strip()
+        if not name or not value:
+            malformed.append(fragment)
+            continue
+        declarations.append((name, value))
+    return declarations, malformed
+
+
+def _resolve_font_sizes(
+    root: ET.Element,
+) -> tuple[dict[int, float], list[TextPropertyDiagnostic]]:
+    """Resolve inherited font sizes and retain declaration-level failures."""
+    resolved: dict[int, float] = {}
+    diagnostics: list[TextPropertyDiagnostic] = []
+
+    def parse_declared_size(
+        elem: ET.Element,
+        raw: str,
+        source: str,
+        parent_size: float,
+        root_size: float,
+    ) -> float | None:
+        label = _element_label(elem)
+        relative_base = (
+            root_size
+            if raw.strip().lower().endswith('rem')
+            else parent_size
+        )
+        try:
+            value = parse_svg_length(
+                raw,
+                parent_size,
+                font_size=relative_base,
+            )
+            font_px_to_hpt(value)
+        except ValueError as exc:
+            diagnostics.append(TextPropertyDiagnostic(
+                'error',
+                label,
+                source,
+                'font-size',
+                raw,
+                f'{label} {source} font-size={raw!r}: {exc}',
+            ))
+            return None
+        return value
+
+    def walk(
+        elem: ET.Element,
+        parent_size: float,
+        root_size: float,
+    ) -> None:
+        declarations, _ = _iter_style_declarations(elem)
+        style_sizes = [
+            raw
+            for name, raw in declarations
+            if name == 'font-size'
+        ]
+        direct_raw = elem.get('font-size')
+        direct_size = (
+            parse_declared_size(
+                elem,
+                direct_raw,
+                'attribute',
+                parent_size,
+                root_size,
+            )
+            if direct_raw is not None
+            else None
+        )
+        parsed_style_sizes = [
+            parse_declared_size(
+                elem,
+                raw,
+                'inline style',
+                parent_size,
+                root_size,
+            )
+            for raw in style_sizes
+        ]
+        effective_size = parent_size
+        if style_sizes:
+            last_style_size = parsed_style_sizes[-1]
+            effective_size = (
+                last_style_size
+                if last_style_size is not None
+                else parent_size
+            )
+        elif direct_raw is not None:
+            effective_size = direct_size if direct_size is not None else parent_size
+        resolved[id(elem)] = effective_size
+        child_root_size = effective_size if elem is root else root_size
+        for child in elem:
+            walk(child, effective_size, child_root_size)
+
+    walk(root, 16.0, 16.0)
+    return resolved, diagnostics
+
+
+def resolve_project_font_sizes(root: ET.Element) -> dict[int, float]:
+    """Return effective SVG font sizes or reject an invalid declaration."""
+    resolved, diagnostics = _resolve_font_sizes(root)
+    if diagnostics:
+        raise ValueError('; '.join(item.message for item in diagnostics[:8]))
+    return resolved
+
+

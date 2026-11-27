@@ -1,0 +1,111 @@
+        icons_dir_value = (
+            payload.get("icons_dir") if isinstance(payload, dict) else None
+        )
+        icons_dir = (
+            Path(icons_dir_value)
+            if isinstance(icons_dir_value, str) and icons_dir_value
+            else Path("icons")
+        )
+        if (
+            icons_dir.drive
+            or icons_dir.anchor
+            or icons_dir.is_absolute()
+            or ".." in icons_dir.parts
+        ):
+            continue
+        assets = payload.get("assets") if isinstance(payload, dict) else None
+        if not isinstance(assets, list):
+            continue
+        for item in assets:
+            value = item.get("asset") if isinstance(item, dict) else None
+            if not isinstance(value, str):
+                continue
+            asset_path = Path(value)
+            if (
+                asset_path.drive
+                or asset_path.anchor
+                or asset_path.is_absolute()
+                or ".." in asset_path.parts
+                or not asset_path.parts
+            ):
+                continue
+            path = (
+                asset_path
+                if asset_path.parts[0] == "icons"
+                else icons_dir / asset_path
+            )
+            if not path.parts or path.parts[0] != "icons":
+                continue
+            target = output_dir / path
+            if _path_lexists(target):
+                managed.add(target)
+    return managed
+
+
+def _managed_report_artifact_paths(output_dir: Path) -> set[Path]:
+    """Return optional artifacts owned by the previous conversion report."""
+    report_path = conversion_report_path(output_dir)
+    if report_path.is_symlink() or not report_path.is_file():
+        return set()
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return set()
+    artifacts = report.get("artifacts")
+    if not isinstance(artifacts, dict):
+        return set()
+    if artifacts.get("animationConfig") != "animations.json":
+        return set()
+
+    managed = {Path("animations.json")}
+    source_template = artifacts.get("sourceTemplate")
+    if source_template == SOURCE_TEMPLATE_NAME:
+        managed.add(Path(str(source_template)))
+    native_structure = artifacts.get("nativeStructure")
+    if native_structure == NATIVE_STRUCTURE_NAME:
+        managed.add(Path(str(native_structure)))
+    if artifacts.get("roundtripManifest") == ROUNDTRIP_MANIFEST_PATH.as_posix():
+        managed.add(ROUNDTRIP_MANIFEST_PATH)
+    embedded_font_paths = [artifacts.get("embeddedFontManifest")]
+    raw_font_parts = artifacts.get("embeddedFontParts")
+    if isinstance(raw_font_parts, list):
+        embedded_font_paths.extend(raw_font_parts)
+    font_prefix = FONT_BUNDLE_DIR.parts
+    for value in embedded_font_paths:
+        if not isinstance(value, str):
+            continue
+        path = Path(value)
+        if (
+            path.drive
+            or path.anchor
+            or path.is_absolute()
+            or ".." in path.parts
+            or path.parts[:len(font_prefix)] != font_prefix
+            or path.suffix.lower() not in {".json", ".fntdata"}
+        ):
+            continue
+        managed.add(path)
+    animation_media = artifacts.get("animationMedia")
+    managed_lists = [animation_media, artifacts.get("resources"), artifacts.get("notes")]
+    managed_resource_roots = {
+        "audio",
+        "images",
+        "native-payloads",
+        "notes",
+        "sounds",
+        "video",
+    }
+    for values in managed_lists:
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            if not isinstance(value, str):
+                continue
+            path = Path(value)
+            if (
+                path.drive
+                or path.anchor
+                or path.is_absolute()
+                or not path.parts
+                or ".." in path.parts
+                or path.parts[0] not in managed_resource_roots

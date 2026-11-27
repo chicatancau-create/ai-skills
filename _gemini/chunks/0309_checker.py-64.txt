@@ -1,0 +1,99 @@
+        <project>/svg_output/). Results are cached per lock path.
+        """
+        if self.quick_generate:
+            return None
+        if _parse_spec_lock is None:
+            return None
+        for candidate in (svg_path.parent / 'spec_lock.md',
+                          svg_path.parent.parent / 'spec_lock.md'):
+            if candidate in self._lock_cache:
+                return self._lock_cache[candidate]
+            if candidate.exists():
+                try:
+                    data = _parse_spec_lock(candidate)
+                except Exception:
+                    data = None
+                self._lock_cache[candidate] = data
+                if data is not None:
+                    self._lock_seen = True
+                return data
+        return None
+
+    def _prototype_drift_allowances(
+        self,
+    ) -> Tuple[set[str], set[str], set[str]]:
+        """Return color/font/size values owned by the selected mirror page."""
+        prototype_root = self._active_prototype_root()
+        if prototype_root is None:
+            return set(), set(), set()
+        try:
+            content = self._active_prototype_path.read_text(encoding='utf-8')
+        except (AttributeError, OSError):
+            return set(), set(), set()
+
+        colors: set[str] = set()
+        for attribute in _PAINT_PROPERTIES or ():
+            for raw_value in self._svg_property_values(content, attribute):
+                normalized = raw_value.strip()
+                if normalized.lower() in {'none', 'transparent'} or re.fullmatch(
+                    r'url\(#[^)]+\)', normalized
+                ):
+                    continue
+                if _parse_export_color is not None:
+                    color, _alpha = _parse_export_color(normalized)
+                else:
+                    color = _normalize_hex_rgb(normalized)
+                if color:
+                    colors.add(color)
+        fonts = {
+            self._normalize_font_stack(value)
+            for value in self._font_family_values(content)
+            if self._normalize_font_stack(value)
+        }
+        sizes = set(self._effective_text_size_counts(prototype_root))
+        return colors, fonts, sizes
+
+    def _declared_typography_size_anchors(
+        self,
+        lock: Dict,
+    ) -> Tuple[Dict, set[str], List[float], List[str]]:
+        """Return valid declared size anchors and malformed lock rows."""
+        typography = lock.get('typography', {})
+        positive_numeric_re = re.compile(
+            r'^(?=.*[1-9])(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)$'
+        )
+        locked_sizes: set[str] = set()
+        anchor_sizes: List[float] = []
+        invalid_sizes: List[str] = []
+        for key, raw_value in typography.items():
+            if key == 'font_family' or key.endswith('_family'):
+                continue
+            value = raw_value.strip()
+            if positive_numeric_re.fullmatch(value) is None:
+                invalid_sizes.append(f"{key}: {raw_value}")
+                continue
+            try:
+                anchor = float(value)
+            except (TypeError, ValueError):
+                invalid_sizes.append(f"{key}: {raw_value}")
+                continue
+            if not math.isfinite(anchor) or anchor <= 0:
+                invalid_sizes.append(f"{key}: {raw_value}")
+                continue
+            locked_sizes.add(self._canonical_font_size_key(anchor))
+            anchor_sizes.append(anchor)
+        return typography, locked_sizes, anchor_sizes, invalid_sizes
+
+    def _count_undeclared_size_occurrences(
+        self,
+        root: ET.Element,
+        *,
+        locked_sizes: set[str],
+        anchor_sizes: List[float],
+        prototype_sizes: set[str],
+    ) -> Counter[str]:
+        """Count text objects using valid sizes outside all declared bands."""
+        counts: Counter[str] = Counter()
+        if not locked_sizes:
+            return counts
+        for value, occurrence_count in self._effective_text_size_counts(root).items():

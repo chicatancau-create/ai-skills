@@ -1,0 +1,110 @@
+| 裸字符串 → 包成 `["span",{"data-type":"text"},["span",{"data-type":"leaf"},"..."]]` | ✓（stderr 打印 `[FIX]`） | ✓ | ✗ |
+| validator 阻断（HasErrors → 拒发） | ✓ | ✓ | ✓ |
+
+报错格式（agent 友好）：
+
+```
+$[2][2]: paragraph child must be span wrapper, got raw string.
+Suggestion: ["span",{"data-type":"text"},["span",{"data-type":"leaf"},"<your text>"]]
+```
+
+三态设计：
+
+- 不传：结构修复 ON + JSON 语法修复 OFF + 校验 ON（推荐人工调用）
+- `--fix-jsonml`：全部修复 ON（含 JSON 语法修复，推荐 agent 调用）
+- `--no-fix-jsonml`：全部修复 OFF，校验仍 ON；用于排查原始错误
+
+**何时不走本节、改用 markdown**：纯文本追加章节（§4.2）、整篇按全新骨架重写（§4.5，且无富结构需要保留时）、只在乎"加一段文字"且确认目标段落无 callout / 分栏 / 颜色 / @人 / 附件。其余场景默认本节。
+
+字段细节见 [doc-jsonml-schema.md](../format/doc-jsonml-schema.md)；可复制范例见 [doc-jsonml-cookbook.md](../format/doc-jsonml-cookbook.md)。
+
+### 4.5 整篇 overwrite
+
+适合「按新风格重写整篇」「按新骨架重组结构」。
+
+**形态选择（按 §1.3 优先级）**：
+
+- 若原文档含 callout / 分栏 / 颜色 / @人 / 附件 / 嵌套结构且需要保留——**走 §4.4 路径 A**（整篇 JSONML overwrite；默认不带 `--revision`，担心并发时再加）
+- 若是纯文本骨架重写、原文档没有富结构需要保真——走本节 markdown overwrite
+
+执行前必须先向用户**显式提示**：
+
+> 注意：本次操作将覆盖整篇文档内容（约 {size}）。可能存在以下风险：
+> - 大文档 overwrite 可能被后端静默降级为 append，导致**旧内容残留 + 新内容追加在末尾**
+> - markdown overwrite 会丢失原文档的 callout / 分栏 / 颜色等富结构；如需保真改走 §4.4 路径 A
+> - 写入完成后我会回读校验，发现异常会主动报告
+>
+> 是否继续？
+
+得到确认后执行（markdown 兜底路径）：
+
+```bash
+dws doc update --node <nodeId> --content-file /tmp/<name>-full.md --mode overwrite --content-format markdown
+```
+
+**写入后必须回读**（§6）。如果发现旧内容残留，按 §6 的修复路径处理。
+
+### 4.6 超长内容追加（分块 append）
+
+当一次性追加内容 **超过 200KB** 时，必须拆分为多片 `--mode append`，并在执行第一片**之前**向用户发出截断风险提示等待确认。
+
+完整规范（提示话术模板、触发条件、失败处理）见 [04-document.md «分块 append 截断风险提示»](../../../best_practices/04-document.md)。
+
+update 场景下的额外约束：
+
+1. 按段落/标题边界切分，**禁止**在表格、代码块、列表内部截断
+2. 每写一片记录已写入的最后一个标题/段落标记，供 §6 回读比对
+3. 与既有内容衔接位置不能产生悬空标题或断列表
+
+---
+
+## 五、改写时的样式约束
+
+按 [doc-style-guideline.md](./doc-style-guideline.md) 处理：
+
+- **文档类型保持不变**；用户明确要求转型时除外（如从「执行型 SOP」改成「说明型接口文档」）
+- **同类信息保持一致**：改写时不要把原本统一的元素改为多种表达
+- **颜色/emoji 语义**：改写后仍满足 style guideline §5「颜色与视觉语义」的一致性
+- **不删除附件/图片**；用户明确要求时除外
+
+---
+
+## 六、回读验收
+
+**所有 `doc update` 完成后都必须回读**，无论 overwrite 还是 append：
+
+```bash
+dws doc read --node <nodeId> --content-format jsonml
+```
+
+校验要点：
+
+- 改写章节的关键标题、段落首句、表格表头是否符合预期
+- overwrite 后旧内容是否真的被清除
+- append 后新内容是否在期望位置
+- 表格、代码块、列表跨块元素是否完整
+- @人、附件、图片等保真要素是否原样保留
+
+### 异常处理
+
+| 现象 | 可能原因 | 处理 |
+|------|----------|------|
+| overwrite 后旧内容残留 + 新内容追加在末尾 | overwrite 被静默降级为 append | 告知用户 overwrite 降级，按下方「先清空再重建」路径修复 |
+| append 后部分片段缺失 | 分块写入丢失 | 定位缺失片段，针对该段单独再 append 一次 |
+| @人 / 附件被替换为纯文本 | 改写时未走保真约束 | 用 JSONML 无损编辑修复（§4.4）|
+| 整篇内容乱序 | 写入顺序异常 | 报告给用户；若可重做，按下方「先清空再重建」路径修复 |
+
+**禁止**在未回读的情况下向用户报告"已完成"。
+
+---
+
+## 七、交付口径
+
+只报告已经验证过的信息：
+
+- 改写涉及的章节范围
+- 改写后的 nodeId 与 docUrl
+- 回读验收结果（哪些章节确认改写成功、保真要素是否完整）
+- 如有缺失或异常，说明具体位置和已采取的修复动作
+
+未回读前，不要说「内容完整」「改写完成」。

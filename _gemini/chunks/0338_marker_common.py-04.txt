@@ -1,0 +1,122 @@
+) -> tuple[float, float, float, float]:
+    x1, y1, x2, y2 = bbox
+    points = [
+        transform_point(matrix, x1, y1),
+        transform_point(matrix, x2, y1),
+        transform_point(matrix, x2, y2),
+        transform_point(matrix, x1, y2),
+    ]
+    result = _bbox_from_points(points)
+    if result is None:
+        raise RuntimeError("Native PPTX object fallback bbox inference failed")
+    return result
+
+
+def _points_attr_bbox(
+    value: str | None,
+    *,
+    min_points: int,
+) -> tuple[float, float, float, float] | None:
+    try:
+        points = parse_svg_points(value or "", min_points=min_points)
+    except ValueError as exc:
+        raise RuntimeError(f"Invalid native fallback points: {exc}") from exc
+    return _bbox_from_points(points)
+
+
+def _path_bbox(value: str | None) -> tuple[float, float, float, float] | None:
+    try:
+        commands = svg_path_to_absolute(parse_svg_path(value or ""))
+    except ValueError as exc:
+        raise RuntimeError(f"Invalid native fallback path d: {exc}") from exc
+
+    points: list[tuple[float, float]] = []
+    subpath_x = 0.0
+    subpath_y = 0.0
+
+    for command in commands:
+        values = command.args
+        if command.cmd == "M":
+            subpath_x, subpath_y = values
+            points.append((subpath_x, subpath_y))
+        elif command.cmd in {"L", "T"}:
+            points.append((values[0], values[1]))
+        elif command.cmd == "C":
+            points.extend(
+                (values[index], values[index + 1])
+                for index in range(0, 6, 2)
+            )
+        elif command.cmd in {"S", "Q"}:
+            points.extend(
+                (values[index], values[index + 1])
+                for index in range(0, 4, 2)
+            )
+        elif command.cmd == "A":
+            points.append((values[5], values[6]))
+        elif command.cmd == "Z":
+            points.append((subpath_x, subpath_y))
+
+    return _bbox_from_points(points)
+
+
+def _element_local_bbox(elem: ET.Element) -> tuple[float, float, float, float] | None:
+    tag = _local_tag(elem)
+    if tag == "metadata":
+        return None
+    if tag in {"defs", "clipPath", "mask", "filter", "style"}:
+        return None
+    if elem.get("display") == "none" or elem.get("visibility") == "hidden":
+        return None
+
+    if tag in {"g", "svg", "a"}:
+        bbox = None
+        for child in elem:
+            bbox = _bbox_union(bbox, _fallback_bbox(child))
+        return bbox
+
+    if tag in {"rect", "image", "use"}:
+        x = _project_geometry_number(elem, "x")
+        y = _project_geometry_number(elem, "y")
+        width = _project_geometry_number(elem, "width")
+        height = _project_geometry_number(elem, "height")
+        if width <= 0 or height <= 0:
+            return None
+        return x, y, x + width, y + height
+
+    if tag == "circle":
+        cx = _project_geometry_number(elem, "cx")
+        cy = _project_geometry_number(elem, "cy")
+        r = _project_geometry_number(elem, "r")
+        if r <= 0:
+            return None
+        return cx - r, cy - r, cx + r, cy + r
+
+    if tag == "ellipse":
+        cx = _project_geometry_number(elem, "cx")
+        cy = _project_geometry_number(elem, "cy")
+        rx = _project_geometry_number(elem, "rx")
+        ry = _project_geometry_number(elem, "ry")
+        if rx <= 0 or ry <= 0:
+            return None
+        return cx - rx, cy - ry, cx + rx, cy + ry
+
+    if tag == "line":
+        points = [
+            (
+                _project_geometry_number(elem, "x1"),
+                _project_geometry_number(elem, "y1"),
+            ),
+            (
+                _project_geometry_number(elem, "x2"),
+                _project_geometry_number(elem, "y2"),
+            ),
+        ]
+        return _bbox_from_points(points)
+
+    if tag in {"polygon", "polyline"}:
+        return _points_attr_bbox(
+            elem.get("points"),
+            min_points=3 if tag == "polygon" else 2,
+        )
+
+    if tag == "path":

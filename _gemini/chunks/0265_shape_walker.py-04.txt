@@ -1,0 +1,119 @@
+            inherited_lst_styles=inherited_lst_styles,
+            inherited_body_properties=inherited_body_properties,
+            effective_rotation=effective_rotation,
+        )
+
+        if kind == GROUP:
+            node.children = _walk_container(
+                child, xfrm, effective_rotation,
+                source_order_path=child_order_path,
+                placeholder_xfrms=placeholder_xfrms,
+                placeholder_lst_styles=placeholder_lst_styles,
+                placeholder_body_properties=placeholder_body_properties,
+            )
+
+        nodes.append(node)
+    return nodes
+
+
+def _lookup_placeholder_xfrm(
+    ph: PlaceholderInfo,
+    table: dict[tuple[str | None, str | None], Xfrm],
+) -> Xfrm | None:
+    """Find inherited geometry after applying the OOXML placeholder defaults."""
+    ph_type, ph_idx = _placeholder_identity(ph.type, ph.idx)
+    for key in (
+        (ph_type, ph_idx),
+        (ph_type, None),
+        (None, ph_idx),
+    ):
+        hit = table.get(key)
+        if hit is not None and (hit.w > 0 or hit.h > 0):
+            return hit
+    return None
+
+
+def _lookup_placeholder_lst_styles(
+    ph: PlaceholderInfo,
+    table: dict[tuple[str | None, str | None], list[ET.Element]],
+) -> tuple[ET.Element, ...]:
+    """Find inherited txBody/lstStyle elements for a placeholder."""
+    ph_type, ph_idx = _placeholder_identity(ph.type, ph.idx)
+    styles: list[ET.Element] = []
+    seen: set[int] = set()
+    for key in (
+        (ph_type, ph_idx),
+        (ph_type, None),
+        (None, ph_idx),
+        _placeholder_tx_style_key(ph),
+    ):
+        for style in table.get(key, []):
+            marker = id(style)
+            if marker in seen:
+                continue
+            styles.append(style)
+            seen.add(marker)
+    return tuple(styles)
+
+
+def _lookup_placeholder_body_properties(
+    ph: PlaceholderInfo,
+    table: dict[tuple[str | None, str | None], list[ET.Element]],
+) -> tuple[ET.Element, ...]:
+    """Find inherited txBody/bodyPr elements for a placeholder."""
+    ph_type, ph_idx = _placeholder_identity(ph.type, ph.idx)
+    exact = table.get((ph_type, ph_idx), [])
+    if exact:
+        return tuple(exact)
+    for key in ((ph_type, None), (None, ph_idx)):
+        candidates = table.get(key, [])
+        if candidates:
+            return (candidates[0],)
+    return ()
+
+
+def _placeholder_tx_style_key(
+    ph: PlaceholderInfo,
+) -> tuple[str | None, str | None]:
+    ph_type, _ph_idx = _placeholder_identity(ph.type, ph.idx)
+    if ph_type in _TITLE_PLACEHOLDER_TYPES:
+        return _TX_STYLE_TITLE_KEY
+    if ph_type in _BODY_PLACEHOLDER_TYPES:
+        return _TX_STYLE_BODY_KEY
+    return _TX_STYLE_OTHER_KEY
+
+
+def _placeholder_identity(
+    ph_type: str | None,
+    ph_idx: str | None,
+) -> tuple[str, str]:
+    """Resolve the schema defaults used for placeholder inheritance keys."""
+    return (
+        _DEFAULT_PLACEHOLDER_TYPE if ph_type is None else ph_type,
+        _DEFAULT_PLACEHOLDER_INDEX if ph_idx is None else ph_idx,
+    )
+
+
+def _build_placeholder_xfrm_table(
+    *parts: ET.Element | None,
+) -> dict[tuple[str | None, str | None], Xfrm]:
+    """Index placeholders that *do* have explicit geometry, in priority order.
+
+    Pass parts most-specific to least-specific (layout first, master second);
+    the first writer for a given key wins so layout overrides master, which is
+    what PowerPoint's inheritance chain expects.
+    """
+    table: dict[tuple[str | None, str | None], Xfrm] = {}
+    for part_xml in parts:
+        if part_xml is None:
+            continue
+        sp_tree = part_xml.find("p:cSld/p:spTree", NS)
+        if sp_tree is None:
+            continue
+        for sp in sp_tree.iter():
+            if not isinstance(sp.tag, str) or sp.tag.split("}", 1)[-1] != "sp":
+                continue
+            ph_elem = sp.find("p:nvSpPr/p:nvPr/p:ph", NS)
+            if ph_elem is None:
+                continue
+            xfrm_elem = sp.find("p:spPr/a:xfrm", NS)

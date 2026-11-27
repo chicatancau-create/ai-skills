@@ -1,0 +1,54 @@
+            for run_properties, size in zip(
+                _style_level_run_properties(
+                    style,
+                    f"p:{style_name}",
+                ),
+                body_levels,
+            ):
+                run_properties.set("sz", str(size))
+
+        style_sizes = (
+            ("titleStyle", (spec.title_hpt,)),
+            ("bodyStyle", body_levels),
+            ("otherStyle", body_levels),
+        )
+
+        tree.write(master_path, encoding="utf-8", xml_declaration=True)
+
+        try:
+            read_back = ET.parse(master_path).getroot()
+        except (OSError, ET.ParseError) as exc:
+            raise ThemeFontError(
+                f"Cannot read back slide master {master_path}: {exc}"
+            ) from exc
+        read_back_styles = read_back.find(f"{{{PML_NS}}}txStyles")
+        if read_back_styles is None:
+            raise ThemeFontError(
+                f"Slide master lost p:txStyles after update: {master_path}"
+            )
+        for style_name, expected_sizes in style_sizes:
+            style = read_back_styles.find(f"{{{PML_NS}}}{style_name}")
+            if style is None:
+                actual_sizes: tuple[str | None, ...] = ()
+            elif style_name == "titleStyle":
+                actual_sizes = tuple(
+                    item.get("sz")
+                    for item in _style_run_properties(
+                        style,
+                        f"p:{style_name}",
+                    )
+                )
+            else:
+                actual_sizes = tuple(
+                    item.get("sz")
+                    for item in _style_level_run_properties(
+                        style,
+                        f"p:{style_name}",
+                    )
+                )
+            if actual_sizes != tuple(str(size) for size in expected_sizes):
+                raise ThemeFontError(
+                    f"Slide master p:{style_name} size read-back failed: "
+                    f"{master_path}"
+                )
+    return len(master_paths)

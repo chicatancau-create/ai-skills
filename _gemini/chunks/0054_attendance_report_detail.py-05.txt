@@ -1,0 +1,113 @@
+        try:
+            feat = json.loads(feat_str)
+        except (ValueError, TypeError):
+            return ""
+    if not isinstance(feat, dict):
+        return ""
+    for key in candidate_keys:
+        val = feat.get(key)
+        if val in (None, "", [], {}):
+            continue
+        if isinstance(val, list) and val:
+            return str(val[0]).strip()
+        s = str(val).strip()
+        if "," in s:
+            return s.split(",")[0].strip()
+        return s
+    return ""
+
+
+def _extract_boss_remark(record: dict) -> str:
+    """
+    管理员修改备注，与 BossCheckRemarkOriginData 对齐。
+    Java 逻辑：features.getBossRemark()。
+    """
+    return str(_extract_field(record, (
+        "bossRemark", "boss_remark",
+        "approveRemark", "approve_remark",
+        "adminModifyRemark", "admin_modify_remark",
+    )) or "").strip()
+
+
+def _extract_boss_photo(record: dict, photo_index: int) -> str:
+    """
+    管理员修改备注图片（1/2/3），与 BossCheckPhoto1/2/3OriginData 对齐。
+    Java 逻辑：features.getBossPhotos()，按 index 取对应张。
+    photo_index: 0-based 索引（0=图片1, 1=图片2, 2=图片3）
+    """
+    boss_photos = record.get("bossPhotos") or record.get("boss_photos")
+    if isinstance(boss_photos, list):
+        if photo_index < len(boss_photos):
+            return str(boss_photos[photo_index]).strip()
+        return ""
+    if isinstance(boss_photos, str) and boss_photos.strip():
+        parts = [p.strip() for p in boss_photos.split(",") if p.strip()]
+        return parts[photo_index] if photo_index < len(parts) else ""
+
+    # 降级：尝试独立字段
+    val = _extract_field(record, (
+        f"bossPhoto{photo_index + 1}", f"boss_photo_{photo_index + 1}",
+    ))
+    return str(val).strip() if val else ""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 关联合并 check result + check record → 明细行
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_result_index(
+    check_results: list[dict],
+) -> dict[tuple[str, str], list[dict]]:
+    """
+    把 check result 按 (userId, 打卡时间 YYYY-MM-DD HH:mm:ss) 建索引，
+    用于关联打卡流水获取考勤时间和打卡结果。
+    """
+    index: dict[tuple[str, str], list[dict]] = {}
+    for rec in check_results:
+        uid = str(_extract_field(rec, ("userId", "userid", "user_id")) or "")
+        raw_time = _extract_field(rec, (
+            "userCheckTime", "user_check_time", "checkTime", "baseCheckTime",
+        ))
+        time_key = _humanize_timestamp(raw_time) if raw_time else "_unknown"
+        key = (uid, time_key)
+        index.setdefault(key, []).append(rec)
+    return index
+
+
+def build_record_rows(
+    check_records: list[dict],
+    check_results: list[dict],
+    user_info_map: dict[str, cmn.UserInfo],
+    group_name_map: dict[str, str],
+) -> list[dict[str, str]]:
+    """
+    以 check record（打卡流水）为主表构建明细行。
+
+    每条打卡流水记录输出一行，只展示有实际打卡的记录。
+    通过打卡时间关联 check result 获取"考勤时间"和"打卡结果"。
+
+    列顺序与 Diamond 配置 termId 8-20 对齐，各字段逻辑与 Java DataProvider 一致。
+    返回每行一个 dict，key 与 ALL_HEADERS 对齐。
+    """
+    result_index = _build_result_index(check_results)
+    rows: list[dict[str, str]] = []
+
+    for record in check_records:
+        uid = str(_extract_field(record, ("userId", "userid", "user_id")) or "")
+        info = user_info_map.get(uid, cmn.UserInfo(name=uid))
+
+        # ── 打卡时间（实际打卡时间，OriginUserCheckTimePlug）────────────────
+        actual_time_raw = _extract_field(record, (
+            "userCheckTime", "user_check_time", "checkTime",
+        ))
+        actual_time = _humanize_timestamp(actual_time_raw)
+
+        # ── 关联 check result 获取"考勤时间"和"打卡结果" ──────────────────
+        time_key = actual_time if actual_time else "_unknown"
+        matched_results = result_index.get((uid, time_key), [])
+        result_rec = matched_results[0] if matched_results else {}
+
+        # 考勤时间 = 班次规定的应打卡时间（OriginPlanCheckTimePlug）
+        plan_time_raw = _extract_field(result_rec, (
+            "planCheckTime", "plan_check_time", "baseCheckTime",
+        )) if result_rec else None

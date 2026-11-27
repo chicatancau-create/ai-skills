@@ -1,0 +1,105 @@
+        for slot in root.iter(f'{{{SVG_NS}}}g'):
+            if not (slot.get('data-pptx-placeholder') or '').strip():
+                continue
+            binding = (
+                slot.get('data-pptx-binding') or 'carrier'
+            ).strip().lower()
+            if binding != 'carrier':
+                continue
+            visual_children = [
+                child for child in list(slot)
+                if _local_name(child) not in _NON_VISUAL_SVG_TAGS
+            ]
+            carriers = [
+                child for child in visual_children
+                if (child.get('data-pptx-carrier') or '')
+                .strip()
+                .lower()
+                == 'true'
+            ]
+            slot_id = (slot.get('id') or '').strip()
+            if not slot_id or len(visual_children) != 1 or len(carriers) != 1:
+                continue
+            if not any(
+                _local_name(descendant) == 'tspan'
+                and any(
+                    descendant.get(name) is not None
+                    for name in ('x', 'y', 'dy')
+                )
+                for descendant in carriers[0].iter()
+            ):
+                continue
+            candidate_ids.append(slot_id)
+
+        if not candidate_ids:
+            return
+
+        flattened_root = copy.deepcopy(root)
+        try:
+            _flatten_positional_tspans(
+                ET.ElementTree(flattened_root),
+                merge_paragraphs=True,
+                preserve_line_breaks=True,
+            )
+        except ValueError:
+            # The shared text check reports the unsupported nested-position
+            # contract; avoid turning a quality result into a checker crash.
+            return
+        slots_by_id = {
+            (slot.get('id') or '').strip(): slot
+            for slot in flattened_root.iter(f'{{{SVG_NS}}}g')
+            if (slot.get('id') or '').strip()
+        }
+        for slot_id in candidate_ids:
+            slot = slots_by_id.get(slot_id)
+            if slot is None:
+                continue
+            native_children = [
+                child for child in list(slot)
+                if _local_name(child) not in _NON_VISUAL_SVG_TAGS
+            ]
+            if len(native_children) == 1:
+                continue
+            result['errors'].append(
+                f"{svg_path.name}: placeholder slot {slot_id} becomes "
+                f"{len(native_children)} native children after positional "
+                "<tspan> flattening; a carrier-bound slot must export as one "
+                "text or picture carrier. Use one single-frame dy-stacked text "
+                "frame, or move independently positioned lines outside the slot"
+            )
+
+    def _append_structure_coverage_warnings(
+        self,
+        root: ET.Element,
+        result: Dict,
+    ) -> None:
+        """Warn on mapped pages that compile to bare Masters / empty Layouts.
+
+        Zero-slot and framing-only Layouts are legal contracts, so these stay
+        advisory warnings. They neither fail the workflow gate nor require a
+        per-warning disposition.
+        """
+        messages = self._structure_coverage_messages(root)
+        if not messages:
+            return
+        prototype_root = self._active_prototype_root()
+        if (
+            prototype_root is not None
+            and messages == self._structure_coverage_messages(prototype_root)
+        ):
+            for message in messages:
+                self._append_inherited_info(
+                    result,
+                    'structure_coverage',
+                    message,
+                )
+            return
+        result['warnings'].extend(messages)
+
+    @staticmethod
+    def _structure_coverage_messages(root: ET.Element) -> List[str]:
+        """Return advisory coverage messages for one structured page."""
+        if not (root.get('data-pptx-layout') or '').strip():
+            return []
+        messages: List[str] = []
+        has_layer_mark = any(

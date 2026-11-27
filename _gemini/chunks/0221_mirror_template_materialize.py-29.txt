@@ -1,0 +1,107 @@
+            "Mirror materialization requires at least one source Slide"
+        )
+    if [int(item["index"]) for item in slides] != list(range(1, len(slides) + 1)):
+        raise MirrorMaterializationError(
+            "Mirror source slide indexes must be contiguous and start at 1"
+        )
+
+    retained_layout_keys = {
+        str(slide["layoutKey"])
+        for slide in slides
+    }
+    missing_layout_keys = retained_layout_keys - set(layouts)
+    if missing_layout_keys:
+        raise MirrorMaterializationError(
+            "Source Slides reference missing Layout key(s): "
+            + ", ".join(sorted(missing_layout_keys))
+        )
+    retained_master_keys = {
+        str(layouts[layout_key]["masterKey"])
+        for layout_key in retained_layout_keys
+    }
+    missing_master_keys = retained_master_keys - set(masters)
+    if missing_master_keys:
+        raise MirrorMaterializationError(
+            "Reachable Layouts reference missing Master key(s): "
+            + ", ".join(sorted(missing_master_keys))
+        )
+    selected_document_names = _validate_graph_roster(
+        native,
+        inheritance,
+        retained_master_keys,
+        retained_layout_keys,
+    )
+    authoring_root, documents = _load_authoring_documents(
+        import_workspace,
+        selected_document_names,
+    )
+    vector_assets = _load_vector_assets(import_workspace, documents)
+    referenced_icons = _validate_source_ref_closure(documents, vector_assets)
+    source_theme_bundle = _source_theme_bundle(
+        import_workspace,
+        native,
+        masters,
+        retained_master_keys,
+    )
+    prepared_masters: dict[str, ET.Element] = {}
+    prepared_layouts: dict[str, ET.Element] = {}
+    prepared_slides: dict[int, ET.Element] = {}
+    total_stats = RestorationStats()
+    for key in sorted(retained_master_keys):
+        master = masters[key]
+        document = documents[master["svgFile"]]
+        root, stats = _prepared_document(
+            document,
+            excluded_refs=set(document.source_refs),
+        )
+        _namespace_ids(root, f"m-{_safe_prefix(str(key))}-")
+        prepared_masters[key] = root
+        total_stats.merge(stats)
+    for key in sorted(retained_layout_keys):
+        layout = layouts[key]
+        document = documents[layout["svgFile"]]
+        root, stats = _prepared_document(
+            document,
+            excluded_refs=set(document.source_refs),
+        )
+        _namespace_ids(root, f"l-{_safe_prefix(str(key))}-")
+        prepared_layouts[key] = root
+        total_stats.merge(stats)
+    for slide in slides:
+        index = int(slide["index"])
+        document = documents[slide["layeredSvgFile"]]
+        placeholder_refs = {
+            f"slide:{item['shapeId']}"
+            for item in slide.get("placeholders", [])
+            if isinstance(item, dict) and item.get("shapeId") is not None
+        }
+        root, stats = _prepared_document(document, excluded_refs=placeholder_refs)
+        _namespace_ids(root, f"s-{index:03d}-")
+        prepared_slides[index] = root
+        total_stats.merge(stats)
+
+    slides_by_layout: dict[str, list[dict[str, Any]]] = {
+        key: [] for key in retained_layout_keys
+    }
+    for slide in slides:
+        slides_by_layout[str(slide["layoutKey"])].append(slide)
+
+    plans_by_layout: dict[str, list[SlotPlan]] = {}
+    for key in sorted(retained_layout_keys):
+        layout = layouts[key]
+        master_key = str(layout["masterKey"])
+        plans_by_layout[key] = _slot_plans(
+            layout,
+            prepared_layouts[key],
+            slides_by_layout[key],
+            prepared_slides,
+            masters[master_key],
+            prepared_masters[master_key],
+        )
+
+    materialized_roots: list[tuple[Path, ET.Element]] = []
+    for slide in slides:
+        index = int(slide["index"])
+        layout = layouts[str(slide["layoutKey"])]
+        master = masters[str(slide["masterKey"])]
+        filename = Path("templates") / f"{index:03d}_{_page_type(slide)}.svg"

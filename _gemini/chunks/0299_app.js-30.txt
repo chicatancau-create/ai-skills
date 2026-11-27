@@ -1,0 +1,95 @@
+                    !el.hasAttribute("width") || !el.hasAttribute("height")) return false;
+            var x = splitNumberUnit(el.getAttribute("x"));
+            var y = splitNumberUnit(el.getAttribute("y"));
+            var w = splitNumberUnit(el.getAttribute("width"));
+            var h = splitNumberUnit(el.getAttribute("height"));
+            if (!x || !y || !w || !h || x.unit !== y.unit ||
+                    x.unit !== w.unit || x.unit !== h.unit) return false;
+            attrs.x = fmt(own.a * x.num + own.e + d.x) + x.unit;
+            attrs.y = fmt(own.d * y.num + own.f + d.y) + y.unit;
+            attrs.width = fmt(Math.abs(own.a) * w.num) + w.unit;
+            attrs.height = fmt(Math.abs(own.d) * h.num) + h.unit;
+            attrs.transform = null;
+            return true;
+        };
+
+        if (rawMode === "box-transform") {
+            return bakeBox() ? attrs : null;
+        }
+        if (["rect", "image", "use", "text"].indexOf(tag) !== -1) {
+            return bakeTranslate("x", "y") ? attrs : null;
+        }
+        if (tag === "circle" || tag === "ellipse") {
+            return bakeTranslate("cx", "cy") ? attrs : null;
+        }
+        if (tag === "line") {
+            if (add("x1", own.e + d.x) && add("x2", own.e + d.x) &&
+                    add("y1", own.f + d.y) && add("y2", own.f + d.y)) {
+                if (el.hasAttribute("transform")) attrs.transform = null;
+                return attrs;
+            }
+            return null;
+        }
+        return null;
+    }
+
+    function attrsForMove(el, dx, dy) {
+        var attrs = rawMoveAttrs(el, dx, dy);
+        if (attrs) return attrs;
+        var rb = computeRenderBox(el);
+        var moved = matrixAfterMove(el, rb, rb.x + dx, rb.y + dy);
+        var tstr = matrixToString(moved);
+        return tstr ? { transform: tstr } : null;
+    }
+
+    function computeElementsBox(elements) {
+        var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        elements.forEach(function (el) {
+            var rb = computeRenderBox(el);
+            minX = Math.min(minX, rb.x);
+            minY = Math.min(minY, rb.y);
+            maxX = Math.max(maxX, rb.x + rb.w);
+            maxY = Math.max(maxY, rb.y + rb.h);
+        });
+        return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+    }
+
+    function topLevelSelectedElements(ids) {
+        var els = ids.map(function (eid) {
+            return svgContent.querySelector("#" + CSS.escape(eid));
+        }).filter(Boolean);
+        return els.filter(function (el) {
+            return !els.some(function (other) {
+                return other !== el && other.contains(el);
+            });
+        });
+    }
+
+    function attachPropEditors(el) {
+        var eid = el.id;
+        var panel = elementPropsEl;
+
+        var groupBtn = panel.querySelector(".btn-select-group");
+        if (groupBtn) {
+            groupBtn.addEventListener("click", function () {
+                var gid = groupBtn.getAttribute("data-group-id");
+                var groupEl = gid ? svgContent.querySelector("#" + CSS.escape(gid)) : null;
+                if (groupEl) selectElement(groupEl, false);
+            });
+        }
+
+        // L1: text content (fires on blur/change).
+        var contentBox = panel.querySelector(".prop-edit-content");
+        if (contentBox) {
+            contentBox.addEventListener("change", function () {
+                var newText = contentBox.value;
+                stageEditRequest(eid, { text: newText })
+                    .then(function () { el.textContent = newText; })
+                    .catch(function (err) { showError(t("err_edit") + err.message); });
+            });
+        }
+
+        // Raw own attributes: color picker + text input stay in sync.
+        panel.querySelectorAll(".prop-edit-color").forEach(function (picker) {
+            var key = picker.getAttribute("data-key");
+            var textInput = panel.querySelector('.prop-edit-color-text[data-key="' + key + '"]');

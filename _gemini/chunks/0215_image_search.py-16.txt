@@ -1,0 +1,120 @@
+# ---------------------------------------------------------------------------
+
+
+def fetch_url_replace(
+    output_dir: Path,
+    target_filename: str,
+    url: str,
+    manifest_path: Optional[Path] = None,
+    *,
+    slide: str = "",
+    purpose: str = "",
+    search_query: str = "",
+    orientation: str = "",
+    required_terms: tuple[str, ...] = (),
+    min_width: int = 1200,
+    min_height: int = 800,
+) -> int:
+    """Download a directly selected image URL into the target and record it.
+
+    The model-agnostic manual path: when an automated best match is not
+    suitable (or the running model cannot see images at all), a human finds a
+    good image, passes its URL, and it replaces the target. License is unknown
+    for an arbitrary URL, so the manifest marks it ``manual`` and notes that
+    verifying usage rights is the user's responsibility.
+    """
+    target_filename = _validate_bare_filename(
+        target_filename, field_name="target filename"
+    )
+    mpath = manifest_path or default_manifest_path(str(output_dir))
+    try:
+        existing_manifest = _read_existing_manifest(mpath)
+    except RuntimeError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    prior = next(
+        (
+            item
+            for item in existing_manifest.get("items", [])
+            if isinstance(item.get("filename"), str)
+            and item["filename"].casefold() == target_filename.casefold()
+        ),
+        {},
+    )
+    if prior and prior["filename"] != target_filename:
+        print(
+            f"Error: target filename casing {target_filename!r} conflicts with "
+            f"provenance filename {prior['filename']!r}.",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        inherited_required_terms = _parse_required_terms(
+            prior.get("required_terms")
+        )
+    except ValueError as exc:
+        print(
+            f"Error: existing provenance has invalid required_terms: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+    final_required_terms = inherited_required_terms or required_terms
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    dst_path = output_dir / target_filename
+    try:
+        staged_path, actual_dim = _stage_validated_image(
+            url,
+            dst_path,
+            min_width=min_width,
+            min_height=min_height,
+            enforce_thumbnail_floor=False,
+        )
+    except (
+        DownloadQualityError,
+        requests.RequestException,
+        OSError,
+        RuntimeError,
+        ValueError,
+    ) as exc:
+        print(f"Error: failed to download {url}: {exc}", file=sys.stderr)
+        return 1
+
+    # Inherit page context (which slide / purpose / query this image serves)
+    # from the entry being replaced; override only source / license / size /
+    # status so the audit trail survives a manual swap.
+    item = {
+        "filename": target_filename,
+        "slide": prior.get("slide") or slide,
+        "purpose": prior.get("purpose") or purpose,
+        "search_query": prior.get("search_query") or search_query,
+        "orientation": prior.get("orientation") or orientation,
+        "provider": "manual",
+        "title": "",
+        "author": "",
+        "source_page_url": url,
+        "download_url": url,
+        "license_name": "unverified — direct URL",
+        "license_url": "",
+        "license_tier": "manual",
+        "attribution_required": False,
+        "width": actual_dim[0],
+        "height": actual_dim[1],
+        "attribution_text": "",
+        "status": "manual",
+        "note": (
+            "Direct image URL; verifying usage rights is the user's "
+            "responsibility."
+        ),
+    }
+    if final_required_terms:
+        item["required_terms"] = list(final_required_terms)
+
+    try:
+        written = _commit_staged_image(
+            staged_path,
+            dst_path,
+            lambda: write_sources_manifest(mpath, item),
+        )
+    except (
+        OSError,

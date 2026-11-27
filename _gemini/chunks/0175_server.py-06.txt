@@ -1,0 +1,102 @@
+    preselected_keys = suggested_keys if len(explicit_roots) == 1 else []
+
+    response = {
+        'schema_version': TEMPLATE_SCHEMA_VERSION,
+        'phase': 'template',
+        'default_mode': source['default_mode'],
+        'library': library,
+        'explicit': explicit,
+        'preselected_keys': preselected_keys,
+    }
+    if 'lang' in source:
+        response['lang'] = source['lang'].strip()
+    response['options_sha256'] = _json_sha256({
+        'schema_version': TEMPLATE_SCHEMA_VERSION,
+        'phase': 'template',
+        'default_mode': response['default_mode'],
+        'lang': response.get('lang'),
+        'explicit_workspace_roots': [str(root) for root in explicit_roots],
+        'stage1_sha256': _json_sha256(recommendation),
+        'library_indexes': index_contracts,
+        'library': library,
+        'explicit': explicit,
+        'preselected_keys': preselected_keys,
+    })
+    return response, candidates
+
+
+def _template_selection_from_candidate(candidate: dict) -> dict:
+    """Project one trusted browser candidate into the persisted selection."""
+    selection = {
+        'source': candidate['source'],
+        'kind': candidate['kind'],
+    }
+    if candidate['source'] == 'library':
+        selection['id'] = candidate['id']
+    selection['workspace_root'] = candidate['workspace_root']
+    return selection
+
+
+def _template_selection_sha256(
+    mode: str,
+    selections: list[dict],
+    options_sha256: str,
+    root_snapshots: list[dict],
+) -> str:
+    """Bind one resolved choice to the candidate/options contract it used."""
+    return _json_sha256({
+        'mode': mode,
+        'selections': selections,
+        'options_sha256': options_sha256,
+        'root_snapshots': root_snapshots,
+    })
+
+
+def _validate_template_selection(data: dict) -> None:
+    """Validate the server-owned template-selection receipt shape."""
+    expected_fields = {
+        'schema_version',
+        'phase',
+        'status',
+        'mode',
+        'selections',
+        'options_sha256',
+        'selection_sha256',
+        'confirmed_at',
+        'root_snapshots',
+    }
+    if set(data) != expected_fields:
+        raise ValueError(f'{TEMPLATE_SELECTION_NAME} has invalid fields')
+    if type(data.get('schema_version')) is not int or data['schema_version'] != TEMPLATE_SCHEMA_VERSION:
+        raise ValueError(
+            f'{TEMPLATE_SELECTION_NAME} schema_version must be {TEMPLATE_SCHEMA_VERSION}'
+        )
+    if data.get('phase') != 'template':
+        raise ValueError(f'{TEMPLATE_SELECTION_NAME} phase must be template')
+    if data.get('status') != 'confirmed':
+        raise ValueError(f'{TEMPLATE_SELECTION_NAME} status must be confirmed')
+    mode = data.get('mode')
+    if mode not in {'free_design', 'templates'}:
+        raise ValueError(
+            f'{TEMPLATE_SELECTION_NAME} mode must be free_design or templates'
+        )
+    selections = data.get('selections')
+    if not isinstance(selections, list):
+        raise ValueError(f'{TEMPLATE_SELECTION_NAME} selections must be an array')
+    if mode == 'free_design' and selections:
+        raise ValueError('free_design cannot carry template selections')
+    if mode == 'templates' and not selections:
+        raise ValueError('templates mode requires at least one selection')
+
+    options_sha256 = data.get('options_sha256')
+    selection_sha256 = data.get('selection_sha256')
+    if not isinstance(options_sha256, str) or not re.fullmatch(r'[0-9a-f]{64}', options_sha256):
+        raise ValueError(f'{TEMPLATE_SELECTION_NAME} options_sha256 is invalid')
+    if not isinstance(selection_sha256, str) or not re.fullmatch(r'[0-9a-f]{64}', selection_sha256):
+        raise ValueError(f'{TEMPLATE_SELECTION_NAME} selection_sha256 is invalid')
+
+    seen_root_kinds = set()
+    seen_kinds: set[str] = set()
+    for index, selection in enumerate(selections):
+        if not isinstance(selection, dict):
+            raise ValueError(

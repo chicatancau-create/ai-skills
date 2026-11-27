@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""
+PPT Master - DrawingML Preset Shape Semantics
+
+Load and validate the bundled Office-category and authoring-use catalog for
+DrawingML preset shapes.
+
+Usage:
+    Import get_preset_shape_semantics from pptx_shapes.semantics.
+
+Examples:
+    catalog = get_preset_shape_semantics()
+    arrow = catalog.describe("rightArrow")
+
+Dependencies:
+    None (only uses standard library and local PPT Master modules)
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from functools import lru_cache
+from pathlib import Path
+from typing import Sequence
+
+from .errors import PresetShapeDataError, UnknownPresetShapeError
+from .registry import get_preset_registry
+
+
+BUNDLED_SEMANTICS_PATH = (
+    Path(__file__).resolve().parent / "data" / "presetShapeSemantics.json"
+)
+
+SEMANTIC_ROLES = (
+    "field",
+    "carrier",
+    "node",
+    "edge",
+    "spine",
+    "boundary",
+    "callout",
+    "label",
+    "symbol",
+    "control",
+    "accent",
+)
+SEMANTIC_RELATIONSHIPS = (
+    "none",
+    "membership",
+    "order",
+    "link",
+    "hierarchy",
+    "contrast",
+    "convergence",
+    "cycle",
+    "overlap",
+    "annotation",
+    "flow",
+    "literal",
+    "navigation",
+)
+SEMANTIC_DIRECTIONALITY = (
+    "none",
+    "horizontal",
+    "vertical",
+    "diagonal",
+    "bidirectional",
+    "multidirectional",
+    "bent",
+    "curved",
+    "radial",
+    "callout",
+)
+SEMANTIC_ASPECTS = (
+    "flexible",
+    "wide",
+    "tall",
+    "square",
+    "linear",
+)
+SEMANTIC_TEXT_CAPACITIES = ("none", "short", "medium", "high")
+SEMANTIC_VISUAL_WEIGHTS = ("quiet", "moderate", "strong", "emblematic")
+SEMANTIC_SCOPES = ("general", "literal", "flowchart", "navigation")
+
+_QUERY_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+_QUERY_STOP_WORDS = frozenset({
+    "a",
+    "an",
+    "and",
+    "for",
+    "of",
+    "or",
+    "the",
+    "to",
+    "with",
+})
+
+
+class PresetShapeSemantics:
+    """Read-only semantic catalog aligned exactly with the preset registry."""
+
+    def __init__(self, payload: object, expected_names: Sequence[str]) -> None:
+        root = _require_dict(payload, "catalog")
+        self.schema = _require_string(root.get("schema"), "catalog.schema")
+        self.sources = tuple(
+            _require_dict(item, f"catalog.sources[{index}]")
+            for index, item in enumerate(
+                _require_list(root.get("sources"), "catalog.sources")
+            )
+        )
+
+        categories = _require_list(
+            root.get("office_categories"),
+            "catalog.office_categories",
+        )
+        self._categories: list[dict[str, object]] = []
+        self._category_by_id: dict[str, dict[str, object]] = {}
+        for index, raw_category in enumerate(categories):
+            label = f"catalog.office_categories[{index}]"
+            category = _require_dict(raw_category, label)
+            _reject_unknown_fields(category, label, {"id", "label", "summary"})
+            category_id = _require_string(category.get("id"), f"{label}.id")
+            if category_id in self._category_by_id:
+                raise PresetShapeDataError(
+                    f"Duplicate Office shape category: {category_id!r}"
+                )
+            normalized = {
+                "id": category_id,
+                "label": _require_string(category.get("label"), f"{label}.label"),
+                "summary": _require_string(
+                    category.get("summary"),
+                    f"{label}.summary",
+                ),
+            }
+            self._categories.append(normalized)
+            self._category_by_id[category_id] = normalized
+
+        groups = _require_list(root.get("groups"), "catalog.groups")
+        self._groups: list[dict[str, object]] = []
+        self._preset_semantics: dict[str, dict[str, object]] = {}
+        group_ids: set[str] = set()
+        for index, raw_group in enumerate(groups):
+            group = self._normalize_group(raw_group, index)

@@ -1,0 +1,207 @@
+    return try JSONDecoder().decode(User.self, from: data)
+}
+
+// Calling async functions
+Task {
+    do {
+        let user = try await fetchUser(id: 123)
+        print(user.name)
+    } catch {
+        print("Failed: \(error)")
+    }
+}
+```
+
+### 7.2 Parallel Execution with TaskGroup
+
+```swift
+func fetchAllUsers(ids: [Int]) async throws -> [User] {
+    try await withThrowingTaskGroup(of: User.self) { group in
+        for id in ids {
+            group.addTask {
+                try await fetchUser(id: id)
+            }
+        }
+        return try await group.reduce(into: []) { $0.append($1) }
+    }
+}
+```
+
+### 7.3 async let for Concurrent Bindings
+
+```swift
+async let user = fetchUser(id: 1)
+async let posts = fetchPosts(userId: 1)
+async let followers = fetchFollowers(userId: 1)
+
+let profile = try await ProfileData(
+    user: user,
+    posts: posts,
+    followers: followers
+)
+```
+
+### 7.4 Actors for Thread-Safe State
+
+```swift
+actor BankAccount {
+    private var balance: Double = 0
+    
+    func deposit(_ amount: Double) {
+        balance += amount
+    }
+    
+    func withdraw(_ amount: Double) throws {
+        guard balance >= amount else {
+            throw BankError.insufficientFunds
+        }
+        balance -= amount
+    }
+    
+    func getBalance() -> Double {
+        balance
+    }
+}
+
+// Usage
+let account = BankAccount()
+await account.deposit(100)
+let balance = await account.getBalance()
+```
+
+### 7.5 MainActor for UI Updates
+
+```swift
+@MainActor
+class ViewModel: ObservableObject {
+    @Published var isLoading = false
+    @Published var users: [User] = []
+    
+    func loadUsers() async {
+        isLoading = true
+        defer { isLoading = false }
+        
+        do {
+            users = try await fetchUsers()
+        } catch {
+            // Handle error
+        }
+    }
+}
+```
+
+### 7.6 Task Cancellation
+
+```swift
+func fetchWithTimeout() async throws -> Data {
+    try await withThrowingTaskGroup(of: Data.self) { group in
+        group.addTask {
+            try await fetchData()
+        }
+        group.addTask {
+            try await Task.sleep(for: .seconds(10))
+            throw TimeoutError()
+        }
+        
+        let result = try await group.next()!
+        group.cancelAll()
+        return result
+    }
+}
+
+// Check for cancellation
+func longOperation() async throws {
+    for item in items {
+        try Task.checkCancellation()
+        await process(item)
+    }
+}
+```
+
+---
+
+## 8. Access Control
+
+**Impact:** MEDIUM
+
+### 8.1 Access Levels
+
+| Level | Scope |
+|-------|-------|
+| `private` | Enclosing declaration only |
+| `fileprivate` | Entire source file |
+| `internal` | Module (default) |
+| `public` | Other modules can access |
+| `open` | Other modules can subclass/override |
+
+### 8.2 Best Practices
+
+```swift
+public class UserService {
+    // Public API
+    public func fetchUser(id: Int) async throws -> User { }
+    
+    // Internal helper
+    func buildRequest(for id: Int) -> URLRequest { }
+    
+    // Private implementation detail
+    private let session: URLSession
+    private var cache: [Int: User] = [:]
+}
+```
+
+### 8.3 Private Setters
+
+```swift
+public struct Counter {
+    public private(set) var count = 0
+    
+    public mutating func increment() {
+        count += 1
+    }
+}
+```
+
+---
+
+## 9. Generics and Type Constraints
+
+**Impact:** MEDIUM
+
+### 9.1 Generic Functions
+
+```swift
+func swapValues<T>(_ a: inout T, _ b: inout T) {
+    let temp = a
+    a = b
+    b = temp
+}
+```
+
+### 9.2 Type Constraints
+
+```swift
+func findIndex<T: Equatable>(of value: T, in array: [T]) -> Int? {
+    array.firstIndex(of: value)
+}
+
+func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
+    try JSONDecoder().decode(type, from: data)
+}
+```
+
+### 9.3 Where Clauses
+
+```swift
+func allMatch<C: Collection>(_ collection: C, predicate: (C.Element) -> Bool) -> Bool
+    where C.Element: Equatable {
+    collection.allSatisfy(predicate)
+}
+
+extension Array where Element: Numeric {
+    func sum() -> Element {
+        reduce(0, +)
+    }
+}
+```
+

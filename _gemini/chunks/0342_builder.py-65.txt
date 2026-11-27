@@ -1,0 +1,100 @@
+        for index in passthrough_slides
+        if index < 1 or index > len(public_svg_files)
+    )
+    if invalid_passthrough:
+        raise ValueError(
+            "Round-trip passthrough slide indices are outside the SVG roster: "
+            + ", ".join(str(index) for index in invalid_passthrough)
+        )
+    invalid_overlays = sorted(
+        index
+        for index in overlay_slides
+        if index < 1 or index > len(public_svg_files)
+    )
+    if invalid_overlays:
+        raise ValueError(
+            "Round-trip overlay slide indices are outside the SVG roster: "
+            + ", ".join(str(index) for index in invalid_overlays)
+        )
+    overlap = sorted(passthrough_slides & overlay_slides)
+    if overlap:
+        raise ValueError(
+            "Round-trip slides cannot be both passthrough and overlay: "
+            + ", ".join(str(index) for index in overlap)
+        )
+    if passthrough_slides and pptx_structure != "preserve":
+        raise ValueError(
+            "Round-trip slide passthrough is available only in preserve mode"
+        )
+    if (overlay_slides or roundtrip_resources) and pptx_structure != "preserve":
+        raise ValueError(
+            "Round-trip overlays and resource reinjection require preserve mode"
+        )
+    if page_plan_export:
+        if pptx_structure != "preserve":
+            raise ValueError(
+                "Round-trip page plans are available only in preserve mode"
+            )
+        if len(roundtrip_page_sources) != len(public_svg_files):
+            raise ValueError(
+                "Round-trip page-plan source roster differs from the SVG roster"
+            )
+    definition_svg_files = list(layout_definition_files or [])
+    public_slide_names = [path.stem for path in public_svg_files]
+    morph_pairs = resolve_morph_pairs(
+        public_slide_names,
+        animation_config,
+    )
+    public_slide_numbers = {
+        slide_name: slide_number
+        for slide_number, slide_name in enumerate(public_slide_names, 1)
+    }
+    morph_expectations = tuple(
+        MorphPairExpectation(
+            source_slide_number=public_slide_numbers[pair.source_slide],
+            destination_slide_number=public_slide_numbers[
+                pair.destination_slide
+            ],
+            key=pair.key,
+        )
+        for pair in morph_pairs
+    )
+    morph_pairs_by_destination: dict[str, list[MorphPair]] = {}
+    morph_group_overrides_by_slide: dict[str, set[str]] = {}
+    for pair in morph_pairs:
+        morph_pairs_by_destination.setdefault(
+            pair.destination_slide,
+            [],
+        ).append(pair)
+        morph_group_overrides_by_slide.setdefault(
+            pair.source_slide,
+            set(),
+        ).add(pair.source_group_id)
+        morph_group_overrides_by_slide.setdefault(
+            pair.destination_slide,
+            set(),
+        ).add(pair.destination_group_id)
+    morph_shape_ids: dict[tuple[str, str], int] = {}
+    if definition_svg_files and pptx_structure != "structured":
+        raise ValueError(
+            "unselected Layout prototypes require pptx_structure='structured'"
+        )
+    public_paths = {path.resolve() for path in public_svg_files}
+    seen_definition_paths: set[Path] = set()
+    for path in definition_svg_files:
+        resolved = path.resolve()
+        if not path.is_file():
+            raise ValueError(f"Layout prototype SVG does not exist: {path}")
+        if resolved in public_paths:
+            raise ValueError(
+                f"Layout prototype SVG is already a generated page: {path}"
+            )
+        if resolved in seen_definition_paths:
+            raise ValueError(f"Layout prototype SVG is repeated: {path}")
+        seen_definition_paths.add(resolved)
+    public_slide_count = len(public_svg_files)
+    svg_files = public_svg_files + definition_svg_files
+    total_slide_count = len(svg_files)
+
+    if not use_native_shapes:
+        raise ValueError(

@@ -1,0 +1,90 @@
+        modalConfirm.style.display = "";
+        modalCancel.style.display = "";
+        modalOverlay.style.display = "flex";
+    });
+
+    modalConfirm.addEventListener("click", function () {
+        if (pendingModalAction === "exit") {
+            modalConfirm.style.display = "none";
+            modalCancel.style.display = "none";
+            modalMessage.textContent = t("modal_stopping");
+            fetch("/api/shutdown", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ reason: "exit-preview" })
+            })
+                .then(function () {
+                    modalMessage.textContent = t("modal_success_exit");
+                })
+                .catch(function () {
+                    modalMessage.textContent = t("modal_success_exit");
+                });
+            return;
+        }
+
+        // Step 2: save annotations. Service lifetime is controlled only by Exit preview.
+        var hadDirectEdits = pendingDirectEditCount() > 0;
+        var hadAnnotationChanges = pendingAnnotationChangeCount() > 0;
+        modalConfirm.style.display = "none";
+        modalCancel.style.display = "none";
+
+        // Wait for any just-fired direct edits (drag/nudge) to land first, or
+        // save-all could race ahead and leave their edits as a fresh pending set.
+        drainDirectEdits()
+            .then(function () { return fetch("/api/save-all", { method: "POST" }); })
+            .then(function (res) { return res.json(); })
+            .then(function (data) {
+                if (data.error) {
+                    modalMessage.textContent = t("err_save") + data.error;
+                } else {
+                    if (hadDirectEdits && hadAnnotationChanges) {
+                        modalMessage.textContent = t("modal_success_mixed");
+                    } else if (hadDirectEdits) {
+                        modalMessage.textContent = t("modal_success_direct_only");
+                    } else if (hadAnnotationChanges) {
+                        modalMessage.textContent = t("modal_success_annotations_only");
+                    } else {
+                        modalMessage.textContent = t("modal_success_submit");
+                    }
+                    editStackCount = {};
+                    matrixEditSlides = {};
+                    matrixHintShown = false;
+                    savedHintShown = false;
+                    annotationsDirty = false;
+                    annotationEditSlides = {};
+                    updateUndoButton();
+                    updatePendingStatus();
+                    var activeSlide = currentSlide;
+                    loadSlides().then(function () {
+                        if (activeSlide) {
+                            var item = slideListEl.querySelector('.slide-item[data-name="' + cssAttr(activeSlide) + '"]');
+                            selectSlide(activeSlide, item || undefined);
+                        }
+                    });
+                }
+            })
+            .catch(function (err) {
+                modalMessage.textContent = t("err_save") + err;
+                modalConfirm.style.display = "";
+                modalCancel.style.display = "";
+            });
+    });
+
+    modalCancel.addEventListener("click", function () {
+        modalConfirm.textContent = t("modal_submit");
+        modalOverlay.style.display = "none";
+    });
+
+    // Close modal on overlay click
+    modalOverlay.addEventListener("click", function (e) {
+            if (e.target === modalOverlay) {
+                modalConfirm.textContent = t("modal_submit");
+                modalOverlay.style.display = "none";
+            }
+        });
+
+    // ================================================================
+    //  Utility
+    // ================================================================
+    var SVG_NS = "http://www.w3.org/2000/svg";
+    var SVG_ALLOWED_ELEMENTS = new Set([

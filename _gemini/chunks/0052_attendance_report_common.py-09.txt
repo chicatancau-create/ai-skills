@@ -1,0 +1,89 @@
+    # ── 数据行样式 ───────────────────────────────────────────────────────
+    for row_offset in range(n_rows):
+        excel_row = first_data_row + row_offset
+        row_fill = band_fill_map.get(row_offset)
+        is_attend_row = row_offset in _ar_rows
+        for col_idx in range(1, n_cols + 1):
+            cell = ws.cell(row=excel_row, column=col_idx)
+            cell.font = styles["data_font"]
+            cell.border = styles["border"]
+
+            # 背景色优先级：考勤结果条件配色 > 人员交替配色 > 默认无色
+            col_zero = col_idx - 1
+            value = rows[row_offset][col_zero] if col_zero < len(rows[row_offset]) else None
+            is_attend_cell = (col_zero in _ar_cols) or (is_attend_row and col_zero >= 4)
+            attend_color = None
+            if is_attend_cell and value not in (None, ""):
+                attend_color = _match_attend_result_color(str(value))
+
+            if attend_color:
+                cell.fill = _get_attend_fill(attend_color)
+            elif row_fill is not None:
+                cell.fill = row_fill
+
+            # 数据区统一居中（参考图风格），仅对长文本（>10 字符）的非首列左对齐避免拥挤
+            if _is_numeric_value(value):
+                cell.alignment = styles["align_right"]
+            else:
+                text = str(value) if value not in (None, "") else ""
+                if _estimate_text_width(text) > 14 and col_idx > 1:
+                    cell.alignment = styles["align_left"]
+                else:
+                    cell.alignment = styles["align_center"]
+        ws.row_dimensions[excel_row].height = _DATA_ROW_HEIGHT
+
+    # ── 列宽自适应 ───────────────────────────────────────────────────────
+    for col_idx in range(1, n_cols + 1):
+        header_text = str(headers[col_idx - 1])
+        max_width = _estimate_text_width(header_text) + 2
+        for row in rows:
+            if col_idx - 1 < len(row):
+                cell_value = row[col_idx - 1]
+                if cell_value is None or cell_value == "":
+                    continue
+                w = _estimate_text_width(str(cell_value))
+                if w > max_width:
+                    max_width = w
+        max_width = min(max(max_width + 1, _MIN_COL_WIDTH), _MAX_COL_WIDTH)
+        ws.column_dimensions[get_column_letter(col_idx)].width = max_width
+
+    # ── 冻结窗格 ─────────────────────────────────────────────────────────
+    # 冻结到首个数据行 + 第二列（保留标题/表头/姓名列常驻）
+    freeze_col_letter = "B" if (freeze_first_col and n_cols >= 2) else "A"
+    ws.freeze_panes = f"{freeze_col_letter}{first_data_row}"
+
+    # ── 自动筛选器（覆盖表头到最后一行数据）──────────────────────────
+    # 注意：合并单元格时不应用 auto_filter（会和合并冲突）
+    if n_cols >= 1 and n_rows >= 1 and not merge_groups:
+        ws.auto_filter.ref = (
+            f"A{header_row}:{last_col_letter}{first_data_row + n_rows - 1}"
+        )
+
+    # ── 单元格纵向合并（仅指定的基础列）──────────────────────────
+    # merge_groups: [(start_row_offset, end_row_offset, n_base_cols), ...]
+    # 其中 row_offset 是基于数据区第 0 行的偏移
+    if merge_groups:
+        for start_offset, end_offset, n_base_cols in merge_groups:
+            if end_offset <= start_offset:
+                continue
+            excel_start = first_data_row + start_offset
+            excel_end = first_data_row + end_offset
+            for col_idx in range(1, n_base_cols + 1):
+                # 取首行的值，合并后只保留首行内容
+                top_value = ws.cell(row=excel_start, column=col_idx).value
+                ws.merge_cells(
+                    start_row=excel_start, start_column=col_idx,
+                    end_row=excel_end, end_column=col_idx,
+                )
+                top_cell = ws.cell(row=excel_start, column=col_idx)
+                top_cell.value = top_value
+                top_cell.alignment = styles["align_center"]
+                top_cell.border = styles["border"]
+
+    # ── 图片嵌入（下载 URL 列指向的图片，转 PNG，嵌入对应单元格）────
+    if image_columns:
+        _embed_images_in_columns(
+            ws, headers, rows,
+            image_column_names=image_columns,
+            header_row=header_row,
+            first_data_row=first_data_row,

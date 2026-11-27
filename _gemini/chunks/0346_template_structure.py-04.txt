@@ -1,0 +1,107 @@
+            raise TemplateStructureError(
+                f"{spec.svg_path.name}: layout {spec.layout_key!r} gives "
+                f"placeholders {previous!r} and {item.element_id!r} the same "
+                f"effective idx {effective_idx}; omitted idx defaults to 0 in OOXML"
+            )
+        used_indices[effective_idx] = item.element_id
+        if assigned_idx is not None:
+            next_idx = max(next_idx, assigned_idx + 1)
+        bindings.append(TemplatePlaceholderBinding(
+            element=item,
+            placeholder_type=placeholder_type,
+            assigned_idx=assigned_idx,
+        ))
+    return tuple(bindings)
+
+
+def _local_tag(elem: ET.Element) -> str:
+    return elem.tag.rsplit("}", 1)[-1] if isinstance(elem.tag, str) else ""
+
+
+def _parse_svg_root(svg_path: Path) -> ET.Element:
+    """Parse one SVG and hydrate compact native metadata in memory."""
+    root = ET.parse(svg_path).getroot()
+    hydrate_native_payload_refs(root, svg_path)
+    return root
+
+
+def _is_authored_preset_atom(elem: ET.Element) -> bool:
+    """Return whether one group is a valid compact authored-shape atom."""
+    return (
+        authored_preset_encoding(elem) == "compact"
+        and not validate_authored_preset_group(elem)
+    )
+
+
+def _svg_canvas(root: ET.Element) -> tuple[float, float, float, float]:
+    viewbox = parse_project_viewbox(root.get("viewBox"))
+    return 0.0, 0.0, float(viewbox.width), float(viewbox.height)
+
+
+def _is_full_canvas_solid_rect(
+    elem: ET.Element,
+    canvas: tuple[float, float, float, float],
+    *,
+    root: ET.Element | None = None,
+) -> bool:
+    """Return whether a direct rect is eligible for scoped p:bg compilation."""
+    if canvas[2] <= 0 or canvas[3] <= 0:
+        return False
+    if _local_tag(elem) != "rect":
+        return False
+    if any(elem.get(attr) for attr in ("transform", "filter", "clip-path")):
+        return False
+    style = parse_inline_style(elem.get("style"))
+    root_style = parse_inline_style(root.get("style")) if root is not None else {}
+
+    def root_value(name: str) -> str | None:
+        return root_style.get(name, root.get(name)) if root is not None else None
+
+    try:
+        fill_opacity = style.get("fill-opacity", elem.get("fill-opacity"))
+        if fill_opacity in {None, "inherit"}:
+            fill_opacity = root_value("fill-opacity")
+        opacity = style.get("opacity", elem.get("opacity"))
+        if opacity == "inherit":
+            opacity = root_value("opacity")
+        if any(parse_opacity(value, allow_percentage=True) < 1
+               for value in (fill_opacity, opacity, root_value("opacity"))):
+            return False
+    except ValueError:
+        return False
+    try:
+        geometry = (
+            parse_project_geometry_length(elem.get("x", "0"), "x"),
+            parse_project_geometry_length(elem.get("y", "0"), "y"),
+            parse_project_geometry_length(elem.get("width", "0"), "width"),
+            parse_project_geometry_length(elem.get("height", "0"), "height"),
+        )
+        corner_radius = (
+            parse_project_geometry_length(elem.get("rx", "0"), "rx"),
+            parse_project_geometry_length(elem.get("ry", "0"), "ry"),
+        )
+    except ValueError:
+        return False
+    if not all(math.isfinite(value) for value in (*geometry, *corner_radius)):
+        return False
+    if corner_radius != (0.0, 0.0):
+        return False
+    if any(abs(actual - expected) > 0.5 for actual, expected in zip(geometry, canvas)):
+        return False
+    fill = (elem.get("fill") or "").strip().lower()
+    if not fill or fill == "none" or fill.startswith("url("):
+        return False
+    stroke = (elem.get("stroke") or "none").strip().lower()
+    if stroke != "none":
+        try:
+            if float(elem.get("stroke-opacity", "1")) != 0:
+                return False
+        except ValueError:
+            return False
+    return True
+
+
+def _portable_project_file(
+    project_path: Path,
+    raw_value: str,
+    field_name: str,

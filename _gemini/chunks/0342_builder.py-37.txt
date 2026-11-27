@@ -1,0 +1,112 @@
+        raise TemplateStructureError(
+            f"Cannot create placeholder binding for {item.element_id!r}: "
+            "p:txBody is missing"
+        )
+    for child in list(tx_body):
+        if child.tag == f"{{{DML_NS}}}p":
+            tx_body.remove(child)
+    paragraph = ET.SubElement(tx_body, f"{{{DML_NS}}}p")
+    run = ET.SubElement(paragraph, f"{{{DML_NS}}}r")
+    run_props = ET.SubElement(
+        run,
+        f"{{{DML_NS}}}rPr",
+        {"lang": "en-US", "sz": "100"},
+    )
+    solid_fill = ET.SubElement(run_props, f"{{{DML_NS}}}solidFill")
+    color = ET.SubElement(solid_fill, f"{{{DML_NS}}}srgbClr", {"val": "FFFFFF"})
+    ET.SubElement(color, f"{{{DML_NS}}}alpha", {"val": "0"})
+    ET.SubElement(run, f"{{{DML_NS}}}t").text = "\u200b"
+    ET.SubElement(
+        paragraph,
+        f"{{{DML_NS}}}endParaRPr",
+        {"lang": "en-US"},
+    )
+    return proxy
+
+
+def _patch_slide_placeholder(
+    shape: ET.Element,
+    item: TemplateElementSpec,
+    placeholder_idx: int | None,
+    placeholder_type: str | None = None,
+    theme_font_spec: ThemeFontSpec | None = None,
+) -> None:
+    resolved_type = placeholder_type or TEMPLATE_PLACEHOLDER_TYPES.get(
+        item.placeholder or ""
+    )
+    if resolved_type is None:
+        raise TemplateStructureError(
+            f"Unsupported placeholder type: {item.placeholder!r}"
+        )
+    nv_paths = {
+        f"{{{PML_NS}}}sp": f"{{{PML_NS}}}nvSpPr/{{{PML_NS}}}nvPr",
+        f"{{{PML_NS}}}pic": f"{{{PML_NS}}}nvPicPr/{{{PML_NS}}}nvPr",
+        f"{{{PML_NS}}}graphicFrame": (
+            f"{{{PML_NS}}}nvGraphicFramePr/{{{PML_NS}}}nvPr"
+        ),
+    }
+    nv_path = nv_paths.get(shape.tag)
+    if nv_path is None:
+        raise TemplateStructureError(
+            f"Placeholder {item.element_id!r} converted to unsupported "
+            f"DrawingML element {shape.tag.rsplit('}', 1)[-1]!r}; text/picture/"
+            "native chart/table placeholders must remain one top-level object"
+        )
+    nv_pr = shape.find(nv_path)
+    if nv_pr is None:
+        raise TemplateStructureError(
+            f"Placeholder {item.element_id!r} has no non-visual properties"
+        )
+    _set_placeholder_no_inherited_bullets(shape, item)
+    _set_placeholder_theme_font_role(shape, item, theme_font_spec)
+    for existing in list(nv_pr):
+        if existing.tag == f"{{{PML_NS}}}ph":
+            nv_pr.remove(existing)
+    placeholder_attrs: dict[str, str] = {}
+    if (
+        placeholder_type is not None
+        or resolved_type != "obj"
+        or placeholder_idx is None
+    ):
+        placeholder_attrs["type"] = resolved_type
+    if placeholder_idx is not None:
+        placeholder_attrs["idx"] = str(placeholder_idx)
+    ph = ET.Element(f"{{{PML_NS}}}ph", placeholder_attrs)
+    ext_tag = f"{{{PML_NS}}}extLst"
+    insert_at = next(
+        (idx for idx, child in enumerate(nv_pr) if child.tag == ext_tag),
+        len(nv_pr),
+    )
+    nv_pr.insert(insert_at, ph)
+
+
+def _set_template_layout_header_footer(
+    layout_path: Path,
+    placeholders: tuple[TemplateElementSpec, ...],
+) -> None:
+    """Enable declared footer fields for slides newly created from the layout."""
+    kinds = {item.placeholder for item in placeholders}
+    if not kinds.intersection({"date", "footer", "slide-number"}):
+        return
+    tree = ET.parse(layout_path)
+    root = tree.getroot()
+    hf = root.find(f"{{{PML_NS}}}hf")
+    if hf is None:
+        hf = ET.Element(f"{{{PML_NS}}}hf")
+        trailing_tags = {
+            f"{{{PML_NS}}}timing",
+            f"{{{PML_NS}}}transition",
+            f"{{{PML_NS}}}extLst",
+        }
+        insert_at = next(
+            (idx for idx, child in enumerate(root) if child.tag in trailing_tags),
+            len(root),
+        )
+        root.insert(insert_at, hf)
+    hf.set("hdr", "0")
+    hf.set("dt", "1" if "date" in kinds else "0")
+    hf.set("ftr", "1" if "footer" in kinds else "0")
+    hf.set("sldNum", "1" if "slide-number" in kinds else "0")
+    _write_xml_tree(layout_path, tree)
+
+

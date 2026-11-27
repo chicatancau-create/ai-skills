@@ -1,0 +1,117 @@
+                    "audio_stream_sha256": mixed_audio_hash,
+                    "video_codec": mixed_video_streams[0].get("codec_name"),
+                    "audio_codec": mixed_audio_streams[0].get("codec_name"),
+                    "maximum_volume_db": mixed_peak_db,
+                    "true_peak_dbfs": true_peak_dbfs,
+                },
+            },
+            "validation": {
+                "trace_matches_pptx_motion": True,
+                "cue_count": len(cues),
+                "stem_non_silent": True,
+                "mixed_audio_present": True,
+                "video_stream_preserved": True,
+                "duration_delta_ms": mixed_video_duration_ms - raw_duration_ms,
+                "video_timeline_preserved": True,
+                "limiter_applied": True,
+                "sound_mix_correlation": verification_correlation,
+                "minimum_sound_mix_correlation": _MIN_SOUND_MIX_CORRELATION,
+            },
+        }
+        temporary_report.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        _publish_outputs(
+            [
+                (temporary_stem, stem_path),
+                (temporary_video, output_path),
+                (temporary_report, report_path),
+            ]
+        )
+    finally:
+        for temporary in (temporary_stem, temporary_video, temporary_report):
+            temporary.unlink(missing_ok=True)
+
+    return SoundMixResult(
+        output_path=output_path,
+        stem_path=stem_path,
+        report_path=report_path,
+        cue_count=len(cues),
+        verification_correlation=verification_correlation,
+        true_peak_dbfs=true_peak_dbfs,
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Mix PPTX transition/object-animation sounds into a "
+            "PowerPoint-exported narrated video."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("project_path", help="PPT Master project directory")
+    parser.add_argument(
+        "--pptx",
+        required=True,
+        help="Final narrated PPTX; relative paths resolve under the project",
+    )
+    parser.add_argument(
+        "--trace",
+        required=True,
+        help="Final narrated conversion trace; relative paths resolve under the project",
+    )
+    parser.add_argument(
+        "--video",
+        required=True,
+        help="Raw PowerPoint-exported video; relative paths resolve under the project",
+    )
+    parser.add_argument(
+        "--audio-dir",
+        default=None,
+        help="Page narration audio directory; default: <project>/audio",
+    )
+    parser.add_argument(
+        "--subtitle-dir",
+        default=None,
+        help=(
+            "Optional page-local SRT directory used to refine calibration; "
+            "default: <project>/audio"
+        ),
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="Final mixed MP4; default: beside raw video as *_mixed.mp4",
+    )
+    parser.add_argument(
+        "--stem-output",
+        default=None,
+        help="Independent SFX WAV; default: beside raw video as *_sfx.wav",
+    )
+    parser.add_argument(
+        "--report-output",
+        default=None,
+        help="Sound mix JSON receipt; default: beside raw video as *_sound_mix.json",
+    )
+    parser.add_argument(
+        "--transition-gain-db",
+        type=float,
+        default=_DEFAULT_TRANSITION_GAIN_DB,
+        help="Transition cue gain in dB (default: -9.1, about 35%%)",
+    )
+    parser.add_argument(
+        "--animation-gain-db",
+        type=float,
+        default=_DEFAULT_ANIMATION_GAIN_DB,
+        help="Object-animation cue gain in dB (default: -12, about 25%%)",
+    )
+    parser.add_argument(
+        "--limiter-dbfs",
+        type=float,
+        default=_DEFAULT_LIMITER_DBFS,
+        help="Final peak limiter ceiling in dBFS (default: -1)",
+    )

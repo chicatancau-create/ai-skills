@@ -1,0 +1,132 @@
+    return _SOURCE_TYPE_MAP.get(raw_source, raw_source)
+
+
+def _extract_location(record: dict) -> str:
+    """
+    拼接打卡地址：地点名称 + 详细地址，与 UserLocationOriginData 对齐。
+
+    Java 逻辑：
+      locationResult.getSpaceName()  → 地点名称
+      locationResult.getDetailAddr() → 详细地址（含省市区+街道）
+    两者均有时拼接，只有一个时单独返回。
+    """
+    space_name = str(_extract_field(record, (
+        "spaceName", "space_name", "locationName", "location_name",
+    )) or "").strip()
+    detail_addr = str(_extract_field(record, (
+        "detailAddr", "detail_addr", "detailAddress", "address", "userAddress",
+    )) or "").strip()
+
+    if space_name and detail_addr:
+        return f"{space_name} {detail_addr}"
+    return space_name or detail_addr
+
+
+def _extract_exception_reason(record: dict) -> str:
+    """
+    提取并翻译异常打卡原因，与 CheckExceptionReasonOriginData 对齐。
+
+    Java 逻辑：
+      取 features.getInvalidRecordMsg()（逗号分隔的错误码列表）
+      逐个从 DEFAULT_CHEAT_LIST 查中文描述后再拼接返回。
+    """
+    raw = str(_extract_field(record, (
+        "invalidRecordMsg", "invalid_record_msg",
+        "outsideRemark", "outside_remark",
+        "exceptionReason",
+    )) or "").strip()
+
+    if not raw:
+        return ""
+
+    # 逗号分隔的多个错误码，逐个翻译后重新拼接
+    codes = [c.strip() for c in raw.split(",") if c.strip()]
+    translated = [_CHEAT_REASON_MAP.get(code, code) for code in codes]
+    return ",".join(translated)
+
+
+def _extract_photo_url(record: dict, candidate_keys: tuple[str, ...]) -> str:
+    """从 record 或其 features 嵌套结构中提取图片 URL。"""
+    raw = _extract_field(record, candidate_keys)
+    if raw is None:
+        return ""
+    return str(raw).strip()
+
+
+def _extract_remark_photo(record: dict) -> str:
+    """
+    打卡图片1（备注/外勤打卡照片）。
+
+    dws check record 的真实返回字段（实测验证）：
+      - 顶层 photoUrl：外勤/拍照打卡的主图片 URL
+      - 顶层 outsideAttachment：外勤打卡的附件（可能含多张图片）
+      - 顶层 remarkPhotos：备注图片数组（旧字段，部分版本）
+    Java 侧 RemarkPhotoOriginData 对应 features.getRemarkPhotos()，
+    但 dws CLI 实际把图片字段提到了顶层，需直接读顶层字段。
+    """
+    # 1) 兼容数组形式的 remarkPhotos（早期版本）
+    remark_photos = record.get("remarkPhotos") or record.get("remark_photos")
+    if isinstance(remark_photos, list) and remark_photos:
+        return str(remark_photos[0]).strip()
+    if isinstance(remark_photos, str) and remark_photos.strip():
+        parts = [p.strip() for p in remark_photos.split(",") if p.strip()]
+        return parts[0] if parts else ""
+
+    # 2) dws CLI 当前实际返回的字段（顶层）
+    #    photoUrl 优先，其次 outsideAttachment，再次旧候选名
+    photo = _extract_photo_url(record, (
+        "photoUrl", "photo_url",
+        "outsideAttachment", "outside_attachment",
+        "remarkPhoto", "remark_photo",
+        "userImage", "user_image", "imageUrl", "image_url",
+    ))
+    if photo:
+        # outsideAttachment 可能是逗号分隔多张，取第一张
+        if "," in photo:
+            first = photo.split(",")[0].strip()
+            if first:
+                return first
+        return photo
+
+    # 3) 兜底：从 features 嵌套 JSON 里翻
+    return _extract_photo_from_features(record, (
+        "photoUrl", "remarkPhoto", "remarkPhotos",
+        "outsideAttachment", "userImage", "imageUrl",
+    ))
+
+
+def _extract_face_check_photo(record: dict) -> str:
+    """
+    打卡图片2（人脸识别照片）。
+
+    Java 侧 FaceCheckPhotoOriginData 对应 features.getFacePhoto()。
+    dws CLI 中人脸图未稳定暴露在顶层，优先读 features 嵌套字段。
+    """
+    # 1) 顶层候选
+    face = _extract_photo_url(record, (
+        "facePhoto", "face_photo",
+        "faceCheckPhoto", "face_check_photo",
+        "faceImage", "face_image",
+        "faceUrl", "face_url",
+    ))
+    if face:
+        return face
+    # 2) features 嵌套兜底
+    return _extract_photo_from_features(record, (
+        "facePhoto", "faceCheckPhoto", "faceImage", "faceUrl",
+    ))
+
+
+def _extract_photo_from_features(
+    record: dict,
+    candidate_keys: tuple[str, ...],
+) -> str:
+    """
+    从 record['features']（JSON 字符串或 dict）中提取图片 URL。
+    候选 key 命中 features 中第一个非空值则返回。
+    """
+    feat = record.get("features")
+    if isinstance(feat, str):
+        feat_str = feat.strip()
+        if not feat_str or feat_str[0] not in "{[":
+            return ""

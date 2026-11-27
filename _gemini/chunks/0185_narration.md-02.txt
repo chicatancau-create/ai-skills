@@ -1,0 +1,30 @@
+- **Edge SRT**: MP3 and page SRT come from the same `edge-tts` stream using `WordBoundary` timing. Sentence-ending punctuation always closes a cue; text over the 20-visible-character default (`--subtitle-max-chars`) splits at commas, semicolons, or colons, then at the nearest word boundary. Adjacent overlap up to 100 ms moves the later cue start to the previous end; larger overlap fails. Each SRT uses a page-local timeline starting at `00:00:00,000` including leading silence. Default concurrency is three slide pairs (`--concurrency 1` for serial troubleshooting); cloud providers stay serial.
+- **Provider timing**: MiniMax reads word timing from its synchronous subtitle file (a normalized number such as `42` comes back as one row per spoken syllable sharing one original-text span; the adapter merges rows by that span, never by text alone); ElevenLabs uses `/with-timestamps` with original-text character alignment; CosyVoice enables HTTP streaming plus `word_timestamp_enabled` and uses the final audio URL and word timing — unsupported model/voice pairs fail without replacing the prior pair unless `--cosyvoice-audio-only` was explicit (model and voice families must match; cloned voices need a supported v3.5/v3/v2 model or a timestamp-supported system voice); Qwen exposes no timing and never gets estimated SRT. Provider-timed paths share punctuation-first, `--subtitle-max-chars`-bounded regrouping, exact-text validation, and rollback-safe pair publication.
+
+Signed Edge values accept both equals and space forms: `--rate=-5%` / `--rate -5%`, `--pitch=-2Hz` / `--pitch -2Hz`, and `--volume=-10%` / `--volume -10%`. The examples use equals for clarity; omitted pitch and volume remain `+0Hz` and `+0%`. These three options are ignored by cloud providers.
+
+## `narration_sync.py`
+
+```bash
+python3 skills/ppt-master/scripts/narration_sync.py fingerprint <project_path>
+python3 skills/ppt-master/scripts/narration_sync.py animations <project_path> --narration-start-floor 0.8 --narration-padding 0.5 --force
+python3 skills/ppt-master/scripts/narration_sync.py subtitles <project_path> --pptx <final_narrated_pptx> --force
+```
+
+- `animations` deep-copies read-only `animations.json` to `narration_animations.json`, preserving transitions, effects, durations, order, and explicit `effect: none`, and changes only the derived trigger/delay values needed for click-free playback. `<project_path>/narration_timing.json` maps each animated content group (not each effect row) to the 1-based SRT `cue` that speaks about it; for `effects[]` the cue anchors the group's first active row and later rows keep global order and relative delay; an omitted `cue` keeps the group's canonical relative delay. The file is fingerprinted to the ordered SRT set (`srt_sha256`, from the `fingerprint` subcommand); reuse a complete current mapping when fingerprint and group semantics remain valid, rebuild only affected pages otherwise. Without a timing sidecar the command maps groups positionally (group N → cue N) and warns when later objects may reveal during an earlier topic — treat that warning as required repair. The command may read an affected SVG page to resolve structural group order for a sparse sidecar; it never edits SVG, notes, or `animations.json`.
+- `subtitles` merges page-local SRT against timing read from the final PPTX and may write `audio/total.srt` as a PPTX-timeline diagnostic; it is not the delivery subtitle for a finished video.
+
+```json
+{
+  "version": 1,
+  "srt_sha256": "<sha256 of the ordered page-local SRT set>",
+  "narration_start_floor": 0.8,
+  "narration_padding": 0.5,
+  "slides": {"01_title": {"groups": [{"id": "page-title", "cue": 1}, {"id": "supporting-visual"}]}}
+}
+```
+
+## Narrated `svg_to_pptx.py` export
+
+```bash
+python3 skills/ppt-master/scripts/svg_to_pptx.py <project_path> --recorded-narration audio --narration-start-floor 0.8 --narration-padding 0.5 --inherit-motion-from "<base_postflight_report>"

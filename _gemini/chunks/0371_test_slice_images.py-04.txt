@@ -1,0 +1,73 @@
+                    "--output", str(output_dir),
+                ],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("painted backing panel", result.stderr)
+            self.assertIn("Cells painted as panels", result.stderr)
+            self.assertNotIn("Suggested rerun:", result.stderr)
+
+
+class ImageOrientationProcessingTests(unittest.TestCase):
+    def test_compression_applies_orientation_and_preserves_image_format(self) -> None:
+        for fmt, mime in (("JPEG", "image/jpeg"), ("PNG", "image/png"), ("WEBP", "image/webp")):
+            for orientation in (None, 6):
+                with self.subTest(format=fmt, orientation=orientation):
+                    image = Image.new("RGB", (80, 40), "red")
+                    image.paste("blue", (40, 0, 80, 40))
+                    exif = image.getexif()
+                    if orientation is not None:
+                        exif[274] = orientation
+                    source = io.BytesIO()
+                    image.save(source, format=fmt, exif=exif)
+                    result = _optimize_image_bytes(source.getvalue(), mime, compress=True, max_dimension=20)
+                    self.assertLess(len(result), len(source.getvalue()))
+                    with Image.open(io.BytesIO(result)) as optimized:
+                        self.assertEqual(optimized.format, fmt)
+                        self.assertEqual(optimized.size, (10, 20) if orientation == 6 else (20, 10))
+                        self.assertNotIn(274, optimized.getexif())
+
+    def test_animated_images_are_not_reencoded(self) -> None:
+        source = io.BytesIO()
+        Image.new("RGB", (80, 40), "red").save(
+            source, format="GIF", save_all=True,
+            append_images=[Image.new("RGB", (80, 40), "blue")],
+        )
+        original = source.getvalue()
+        self.assertEqual(_optimize_image_bytes(original, "image/gif", compress=True), original)
+
+    def test_svg_dimensions_and_crop_use_display_orientation_while_import_keeps_stored_pixels(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "photo.jpg"
+            image = Image.new("RGB", (80, 40), "red")
+            image.paste("blue", (40, 0, 80, 40))
+            exif = image.getexif()
+            exif[274] = 6
+            image.save(source, exif=exif, dpi=(96, 96))
+            data = source.read_bytes()
+            uri = "data:image/jpeg;base64," + base64.b64encode(data).decode("ascii")
+            self.assertEqual(get_image_dimensions_pil(str(source)), (40, 80))
+            self.assertEqual(get_image_dimensions_from_base64(uri), (40, 80))
+            # PPTX import keeps the stored pixel orientation: PowerPoint renders
+            # an embedded picture without applying its EXIF orientation tag.
+            self.assertEqual(_image_size_at_96_dpi(data, ET.Element("blipFill")), (80, 40))
+
+            svg = root / "slide.svg"
+            svg.write_text(
+                '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 80">'
+                '<image href="photo.jpg" width="40" height="80" '
+                'preserveAspectRatio="xMidYMid slice"/></svg>',
+                encoding="utf-8",
+            )
+            self.assertEqual(process_svg_images(str(svg), root / "cropped", verbose=False), (1, 0))
+            with Image.open(root / "cropped" / "photo.jpg") as cropped:
+                self.assertEqual(cropped.size, (40, 80))
+                self.assertGreater(cropped.getpixel((10, 60))[2], 200)
+
+            blip = ET.fromstring(
+                '<a:blip xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+                '<a:lum bright="10000"/></a:blip>'
+            )
+            _, adjusted, diagnostics = _apply_blip_image_effects("photo.jpg", data, blip)
+            self.assertEqual(diagnostics, ())

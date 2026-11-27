@@ -1,0 +1,163 @@
+    ordering = '-created_at'
+```
+
+### Caching
+
+```python
+from django.core.cache import cache
+
+def get_product(product_id: str):
+    cache_key = f'product:{product_id}'
+    product = cache.get(cache_key)
+    if product is None:
+        product = Product.objects.get(id=product_id)
+        cache.set(cache_key, product, timeout=300)
+    return product
+```
+
+---
+
+## 6. Testing (MEDIUM-HIGH)
+
+### pytest-django + factory_boy
+
+```python
+# conftest.py
+@pytest.fixture
+def api_client():
+    return APIClient()
+
+@pytest.fixture
+def authenticated_client(api_client, user_factory):
+    user = user_factory()
+    api_client.force_authenticate(user=user)
+    return api_client
+```
+
+```python
+# factories.py
+class UserFactory(factory.django.DjangoModelFactory):
+    class Meta:
+        model = User
+    email = factory.Sequence(lambda n: f'user{n}@example.com')
+    username = factory.Sequence(lambda n: f'user{n}')
+
+class OrderFactory(factory.django.DjangoModelFactory):
+    class Meta:
+        model = 'orders.Order'
+    user = factory.SubFactory(UserFactory)
+    total = factory.Faker('pydecimal', left_digits=3, right_digits=2, positive=True)
+```
+
+```python
+# test_views.py
+@pytest.mark.django_db
+class TestListOrders:
+    def test_returns_user_orders(self, authenticated_client):
+        OrderFactory.create_batch(3, user=authenticated_client.handler._force_user)
+        response = authenticated_client.get('/api/orders/')
+        assert response.status_code == 200
+        assert len(response.data['data']) == 3
+
+    def test_requires_authentication(self, api_client):
+        response = api_client.get('/api/orders/')
+        assert response.status_code == 401
+```
+
+---
+
+## 7. Admin Customization (MEDIUM)
+
+```python
+class OrderItemInline(admin.TabularInline):
+    model = OrderItem
+    extra = 0
+    readonly_fields = ['price']
+
+@admin.register(Order)
+class OrderAdmin(admin.ModelAdmin):
+    list_display = ['id', 'user', 'status', 'total', 'created_at']
+    list_filter = ['status', 'created_at']
+    search_fields = ['user__email', 'id']
+    readonly_fields = ['id', 'created_at', 'updated_at']
+    inlines = [OrderItemInline]
+    date_hierarchy = 'created_at'
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).select_related('user')
+```
+
+---
+
+## 8. Production Deployment (MEDIUM)
+
+### Security Settings
+
+```python
+# settings/prod.py
+DEBUG = False
+ALLOWED_HOSTS = ['example.com', 'www.example.com']
+CSRF_TRUSTED_ORIGINS = ['https://example.com']
+SECURE_SSL_REDIRECT = True
+SESSION_COOKIE_SECURE = True
+CSRF_COOKIE_SECURE = True
+SECURE_HSTS_SECONDS = 31536000
+```
+
+### Deployment Stack
+
+```
+Nginx → Gunicorn → Django
+         ↕
+      PostgreSQL + Redis (cache)
+         ↕
+      Celery (background tasks)
+```
+
+```bash
+gunicorn config.wsgi:application \
+  --bind 0.0.0.0:8000 \
+  --workers 4 \
+  --timeout 120 \
+  --access-logfile -
+```
+
+### WhiteNoise for Static Files
+
+```python
+MIDDLEWARE = [
+    'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',  # right after Security
+    ...
+]
+STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
+```
+
+### Rules
+
+```
+✅ Gunicorn + Nginx (or Cloud Run / Railway)
+✅ PostgreSQL (not SQLite)
+✅ python manage.py check --deploy
+✅ Sentry for error tracking
+
+❌ Never use runserver in production
+❌ Never use DEBUG=True in production
+❌ Never use SQLite in production
+```
+
+---
+
+## Anti-Patterns
+
+| # | ❌ Don't | ✅ Do Instead |
+|---|---------|--------------|
+| 1 | Business logic in views | Service layer (`services.py`) |
+| 2 | One giant app | App-per-domain |
+| 3 | Default User model | Custom User before first migrate |
+| 4 | No `select_related` | Always eager-load related objects |
+| 5 | Django fixtures for tests | `factory_boy` factories |
+| 6 | `settings.py` single file | Split: base + dev + prod |
+| 7 | `runserver` in production | Gunicorn + Nginx |
+| 8 | SQLite in production | PostgreSQL |
+| 9 | `ModelSerializer` for writes | Explicit input serializer |

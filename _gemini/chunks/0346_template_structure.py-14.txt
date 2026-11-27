@@ -1,0 +1,114 @@
+            f"{source_template.name} is missing layout part(s): " + ", ".join(missing_parts)
+        )
+
+    return NativeStructureContract(
+        source_template=source_template,
+        contract_path=contract_path,
+        source_sha256=expected_sha,
+        slide_size_emu=slide_size_emu,
+        layouts=tuple(layouts),
+        slides=tuple(sorted(slides, key=lambda item: item.index)),
+    )
+
+
+def _parse_placeholder_bounds(
+    raw: str | None,
+    *,
+    svg_path: Path,
+    element_id: str,
+) -> tuple[float, float, float, float] | None:
+    if raw is None:
+        return None
+    parts = [part for part in re.split(r"[\s,]+", raw.strip()) if part]
+    if len(parts) != 4:
+        raise TemplateStructureError(
+            f"{svg_path.name}: {element_id} data-pptx-bounds must be "
+            "'x y width height'"
+        )
+    try:
+        x, y, width, height = (float(part) for part in parts)
+    except ValueError as exc:
+        raise TemplateStructureError(
+            f"{svg_path.name}: {element_id} placeholder bounds must be numeric"
+        ) from exc
+    if not all(math.isfinite(value) for value in (x, y, width, height)):
+        raise TemplateStructureError(
+            f"{svg_path.name}: {element_id} placeholder bounds must be finite"
+        )
+    if width <= 0 or height <= 0:
+        raise TemplateStructureError(
+            f"{svg_path.name}: {element_id} placeholder width/height must be positive"
+        )
+    return x, y, width, height
+
+
+def _parse_placeholder_idx(
+    raw: str | None,
+    *,
+    svg_path: Path,
+    element_id: str,
+) -> int | None:
+    if raw is None:
+        return None
+    value = raw.strip()
+    if not value or not value.isdigit():
+        raise TemplateStructureError(
+            f"{svg_path.name}: {element_id} data-pptx-idx must be "
+            "a non-negative integer"
+        )
+    parsed = int(value)
+    if parsed > OOXML_UINT32_MAX:
+        raise TemplateStructureError(
+            f"{svg_path.name}: {element_id} data-pptx-idx must be "
+            f"at most {OOXML_UINT32_MAX}"
+        )
+    return parsed
+
+
+def _validate_placeholder_carrier(
+    carrier: ET.Element,
+    placeholder: str,
+    *,
+    svg_path: Path,
+    element_id: str,
+) -> None:
+    tag = _local_tag(carrier)
+    if placeholder in _TEXT_PLACEHOLDERS and tag != "text":
+        raise TemplateStructureError(
+            f"{svg_path.name}: {element_id} placeholder '{placeholder}' must be "
+            "carried by one direct <text> child"
+        )
+    picture_carrier = (
+        tag in {"image", "svg"}
+        or (tag == "g" and is_picture_effect_carrier(carrier))
+    )
+    if placeholder == "picture" and not picture_carrier:
+        raise TemplateStructureError(
+            f"{svg_path.name}: {element_id} picture placeholder must be declared "
+            "with one direct <image>, crop <svg>, or exact clipped-picture "
+            "effect carrier"
+        )
+    if placeholder == "media" and not picture_carrier:
+        raise TemplateStructureError(
+            f"{svg_path.name}: {element_id} media placeholder must be declared "
+            "with one direct <image>, crop <svg>, or exact clipped-picture "
+            "effect carrier"
+        )
+    if (
+        placeholder == "object"
+        and tag not in _OBJECT_PLACEHOLDER_TAGS
+        and not _is_authored_preset_atom(carrier)
+    ):
+        raise TemplateStructureError(
+            f"{svg_path.name}: {element_id} object placeholder carrier must be "
+            "one direct text, image, basic SVG shape, or authored preset atom"
+        )
+    if placeholder in {"chart", "table"}:
+        try:
+            native_kind = native_replacement_kind(carrier)
+        except NativeMarkerAttributeError as exc:
+            raise TemplateStructureError(
+                f"{svg_path.name}: {element_id} placeholder '{placeholder}' has "
+                f"conflicting chart/table replacement metadata: {exc}"
+            ) from exc
+        if tag != "g" or native_kind != placeholder:

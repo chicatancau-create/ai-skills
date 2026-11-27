@@ -1,0 +1,120 @@
+            if _local(attr_name) == "href" and value.startswith("#"):
+                live_refs.add(value[1:])
+        for child in root:
+            if child is definitions:
+                continue
+            live_refs.update(_referenced_ids(child))
+
+        reachable: set[ET.Element] = set()
+        pending = sorted(live_refs)
+        while pending:
+            ref_id = pending.pop(0)
+            owner = owner_by_id.get(ref_id)
+            if owner is None or owner in reachable:
+                continue
+            reachable.add(owner)
+            for nested_ref in sorted(_referenced_ids(owner)):
+                if nested_ref not in live_refs:
+                    live_refs.add(nested_ref)
+                    pending.append(nested_ref)
+
+        for definition in list(definitions):
+            has_id = any(item.get("id") for item in definition.iter())
+            if has_id and definition not in reachable:
+                definitions.remove(definition)
+                pruned += 1
+
+        if not list(definitions):
+            root.remove(definitions)
+
+    return deduplicated, pruned
+
+
+def _find_extractable(root: ET.Element, min_drawables: int, min_bytes: int) -> list[ET.Element]:
+    """Outermost <g> groups whose drawable count clears the threshold (no nesting)."""
+    found: list[ET.Element] = []
+
+    def walk(elem: ET.Element) -> None:
+        if (
+            _local(elem.tag) in DEFINITION_CONTAINERS
+            or _is_semantic_owner(elem)
+        ):
+            return
+        for child in list(elem):
+            if _local(child.tag) != "g":
+                walk(child)
+                continue
+            if (
+                not _is_chart_group(child)
+                and not _has_semantic_object(child)
+                and not _has_semantic_content(child)
+                and not _has_icon_placeholder(child)
+                and _large_enough(child, min_drawables, min_bytes)
+            ):
+                found.append(child)  # outermost qualifying — do not descend
+            else:
+                walk(child)
+
+    walk(root)
+    return found
+
+
+def _find_extractable_runs(
+    root: ET.Element,
+    min_drawables: int,
+    min_bytes: int,
+    min_decoration_bytes: int,
+) -> list[tuple[ET.Element, list[ET.Element]]]:
+    """
+    Consecutive pure-vector children inside mixed groups.
+
+    PPT exports often flatten text and large vector decorations as siblings
+    under the same parent. Whole-group extraction would hide text, so only the
+    contiguous vector runs are factored out.
+    """
+    found: list[tuple[ET.Element, list[ET.Element]]] = []
+
+    def flush(parent: ET.Element, run: list[ET.Element]) -> None:
+        byte_threshold = min_decoration_bytes if _has_semantic_content(parent) else min_bytes
+        if run and (
+            sum(_drawable_count(child) for child in run) >= min_drawables
+            or sum(_xml_size(child) for child in run) >= byte_threshold
+        ):
+            found.append((parent, list(run)))
+
+    def walk(elem: ET.Element) -> None:
+        if (
+            _local(elem.tag) in DEFINITION_CONTAINERS
+            or _is_semantic_owner(elem)
+        ):
+            return
+        run: list[ET.Element] = []
+        for child in list(elem):
+            if _is_extractable_subtree(child):
+                run.append(child)
+                continue
+            flush(elem, run)
+            run = []
+            walk(child)
+        flush(elem, run)
+
+    walk(root)
+    return found
+
+
+def _asset_svg(
+    group: ET.Element,
+    dependencies: list[ET.Element],
+    view_box: str | None,
+    width: str | None,
+    height: str | None,
+) -> bytes:
+    """Standalone, independently-viewable SVG carrying the group in page coords."""
+    semantic_inputs = [group, *dependencies]
+    if any(
+        _has_semantic_object(item)
+        or _has_semantic_content(item)
+        or _is_chart_group(item)
+        for item in semantic_inputs
+    ):
+        raise ValueError(

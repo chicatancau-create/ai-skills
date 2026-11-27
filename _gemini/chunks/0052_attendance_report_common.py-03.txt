@@ -1,0 +1,142 @@
+        flattened.append(flat)
+    return flattened
+
+
+def extract_group_names_from_records(
+    records: list[dict],
+    user_ids: list[str],
+) -> dict[str, str]:
+    """
+    获取每个用户的考勤组名称。
+
+    优先从 report query-data 原始记录中提取（如果接口返回了 groupName 字段），
+    否则回退到通过 `dws attendance group search` + `filtered-get --member`
+    获取所有考勤组的成员列表，反向映射 userId → 考勤组名称。
+
+    返回 {userId: groupName} 映射，未找到的用户映射为空字符串。
+    """
+    group_map: dict[str, str] = {}
+    candidate_keys = ("groupName", "group_name", "attendanceGroupName",
+                      "groupId", "group_id")
+
+    # 1) 先尝试从原始记录中提取
+    for record in records:
+        uid = _first_nonempty(record, ("userId", "userid", "user_id", "targetUserId"))
+        if uid is None:
+            continue
+        uid_str = str(uid)
+        if uid_str in group_map:
+            continue
+        name = _first_nonempty(record, candidate_keys)
+        if name is not None and str(name).strip():
+            group_map[uid_str] = str(name).strip()
+
+    # 2) 如果还有用户未匹配到考勤组，通过 group API 反向查找
+    missing_uids = {uid for uid in user_ids if uid not in group_map}
+    if missing_uids:
+        api_map = _resolve_group_names_via_api(missing_uids)
+        group_map.update(api_map)
+
+    # 兜底：未找到的用户填空字符串
+    for uid in user_ids:
+        if uid not in group_map:
+            group_map[uid] = ""
+
+    return group_map
+
+
+def _resolve_group_names_via_api(target_uids: set[str]) -> dict[str, str]:
+    """
+    通过 dws attendance group search + filtered-get --member
+    反向映射 userId → 考勤组名称。
+
+    流程：
+      1. group search 获取所有考勤组（id + name）
+      2. 对每个考勤组调用 filtered-get --member 获取成员 userId 列表
+      3. 将 target_uids 中的用户与考勤组成员做交集映射
+    """
+    result_map: dict[str, str] = {}
+    if not target_uids:
+        return result_map
+
+    # 获取所有考勤组
+    try:
+        search_payload = run_dws([
+            "attendance", "group", "search",
+            "--limit", "200",
+        ])
+    except DwsCallError as e:
+        log(f"[group] 获取考勤组列表失败：{e}")
+        return result_map
+
+    search_result = unwrap_result(search_payload)
+    groups: list[dict] = []
+    if isinstance(search_result, dict):
+        groups = search_result.get("items", [])
+    elif isinstance(search_result, list):
+        groups = search_result
+
+    if not groups:
+        log("[group] 未获取到任何考勤组")
+        return result_map
+
+    log(f"[group] 共 {len(groups)} 个考勤组，开始查询成员列表")
+
+    remaining = set(target_uids)
+    for group in groups:
+        if not remaining:
+            break
+        group_id = group.get("id")
+        group_name = group.get("name", "")
+        if not group_id:
+            continue
+
+        try:
+            detail_payload = run_dws([
+                "attendance", "group", "filtered-get",
+                "--group-id", str(group_id),
+                "--member",
+            ])
+        except DwsCallError as e:
+            log(f"[group] filtered-get 失败 (group={group_name}): {e}")
+            continue
+
+        detail = unwrap_result(detail_payload)
+        if not isinstance(detail, dict):
+            continue
+
+        member_users = detail.get("memberUsers", [])
+        if not isinstance(member_users, list):
+            continue
+
+        for member_uid in member_users:
+            uid_str = str(member_uid)
+            if uid_str in remaining:
+                result_map[uid_str] = group_name
+                remaining.discard(uid_str)
+
+    if remaining:
+        log(f"[group] {len(remaining)} 个用户未匹配到考勤组")
+
+    return result_map
+
+
+def dump_first_record_for_inspection(records: list[dict], label: str) -> None:
+    """
+    第一次跑脚本时，把第一条记录打到 stderr，方便用户/开发者
+    看清真实字段结构后回来调优解析逻辑。
+    """
+    if not records:
+        log(f"[inspect:{label}] 无记录")
+        return
+    sample = records[0]
+    log(f"[inspect:{label}] 首条记录字段示例（用于核对真实结构）：")
+    log(json.dumps(sample, ensure_ascii=False, indent=2))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 时间区间切片
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class DateSlice:

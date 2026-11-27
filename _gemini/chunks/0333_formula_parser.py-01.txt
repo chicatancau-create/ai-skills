@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+r"""
+PPT Master - Microsoft 365 LaTeX Formula Parser
+
+Parse the documented Microsoft 365 LaTeX import profile into the internal
+native-formula AST. Unknown commands remain fail-closed.
+
+See references/native-formula.md for the owning authoring contract.
+
+Usage:
+    Import parse_latex_formula() from the native formula compiler facade.
+
+Examples:
+    parse_latex_formula(r"\binom{n}{k}", display=True)
+
+Dependencies:
+    None (only uses standard library and local PPT Master modules)
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+
+from .formula_ast import (
+    Accent,
+    AlignmentPoint,
+    Bar,
+    BorderBox,
+    Delimiter,
+    EquationArray,
+    Fraction,
+    Function,
+    GroupChar,
+    Limit,
+    Matrix,
+    Nary,
+    Node,
+    OperatorEmulator,
+    Phantom,
+    Prescript,
+    Radical,
+    RunStyle,
+    Script,
+    Sequence,
+    Styled,
+    Text,
+    append_child,
+    is_empty,
+    merge_run_styles,
+)
+from .formula_profile import (
+    ACCENT_COMMANDS,
+    BARE_DELIMITER_COMMAND_PAIRS,
+    COLOR_NAMES,
+    DELIMITER_COMMANDS,
+    DISCARDED_ARGUMENT_COMMANDS,
+    EQUATION_ARRAY_ENVIRONMENTS,
+    GREEK_SYMBOLS,
+    LIMIT_FUNCTIONS,
+    MATRIX_ENVIRONMENTS,
+    NARY_COMMANDS,
+    NEGATED_SYMBOLS,
+    NO_OUTPUT_COMMANDS,
+    OPERATOR_BOUNDARY_COMMANDS,
+    SPACING_COMMANDS,
+    STANDARD_FUNCTIONS,
+    SYMBOL_COMMANDS,
+    UNSUPPORTED_COMMANDS,
+    VARIANT_UPPERCASE_GREEK,
+)
+
+
+_MAX_PARSE_DEPTH = 128
+_MAX_MACRO_EXPANSIONS = 500
+_MAX_EXPANDED_LENGTH = 1_048_576
+_ENVIRONMENT_NAME_RE = re.compile(r"[A-Za-z]+\*?")
+_COLOR_HEX_RE = re.compile(r"#[0-9A-Fa-f]{6}")
+_LENGTH_RE = re.compile(
+    r"([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*(mu|em|ex|pt)",
+    re.IGNORECASE,
+)
+_BIG_DELIMITER_RE = re.compile(
+    r"\\(?:big|Big|bigg|Bigg)([lrm]?)(?![A-Za-z])\s*"
+    r"(\\[A-Za-z]+|\\[{}|]|[()\[\]{}|.])"
+)
+_BIG_LEFT_COMMAND = "pptmasterbigleft"
+_BIG_RIGHT_COMMAND = "pptmasterbigright"
+_BIG_MIDDLE_COMMAND = "pptmasterbigmiddle"
+_BIG_SYMMETRIC_COMMAND = "pptmasterbigsymmetric"
+_MIDDLE_DELIMITER_COMMANDS = ("middle", _BIG_MIDDLE_COMMAND)
+_RIGHT_DELIMITER_COMMANDS = ("right", _BIG_RIGHT_COMMAND)
+_WHITE_OPEN_RE = re.compile(
+    r"(?:(?:\\left)?(?:\[|\\lbrack))\\!"
+    r"(?:(?:\\left)?(?:\[|\\lbrack))"
+)
+_WHITE_CLOSE_RE = re.compile(
+    r"(?:(?:\\right)?(?:\]|\\rbrack))\\!"
+    r"(?:(?:\\right)?(?:\]|\\rbrack))"
+)
+
+_ROMAN_STYLE = RunStyle(style="p", is_default=True)
+_TEXT_STYLE = RunStyle(normal=True)
+_MATH_MODE_RESET_STYLE = RunStyle(
+    normal=False,
+    bold=False,
+    italic=False,
+    typeface="",
+)
+_SPACING_STYLE = RunStyle()
+_PLAIN_OPERATOR_CHARS = frozenset("+−*/=<>±∓×÷⋅,;:!?")
+_INFIX_FRACTIONS = frozenset({"over", "atop", "choose", "brace", "brack"})
+
+_STYLE_WRAPPERS = {
+    "mathrm": RunStyle(style="p"),
+    "mathbf": RunStyle(style="b"),
+    "mathit": RunStyle(style="i"),
+    "mathsf": RunStyle(style="p", script="sans-serif"),
+    "mathtt": RunStyle(style="p", script="monospace"),
+    "mathbb": RunStyle(style="p", script="double-struck"),
+    "Bbb": RunStyle(style="p", script="double-struck"),
+    "mathcal": RunStyle(style="p", script="script"),
+    "mathscr": RunStyle(style="p", script="script"),
+    "mathfrak": RunStyle(style="p", script="fraktur"),
+    "boldsymbol": RunStyle(style="bi"),
+    "bm": RunStyle(style="bi"),
+    "text": _TEXT_STYLE,
+    "textrm": _TEXT_STYLE,
+    "textnormal": _TEXT_STYLE,
+    "textbf": RunStyle(normal=True, bold=True),
+    "textit": RunStyle(normal=True, italic=True),
+    "emph": RunStyle(normal=True, italic=True),
+    "textsf": RunStyle(normal=True, typeface="Arial"),
+    "texttt": RunStyle(normal=True, typeface="Courier New"),
+    "mbox": _TEXT_STYLE,
+    "hbox": _TEXT_STYLE,
+}
+
+_DECLARATION_STYLES = {
+    "rm": RunStyle(style="p"),
+    "bf": RunStyle(style="b"),
+    "it": RunStyle(style="i"),
+    "cal": RunStyle(style="p", script="script"),
+    "frak": RunStyle(style="p", script="fraktur"),
+    "sf": RunStyle(style="p", script="sans-serif"),

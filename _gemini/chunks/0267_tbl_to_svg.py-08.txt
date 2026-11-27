@@ -1,0 +1,107 @@
+    decoration_names = {"round", "headEnd", "tailEnd"}
+    if child_names.count("solidFill") != 1 or any(
+        name not in {"solidFill", "prstDash", *decoration_names}
+        for name in child_names
+    ):
+        raise ValueError("unsupported border paint")
+    if (
+        child_names.count("prstDash") > 1
+        or any(child_names.count(name) > 1 for name in decoration_names)
+        or width_emu is None
+    ):
+        raise ValueError("invalid solid border")
+    dash = next(
+        (child for child in children if child.tag.rsplit("}", 1)[-1] == "prstDash"),
+        None,
+    )
+    if dash is not None and (
+        dash.attrib != {"val": "solid"} or list(dash)
+    ):
+        raise ValueError("unsupported border dash")
+    line_join = next(
+        (child for child in children if child.tag.rsplit("}", 1)[-1] == "round"),
+        None,
+    )
+    if line_join is not None and (line_join.attrib or list(line_join)):
+        raise ValueError("unsupported border line join")
+    for endpoint_name in ("headEnd", "tailEnd"):
+        endpoint = next(
+            (
+                child for child in children
+                if child.tag.rsplit("}", 1)[-1] == endpoint_name
+            ),
+            None,
+        )
+        if endpoint is None:
+            continue
+        if (
+            set(endpoint.attrib) - {"type", "w", "len"}
+            or endpoint.get("type") not in {None, "none"}
+            or endpoint.get("w") not in {None, "med"}
+            or endpoint.get("len") not in {None, "med"}
+            or list(endpoint)
+        ):
+            raise ValueError("unsupported border endpoint")
+
+    solid_fill = next(
+        child for child in children
+        if child.tag.rsplit("}", 1)[-1] == "solidFill"
+    )
+    if solid_fill.attrib or len(list(solid_fill)) != 1:
+        raise ValueError("invalid solid border fill")
+    color_elem = find_color_elem(solid_fill)
+    try:
+        color, alpha = resolve_color(color_elem, palette, strict=True)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("invalid solid border color") from exc
+    if color is None or alpha != 1.0:
+        raise ValueError("border color must resolve to opaque RGB")
+
+    width = _round_payload_number(emu_to_px(str(width_emu)))
+    if width <= 0:
+        raise ValueError("border width is too small")
+    return {
+        "style": "solid",
+        "color": color,
+        "width": width,
+    }
+
+
+def _table_has_unsupported_direct_formatting(
+    tbl: ET.Element,
+    palette: ColorPalette | None,
+) -> bool:
+    """Reject direct cell features the compact native schema cannot retain."""
+    for tc in tbl.findall(".//a:tc", NS):
+        if _table_cell_has_unsupported_topology(tc):
+            return True
+        tc_pr = tc.find("a:tcPr", NS)
+        if tc_pr is not None:
+            allowed_attrs = {
+                "marL", "marR", "marT", "marB", "anchor",
+                "anchorCtr", "horzOverflow",
+            }
+            if any(name not in allowed_attrs for name in tc_pr.attrib):
+                return True
+            if tc_pr.get("anchor") not in {None, "t", "ctr", "b"}:
+                return True
+            if tc_pr.get("anchorCtr") not in {None, "0", "1", "false", "true"}:
+                return True
+            if tc_pr.get("horzOverflow") not in {None, "clip", "overflow"}:
+                return True
+            if any(
+                child.tag.rsplit("}", 1)[-1]
+                not in {"solidFill", "noFill", *_DIRECT_BORDER_TAGS}
+                for child in tc_pr
+            ):
+                return True
+            fills = [
+                child for child in tc_pr
+                if child.tag.rsplit("}", 1)[-1] in {"solidFill", "noFill"}
+            ]
+            if len(fills) > 1:
+                return True
+            no_fill = tc_pr.find("a:noFill", NS)
+            if no_fill is not None and (no_fill.attrib or list(no_fill)):
+                return True
+            for border_tag in _DIRECT_BORDER_TAGS:

@@ -1,0 +1,123 @@
+            f"Canonical animation config is invalid: {path}\n{details}"
+        )
+    return raw
+
+
+def _page_subtitle_names(subtitle_dir: Path) -> list[str]:
+    """Return ordered page-local SRT stems, excluding the merged sidecar."""
+    if not subtitle_dir.is_dir():
+        raise FileNotFoundError(f"Page-local SRT directory not found: {subtitle_dir}")
+    names = [
+        path.stem
+        for path in sorted(subtitle_dir.glob("*.srt"))
+        if path.stem != "total"
+    ]
+    if not names:
+        raise FileNotFoundError(f"No page-local SRT files found under: {subtitle_dir}")
+    return names
+
+
+def _animation_slide_names(
+    project_path: Path,
+    config: dict[str, Any],
+    subtitle_dir: Path,
+) -> list[str]:
+    """Resolve the page roster without parsing SVG unless a slide is missing."""
+    slides = config.get("slides", {})
+    if not isinstance(slides, dict):
+        raise ValueError('Canonical animations.json field "slides" must be an object')
+    canonical_names = list(slides)
+    subtitle_names = _page_subtitle_names(subtitle_dir)
+    subtitle_set = set(subtitle_names)
+
+    missing_subtitles = [
+        slide_name for slide_name in canonical_names if slide_name not in subtitle_set
+    ]
+    if missing_subtitles:
+        raise FileNotFoundError(
+            "Missing page-local SRT for canonical animation slide(s): "
+            + ", ".join(missing_subtitles)
+        )
+
+    canonical_set = set(canonical_names)
+    extra_subtitles = [
+        slide_name for slide_name in subtitle_names if slide_name not in canonical_set
+    ]
+    unexpected = [
+        slide_name
+        for slide_name in extra_subtitles
+        if not (project_path / "svg_output" / f"{slide_name}.svg").is_file()
+    ]
+    if unexpected:
+        raise ValueError(
+            "Page-local SRT has no matching canonical animation slide or SVG: "
+            + ", ".join(unexpected)
+        )
+    if not extra_subtitles:
+        return canonical_names
+    return subtitle_names
+
+
+def _animation_scope(
+    scope: dict[str, Any],
+    *,
+    label: str,
+) -> dict[str, Any]:
+    value = scope.get("animation", {})
+    if not isinstance(value, dict):
+        raise ValueError(f'{label} field "animation" must be an object')
+    return value
+
+
+def _transition_scope(
+    scope: dict[str, Any],
+    *,
+    label: str,
+) -> dict[str, Any]:
+    value = scope.get("transition", {})
+    if not isinstance(value, dict):
+        raise ValueError(f'{label} field "transition" must be an object')
+    return value
+
+
+def _effective_transition_duration_ms(
+    config: dict[str, Any],
+    slide_cfg: dict[str, Any],
+) -> int:
+    """Resolve the destination slide's effective transition duration."""
+    defaults = config.get("defaults", {})
+    if not isinstance(defaults, dict):
+        raise ValueError('Canonical animations.json field "defaults" must be an object')
+    default_transition = _transition_scope(
+        defaults,
+        label="Canonical animations.json defaults",
+    )
+    default_effect, _default_options = normalize_transition_effect_request(
+        default_transition.get("effect", "fade"),
+        default_transition.get("effect_options"),
+    )
+    default_duration = validate_seconds(
+        default_transition.get("duration", DEFAULT_TRANSITION_DURATION),
+        "canonical transition duration",
+        allow_zero=default_effect is None,
+    )
+
+    slide_transition = _transition_scope(
+        slide_cfg,
+        label="Canonical animations.json slide",
+    )
+    if "effect" in slide_transition:
+        effect, _effect_options = normalize_transition_effect_request(
+            slide_transition["effect"],
+            slide_transition.get("effect_options"),
+        )
+    else:
+        effect = default_effect
+    duration = validate_seconds(
+        slide_transition.get("duration", default_duration),
+        "canonical slide transition duration",
+        allow_zero=effect is None,
+    )
+    return 0 if effect is None else round(duration * 1000)
+
+

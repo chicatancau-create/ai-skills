@@ -1,0 +1,104 @@
+            rel_type = relationship.attrib.get("Type", "")
+            target = relationship.attrib.get("Target", "")
+            if not rel_id or not rel_type or not target:
+                continue
+            resolved = _resolve_relationship_target(source_part, target)
+            if source_part:
+                parents_by_target[resolved].add(source_part)
+            references[resolved].append({
+                "relationshipType": rel_type,
+                "sourcePart": source_part or "",
+                "transition": rel_id in transition_ids,
+            })
+
+    candidate_parts = sorted(
+        name
+        for name in names
+        if not name.endswith("/")
+        and (
+            name.startswith("ppt/media/")
+            or name.startswith("ppt/embeddings/")
+            or name.startswith("ppt/model3d/")
+        )
+    )
+    allocated: dict[tuple[str, str], list[tuple[str, str]]] = defaultdict(list)
+    resources: list[PackageResource] = []
+    for package_part in candidate_parts:
+        rows = references.get(package_part, [])
+        relationship_types = {
+            str(row["relationshipType"])
+            for row in rows
+            if row.get("relationshipType")
+        }
+        transition_flags = [bool(row.get("transition")) for row in rows]
+        transition_only = bool(transition_flags) and all(transition_flags)
+        kind, directory = _classify_resource(
+            package_part,
+            relationship_types,
+            transition_only=transition_only,
+        )
+        payload = package.read(package_part)
+        digest = _sha256(payload)
+        original_name = _safe_basename(PurePosixPath(package_part).name)
+        key = (directory.as_posix(), original_name.lower())
+        allocations = allocated[key]
+        existing_name = next(
+            (name for known_digest, name in allocations if known_digest == digest),
+            None,
+        )
+        if existing_name is None:
+            stem = Path(original_name).stem
+            suffix = Path(original_name).suffix
+            existing_name = (
+                original_name
+                if not allocations
+                else f"{stem}_{len(allocations) + 1}{suffix}"
+            )
+            allocations.append((digest, existing_name))
+        workspace_path = (directory / existing_name).as_posix()
+        resources.append(PackageResource(
+            package_part=package_part,
+            kind=kind,
+            workspace_path=workspace_path,
+            payload=payload,
+            relationship_types=tuple(sorted(relationship_types)),
+            source_parts=tuple(sorted({
+                str(row["sourcePart"])
+                for row in rows
+                if row.get("sourcePart")
+            })),
+            owner_parts=_resource_owner_parts(
+                package_part,
+                parents_by_target,
+            ),
+        ))
+    return PackageResourceInventory(resources=tuple(resources))
+
+
+def write_workspace_resources(
+    workspace: Path,
+    inventory: PackageResourceInventory,
+    *,
+    include_images: bool = True,
+) -> tuple[str, ...]:
+    """Write the exact resource inventory without overwriting different bytes."""
+    written: list[str] = []
+    for resource in inventory.resources:
+        if resource.kind == "image" and not include_images:
+            continue
+        relative = Path(resource.workspace_path)
+        target = workspace / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            if not target.is_file() or target.read_bytes() != resource.payload:
+                raise RuntimeError(
+                    "Semantic resource path collides with different content: "
+                    f"{relative}"
+                )
+        else:
+            target.write_bytes(resource.payload)
+        written.append(relative.as_posix())
+    return tuple(written)
+
+
+def load_roundtrip_manifest(workspace: Path) -> dict[str, object] | None:

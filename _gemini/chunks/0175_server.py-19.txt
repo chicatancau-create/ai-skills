@@ -1,0 +1,120 @@
+        current_stage = 'stage2' if ready else 'stage1'
+    else:
+        expected_stage_number = 1
+        ready = rec_stage_number == 1
+        status = 'ready_user' if ready else 'waiting_agent'
+        current_stage = 'stage1'
+
+    session = {
+        'phase': 'strategist',
+        'status': status,
+        'current_stage': current_stage,
+        'expected_stage': _stage_name(expected_stage_number),
+        'expected_stage_number': expected_stage_number,
+        'recommendation_stage': rec_stage,
+        'recommendation_stage_number': rec_stage_number,
+        'recommendation_file': rec_file.name,
+        'recommendation_version': _file_version(rec_file),
+        'recommendation_error': rec_error,
+        'result_stage': result_stage,
+        'result_stage_number': result_stage_number,
+        'result_version': _file_version(result_file),
+        'server_port': server_port or previous.get('server_port'),
+        'event': event or previous.get('event') or 'derived',
+    }
+
+    session.update({
+        'template_selection_version': _file_version(confirm_dir / TEMPLATE_SELECTION_NAME),
+        'template_install_version': _file_version(confirm_dir.parent / 'template_install.json'),
+    })
+
+    if result_stage == 'final':
+        session.update({
+            'template_status': 'ready',
+            'template_error': None,
+        })
+        return session
+
+    if result_stage is None:
+        ready_error = _stage1_ready_error(confirm_dir)
+        if ready_error:
+            session.update({
+                'status': 'error',
+                'template_status': 'error',
+                'template_error': ready_error,
+            })
+            if not session.get('recommendation_error'):
+                session['recommendation_error'] = ready_error
+            return session
+        session.update({
+            'template_status': 'ready_user',
+            'template_error': None,
+        })
+        return session
+
+    ready_error = _stage2_ready_error(
+        confirm_dir.parent,
+        confirm_dir,
+        rec_file if rec_stage_number == 2 else None,
+    )
+    if ready_error:
+        session.update({
+            'status': 'waiting_agent',
+            'current_stage': 'stage1',
+            'expected_stage': 'stage2',
+            'expected_stage_number': 2,
+            'template_status': 'waiting_agent',
+            'template_error': ready_error,
+        })
+        return session
+    session.update({
+        'template_status': 'ready',
+        'template_error': None,
+    })
+    return session
+
+
+def _write_session_state(confirm_dir: Path, session: dict) -> None:
+    """Persist session.json only when stable state changes."""
+    previous = _read_session(confirm_dir)
+    comparable_previous = dict(previous)
+    comparable_current = dict(session)
+    comparable_previous.pop('updated_at', None)
+    comparable_current.pop('updated_at', None)
+    if comparable_previous == comparable_current:
+        return
+    session = dict(session)
+    session['updated_at'] = time.strftime('%Y-%m-%dT%H:%M:%S')
+    _write_json_atomic(confirm_dir / SESSION_NAME, session)
+
+
+def _sync_session_state(
+    confirm_dir: Path,
+    *,
+    server_port: Optional[int] = None,
+    event: Optional[str] = None,
+) -> dict:
+    """Derive and persist the current session state."""
+    session = _build_session_state(
+        confirm_dir,
+        server_port=server_port,
+        event=event,
+    )
+    _write_session_state(confirm_dir, session)
+    return session
+
+
+# Earlier-stage choices are not rendered on later pages, so their values live
+# only in browser STATE and would be lost on an in-run refresh. Fold them from
+# result.json into Stage-2 recommendations so the same live run resumes from the
+# user's actual communication contract and complete deck-solution choices.
+_CONTRACT_RECOMMEND_KEYS = (
+    'canvas',
+)
+_CONTRACT_VALUE_KEYS = (
+    'audience',
+    'communication_intent',
+    'audience_outcome',
+    'core_message',
+    'delivery_context',
+    'artifact_afterlife',

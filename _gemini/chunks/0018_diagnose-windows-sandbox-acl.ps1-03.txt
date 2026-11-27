@@ -1,0 +1,78 @@
+public static extern bool GetTokenInformation(IntPtr token, int infoClass, IntPtr info, uint length, out uint returned);
+[DllImport("advapi32.dll", SetLastError = true)]
+public static extern IntPtr GetSidSubAuthority(IntPtr sid, uint index);
+[DllImport("advapi32.dll", SetLastError = true)]
+public static extern IntPtr GetSidSubAuthorityCount(IntPtr sid);
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+private static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFileW(
+  string path, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+// OPEN_EXISTING never creates or changes contents. Windows evaluates the caller's
+// effective access, including group attributes, denies, ownership and inheritance.
+public static bool HasAccess(string path, uint access) {
+  using (var handle = CreateFileW(path, access, 7, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero)) {
+    if (!handle.IsInvalid) { return true; }
+    int error = Marshal.GetLastWin32Error();
+    if (error == 5) { return false; }
+    throw new System.ComponentModel.Win32Exception(error, "CreateFileW access check: " + path);
+  }
+}
+[DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+private static extern uint SetNamedSecurityInfoW(string path, int type, uint information,
+  IntPtr owner, IntPtr group, byte[] dacl, IntPtr sacl);
+public static void SetDacl(string path, string sddl) {
+  var descriptor = new System.Security.AccessControl.RawSecurityDescriptor(sddl);
+  byte[] dacl = null;
+  if (descriptor.DiscretionaryAcl != null) {
+    dacl = new byte[descriptor.DiscretionaryAcl.BinaryLength];
+    descriptor.DiscretionaryAcl.GetBinaryForm(dacl, 0);
+  }
+  bool isProtected = (descriptor.ControlFlags & System.Security.AccessControl.ControlFlags.DiscretionaryAclProtected) != 0;
+  // Only the DACL and its inheritance protection are written: never owner, group or SACL.
+  uint result = SetNamedSecurityInfoW(path, 1, 4u | (isProtected ? 0x80000000u : 0x20000000u),
+    IntPtr.Zero, IntPtr.Zero, dacl, IntPtr.Zero);
+  if (result != 0) { throw new System.ComponentModel.Win32Exception((int)result, "Write DACL: " + path); }
+}
+public static int Level(IntPtr token) {
+  uint length;
+  GetTokenInformation(token, 25, IntPtr.Zero, 0, out length);
+  if (length == 0) { throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "Read integrity information length"); }
+  IntPtr buffer = Marshal.AllocHGlobal((int)length);
+  try {
+    if (!GetTokenInformation(token, 25, buffer, length, out length)) { throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "Read integrity information"); }
+    IntPtr sid = Marshal.PtrToStructure<TOKEN_MANDATORY_LABEL>(buffer).Label.Sid;
+    byte count = Marshal.ReadByte(GetSidSubAuthorityCount(sid));
+    return Marshal.ReadInt32(GetSidSubAuthority(sid, (uint)(count - 1)));
+  } finally { Marshal.FreeHGlobal(buffer); }
+}
+'@
+    }
+}
+
+function Get-IntegritySid {
+  try {
+    $level = [Dsh.TokenInfo]::Level([System.Security.Principal.WindowsIdentity]::GetCurrent().Token)
+    switch ($level) {
+      0 { return 'S-1-16-0 (Untrusted)' }
+      4096 { return 'S-1-16-4096 (Low)' }
+      8192 { return 'S-1-16-8192 (Medium)' }
+      12288 { return 'S-1-16-12288 (High)' }
+      16384 { return 'S-1-16-16384 (System)' }
+      default { return "S-1-16-$level (unrecognized level)" }
+    }
+  } catch {
+    Write-Report observation integrity '' unknown 'The token integrity level could not be read; do not infer that the caller is elevated or confined.' @{ error = (Get-HResultChain $_.Exception) }
+    return 'unknown'
+  }
+}
+
+function Get-NormalizedPath {
+  param([string]$Value)
+  $full = [System.IO.Path]::GetFullPath($Value)
+  $root = [System.IO.Path]::GetPathRoot($full)
+  if ($full.Length -le $root.Length) { return $root }
+  return $full.TrimEnd('\', '/')
+}
+
+function Test-DangerousRoot {
+  param([string]$FullPath)
+  $trimmed = (Get-NormalizedPath $FullPath).TrimEnd('\')

@@ -1,0 +1,117 @@
+    A non-key-dominant pixel is treated as opaque foreground. A key-dominant
+    pixel uses color-to-alpha recovery, which preserves soft shadows, glows,
+    and antialiased edges without making an ordinary solid foreground color
+    unnecessarily translucent.
+    """
+    channels = rgb.split()
+    channel_alphas = [
+        _channel_alpha(channel, bg_value)
+        for channel, bg_value in zip(channels, bg)
+    ]
+    raw_alpha = ImageChops.lighter(
+        ImageChops.lighter(channel_alphas[0], channel_alphas[1]),
+        channel_alphas[2],
+    )
+    key_index = _pure_chroma_channel(bg)
+    if key_index is None:
+        return raw_alpha
+
+    other_channels = [
+        channel for index, channel in enumerate(channels) if index != key_index
+    ]
+    key_blend = _key_blend_mask(
+        channels[key_index],
+        ImageChops.lighter(other_channels[0], other_channels[1]),
+    )
+    opaque = Image.new("L", rgb.size, 255)
+    return Image.composite(raw_alpha, opaque, key_blend)
+
+
+def _key_blend_mask(key_channel: Image.Image, other_max: Image.Image) -> Image.Image:
+    """Mask the pixels that read as a blend of foreground with a pure key.
+
+    A pixel qualifies only when the key channel dominates and the strongest
+    non-key channel stays below `_KEY_PURITY_OPAQUE_RATIO` of it. An opaque
+    foreground color that merely shares the key's hue (a malachite green under a
+    green key) keeps a substantial non-key channel and is left opaque, while
+    antialiased edges, soft shadows, and glows composited over the key fall
+    below the ratio and still receive color-to-alpha recovery.
+    """
+    ratio_num = round(_KEY_PURITY_OPAQUE_RATIO * 10)
+    if hasattr(ImageMath, "lambda_eval"):
+        blend = ImageMath.lambda_eval(
+            lambda op: op["convert"](
+                (op["key"] > op["other"])
+                & (op["other"] * 10 < op["key"] * ratio_num),
+                "L",
+            ),
+            key=key_channel,
+            other=other_max,
+        )
+    else:
+        blend = ImageMath.eval(  # type: ignore[attr-defined]
+            "convert((key > other) & (other * 10 < key * ratio), 'L')",
+            key=key_channel,
+            other=other_max,
+            ratio=ratio_num,
+        )
+    return blend.point(lambda value: 255 if value else 0)
+
+
+def _decontaminate_channel(
+    channel: Image.Image,
+    alpha: Image.Image,
+    bg_value: int,
+) -> Image.Image:
+    """Remove a composited key channel while supporting Pillow 9 through 12."""
+    if hasattr(ImageMath, "lambda_eval"):
+        return ImageMath.lambda_eval(
+            lambda op: op["convert"](
+                bg_value
+                + (op["channel"] - bg_value)
+                * 255
+                / op["max"](op["alpha"], 1),
+                "L",
+            ),
+            channel=channel,
+            alpha=alpha,
+        )
+    return ImageMath.eval(  # type: ignore[attr-defined]
+        "convert(bg + (channel - bg) * 255 / max(alpha, 1), 'L')",
+        channel=channel,
+        alpha=alpha,
+        bg=bg_value,
+    )
+
+
+def _decontaminate_rgb(
+    rgb: Image.Image,
+    alpha: Image.Image,
+    bg: tuple[int, int, int],
+) -> Image.Image:
+    """Recover foreground RGB values from a composited pure chroma key."""
+    return Image.merge(
+        "RGB",
+        tuple(
+            _decontaminate_channel(channel, alpha, bg_value)
+            for channel, bg_value in zip(rgb.split(), bg)
+        ),
+    )
+
+
+def _soft_mask_from_diff(diff: Image.Image, tolerance: int) -> Image.Image:
+    """Build a feathered alpha mask around the tolerance threshold."""
+    low = max(0, tolerance - _DEFAULT_FEATHER)
+    high = min(255, tolerance + _DEFAULT_FEATHER)
+    if high <= low:
+        return diff.point(lambda p: 255 if p > tolerance else 0)
+
+    span = high - low
+    lut = []
+    for value in range(256):
+        if value <= low:
+            lut.append(0)
+        elif value >= high:
+            lut.append(255)
+        else:
+            lut.append(round((value - low) * 255 / span))

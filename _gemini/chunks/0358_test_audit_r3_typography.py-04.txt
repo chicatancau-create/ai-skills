@@ -1,0 +1,72 @@
+                    '<a:r><a:rPr lang="en-US"/><a:t> </a:t></a:r>'
+                    '<a:endParaRPr lang="en-US"/></a:p></p:txBody></p:sp>'
+                    f'</p:spTree></p:cSld></p:{tag}>',
+                    encoding="utf-8",
+                )
+            _apply_template_text_language(folder, "zh-CN")
+            for path in (folder / "ppt").glob("*/*.xml"):
+                root = ET.parse(path).getroot()
+                for tag in ("rPr", "defRPr", "endParaRPr"):
+                    properties = root.findall(f".//a:{tag}", NS)
+                    self.assertTrue(properties)
+                    self.assertTrue(all(node.get("lang") == "zh-CN" for node in properties))
+                original = path.read_bytes()
+                _apply_template_text_language(folder, "zh-CN")
+                self.assertEqual(path.read_bytes(), original)
+
+
+class IncrementalCalibrationTests(unittest.TestCase):
+    def _run_calibration(self, project: Path, *options: str) -> subprocess.CompletedProcess[str]:
+        result = subprocess.run(
+            [sys.executable, "-B", str(SCRIPTS_DIR / "text_measure.py"),
+             "calibrate", str(project), *options],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result
+
+    def _read_calibration(self, project: Path) -> dict:
+        return json.loads((project / "validation" / "text_calibration.json").read_text(encoding="utf-8"))
+
+    def test_quick_and_default_keep_prior_role_weight_samples_and_rates(self) -> None:
+        for default in (False, True):
+            with self.subTest(default=default), tempfile.TemporaryDirectory() as tmp:
+                project = Path(tmp)
+                if default:
+                    (project / "spec_lock.md").write_text(
+                        "# Spec Lock\n\n## typography\n- font_family: Arial\n"
+                        "- body_family: Arial\n- title_family: Arial\n- body: 20\n- title: 40\n",
+                        encoding="utf-8",
+                    )
+                first_run = self._run_calibration(
+                    project, "--role", "title:Arial:40:bold", "--sample", THAI_SAMPLE, "--json",
+                )
+                first = json.loads(first_run.stdout)
+                second_run = self._run_calibration(
+                    project, "--role", "body:Arial:20:bold" if default else "body:Arial:20",
+                )
+                second = self._read_calibration(project)
+                self.assertEqual(second["roles"]["title"], first["roles"]["title"])
+                self.assertEqual(second["script_samples"], first["script_samples"])
+                self.assertIn("Thai", second["script_samples"])
+                self.assertEqual(second["roles"]["title"]["weight"], "bold")
+                self.assertEqual(second["roles"]["body"]["weight"], "bold" if default else "normal")
+                self.assertTrue(all(
+                    row["script_clusters_per_100px"]["Thai"] > 0
+                    for row in second["roles"].values()
+                ))
+                self.assertIn("Thai ≈clusters/100px", second_run.stdout)
+                notes = " ".join(second["notes"])
+                self.assertIn("title", notes)
+                self.assertIn("bold", notes)
+                self.assertNotIn("every role is measured at normal weight", notes)
+                if default:
+                    self.assertIn("body", notes)
+
+    def test_incremental_default_notes_follow_the_saved_role_family(self) -> None:
+        for explicit_family in (None, "Georgia"):
+            with self.subTest(explicit_family=explicit_family), tempfile.TemporaryDirectory() as tmp:
+                project = Path(tmp)
+                (project / "spec_lock.md").write_text(
+                    "# Spec Lock\n\n## typography\n- font_family: Arial\n"
+                    "- body_family: Arial\n- body: 20\n- hero: 48\n",

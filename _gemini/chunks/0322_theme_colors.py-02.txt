@@ -1,0 +1,112 @@
+    rows: dict[str, str] = {}
+    current_section: str | None = None
+    try:
+        lines = lock_path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise ThemeColorError(f"Cannot read {lock_path}: {exc}") from exc
+    for raw_line in lines:
+        line = raw_line.strip()
+        if line.startswith("## "):
+            current_section = line[3:].strip()
+            continue
+        if current_section != "colors":
+            continue
+        match = _LOCK_ROW_RE.fullmatch(line)
+        if not match:
+            continue
+        raw_color = match.group(2).strip()
+        if (
+            len(raw_color) >= 2
+            and raw_color[0] == raw_color[-1]
+            and raw_color[0] in {'"', "'"}
+        ):
+            raw_color = raw_color[1:-1].strip()
+        color = parse_hex_color(raw_color)
+        if color is not None:
+            rows[match.group(1)] = color
+    return rows
+
+
+def _first_color(roles: dict[str, str], *keys: str, default: str) -> str:
+    return next((roles[key] for key in keys if key in roles), default)
+
+
+def load_theme_color_spec(project_path: Path) -> ThemeColorSpec | None:
+    """Load a PowerPoint color scheme from ``spec_lock.md`` color rows."""
+    lock_path = project_path / "spec_lock.md"
+    if not lock_path.is_file():
+        return None
+    roles = _color_rows(lock_path)
+    if not roles:
+        return None
+
+    extra_roles = tuple(
+        key
+        for key, color in roles.items()
+        if key not in _ROLE_SLOTS and color not in {"000000", "FFFFFF"}
+    )[:2]
+    extra_slots = dict(zip(extra_roles, ("accent5", "accent6")))
+    role_slots = {**_ROLE_SLOTS, **extra_slots}
+
+    slots = dict(_OFFICE_DEFAULTS)
+    slots.update({
+        "lt1": _first_color(
+            roles,
+            "bg", "background", "master_bg",
+            default=slots["lt1"],
+        ),
+        "dk1": _first_color(
+            roles,
+            "text", "body_text", "primary",
+            default=slots["dk1"],
+        ),
+        "lt2": _first_color(
+            roles,
+            "secondary_bg", "bg_secondary", "bg", "background", "master_bg",
+            default=slots["lt2"],
+        ),
+        "dk2": _first_color(roles, "text_secondary", "text", default=slots["dk2"]),
+        "accent1": _first_color(roles, "primary", "accent", default=slots["accent1"]),
+        "accent2": _first_color(
+            roles,
+            "accent", "secondary_accent", "primary",
+            default=slots["accent2"],
+        ),
+        "accent3": _first_color(roles, "secondary_accent", "accent", default=slots["accent3"]),
+        "accent4": _first_color(roles, "border", "primary", default=slots["accent4"]),
+        "hlink": _first_color(roles, "accent", "primary", default=slots["hlink"]),
+        "folHlink": _first_color(roles, "secondary_accent", "accent", default=slots["folHlink"]),
+    })
+    for role, slot in extra_slots.items():
+        slots[slot] = roles[role]
+    return ThemeColorSpec(
+        slots=slots,
+        roles=roles,
+        role_slots=role_slots,
+        extra_roles=extra_roles,
+    )
+
+
+def color_node_xml(
+    color: str,
+    spec: ThemeColorSpec | None,
+    usage: str,
+    inner_xml: str = "",
+) -> str:
+    """Build an srgbClr or schemeClr node while preserving child transforms."""
+    normalized = parse_hex_color(color) or color.strip().lstrip("#").upper()
+    scheme = spec.scheme_for(normalized, usage) if spec is not None else None
+    if scheme:
+        return f'<a:schemeClr val="{scheme}">{inner_xml}</a:schemeClr>'
+    return f'<a:srgbClr val="{normalized}">{inner_xml}</a:srgbClr>'
+
+
+def _set_scheme_color(parent: ET.Element, slot: str, color: str) -> None:
+    target = parent.find(f"{{{DML_NS}}}{slot}")
+    if target is None:
+        target = ET.SubElement(parent, f"{{{DML_NS}}}{slot}")
+    for child in list(target):
+        target.remove(child)
+    ET.SubElement(target, f"{{{DML_NS}}}srgbClr", {"val": color})
+
+

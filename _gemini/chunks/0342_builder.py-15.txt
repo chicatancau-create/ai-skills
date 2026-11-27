@@ -1,0 +1,98 @@
+        all_source_shapes,
+    ) = _roundtrip_source_shape_roster(source_tree)
+
+    generated_order: list[str] = []
+    generated_shapes: dict[str, ET.Element] = {}
+    generated_top_id_by_descendant: dict[str, str] = {}
+    for child in generated_sp_tree:
+        if child.tag not in _TOP_LEVEL_SHAPE_TAGS:
+            continue
+        shape_id = _shape_id(child)
+        if not shape_id:
+            raise TemplateStructureError(
+                "Generated round-trip slide contains a top-level shape without id"
+            )
+        if shape_id in generated_shapes:
+            raise TemplateStructureError(
+                f"Generated round-trip slide repeats top-level shape id {shape_id}"
+            )
+        generated_order.append(shape_id)
+        generated_shapes[shape_id] = child
+        for descendant_id in _shape_ids_in_element(child):
+            previous = generated_top_id_by_descendant.setdefault(
+                descendant_id,
+                shape_id,
+            )
+            if previous != shape_id:
+                raise TemplateStructureError(
+                    "Generated round-trip slide repeats a shape id across "
+                    f"top-level objects: {descendant_id}"
+                )
+
+    source_ref_ids = _slide_ref_shape_ids(patch.source_ref_ids)
+    edited_ids = _slide_ref_shape_ids(patch.edited_ref_ids)
+    deleted_ids = _slide_ref_shape_ids(patch.deleted_ref_ids)
+    unchanged_ids = source_ref_ids - edited_ids - deleted_ids
+    affected_top_ids = {
+        shape_id
+        for shape_id, descendant_ids in source_descendant_ids.items()
+        if descendant_ids & (edited_ids | deleted_ids)
+    }
+    nested_restore_ids = _roundtrip_nested_restore_ids(
+        source_shapes,
+        source_key_by_element,
+        affected_top_ids,
+        unchanged_ids,
+        deleted_ids,
+    )
+    authored_top_ids = {
+        shape_id
+        for shape_id in source_shapes
+        if shape_id in source_ref_ids or shape_id in affected_top_ids
+    }
+    deleted_top_ids = authored_top_ids & deleted_ids
+    traced_ids = _trace_native_shape_ids(conversion_trace)
+    generated_by_source_id: dict[str, ET.Element] = {}
+    source_id_by_generated_top_id: dict[str, str] = {}
+    for source_id in authored_top_ids - deleted_top_ids:
+        candidate_ids = [source_id]
+        candidate_ids.extend(traced_ids.get(f"shape-{source_id}", []))
+        generated_top_ids = {
+            generated_top_id_by_descendant[candidate_id]
+            for candidate_id in candidate_ids
+            if candidate_id in generated_top_id_by_descendant
+        }
+        if len(generated_top_ids) > 1:
+            raise TemplateStructureError(
+                "Generated round-trip source object maps to multiple top-level "
+                f"shapes: {source_id}"
+            )
+        if not generated_top_ids:
+            continue
+        generated_top_id = next(iter(generated_top_ids))
+        previous_source_id = source_id_by_generated_top_id.setdefault(
+            generated_top_id,
+            source_id,
+        )
+        if previous_source_id != source_id:
+            raise TemplateStructureError(
+                "Generated round-trip top-level shape maps to multiple source "
+                f"objects: {previous_source_id}, {source_id}"
+            )
+        generated_by_source_id[source_id] = generated_shapes[generated_top_id]
+
+    authored_order = [
+        source_id_by_generated_top_id[generated_top_id]
+        for generated_top_id in generated_order
+        if generated_top_id in source_id_by_generated_top_id
+    ]
+    if len(authored_order) != len(set(authored_order)):
+        raise TemplateStructureError(
+            "Generated round-trip slide has an ambiguous authored shape order"
+        )
+    missing_authored = (
+        authored_top_ids - deleted_top_ids - set(authored_order)
+    )
+    if missing_authored:
+        raise TemplateStructureError(
+            "Edited round-trip source object did not produce a DrawingML shape: "

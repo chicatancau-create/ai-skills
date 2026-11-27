@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""
+PowerPoint to Markdown Converter
+
+Extracts slide text, tables, SmartArt node structure, speaker notes, and
+embedded pictures from Open XML PowerPoint files into Markdown.
+
+Primary use case: PPTX source decks -> Markdown for PPT generation input.
+
+Hyperlinks present in the source deck are preserved: run-level external URLs
+and slide-internal jumps are emitted as ``[text](url)`` / ``[text](#slide-N)``,
+with a shape-level ``click_action`` fallback.
+
+Dependency:
+    pip install python-pptx
+
+API stability note:
+    Detecting slide-internal jumps (``ppaction://hlinksldjump``) reads
+    ``run._r`` (the CT_TextRun lxml element) because python-pptx exposes no
+    public API to distinguish an internal jump from an external URL. XY chart
+    extraction likewise reads ``series._element`` for X values and bubble sizes,
+    which the public chart API does not expose. Keep these private accesses
+    localized here and covered by conversion smoke tests.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import re
+import shutil
+import sys
+import zipfile
+from dataclasses import dataclass
+from io import BytesIO
+from pathlib import Path
+from urllib.parse import quote
+from xml.etree import ElementTree as ET
+
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from console_encoding import configure_utf8_stdio  # noqa: E402
+from _batch import run_path_batch  # noqa: E402
+from _conversion_profile import write_conversion_profile_best_effort  # noqa: E402
+from pptx_ooxml.diagram_read import (  # noqa: E402
+    read_smartart_diagrams,
+    smartart_to_markdown,
+)
+
+configure_utf8_stdio()
+
+# Help must not depend on the optional conversion packages: a stdlib-only
+# interpreter still gets the argparse usage (docs/rules/code-style.md §4).
+_HELP_REQUESTED = __name__ == "__main__" and any(
+    arg in {"-h", "--help"} for arg in sys.argv[1:]
+)
+if not _HELP_REQUESTED:
+    try:
+        from pptx import Presentation
+        from pptx.enum.action import PP_ACTION
+        from pptx.enum.shapes import MSO_SHAPE_TYPE
+        from pptx.oxml.ns import qn
+        from pptx.text.text import _Run
+    except ImportError:
+        print("[ERROR] python-pptx not installed. Run: pip install python-pptx", file=sys.stderr)
+        sys.exit(1)
+
+
+EMU_PER_INCH = 914400
+DRAWINGML_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+PRESENTATIONML_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
+RELATIONSHIP_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+CHARTEX_URI = "http://schemas.microsoft.com/office/drawing/2014/chartex"
+OFFICE_VECTOR_EXTENSIONS = {"emf", "wmf"}
+IMAGE_EXT_BY_CONTENT_TYPE = {
+    "image/bmp": "bmp",
+    "image/gif": "gif",
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/png": "png",
+    "image/svg+xml": "svg",
+    "image/tiff": "tiff",
+    "image/x-emf": "emf",
+    "image/x-wmf": "wmf",
+}
+LEGACY_GENERATED_IMAGE_RE = re.compile(r"^slide_\d{2}_image_\d{2}\.[A-Za-z0-9]+$")
+_READBACK_SLIDE_HEADING_RE = re.compile(r"^## Slide\s+\d+\s*$")
+_READBACK_NOTES_HEADING_RE = re.compile(r"^### Speaker Notes\s*$")
+
+# Hyperlink schemes dropped during extraction (a blacklist of known-dangerous
+# schemes). PowerPoint also rejects unrecognized schemes at open time, so the
+# residual risk from schemes not listed here is low.
+UNSUPPORTED_URL_SCHEMES = ("javascript:", "data:", "vbscript:", "file:")
+
+
+SUPPORTED_FORMATS = {
+    ".pptx": "PowerPoint Presentation",
+    ".pptm": "Macro-enabled PowerPoint Presentation",
+    ".ppsx": "PowerPoint Slide Show",
+    ".ppsm": "Macro-enabled PowerPoint Slide Show",
+    ".potx": "PowerPoint Template",
+    ".potm": "Macro-enabled PowerPoint Template",
+}
+
+
+@dataclass
+class LeafShape:
+    """Flattened leaf shape with stable position ordering."""
+
+    shape: object
+    top: int
+    left: int
+
+
+@dataclass
+class SavedPicture:

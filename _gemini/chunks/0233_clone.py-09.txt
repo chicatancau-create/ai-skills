@@ -1,0 +1,91 @@
+        source_entries,
+        [slide_refs[index] for index in source_slides],
+        outputs_by_source_part=outputs_by_source_part,
+        source_ref_by_part=source_ref_by_part,
+        discarded_shape_links=discarded_shape_links,
+    )
+    for output_index, source_index in enumerate(source_slides, start=1):
+        source_ref = slide_refs[source_index]
+        output_part, output_rels = output_slides[output_index - 1]
+        source_slide_xml = source_entries[source_ref.part_name]
+        source_rels_xml = source_entries.get(source_ref.rels_name)
+        slide_root = ET.fromstring(source_slide_xml)
+        relationships_root = (
+            ET.fromstring(source_rels_xml)
+            if source_rels_xml is not None
+            else _empty_relationships_root()
+        )
+        discarded = (discarded_shape_links or {}).get(output_index, set())
+        if discarded:
+            _discard_rebuilt_shape_links(slide_root, discarded)
+            for rel in unreferenced_slide_relationships(
+                slide_root, relationships_root, owner_part=source_ref.part_name,
+                read_part=source_entries.__getitem__,
+            ):
+                relationships_root.remove(rel)
+            source_slide_xml = _xml_bytes(slide_root)
+        for node in slide_root.iter():
+            if node.get("action", "").startswith("ppaction://customshow?"):
+                raise RuntimeError(
+                    f"Source slide {source_index} (output slide {output_index}) retains "
+                    f"custom show action {node.get('action')!r}; page planning removes "
+                    "custom shows; remove the action or its object before export"
+                )
+        _remap_slide_jump_relationships(
+            slide_root,
+            relationships_root,
+            source_owner_part=source_ref.part_name,
+            output_owner_part=output_part,
+            owner_label=f"Source slide {source_index}",
+            outputs_by_source_part=outputs_by_source_part,
+            source_ref_by_part=source_ref_by_part,
+            self_source_part=source_ref.part_name,
+            self_output_part=output_part,
+            fail_on_non_jump_slide_relationships=True,
+        )
+        cloned_parts = deep_clone_slide_private_parts(
+            relationships_root,
+            new_slide_part=output_part,
+            entries=entries,
+            content_root=content_root,
+            allocate=allocate,
+            skipped_rel_types=frozenset({SLIDE_REL_TYPE}),
+        )
+        _remap_cloned_xml_part_slide_jumps(
+            entries,
+            cloned_parts,
+            content_root,
+            output_part=output_part,
+            outputs_by_source_part=outputs_by_source_part,
+            source_ref_by_part=source_ref_by_part,
+            source_slide_part=source_ref.part_name,
+        )
+        entries[output_part] = source_slide_xml
+        entries[output_rels] = _xml_bytes(relationships_root)
+        _add_slide_override(content_root, output_part)
+
+        relationship_id = f"rId{next_rid + output_index - 1}"
+        ET.SubElement(
+            presentation_rels_root,
+            _qn(REL_NS, "Relationship"),
+            {
+                "Id": relationship_id,
+                "Type": SLIDE_REL_TYPE,
+                "Target": f"slides/slide{output_index}.xml",
+            },
+        )
+        source_slide_id_template = source_slide_ids.get(source_ref.rel_id)
+        if source_slide_id_template is None:
+            raise RuntimeError(
+                f"Source slide {source_index} has no p:sldId entry"
+            )
+        source_slide_id = copy.deepcopy(source_slide_id_template)
+        source_slide_id.set("id", str(255 + output_index))
+        source_slide_id.set(_qn(NS["r"], "id"), relationship_id)
+        slide_list.append(source_slide_id)
+
+    _remap_reachable_shared_layer_slide_jumps(
+        entries,
+        output_slides,
+        outputs_by_source_part=outputs_by_source_part,
+        source_ref_by_part=source_ref_by_part,

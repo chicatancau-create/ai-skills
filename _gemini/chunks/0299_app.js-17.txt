@@ -1,0 +1,105 @@
+            var dy = e.clientY - rubberBandStart.y;
+            var dist = Math.sqrt(dx * dx + dy * dy);
+
+            if (dist < RUBBER_BAND_THRESHOLD) {
+                return;
+            }
+
+            // Threshold exceeded — this is a drag, not a click
+            if (!rubberBandUsed) {
+                rubberBandUsed = true;
+                overlay.classList.add("active");
+            }
+
+            if (!rubberBandEl) {
+                rubberBandEl = document.createElement("div");
+                rubberBandEl.id = "rubber-band";
+                document.body.appendChild(rubberBandEl);
+            }
+
+            var x = Math.min(rubberBandStart.x, e.clientX);
+            var y = Math.min(rubberBandStart.y, e.clientY);
+            var w = Math.abs(dx);
+            var h = Math.abs(dy);
+
+            rubberBandEl.style.left = x + "px";
+            rubberBandEl.style.top = y + "px";
+            rubberBandEl.style.width = w + "px";
+            rubberBandEl.style.height = h + "px";
+        });
+
+        document.addEventListener("mouseup", function (e) {
+            if (dragStart) {
+                if (dragMoved) {
+                    commitDrag(e.clientX - dragStart.x, e.clientY - dragStart.y);
+                    // Swallow the click that follows the drag-release so it does
+                    // not re-trigger selection on the dropped element.
+                    suppressNextSvgClick = true;
+                    window.setTimeout(function () { suppressNextSvgClick = false; }, 50);
+                }
+                endDrag();
+                return;
+            }
+            if (!rubberBandStart) return;
+
+            overlay.classList.remove("active");
+
+            var dx = e.clientX - rubberBandStart.x;
+            var dy = e.clientY - rubberBandStart.y;
+            var dist = Math.sqrt(dx * dx + dy * dy);
+
+            if (rubberBandEl) {
+                rubberBandEl.remove();
+                rubberBandEl = null;
+            }
+
+            // Only process if drag was beyond threshold
+            if (dist >= RUBBER_BAND_THRESHOLD) {
+                var rect = {
+                    left: Math.min(rubberBandStart.x, e.clientX),
+                    top: Math.min(rubberBandStart.y, e.clientY),
+                    right: Math.max(rubberBandStart.x, e.clientX),
+                    bottom: Math.max(rubberBandStart.y, e.clientY)
+                };
+
+                if (!e.ctrlKey && !e.metaKey) {
+                    clearSelection();
+                }
+
+                selectByRubberBand(rect);
+                suppressNextSvgClick = true;
+                window.setTimeout(function () {
+                    suppressNextSvgClick = false;
+                }, 50);
+            } else {
+                // Below threshold: treat as click on empty space
+                if (!e.ctrlKey && !e.metaKey) {
+                    clearSelection();
+                }
+            }
+
+            rubberBandStart = null;
+        });
+
+        // Right-click → list every selectable element under the pointer, so
+        // stacked/overlapping shapes can be reached without blind cycling.
+        container.addEventListener("contextmenu", function (e) {
+            var svg = svgContent.querySelector("svg");
+            if (!svg) return;
+            var cands = collectSelectableAt(e.clientX, e.clientY);
+            if (cands.length === 0) return;            // nothing here → native menu
+            e.preventDefault();
+            if (cands.length === 1) { selectElement(cands[0], false); return; }
+            showOverlapPicker(e.clientX, e.clientY, cands);
+        });
+
+        // Dismiss the picker on any press outside it (item clicks stop their own
+        // propagation, so this never fires before a selection is made).
+        document.addEventListener("mousedown", function (e) {
+            if (overlapPickerEl && !overlapPickerEl.contains(e.target)) {
+                closeOverlapPicker();
+            }
+        });
+    }
+
+    function cancelRubberBand() {

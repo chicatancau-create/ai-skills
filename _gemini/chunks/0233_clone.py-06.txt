@@ -1,0 +1,112 @@
+def _validate_internal_relationship_targets(entries: dict[str, bytes]) -> None:
+    """Fail before cloning when any internal relationship target is absent."""
+    canonical_parts = {
+        canonical
+        for part_name in entries
+        if (canonical := canonical_opc_part_path(part_name)) is not None
+    }
+    for rels_name in sorted(
+        name for name in entries if name.endswith(".rels")
+    ):
+        try:
+            rels_root = ET.fromstring(entries[rels_name])
+        except ET.ParseError as exc:
+            raise RuntimeError(
+                f"Cannot parse relationships part {rels_name}: {exc}"
+            ) from exc
+        for rel in rels_root.findall(_qn(REL_NS, "Relationship")):
+            if (rel.attrib.get("TargetMode") or "").strip().lower() == "external":
+                continue
+            target = (rel.attrib.get("Target") or "").strip()
+            if not target:
+                raise RuntimeError(
+                    f"{rels_name} relationship {rel.attrib.get('Id')!r} "
+                    "has no Target"
+                )
+            resolved = resolve_internal_opc_target(rels_name, target)
+            if resolved is None:
+                raise RuntimeError(
+                    f"{rels_name} relationship {rel.attrib.get('Id')!r} has "
+                    f"invalid Target {target!r}"
+                )
+            if resolved not in canonical_parts:
+                raise RuntimeError(
+                    f"{rels_name} relationship {rel.attrib.get('Id')!r} targets "
+                    f"missing part {resolved}"
+                )
+
+
+def _remove_stale_slide_order_metadata(presentation_root: ET.Element) -> None:
+    """Drop source-only custom-show and section rosters after page planning."""
+    custom_shows = presentation_root.find("p:custShowLst", NS)
+    if custom_shows is not None:
+        presentation_root.remove(custom_shows)
+    for extension_list in presentation_root.findall(".//p:extLst", NS):
+        for extension in list(extension_list):
+            if any(
+                isinstance(child.tag, str)
+                and child.tag.rsplit("}", 1)[-1] == "sectionLst"
+                for child in extension.iter()
+            ):
+                extension_list.remove(extension)
+
+
+def _update_app_slide_count(entries: dict[str, bytes], slide_count: int) -> None:
+    app_part = "docProps/app.xml"
+    payload = entries.get(app_part)
+    if payload is None:
+        return
+
+    declaration: dict[str, object] = {
+        "seen": False,
+        "encoding": None,
+    }
+
+    def xml_decl(
+        _version: str,
+        encoding: str | None,
+        _standalone: int,
+    ) -> None:
+        declaration["seen"] = True
+        declaration["encoding"] = encoding
+
+    declaration_parser = expat.ParserCreate()
+    declaration_parser.XmlDeclHandler = xml_decl
+    try:
+        declaration_parser.Parse(payload, True)
+        root = ET.fromstring(payload)
+    except (expat.ExpatError, ET.ParseError) as exc:
+        raise RuntimeError(f"Cannot parse {app_part}: {exc}") from exc
+    slides = next(
+        (
+            element
+            for element in root.iter()
+            if isinstance(element.tag, str)
+            and element.tag.rsplit("}", 1)[-1] == "Slides"
+        ),
+        None,
+    )
+    if slides is None:
+        return
+    slides.text = str(slide_count)
+    encoding = declaration["encoding"]
+    entries[app_part] = ET.tostring(
+        root,
+        encoding=str(encoding or "utf-8"),
+        xml_declaration=bool(declaration["seen"]),
+    )
+
+
+def _verify_entries_before_zip(
+    entries: dict[str, bytes],
+    output_path: Path,
+) -> None:
+    """Run the shared OPC verifier before publishing the cloned ZIP."""
+    with tempfile.TemporaryDirectory(
+        prefix=".pptx-clone-verify-",
+        dir=output_path.parent,
+    ) as temporary:
+        extract_dir = Path(temporary)
+        for part_name, payload in entries.items():
+            part_path = (extract_dir / part_name).resolve()
+            try:

@@ -1,0 +1,69 @@
+        return self.source[start:self.position]
+
+    def _match_arrow(self) -> Node | None:
+        for token, symbol in self._ARROWS.items():
+            if not self.source.startswith(token, self.position):
+                continue
+            self.position += len(token)
+            upper = self._read_arrow_label()
+            lower = self._read_arrow_label()
+            return Limit(Text(symbol, _ROMAN_STYLE), lower=lower, upper=upper)
+        return None
+
+    def _reject_unsupported_arrow(self) -> None:
+        for token in ("<<=>>", "<=>>", "<<=>", "->>"):
+            if self.source.startswith(token, self.position):
+                raise FormulaCompileError(
+                    f"Unsupported chemical reaction arrow {token!r}"
+                )
+
+    def _read_arrow_label(self) -> Sequence | None:
+        if self.position >= len(self.source) or self.source[self.position] != "[":
+            return None
+        start = self.position + 1
+        depth = 1
+        brace_depth = 0
+        cursor = start
+        while cursor < len(self.source):
+            char = self.source[cursor]
+            if char == "\\":
+                cursor += 2
+                continue
+            if char == "{":
+                brace_depth += 1
+            elif char == "}" and brace_depth:
+                brace_depth -= 1
+            elif brace_depth == 0 and char == "[":
+                depth += 1
+            elif brace_depth == 0 and char == "]":
+                depth -= 1
+                if depth == 0:
+                    raw = self.source[start:cursor]
+                    self.position = cursor + 1
+                    return _ChemParser(raw, display=self.display).parse()
+            cursor += 1
+        raise FormulaCompileError("Unclosed chemical arrow label")
+
+    def _standalone_marker(self) -> bool:
+        before = self.position == 0 or self.source[self.position - 1].isspace()
+        after_index = self.position + 1
+        after = after_index >= len(self.source) or self.source[after_index].isspace()
+        return before and after
+
+
+def parse_latex_formula(latex: str, *, display: bool) -> Sequence:
+    """Validate, normalize, and parse one Microsoft 365 LaTeX expression."""
+    if not isinstance(latex, str):
+        raise FormulaCompileError("LaTeX formula must be a string")
+    source = latex.strip()
+    if not source:
+        raise FormulaCompileError("LaTeX formula is empty")
+    if any(not _xml_character_allowed(char) for char in source):
+        raise FormulaCompileError("LaTeX formula contains an invalid XML character")
+    prepared = _prepare_source(source)
+    if not prepared:
+        raise FormulaCompileError("LaTeX formula is empty after preprocessing")
+    return _LatexParser(prepared, display=display).parse()
+
+
+__all__ = ["FormulaCompileError", "parse_latex_formula"]

@@ -1,0 +1,99 @@
+                f'stroke-width="{_fmt(max(0.6, style.stroke_width))}" fill-rule="evenodd"/>'
+            )
+        mid = angle + sweep / 2
+        label_radius = radius * (0.87 if doughnut else 0.68)
+        lx = cx + math.cos(mid) * label_radius
+        ly = cy + math.sin(mid) * label_radius + label_size * 0.32
+        percent = value / total
+        label = f"{category} {_format_percent(percent)}"
+        parts.append(
+            _text(
+                lx,
+                ly,
+                label,
+                size=label_size,
+                anchor="middle",
+                fill="#444444" if fill == "none" else _contrast_color(fill),
+            )
+        )
+        angle = end
+    return parts
+
+
+def _render_xy(
+    payload: dict[str, Any],
+    styles: list[SeriesVisualStyle],
+    content: _Rect,
+    chart_type: str,
+) -> list[str]:
+    series = payload.get("series") or []
+    if not series:
+        return []
+    styles = _complete_styles(styles, len(series))
+    axis_titles = payload.get("axis_titles") if isinstance(payload.get("axis_titles"), dict) else {}
+    label_size = max(6.0, min(11.0, content.h * 0.037, content.w * 0.021))
+    left = max(40.0, content.w * 0.09) + (14.0 if axis_titles.get("y") else 0.0)
+    bottom = max(26.0, content.h * 0.1) + (14.0 if axis_titles.get("x") else 0.0)
+    plot = _Rect(
+        content.x + left,
+        content.y + 6.0,
+        max(12.0, content.w - left - 10.0),
+        max(12.0, content.h - bottom - 8.0),
+    )
+    x_values = [float(value) for item in series for value in item.get("x") or []]
+    y_values = [float(value) for item in series for value in item.get("y") or []]
+    x_lo, x_hi, x_ticks = _nice_scale(x_values, include_zero=False)
+    y_lo, y_hi, y_ticks = _nice_scale(y_values, include_zero=False)
+    axes = payload.get("axes")
+    x_axis = axes.get("x") if isinstance(axes, dict) else None
+    y_axis = axes.get("y") if isinstance(axes, dict) else None
+    x_major_gridlines = (
+        bool(x_axis.get("major_gridlines", False))
+        if isinstance(x_axis, dict)
+        else False
+    )
+    y_major_gridlines = (
+        bool(y_axis.get("major_gridlines", True))
+        if isinstance(y_axis, dict)
+        else True
+    )
+    parts = _xy_grid_and_ticks(
+        plot,
+        x_ticks,
+        y_ticks,
+        x_lo,
+        x_hi,
+        y_lo,
+        y_hi,
+        label_size,
+        show_x_gridlines=x_major_gridlines,
+        show_y_gridlines=y_major_gridlines,
+    )
+    parts.extend(_xy_axis_titles(plot, content, axis_titles, label_size))
+    nonnegative_bubble_sizes = [
+        float(value)
+        for item in series
+        for value in item.get("sizes") or []
+        if float(value) >= 0
+    ]
+    bubble_max = max(max(nonnegative_bubble_sizes or [0.0]), 1e-12)
+    scatter_style = str(payload.get("scatter_style") or "marker")
+    has_line = chart_type == "scatter" and scatter_style in {"line", "lineMarker", "smooth", "smoothMarker"}
+    has_marker = chart_type == "bubble" or scatter_style in {"marker", "lineMarker", "smoothMarker"}
+    for idx, (item, style) in enumerate(zip(series, styles)):
+        color = style.stroke or style.fill or style.marker_fill or _DEFAULT_COLORS[idx % len(_DEFAULT_COLORS)]
+        points = [
+            (
+                _map(float(x), x_lo, x_hi, plot.x, plot.x + plot.w),
+                _map(float(y), y_lo, y_hi, plot.y + plot.h, plot.y),
+            )
+            for x, y in zip(item.get("x") or [], item.get("y") or [])
+        ]
+        if has_line and style.stroke is not None and len(points) >= 2:
+            parts.append(
+                f'<polyline points="{_points(points)}" fill="none" stroke="{color}" '
+                f'stroke-opacity="{_fmt(style.stroke_opacity)}" '
+                f'stroke-width="{_fmt(max(1.0, style.stroke_width))}" '
+                f'stroke-linecap="{style.line_cap}" stroke-linejoin="round"/>'
+            )
+        if has_marker:

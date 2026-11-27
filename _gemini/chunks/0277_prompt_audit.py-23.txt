@@ -1,0 +1,110 @@
+            "Candidates:",
+            (
+                f"  duplicate paragraphs: {duplicates['exact_total']} exact group(s) + "
+                f"{len(duplicates['exact_accepted'])} accepted, "
+                f"{near_summary}"
+            ),
+            (
+                f"  reference graph: {len(references['edges'])} edge(s), "
+                f"{len(references['cycles'])} cyclic component(s)"
+            ),
+            (
+                f"  authority candidates: {len(references['authority_candidates'])} edge(s), "
+                f"{len(references['authority_candidate_cycles'])} candidate cycle(s)"
+            ),
+            (
+                f"  schema grammar projections: {schema_open} open + "
+                f"{schema_accepted} accepted + {schema_stale} stale"
+            ),
+        ]
+    )
+    if duplicates["exact"]:
+        lines.append("  exact examples:")
+        for item in duplicates["exact"][:5]:
+            locations = item["locations"][:2]
+            lines.append(
+                "    " + " <-> ".join(f"{site['path']}:{site['line']}" for site in locations)
+            )
+    if duplicates["near_scanned"] and duplicates["near"]:
+        lines.append("  near examples:")
+        for item in duplicates["near"][:5]:
+            left = item["left"]
+            right = item["right"]
+            lines.append(
+                f"    {left['path']}:{left['line']} <-> {right['path']}:{right['line']} "
+                f"({item['similarity']:.2f})"
+            )
+    lines.extend(["", "Per-file tokens:"])
+    for item in report["files"]:
+        lines.append(f"  {item['tokens']:7d}  {item['path']}")
+
+    lines.extend(["", "Findings:"])
+    if not report["findings"]:
+        lines.append("  none")
+    else:
+        for finding in report["findings"]:
+            location = finding["path"]
+            if location and finding["line"]:
+                location += f":{finding['line']}"
+            prefix = f" {location}" if location else ""
+            lines.append(
+                f"  [{finding['severity'].upper()} {finding['code']}]{prefix} "
+                f"{finding['message']}"
+            )
+    return "\n".join(lines) + "\n"
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Audit PPT Master's prompt budget and governance metadata without writes.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    default_root = Path(__file__).resolve().parents[3]
+    default_manifest = Path(__file__).with_name("prompt_audit_manifest.json")
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=default_root,
+        help=f"Repository root (default: {default_root})",
+    )
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        default=default_manifest,
+        help=f"Audit manifest (default: {default_manifest})",
+    )
+    parser.add_argument("--json", action="store_true", help="Emit the complete report as JSON")
+    parser.add_argument(
+        "--skip-near-duplicates",
+        action="store_true",
+        help="Skip the slower heuristic near-duplicate pass",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    root = args.root.resolve()
+    manifest_path = args.manifest
+    if not manifest_path.is_absolute():
+        manifest_path = root / manifest_path
+    try:
+        report = run_audit(
+            root,
+            manifest_path,
+            include_near_duplicates=not args.skip_near_duplicates,
+        )
+    except AuditError as exc:
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "error": {
+                            "code": "AUDIT_SETUP_ERROR",
+                            "message": str(exc),
+                        },
+                    },
+                    ensure_ascii=False,
+                    indent=2,

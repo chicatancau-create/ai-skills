@@ -1,0 +1,100 @@
+    return diff.point(lut)
+
+
+def _content_masks(
+    cell: Image.Image,
+    bg: tuple[int, int, int],
+    tolerance: int,
+) -> tuple[Image.Image, Image.Image, Optional[Image.Image], Image.Image]:
+    """Build trim/alpha masks, optional chroma-decontaminated RGB, and the key diff."""
+    rgb = cell.convert("RGB")
+    diff = _max_channel_difference(rgb, bg)
+    trim_mask = diff.point(lambda p: 255 if p > tolerance else 0)
+    tolerance_gate = _soft_mask_from_diff(diff, tolerance)
+    if _pure_chroma_channel(bg) is not None:
+        chroma_alpha = _chroma_alpha(rgb, bg)
+        alpha_mask = ImageChops.multiply(chroma_alpha, tolerance_gate)
+        keyed_rgb = _decontaminate_rgb(rgb, chroma_alpha, bg)
+        return trim_mask, alpha_mask, keyed_rgb, diff
+
+    alpha_mask = tolerance_gate.filter(ImageFilter.MinFilter(3))
+    return trim_mask, alpha_mask, None, diff
+
+
+def _keying_findings(
+    label: str,
+    cell_size: tuple[int, int],
+    bbox: tuple[int, int, int, int],
+    alpha_mask: Optional[Image.Image],
+    cell_bg: tuple[int, int, int],
+    *,
+    trim: bool,
+    alpha: bool,
+    trim_mask: Optional[Image.Image] = None,
+    diff: Optional[Image.Image] = None,
+    notices: Optional[list[str]] = None,
+) -> list[str]:
+    """Report objective signs that the flat-background key did not take.
+
+    Two deterministic symptoms: a cut element whose cell boundary is still
+    opaque, and content that reaches any cell edge. Both violate the clear-key
+    gutter required by the sheet contract, usually because the ground is not
+    flat or an element/effect crossed its cell boundary.
+    """
+    findings: list[str] = []
+    hex_bg = "#{:02X}{:02X}{:02X}".format(*cell_bg)
+
+    if alpha and trim and alpha_mask is not None and notices is not None:
+        notice = _backing_panel_notice(label, alpha_mask, bbox, cell_size)
+        if notice:
+            notices.append(notice)
+
+    if alpha and alpha_mask is not None:
+        px = alpha_mask.load()
+        width, height = alpha_mask.size
+        border = max(1, min(_BG_SAMPLE_BORDER, width, height))
+        boundary = []
+        for y in range(border):
+            boundary.extend(px[x, y] for x in range(width))
+        for y in range(max(border, height - border), height):
+            boundary.extend(px[x, y] for x in range(width))
+        for y in range(border, max(border, height - border)):
+            boundary.extend(px[x, y] for x in range(border))
+            boundary.extend(
+                px[x, y] for x in range(max(border, width - border), width)
+            )
+        opaque = sum(
+            1 for value in boundary if value > _BOUNDARY_OPAQUE_ALPHA
+        )
+        if opaque:
+            findings.append(
+                f"{label}: {opaque}/{len(boundary)} boundary pixels stayed opaque "
+                f"after --alpha "
+                f"(key background {hex_bg})"
+            )
+
+    if trim:
+        cell_width, cell_height = cell_size
+        touched_edges = []
+        if bbox[0] <= 0:
+            touched_edges.append("left")
+        if bbox[1] <= 0:
+            touched_edges.append("top")
+        if bbox[2] >= cell_width:
+            touched_edges.append("right")
+        if bbox[3] >= cell_height:
+            touched_edges.append("bottom")
+        if touched_edges:
+            drift = _edge_drift(trim_mask, diff, touched_edges)
+            if drift is not None:
+                count, distance, isolated = drift
+                if isolated:
+                    findings.append(
+                        f"{label}: {count} isolated pixel(s) on the "
+                        f"{'/'.join(touched_edges)} cell edge(s) exceed the key "
+                        f"tolerance (farthest {distance} from key {hex_bg}); this is "
+                        f"key drift, not content — rerun with --tolerance "
+                        f"{distance + _KEY_DRIFT_MARGIN} or higher"
+                    )
+                else:
+                    findings.append(

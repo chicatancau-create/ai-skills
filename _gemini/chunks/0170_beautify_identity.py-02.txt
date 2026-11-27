@@ -1,0 +1,88 @@
+            if defrpr is None:
+                continue
+            sz = (defrpr.attrib.get("sz") or "").strip()
+            if sz.isdigit():
+                levels.append(int(sz) / 100)
+    if levels:
+        out["body"] = levels[0]
+        out["body_levels"] = levels
+    return out
+
+
+# Placeholder types that carry chrome, not body text — excluded from the layout
+# body-size sample so a 9pt footer / slide-number doesn't masquerade as body.
+_NON_BODY_PH = {"title", "ctrTitle", "ftr", "sldNum", "dt", "hdr"}
+
+
+def _layout_text_sizes(pkg: "OoxmlPackage") -> list[dict]:
+    """Frequency-ranked **body** placeholder `defRPr` sizes across the layouts in use.
+
+    For a theme/template-driven deck whose runs set no explicit `sz` (everything
+    inherits its placeholder), this is where a real body size can show: each
+    layout's body placeholder may declare its own size where the master only gives
+    the coarse level-1 default. Only layouts actually referenced by a slide count,
+    only body-ish placeholders (title / footer / slide-number / date / header
+    skipped), and only the placeholder's **level-1** `defRPr` — the primary size —
+    so deeper outline levels (lvl2..lvl9) don't masquerade as body. Sizes in
+    points. Often sparse: placeholders that don't override level-1 inherit the
+    master default and contribute nothing here.
+    """
+    sizes: dict[float, int] = {}
+    seen: set[str] = set()
+    for slide in pkg.iter_slides():
+        layout = slide.layout
+        if layout is None or layout.path in seen:
+            continue
+        seen.add(layout.path)
+        for sp in layout.xml.iterfind(".//p:sp", NS):
+            ph = sp.find(".//p:nvSpPr/p:nvPr/p:ph", NS)
+            ph_type = ph.attrib.get("type") if ph is not None else None
+            if ph_type in _NON_BODY_PH:
+                continue
+            lvl1 = sp.find(".//a:lstStyle/a:lvl1pPr/a:defRPr", NS)
+            if lvl1 is None:
+                continue
+            sz = (lvl1.attrib.get("sz") or "").strip()
+            if sz.isdigit():
+                pt = int(sz) / 100
+                sizes[pt] = sizes.get(pt, 0) + 1
+    return _rank(sizes, 10)
+
+
+def _theme_font_refs(fonts: dict) -> dict[str, str]:
+    """Map `+mj-lt` / `+mn-ea` style theme references to their declared faces."""
+    refs: dict[str, str] = {}
+    for prefix, role in (("+mj", "title"), ("+mn", "body")):
+        pair = fonts.get(role) or {}
+        for suffix, slot in (("lt", "latin"), ("ea", "ea"), ("cs", "cs")):
+            face = pair.get(slot)
+            if face:
+                refs[f"{prefix}-{suffix}"] = face
+    return refs
+
+
+def _sample_observed(pkg: "OoxmlPackage", font_refs: dict[str, str]) -> dict:
+    """Aggregate run-level fonts, explicit point sizes, and explicit fill colors.
+
+    Theme extraction reports the *declared* identity; a hand-edited deck often
+    overrides it per shape / run. This is a frequency sample of run-level usage
+    (not a full style resolution — it misses schemeClr + master/layout
+    inheritance, and counts chart/gradient fills), enough for the workflow to
+    recommend theme vs observed. Theme font references (`+mn-ea`) count as the
+    face they resolve to. `sizes_pt` only counts runs that set an explicit `sz`
+    and ranks by the characters those runs carry, so a size split across many
+    short runs does not outrank the size that sets most of the text; runs
+    inheriting the placeholder size are not seen here (use `theme.sizes` for
+    those), so a small sample is a hint, not the full picture.
+    """
+    latin: dict[str, int] = {}
+    ea: dict[str, int] = {}
+    size_runs: dict[float, int] = {}
+    size_chars: dict[float, int] = {}
+    colors: dict[str, int] = {}
+    for slide in pkg.iter_slides():
+        root = slide.part.xml
+        for tag, bucket in (("a:latin", latin), ("a:ea", ea)):
+            for elem in root.iterfind(f".//{tag}", NS):
+                face = (elem.attrib.get("typeface") or "").strip()
+                if face.startswith("+"):

@@ -1,0 +1,94 @@
+    for slide_num in range(1, slide_count + 1):
+        master_part = structure.slide_master_part(slide_num)
+        slides_by_master.setdefault(master_part, []).append(slide_num)
+
+    promoted = 0
+    promoted_roles = 0
+    for master_part, slide_nums in slides_by_master.items():
+        if len(slide_nums) < 2:
+            continue
+        slide_state: dict[int, dict[str, Any]] = {}
+        for slide_num in slide_nums:
+            slide_path = extract_dir / "ppt" / "slides" / f"slide{slide_num}.xml"
+            rels_path = extract_dir / "ppt" / "slides" / "_rels" / f"slide{slide_num}.xml.rels"
+            tree = ET.parse(slide_path)
+            root = tree.getroot()
+            slide_state[slide_num] = {
+                "path": slide_path,
+                "rels": _read_relationships(rels_path),
+                "root": root,
+                "shapes": _top_level_shapes_by_id(root),
+                "timing_shape_ids": _timing_shape_ids(root),
+                "tokens": _trace_chrome_shape_ids(trace_by_slide.get(slide_num)),
+                "tree": tree,
+            }
+
+        # Per token, find the strict-majority identical variant. Slides
+        # outside every dominant set become cover-layout minority slides.
+        candidate_sets: dict[str, dict[int, str]] = {}
+        all_tokens = sorted({
+            token
+            for state in slide_state.values()
+            for token in state["tokens"]
+        })
+        for token in all_tokens:
+            carriers: dict[int, str] = {}
+            canonical_by_slide: dict[int, bytes] = {}
+            for slide_num in slide_nums:
+                state = slide_state[slide_num]
+                shape_ids = state["tokens"].get(token, [])
+                if len(shape_ids) != 1:
+                    continue
+                shape_id = shape_ids[0]
+                shape = state["shapes"].get(shape_id)
+                if shape is None:
+                    continue
+                if shape_id in state["timing_shape_ids"]:
+                    continue
+                if not _shape_relationships_supported(shape, state["rels"]):
+                    continue
+                carriers[slide_num] = shape_id
+                canonical_by_slide[slide_num] = _canonical_shape_xml(
+                    shape,
+                    state["rels"],
+                )
+            dominant_xml, dominant_slides = _dominant_variant(canonical_by_slide)
+            if dominant_xml is None:
+                continue
+            if not _is_strict_majority(len(dominant_slides), len(slide_nums)):
+                continue
+            candidate_sets[token] = {
+                slide_num: carriers[slide_num] for slide_num in dominant_slides
+            }
+
+        if not candidate_sets:
+            continue
+        content_slides = sorted(set.intersection(
+            *(set(slides) for slides in candidate_sets.values())
+        ))
+        if not _is_strict_majority(len(content_slides), len(slide_nums)):
+            continue
+
+        promotions: list[tuple[str, dict[int, str]]] = []
+        claimed_shape_ids: dict[int, set[str]] = {
+            slide_num: set() for slide_num in content_slides
+        }
+        for token in sorted(candidate_sets):
+            shape_ids_by_slide = {
+                slide_num: candidate_sets[token][slide_num]
+                for slide_num in content_slides
+            }
+            # A flattened nested chrome group can emit several semantic trace
+            # ids for the same generated DrawingML shape. Claim it once.
+            if any(
+                shape_ids_by_slide[slide_num] in claimed_shape_ids[slide_num]
+                for slide_num in content_slides
+            ):
+                continue
+            for slide_num, shape_id in shape_ids_by_slide.items():
+                claimed_shape_ids[slide_num].add(shape_id)
+            promotions.append((token, shape_ids_by_slide))
+
+        if not promotions:
+            continue
+

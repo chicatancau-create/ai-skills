@@ -1,0 +1,96 @@
+        semantic_role is not None or placeholder is not None
+    )
+    is_chrome = (
+        is_static_page_frame(semantic_role, placeholder)
+        if has_explicit_semantics
+        else is_chrome_id(elem_id)
+    )
+    # Chrome — by name or by static role/placeholder marker — stays out of
+    # automatic animation, but an explicit sidecar entry animates it: a
+    # background field can pan, a cover band can slide. Only a structural
+    # layer (master/layout) is beyond reach, because it is not on the slide.
+    should_animate_group = (
+        ctx.depth == 0
+        and elem_id
+        and (not is_chrome or elem_id in ctx.animation_group_overrides)
+        and elem.get('data-pptx-layer') is None
+    )
+    visual_children = [
+        child for child in elem
+        if child.tag.replace(f'{{{SVG_NS}}}', '') not in _NON_VISUAL_TAGS
+    ]
+    unit_axis_reflection = (
+        bool(transform)
+        and _is_unit_axis_reflection(parse_transform_operations(transform))
+    )
+    matrix_supported = (
+        not native_subtree_active
+        and bool(transform)
+        and visual_children
+        and (
+            supports_full_project_transform(elem)
+            or unit_axis_reflection
+        )
+    )
+    # A pure ``rotate(angle [cx cy])`` falls through to the fallback path
+    # below (children are rect/text/path/etc. that don't consume a full
+    # matrix). Decomposing the matrix produces translation components
+    # (e, f) that encode the pivot — handing those to children would
+    # *double-translate* them because grpSp's own ``rot`` already
+    # rotates around the group's bounding-box centre. Skip the child
+    # translation here and apply pivot-centre compensation to ``a:off``
+    # below instead.
+    rotate_pivot = _extract_rotate_pivot(transform) if not matrix_supported else None
+    if rotate_pivot is not None:
+        angle_deg = parse_transform_operations(transform)[0][1][0]
+    if matrix_supported:
+        child_ctx = ctx.child(
+            0, 0, 1.0, 1.0,
+            transform_matrix=parse_transform_matrix(transform),
+            filter_id=filter_id,
+            style_overrides=style_overrides,
+            opacity_multiplier=local_opacity,
+        )
+    elif rotate_pivot is not None:
+        child_ctx = ctx.child(
+            0, 0, 1.0, 1.0,
+            filter_id=filter_id,
+            style_overrides=style_overrides,
+            opacity_multiplier=local_opacity,
+        )
+    else:
+        child_ctx = ctx.child(
+            ctx.scale_x * dx if native_subtree_active else dx,
+            ctx.scale_y * dy if native_subtree_active else dy,
+            sx,
+            sy,
+            filter_id=filter_id,
+            style_overrides=style_overrides,
+            opacity_multiplier=local_opacity,
+        )
+
+    if native_subtree_active and child_ctx.opacity_multiplier < 1.0:
+        raise SvgNativeConversionError(
+            "Group opacity cannot be applied to an active native replacement; "
+            "remove the group opacity or remove data-pptx-replace-with to keep "
+            "the subtree as ordinary SVG"
+        )
+
+    if hidden_reason is None and _native_replacement_enabled(elem, child_ctx):
+        native_result = convert_native_object(elem, child_ctx)
+        if native_result:
+            ctx.sync_from_child(child_ctx)
+            if should_animate_group:
+                shape_match = re.search(r'<p:cNvPr id="(\d+)"', native_result.xml)
+                if shape_match:
+                    ctx.anim_targets.append((int(shape_match.group(1)), elem_id))
+            return native_result
+
+    if hidden_reason is None and elem.get(SEMANTIC_OBJECT_ATTRIBUTE) == SEMANTIC_SHAPE_KIND:
+        geometry_ctx = child_ctx
+        if transform and not native_subtree_active:
+            geometry_ctx = ctx.child(
+                0, 0, 1.0, 1.0,
+                transform_matrix=parse_transform_matrix(transform),
+                filter_id=filter_id,
+                style_overrides=style_overrides,

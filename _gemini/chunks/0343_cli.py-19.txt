@@ -1,0 +1,101 @@
+                f'.groups[{json.dumps(str(group_id), ensure_ascii=False)}]'
+            )
+            for _effect_path, effect_cfg in animation_group_effect_entries(
+                group_cfg,
+                path=group_path,
+            ):
+                row_effect = (
+                    normalize_animation_effect(effect_cfg.get('effect'))
+                    if 'effect' in effect_cfg
+                    else slide_animation
+                )
+                if row_effect is None:
+                    continue
+                row_trigger = (
+                    normalize_animation_trigger(effect_cfg.get('trigger'))
+                    if effect_cfg.get('trigger')
+                    else slide_trigger
+                )
+                if effect_cfg.get('trigger_shape') is not None:
+                    has_interactive_animation = True
+                    break
+                if row_trigger == 'on-click':
+                    has_interactive_animation = True
+                    break
+            if has_interactive_animation:
+                break
+
+        if has_interactive_animation or (
+            slide_animation is not None and slide_trigger == 'on-click'
+        ):
+            blocked.append(svg_path.stem)
+    return blocked
+
+
+def _resolve_animation_config_source(
+    project_path: Path,
+    requested_config: str | None,
+    *,
+    recorded_narration: bool,
+    no_animations: bool,
+    roundtrip: bool,
+) -> str | None:
+    """Resolve the animation sidecar selected for this export."""
+    if requested_config is not None or not recorded_narration or no_animations:
+        return requested_config
+
+    if roundtrip:
+        return (
+            'animations.json'
+            if (project_path / 'animations.json').is_file()
+            else None
+        )
+
+    canonical_exists = (project_path / 'animations.json').is_file()
+    narration_exists = (project_path / 'narration_animations.json').is_file()
+    if canonical_exists or narration_exists:
+        return 'narration_animations.json'
+    return None
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point for the SVG to PPTX conversion tool."""
+    require_skill_integrity()
+    roundtrip_summary_line: str | None = None
+    transition_choices = [
+        'none',
+        *NATIVE_TRANSITION_KEYS,
+        *LEGACY_TRANSITION_KEYS,
+    ]
+
+    animation_choices = ['none', *ANIMATIONS, 'auto', 'mixed', 'random']
+
+    parser = argparse.ArgumentParser(
+        description='PPT Master - SVG to native DrawingML PPTX Tool',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=f'''
+Examples:
+    %(prog)s projects/ppt169_demo                         # Default: native pptx -> exports/, svg_output -> backup/<ts>/
+    %(prog)s projects/ppt169_demo -o out.pptx            # Explicit path (no backup/)
+    %(prog)s projects/quick_generate_demo --quick-generate # Lockless inferred structure + postflight
+    %(prog)s <import_workspace> --roundtrip               # authoring-svg-flat/ with source restoration
+
+    # Disable transition / change transition effect
+    %(prog)s projects/ppt169_demo -t none
+    %(prog)s projects/ppt169_demo -t push --transition-duration 1.0
+
+SVG source directory (-s):
+    output   - svg_output (hand-authored source; native default)
+    final    - svg_final (post-processed preview; diagnostic native input only)
+    <any>    - Specify a subdirectory name directly
+    Omit -s to use the default: native export reads svg_output.
+
+Transition effects (-t/--transition):
+    New selections use the 48 PowerPoint-native gallery keys. The 8 old
+    names remain accepted only as compatibility inputs. Run
+    scripts/pptx_animations.py --list for the categorized registry and
+    --describe-transition <effect> for its Effect Options.
+
+Per-element object animation (-a/--animation, native shapes mode):
+    Use PowerPoint-native entrance_*, emphasis_*, path_*, and exit_* keys for
+    new animation choices. The 29 old short names remain accepted only as

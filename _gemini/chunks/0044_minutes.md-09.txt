@@ -1,0 +1,155 @@
+> "目前这篇听记中 [人名] 的发言仍显示为『发言人X』。要我帮你把听记里的『发言人X』全部替换为『[人名]』吗？替换后纪要和待办中的发言人也会同步更新。
+> 确认后我会执行：`dws minutes speaker replace --id <taskUuid> --from "发言人X" --to "[人名]"`"
+
+- 用户确认 → **先主动调用通讯录模糊查询** `dws contact user search --query "[人名]" --format json` 获取该人员的 userId（长整型 dingUid）：
+  - 唯一匹配 → 告知用户匹配结果，确认后执行 `dws minutes speaker replace --id <taskUuid> --from "发言人X" --to "[人名]" --target-uid <userId> --format json`
+  - 多个匹配 → 列出候选（姓名+部门+userId）让用户选择后执行
+  - 无匹配 → 提示用户未在通讯录中找到此人，执行不带 `--target-uid` 的替换：`dws minutes speaker replace --id <taskUuid> --from "发言人X" --to "[人名]" --format json`
+- 用户拒绝 → 不替换，询问是否还有其他发言人需要处理
+
+**追问是否还有其他人需要识别：**
+
+> "还有其他发言人需要我帮你识别和替换吗？比如告诉我『某某人主要讲了什么内容』，我可以帮你匹配。"
+
+**严禁的行为：**
+- [禁止] 总结完就结束，不引导用户替换发言人——用户下次看听记时发言人还是"发言人1"，体验极差
+- [禁止] AI 自行决定替换而不向用户确认
+- [禁止] 只在回复中口头说"发言人1就是张三"，但不实际调用 `speaker replace` 写回听记
+
+### 获取听记中提取的待办事项
+```
+Usage:
+  dws minutes get todos [flags]
+Example:
+  dws minutes get todos --id <taskUuid>
+Flags:
+      --id string   听记 taskUuid (必填)，取值逻辑参考 ## 注意事项
+```
+
+每条记录包含: 待办内容、待办唯一ID、参与人信息、待办时间
+
+### 批量查询听记详情
+```
+Usage:
+  dws minutes get batch [flags]
+Example:
+  dws minutes get batch --ids uuid1,uuid2,uuid3
+Flags:
+      --ids string   听记 taskUuid 列表，逗号分隔 (必填)
+```
+
+返回字段: 听记标题、时长、参与人列表、创建时间、taskUuid、听记状态
+
+### 修改听记标题
+```
+Usage:
+  dws minutes update title [flags]
+Example:
+  dws minutes update title --id <taskUuid> --title "Q2 复盘会议"
+Flags:
+      --id string      听记 taskUuid (必填)，取值逻辑参考 ## 注意事项
+      --title string   新标题 (必填)
+```
+
+### 发起听记（开始录音）
+```
+Usage:
+  dws minutes record start [flags]
+Example:
+  dws minutes record start
+  dws minutes record start --session-id <sessionId>
+Flags:
+      --session-id string   AI 助理会话 ID (可选)
+```
+
+### 暂停听记录音
+```
+Usage:
+  dws minutes record pause [flags]
+Example:
+  dws minutes record pause --id <taskUuid>
+  dws minutes record pause --id <taskUuid> --session-id <sessionId>
+Flags:
+      --id string           听记 taskUuid (必填)
+      --session-id string   AI 助理会话 ID (可选)
+```
+
+### 恢复听记录音
+```
+Usage:
+  dws minutes record resume [flags]
+Example:
+  dws minutes record resume --id <taskUuid>
+  dws minutes record resume --id <taskUuid> --session-id <sessionId>
+Flags:
+      --id string           听记 taskUuid (必填)
+      --session-id string   AI 助理会话 ID (可选)
+```
+
+### 结束听记录音
+```
+Usage:
+  dws minutes record stop [flags]
+Example:
+  dws minutes record stop --id <taskUuid>
+  dws minutes record stop --id <taskUuid> --session-id <sessionId>
+Flags:
+      --id string           听记 taskUuid (必填)
+      --session-id string   AI 助理会话 ID (可选)
+```
+
+### 更新纪要内容
+```
+Usage:
+  dws minutes update summary [flags]
+Example:
+  dws minutes update summary --id <taskUuid> --content "新的纪要内容"
+Flags:
+      --id string        听记 taskUuid (必填)
+      --content string   新的纪要内容 (必填)
+```
+
+用传入的摘要文本全量覆盖听记的纪要内容，不触发 AI 重新生成。适用于用户手动编辑或 AI Agent 修改纪要的场景。
+
+**重要 — 修改纪要的完整流程（必须严格执行）：**
+当用户要求"精简纪要/优化纪要/修改纪要内容"时，**必须完成以下三步，缺一不可**：
+1. **读取**：先调用 `get summary --id <taskUuid>` 获取当前纪要原文
+2. **修改**：AI 根据用户要求对纪要内容进行修改（如精简、重新整理、格式优化等），但必须遵守以下约束：
+   - **图片必须保留**：原文中的所有 Markdown 图片（如 `![alt](url)`）必须完整保留，不得删除、漏掉、替换为纯文本或打乱语义位置
+   - **仅优化文本内容**：可以调整标题层级、段落结构、列表与措辞，但不得破坏图片与对应上下文的关联关系
+3. **校验**：写回前必须执行 Markdown 格式检查，确保输出结构合理、可渲染、无明显格式错误（如未闭合代码块、列表层级混乱、标题层级异常等）
+4. **写回**：将修改后的完整纪要内容通过 `update summary --id <taskUuid> --content "修改后的完整纪要"` **写回听记**，确保修改持久化
+
+**严禁只读取和修改纪要而不调用 `update summary` 写回**，否则用户看到的仍然是原始纪要，修改不会生效。
+
+### 创建思维导图
+```
+Usage:
+  dws minutes mind-graph create [flags]
+Example:
+  dws minutes mind-graph create --id <taskUuid>
+Flags:
+      --id string   听记 taskUuid (必填)
+```
+
+触发创建听记思维导图任务。触发成功后，可通过 `mind-graph status` 轮询任务状态。状态：0=进行中，1=成功，2=失败。
+
+**重要：当用户要求"生成思维导图/创建脑图"时，必须调用此命令（`mind-graph create`），严禁自行生成 HTML 或其他格式的思维导图。** 思维导图由服务端专业引擎生成，AI 不应尝试自己构造思维导图内容。
+
+### 查询思维导图状态
+```
+Usage:
+  dws minutes mind-graph status [flags]
+Example:
+  dws minutes mind-graph status --id <taskUuid>
+Flags:
+      --id string   听记 taskUuid (必填)
+```
+
+查询指定听记的思维导图生成状态。返回任务状态：0=进行中，1=成功，2=失败。如果没有返回任务状态，也视为成功。
+
+### 替换发言人
+```
+Usage:
+  dws minutes speaker replace [flags]
+Example:

@@ -1,0 +1,70 @@
+                for response in responses:
+                    response.close.assert_called_once_with()
+
+    def test_a01_curl_follows_relative_public_redirects(self) -> None:
+        for status in (301, 302, 303, 307, 308):
+            routes = {self.START: (status, {"Location": "/middle"}), self.MIDDLE: (200, {})}
+            with self.subTest(status=status), _memory_curl(routes) as (visited, responses):
+                result = web_to_md._http_get(self.START, verify=False, stream=True)
+                self.assertIs(result, responses[-1])
+                self.assertEqual([item["url"] for item in visited], [self.START, self.MIDDLE])
+                for item in visited:
+                    self.assertIs(item["kwargs"]["allow_redirects"], False)
+                    self.assertIs(item["kwargs"]["verify"], False)
+                    self.assertIs(item["kwargs"]["stream"], True)
+                responses[0].close.assert_called_once_with()
+                responses[-1].close.assert_not_called()
+
+    def test_a01_curl_retains_cookie_scope_and_strips_cross_host_credentials(self) -> None:
+        scoped = "https://8.8.8.8/only/step"
+        routes = {
+            self.START: (302, [
+                ("Location", "/only/step"),
+                ("Set-Cookie", "host=kept; Path=/"),
+                ("Set-Cookie", "domain=kept; Domain=8.8.8.8; Path=/"),
+                ("Set-Cookie", "scoped=kept; Path=/only"),
+                ("Set-Cookie", "expired=gone; Max-Age=0; Path=/"),
+            ]),
+            scoped: (302, {"Location": "/middle"}),
+            self.MIDDLE: (302, {"Location": self.FINAL}),
+            self.FINAL: (200, {}),
+        }
+        headers = {"Authorization": "secret", "Cookie": "explicit=secret", "User-Agent": "test"}
+        with _memory_curl(routes) as (visited, _):
+            web_to_md._http_get(self.START, headers=headers)
+        self.assertIn("host=kept", visited[1]["cookie_header"])
+        self.assertIn("domain=kept", visited[1]["cookie_header"])
+        self.assertIn("scoped=kept", visited[1]["cookie_header"])
+        self.assertNotIn("expired=", visited[1]["cookie_header"])
+        self.assertIn(("host", "8.8.8.8", False, "/"), visited[1]["cookies"])
+        self.assertIn(("domain", ".8.8.8.8", True, "/"), visited[1]["cookies"])
+        self.assertNotIn("scoped=", visited[2]["cookie_header"])
+        self.assertEqual(visited[2]["headers"]["Authorization"], "secret")
+        self.assertEqual(visited[3]["cookie_header"], "")
+        self.assertNotIn("Authorization", visited[3]["headers"])
+        self.assertNotIn("Cookie", visited[3]["headers"])
+        self.assertEqual(visited[3]["headers"]["User-Agent"], "test")
+        self.assertEqual(headers["Authorization"], "secret")
+
+    def test_a01_curl_redirect_limit_closes_last_response(self) -> None:
+        routes = {self.START: (302, {"Location": self.START})}
+        with _memory_curl(routes) as (visited, responses):
+            with self.assertRaisesRegex(requests.exceptions.TooManyRedirects, "Exceeded 30 redirects"):
+                web_to_md._http_get(self.START)
+            self.assertEqual(len(visited), 31)
+            for response in responses:
+                response.close.assert_called_once_with()
+
+    def test_a01_curl_private_opt_in_keeps_redirects_without_pinning(self) -> None:
+        routes = {
+            self.START: (302, {"Location": self.PRIVATE}),
+            self.PRIVATE: (302, {"Location": self.FINAL}),
+            self.FINAL: (200, {}),
+        }
+        with patch.dict(web_to_md.CONFIG, allow_private_hosts=True), \
+                _memory_curl(routes) as (visited, responses):
+            self.assertIs(web_to_md._http_get(self.START), responses[-1])
+        self.assertEqual([item["url"] for item in visited], [self.START, self.PRIVATE, self.FINAL])
+        for item in visited:
+            self.assertEqual(item["kwargs"]["curl_options"], {})
+            self.assertIs(item["kwargs"]["allow_redirects"], False)

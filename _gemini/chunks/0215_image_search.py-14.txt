@@ -1,0 +1,108 @@
+        1. Resolve the selected thumbnail's original URL from candidates.json
+        2. Download and validate exactly that one original
+        3. Replace the canonical image and its provenance as one rollback unit
+        4. Advance ``candidates.json`` only after provenance succeeds
+    """
+    target_filename = _validate_bare_filename(
+        target_filename, field_name="target filename"
+    )
+    candidate_filename = _validate_bare_filename(
+        candidate_filename, field_name="candidate filename"
+    )
+    mpath = manifest_path or default_manifest_path(str(output_dir))
+    stem = Path(target_filename).stem
+    cand_dir = output_dir / "candidates" / stem
+    cand_meta_path = cand_dir / "candidates.json"
+
+    if not cand_meta_path.is_file():
+        print(f"Error: {cand_meta_path} not found.", file=sys.stderr)
+        return 1
+
+    try:
+        meta = json.loads(cand_meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"Error: cannot read {cand_meta_path}: {exc}", file=sys.stderr)
+        return 1
+    if not isinstance(meta, dict) or not isinstance(meta.get("candidates"), list):
+        print(
+            f"Error: {cand_meta_path} must contain a candidates array.",
+            file=sys.stderr,
+        )
+        return 1
+    candidates = meta.get("candidates", [])
+
+    entry = next(
+        (
+            candidate
+            for candidate in candidates
+            if isinstance(candidate, dict)
+            and candidate.get("filename") == candidate_filename
+        ),
+        None,
+    )
+    if entry is None:
+        names = [
+            str(candidate.get("filename"))
+            for candidate in candidates
+            if isinstance(candidate, dict) and candidate.get("filename")
+        ]
+        print(
+            f"Error: '{candidate_filename}' not found. Available: {', '.join(names)}",
+            file=sys.stderr,
+        )
+        return 1
+
+    dst_path = output_dir / target_filename
+    declared_target = meta.get("target_filename")
+    if declared_target != target_filename:
+        print(
+            f"Error: candidate pool targets {declared_target!r}, not "
+            f"{target_filename!r}.",
+            file=sys.stderr,
+        )
+        return 1
+
+    request_meta = meta.get("request")
+    if not isinstance(request_meta, dict):
+        request_meta = {}
+    min_width = int(request_meta.get("min_width") or 0)
+    min_height = int(request_meta.get("min_height") or 0)
+    selected_candidate = AssetCandidate(
+        provider=str(entry.get("provider") or ""),
+        title=str(entry.get("title") or ""),
+        source_page_url=str(entry.get("source_page_url") or ""),
+        license_name=str(entry.get("license_name") or ""),
+        license_url=str(entry.get("license_url") or ""),
+        license_tier=str(entry.get("license_tier") or ""),
+        width=int(entry.get("width") or 0),
+        height=int(entry.get("height") or 0),
+        download_url=str(entry.get("download_url") or ""),
+        preview_url=str(entry.get("preview_url") or ""),
+        discovery_query=str(entry.get("matched_query") or ""),
+        author=str(entry.get("author") or ""),
+    )
+    if not selected_candidate.download_url:
+        print(
+            f"Error: {candidate_filename} has no original download URL.",
+            file=sys.stderr,
+        )
+        return 1
+
+    metadata_dimensions = (
+        (selected_candidate.width, selected_candidate.height)
+        if selected_candidate.width > 0 and selected_candidate.height > 0
+        else None
+    )
+
+    staged_path: Optional[Path] = None
+    try:
+        legacy_src_path = cand_dir / candidate_filename
+        if (
+            meta.get("candidate_storage") != "thumbnail-only"
+            and legacy_src_path.is_file()
+        ):
+            staged_path, actual_dimensions = _stage_validated_candidate_copy(
+                legacy_src_path,
+                dst_path,
+                min_width=min_width,
+                min_height=min_height,

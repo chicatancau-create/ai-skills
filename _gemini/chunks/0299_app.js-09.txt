@@ -1,0 +1,95 @@
+                    var nameSpan = document.createElement("span");
+                    nameSpan.className = "slide-name";
+                    nameSpan.textContent = s.name;
+                    item.appendChild(nameSpan);
+
+                    if (s.annotation_count > 0) {
+                        var badge = document.createElement("span");
+                        badge.className = "badge";
+                        badge.textContent = s.annotation_count;
+                        item.appendChild(badge);
+                    }
+
+                    item.addEventListener("click", function () {
+                        selectSlide(s.name, item);
+                    });
+                    slideListEl.appendChild(item);
+                });
+
+                if (!currentSlide || !currentExists) {
+                    var rememberedSlide = readSlideFromLocation();
+                    var targetSlide = rememberedSlide && slideNames.indexOf(rememberedSlide) !== -1
+                        ? rememberedSlide
+                        : slides[0].name;
+                    selectSlide(targetSlide);
+                } else if (waitingForSlide === currentSlide) {
+                    if (currentReady) {
+                        selectSlide(currentSlide);
+                    }
+                } else if (currentMtimeChanged) {
+                    showReloadBanner(currentSlide);
+                }
+                updateNavLabel();
+                updatePendingStatus();
+            })
+            .catch(function (err) {
+                console.error("loadSlides:", err);
+                showError(t("err_load_slides") + err.message);
+            });
+    }
+
+    // ================================================================
+    //  2.  selectSlide  -- GET /api/slide/{name}
+    // ================================================================
+    function waitForSlideRewrite(name) {
+        if (!liveMode || name !== currentSlide) return;
+        waitingForSlide = name;
+        svgPlaceholder.style.display = "block";
+        svgPlaceholder.textContent = t("placeholder_slide_writing");
+        svgContent.style.display = "none";
+    }
+
+    function selectSlide(name, el) {
+        if (!el) {
+            el = slideListEl.querySelector('.slide-item[data-name="' + cssAttr(name) + '"]');
+        }
+        // Update active class in sidebar
+        document.querySelectorAll(".slide-item").forEach(function (it) {
+            it.classList.remove("active");
+        });
+        if (el) el.classList.add("active");
+
+        currentSlide = name;
+        waitingForSlide = null;
+        rememberSlideInLocation(name);
+        selectedElementIds.clear();
+        slideAnnotations = {};
+        updateNavLabel();
+
+        // Reset right panel and rubber band
+        cancelRubberBand();
+        clearSelection();
+
+        // Selecting a slide implicitly dismisses any stale "page updated" banner.
+        hideReloadBanner();
+
+        fetch("/api/slide/" + encodeURIComponent(name))
+            .then(function (res) { return res.json(); })
+            .then(function (data) {
+                if (name !== currentSlide) return;
+                if (data.error) {
+                    console.error("selectSlide:", data.error);
+                    showError(t("err_load_slide") + data.error);
+                    waitForSlideRewrite(name);
+                    return;
+                }
+                // Validate before showing the canvas; parse errors use the catch below.
+                var sanitizedSvg = sanitizeSvg(data.content);
+                svgPlaceholder.style.display = "none";
+                svgContent.style.display = "block";
+                svgContent.innerHTML = sanitizedSvg;
+
+                // Empty-canvas guard: surface a clear error if the SVG parsed
+                // to nothing renderable (issue #115's silent-blank scenario).
+                var rootSvg = svgContent.querySelector("svg");
+                // viewBox is the PPT Master canvas authority. Normalize the

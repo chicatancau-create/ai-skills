@@ -1,0 +1,120 @@
+            ):
+                continue
+            managed.add(path)
+    if not isinstance(animation_media, list):
+        return managed
+    for value in animation_media:
+        if not isinstance(value, str):
+            continue
+        path = Path(value)
+        if (
+            path.drive
+            or path.anchor
+            or path.is_absolute()
+            or not path.parts
+            or ".." in path.parts
+            or not _MANAGED_TRANSITION_SOUND_RE.fullmatch(path.name)
+        ):
+            continue
+        managed.add(path)
+    return managed
+
+
+def _referenced_local_paths(
+    output_dir: Path,
+    svg_paths: list[Path],
+) -> set[Path]:
+    """Resolve local media referenced by converter-owned SVGs."""
+    referenced: set[Path] = set()
+    output_abs = output_dir.absolute()
+    for svg_path in svg_paths:
+        if svg_path.is_symlink() or not svg_path.is_file():
+            continue
+        try:
+            svg_text = svg_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        for raw_href in _SVG_HREF_RE.findall(svg_text):
+            href = unescape(raw_href)
+            parsed = urlsplit(href)
+            if parsed.scheme or parsed.netloc or not parsed.path:
+                continue
+            href_path = unquote(parsed.path)
+            if Path(href_path).is_absolute():
+                continue
+            target = Path(os.path.normpath(str(svg_path.parent / href_path)))
+            try:
+                relative = target.absolute().relative_to(output_abs)
+            except ValueError:
+                continue
+            if relative.parts:
+                referenced.add(relative)
+    return referenced
+
+
+def _validated_relative_paths(paths: set[str | Path]) -> set[Path]:
+    """Normalize caller-supplied managed paths and reject output escapes."""
+    normalized: set[Path] = set()
+    for value in paths:
+        path = Path(value)
+        if (
+            path.drive
+            or path.anchor
+            or path.is_absolute()
+            or not path.parts
+            or ".." in path.parts
+        ):
+            raise ValueError(f"Managed artifact path must stay relative: {value}")
+        normalized.add(path)
+    return normalized
+
+
+def _reject_symlink_ancestors(
+    root: Path,
+    relative_paths: set[Path],
+) -> None:
+    """Reject managed paths that would traverse a preserved user symlink."""
+    for relative in relative_paths:
+        current = root
+        for component in relative.parts[:-1]:
+            current /= component
+            if current.is_symlink():
+                raise RuntimeError(
+                    "Managed artifact path crosses an unmanaged symlink: "
+                    f"{relative}"
+                )
+
+
+def _remove_managed_paths(candidate_dir: Path, relative_paths: set[Path]) -> None:
+    """Remove only the previous converter roster from a candidate workspace."""
+    _reject_symlink_ancestors(candidate_dir, relative_paths)
+    parents: set[Path] = set()
+    for relative in sorted(
+        relative_paths,
+        key=lambda item: len(item.parts),
+        reverse=True,
+    ):
+        target = candidate_dir / relative
+        if target.is_symlink() or target.is_file():
+            target.unlink()
+        elif target.is_dir():
+            raise RuntimeError(
+                "Managed artifact path collides with a preserved directory: "
+                f"{relative}"
+            )
+        parent = target.parent
+        while parent != candidate_dir:
+            parents.add(parent)
+            parent = parent.parent
+
+    for parent in sorted(parents, key=lambda item: len(item.parts), reverse=True):
+        if parent.is_symlink() or not parent.is_dir():
+            continue
+        try:
+            parent.rmdir()
+        except OSError:
+            pass
+
+
+def _overlay_staged_tree(staged_dir: Path, candidate_dir: Path) -> None:
+    """Overlay generated artifacts without overwriting unmanaged user files."""

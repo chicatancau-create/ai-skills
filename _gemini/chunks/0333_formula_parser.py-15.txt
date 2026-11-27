@@ -1,0 +1,113 @@
+        _, position = _read_control_word(self.source, position)
+        return position
+
+    def _find_matching_control_symbol(
+        self,
+        opener: str,
+        closer: str,
+        start: int,
+    ) -> int | None:
+        depth = 1
+        cursor = start
+        while cursor + 1 < len(self.source):
+            if self.source[cursor] != "\\":
+                cursor += 1
+                continue
+            symbol = self.source[cursor + 1]
+            if symbol == opener:
+                depth += 1
+            elif symbol == closer:
+                depth -= 1
+                if depth == 0:
+                    return cursor
+            cursor += 2
+        return None
+
+    def _find_matching_control_word(
+        self,
+        opener: str,
+        closer: str,
+        start: int,
+    ) -> int | None:
+        depth = 1
+        cursor = start
+        while cursor < len(self.source):
+            if self.source[cursor] != "\\" or cursor + 1 >= len(self.source):
+                cursor += 1
+                continue
+            if not _is_command_letter(self.source[cursor + 1]):
+                cursor += 2
+                continue
+            command, end = _read_control_word(self.source, cursor)
+            if command == opener:
+                depth += 1
+            elif command == closer:
+                depth -= 1
+                if depth == 0:
+                    return cursor
+            cursor = end
+        return None
+
+    def _find_symmetric_control_word(
+        self,
+        command: str,
+        start: int,
+    ) -> int | None:
+        group_depth = 0
+        cursor = start
+        while cursor < len(self.source):
+            char = self.source[cursor]
+            if char == "{":
+                group_depth += 1
+                cursor += 1
+                continue
+            if char == "}":
+                group_depth = max(0, group_depth - 1)
+                cursor += 1
+                continue
+            if char != "\\" or cursor + 1 >= len(self.source):
+                cursor += 1
+                continue
+            if not _is_command_letter(self.source[cursor + 1]):
+                cursor += 2
+                continue
+            current, end = _read_control_word(self.source, cursor)
+            if group_depth == 0 and current == command:
+                return cursor
+            cursor = end
+        return None
+
+    def _parse_environment(self) -> Node:
+        environment = self._parse_environment_name("\\begin")
+        if (
+            environment not in MATRIX_ENVIRONMENTS
+            and environment not in EQUATION_ARRAY_ENVIRONMENTS
+        ):
+            self._fail(f"Unsupported formula environment {environment!r}")
+
+        if environment == "CD":
+            return self._parse_cd_environment()
+
+        column_alignments: tuple[str, ...] = ()
+        if environment in {"array", "subarray"}:
+            raw = self._parse_raw_required_group(f"{environment} column specification")
+            filtered = tuple(char for char in raw if char in "lcr")
+            if not filtered:
+                self._fail(f"Environment {environment!r} requires l/c/r columns")
+            column_alignments = tuple("center" for _ in filtered)
+        elif environment in {"alignat", "alignat*", "alignedat"}:
+            raw = self._parse_raw_required_group(f"{environment} column count").strip()
+            if not raw.isdigit() or int(raw) <= 0:
+                self._fail(f"Environment {environment!r} requires a positive column count")
+
+        self.environment_stack.append(environment)
+        try:
+            rows = self._parse_environment_rows(environment)
+        finally:
+            self.environment_stack.pop()
+
+        if environment in MATRIX_ENVIRONMENTS:
+            if not column_alignments and rows:
+                column_alignments = tuple("center" for _ in rows[0])
+            matrix = Matrix(environment, rows, column_alignments)
+            delimiters = MATRIX_ENVIRONMENTS[environment]

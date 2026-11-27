@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""
+PPT Master - Beautify Identity Extractor
+
+Extract a source deck's visual identity as JSON for the beautify-pptx profile:
+the declared `theme` (palette + major/minor fonts + master placeholder sizes,
+full bodyStyle ramp in `sizes.body_levels`) plus `observed` usage (run-level
+fonts incl. CJK `ea`, explicit point sizes, and frequent explicit fill colors)
+sampled across slides, plus `layout_sizes_pt` (in-use layout body-placeholder
+level-1 sizes — a reference hint, not an auto-seed) — so the workflow can
+recommend theme vs actual-usage identity, incl. a source-derived body size
+(seed chain: observed → theme.sizes.body → canvas baseline) and let the user
+confirm. Pure read: reuses the pptx_to_svg resolver, writes
+no PPTX.
+
+Usage:
+    python3 scripts/beautify_identity.py <source.pptx> [-o identity.json]
+
+Examples:
+    python3 scripts/beautify_identity.py projects/x/sources/deck.pptx
+    python3 scripts/beautify_identity.py deck.pptx -o projects/x/analysis/deck.identity.json
+
+Dependencies:
+    None beyond the standard library (reuses scripts/pptx_to_svg/).
+
+See workflows/profiles/beautify-pptx.md for how the emitted identity is consumed.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from typing import Optional
+
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from console_encoding import configure_utf8_stdio  # noqa: E402
+from pptx_to_svg.color_resolver import ColorPalette  # noqa: E402
+from pptx_to_svg.emu_units import NS  # noqa: E402
+from pptx_to_svg.ooxml_loader import OoxmlPackage  # noqa: E402
+
+configure_utf8_stdio()
+
+
+def _font_pair(theme_root, font_tag: str) -> dict[str, object]:
+    """Read one theme font family, including explicit CJK script mappings."""
+    out: dict[str, object] = {}
+    font = theme_root.find(f".//a:fontScheme/a:{font_tag}", NS)
+    if font is None:
+        return out
+    for slot, key in (("a:latin", "latin"), ("a:ea", "ea"), ("a:cs", "cs")):
+        elem = font.find(slot, NS)
+        if elem is not None:
+            face = (elem.attrib.get("typeface") or "").strip()
+            if face:
+                out[key] = face
+    scripts: dict[str, str] = {}
+    for elem in font.findall("a:font", NS):
+        script = (elem.attrib.get("script") or "").strip()
+        face = (elem.attrib.get("typeface") or "").strip()
+        if script in {"Hans", "Hant", "Jpan", "Hang"} and face:
+            scripts[script] = face
+    if scripts:
+        out["scripts"] = scripts
+    return out
+
+
+def _rank(counter: dict, limit: int) -> list[dict]:
+    """Frequency-ranked [{value, count}, ...], most common first."""
+    ranked = sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [{"value": v, "count": n} for v, n in ranked[:limit]]
+
+
+def _master_text_sizes(master_root) -> dict:
+    """Declared title/body point sizes from the master's <p:txStyles>.
+
+    `title` is <p:titleStyle> level-1; `body` is <p:bodyStyle> level-1 and
+    `body_levels` is every declared body outline level in order (lvl1..lvl9).
+    `sz` is in hundredths of a point. This is the *declared* size — the
+    placeholder default a run inherits when it sets no explicit `sz` — the size
+    counterpart of `theme.fonts`. Note level-1 is the coarsest/largest body
+    level and commonly over-reads real density; `body_levels` exposes the full
+    ramp. Returns {} when no txStyles are present.
+    """
+    out: dict[str, object] = {}
+    title = master_root.find(".//p:txStyles/p:titleStyle//a:defRPr", NS)
+    if title is not None:
+        sz = (title.attrib.get("sz") or "").strip()
+        if sz.isdigit():
+            out["title"] = int(sz) / 100
+    body = master_root.find(".//p:txStyles/p:bodyStyle", NS)
+    levels: list[float] = []
+    if body is not None:
+        for lvl in body:  # a:lvl1pPr .. a:lvl9pPr, in document order
+            defrpr = lvl.find("a:defRPr", NS)

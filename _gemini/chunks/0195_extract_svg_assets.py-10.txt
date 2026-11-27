@@ -1,0 +1,109 @@
+        default="",
+        help=(
+            "Optional lower-case subdirectory and data-icon prefix for extracted "
+            "assets (create-template uses: imported)"
+        ),
+    )
+    parser.add_argument(
+        "--rewritten-dir",
+        help="Directory for rewritten SVGs when not using --inplace (default: <svg_dir>/../<svg_dir-name>-rewritten)",
+    )
+    parser.add_argument(
+        "--inventory",
+        help="Inventory JSON path (default: <svg_dir>/../<svg_dir-name>_vector_asset_inventory.json)",
+    )
+    parser.add_argument(
+        "--reuse-inventory",
+        help=(
+            "Reuse fingerprint-matched assets from an earlier extraction inventory; "
+            "only unmatched vector subtrees create new assets"
+        ),
+    )
+    parser.add_argument(
+        "--id-prefix",
+        default="",
+        help=(
+            "Optional prefix for generated asset IDs, useful when processing "
+            "layered and flat SVG dirs into one icons dir"
+        ),
+    )
+    parser.add_argument(
+        "--min-drawables", type=int, default=DEFAULT_MIN_DRAWABLES,
+        help=f"Min drawable elements for a group to be extracted (default: {DEFAULT_MIN_DRAWABLES})",
+    )
+    parser.add_argument(
+        "--min-bytes", type=int, default=DEFAULT_MIN_BYTES,
+        help=f"Min XML bytes for a pure-vector group/run to be extracted (default: {DEFAULT_MIN_BYTES})",
+    )
+    parser.add_argument(
+        "--min-decoration-bytes", type=int, default=DEFAULT_MIN_DECORATION_BYTES,
+        help=(
+            "Min XML bytes for pure-vector decoration runs inside text-bearing groups "
+            f"(default: {DEFAULT_MIN_DECORATION_BYTES})"
+        ),
+    )
+    parser.add_argument(
+        "--inplace", action="store_true",
+        help="Rewrite the source SVGs in place instead of writing to --rewritten-dir",
+    )
+    parser.add_argument(
+        "--clean-stale",
+        action="store_true",
+        help=(
+            "Remove stale generated assets for the current svg filenames/id prefix "
+            "that are not referenced by this run's inventory"
+        ),
+    )
+    return parser
+
+
+def extract_directory(
+    svg_dir: Path,
+    icons_dir: Path,
+    icon_namespace: str,
+    *,
+    min_drawables: int = DEFAULT_MIN_DRAWABLES,
+    min_bytes: int = DEFAULT_MIN_BYTES,
+    min_decoration_bytes: int = DEFAULT_MIN_DECORATION_BYTES,
+    inplace: bool = False,
+    id_prefix: str = "",
+    rewritten_dir: Path | None = None,
+    inventory_path: Path | None = None,
+    reuse_inventory_path: Path | None = None,
+    clean_stale: bool = False,
+    skip_unparseable: bool = False,
+) -> tuple[dict, Path | None, tuple[tuple[Path, str], ...]]:
+    """Extract one SVG directory and publish its deterministic inventory.
+
+    Thresholds select vector groups or decoration runs. In-place authoring
+    bundles also refresh their model-readable summary. Returns the inventory,
+    optional summary path, and any parse failures skipped by the CLI mode.
+    """
+    svg_dir = Path(svg_dir)
+    icons_dir = Path(icons_dir)
+    if not svg_dir.is_dir():
+        raise ValueError(f"svg_dir not found: {svg_dir}")
+    if icon_namespace and not ICON_NAMESPACE_RE.fullmatch(icon_namespace):
+        raise ValueError(
+            "icon_namespace must be one lower-case ASCII directory name "
+            "using only letters, digits, '_' or '-'"
+        )
+    if min(min_drawables, min_bytes, min_decoration_bytes) < 0:
+        raise ValueError("vector extraction thresholds must be non-negative")
+
+    icons_dir.mkdir(parents=True, exist_ok=True)
+    reusable_assets = (
+        _load_reusable_assets(reuse_inventory_path, icons_dir)
+        if reuse_inventory_path is not None
+        else {}
+    )
+    inventory_path = (
+        Path(inventory_path)
+        if inventory_path is not None
+        else svg_dir.parent / f"{svg_dir.name}_vector_asset_inventory.json"
+    )
+
+    def manifest_path(path: Path | None) -> str | None:
+        if path is None:
+            return None
+        try:

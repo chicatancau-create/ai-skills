@@ -1,0 +1,79 @@
+                height=int(info.get("height") or 0),
+                download_url=download_url,
+                preview_url=(info.get("thumburl") or "").strip(),
+                author=_ext_value(extmetadata, "Artist"),
+                raw=page,
+            )
+        )
+
+    return candidates
+
+
+def _filter_by_orientation(
+    candidates: list[AssetCandidate], orientation: str
+) -> list[AssetCandidate]:
+    """Wikimedia API has no orientation parameter; filter client-side."""
+    if not orientation or orientation == "any":
+        return candidates
+    matching = [
+        c for c in candidates if normalize_orientation(c.width, c.height) == orientation
+    ]
+    # Fall back to the unfiltered list if orientation pruning leaves nothing —
+    # better an off-orientation match than no image at all.
+    return matching or candidates
+
+
+def search(
+    request: ImageSearchRequest,
+    *,
+    license_tier_filter: str = "no-attribution-only",
+    search_limit: int = DEFAULT_SEARCH_LIMIT,
+    timeout: int = DEFAULT_TIMEOUT,
+) -> list[AssetCandidate]:
+    """Search Wikimedia Commons for candidates.
+
+    Wikimedia returns license info via ``extmetadata`` rather than as a
+    request parameter, so the ``license_tier_filter`` does its work in
+    ``parse_results`` (and is honored implicitly because tier classification
+    happens there). Returning candidates from the first non-empty query.
+    """
+    if license_tier_filter not in {"no-attribution-only", "all"}:
+        raise ValueError(f"unsupported license_tier_filter: {license_tier_filter!r}")
+
+    orientation = (request.orientation or "").strip().lower()
+
+    for query in build_query_progression(request.query):
+        params = {
+            "action": "query",
+            "format": "json",
+            "generator": "search",
+            "gsrnamespace": "6",  # File: namespace
+            "gsrsearch": f"{query} filetype:bitmap",
+            "gsrlimit": search_limit,
+            "prop": "imageinfo",
+            "iiprop": "url|size|extmetadata|mime",
+            "iiurlwidth": 1024,
+            "iiextmetadatafilter": (
+                "LicenseShortName|License|LicenseUrl|Artist"
+            ),
+        }
+
+        response = requests.get(
+            API_URL,
+            params=params,
+            headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        all_candidates = parse_results(response.json())
+
+        if license_tier_filter == "no-attribution-only":
+            all_candidates = [
+                c for c in all_candidates if c.license_tier == "no-attribution"
+            ]
+
+        all_candidates = _filter_by_orientation(all_candidates, orientation)
+        if all_candidates:
+            return all_candidates
+
+    return []

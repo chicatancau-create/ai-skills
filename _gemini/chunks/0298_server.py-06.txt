@@ -1,0 +1,106 @@
+        except ValueError:
+            return jsonify({'error': 'invalid path'}), 400
+        if not target.exists() or not target.is_file():
+            return jsonify({'error': 'not found'}), 404
+        return send_from_directory(str(images_dir), filename)
+
+    @app.route('/api/slides')
+    def get_slides():
+        svg_dir = app.config['SVG_DIR']
+        if not svg_dir.exists():
+            return jsonify({'slides': []})
+
+        annotations = app.config['ANNOTATIONS']
+        slides = []
+        for svg_file in discover_slide_svgs(svg_dir):
+            path_str = str(svg_file)
+            try:
+                mtime = svg_file.stat().st_mtime
+            except OSError as exc:
+                logger.warning('stat failed: %s: %s', path_str, exc)
+                continue
+
+            ok = True
+            error_msg: Optional[str] = None
+            cached = _cache_get(_LIST_CACHE, _LIST_CACHE_LOCK, path_str, mtime)
+            if cached is None:
+                try:
+                    tree = ET.parse(path_str)
+                    disk_count = len(parse_annotations(tree.getroot()))
+                except ET.ParseError as exc:
+                    ok = False
+                    error_msg = f'XML parse error: {exc}'
+                    disk_count = 0
+                    logger.warning('slide parse failed: %s: %s', svg_file.name, exc)
+                _cache_put(_LIST_CACHE, _LIST_CACHE_LOCK, path_str, mtime, (disk_count, ok, error_msg))
+            else:
+                disk_count, ok, error_msg = cached
+
+            if svg_file.name in annotations:
+                annotation_count = len(annotations[svg_file.name])
+            else:
+                annotation_count = disk_count
+
+            slides.append({
+                'name': svg_file.name,
+                'annotated': annotation_count > 0,
+                'annotation_count': annotation_count,
+                'ok': ok,
+                'error': error_msg,
+                'mtime': mtime,
+            })
+
+        return jsonify({'slides': slides})
+
+    def _safe_svg_path(name: str):
+        """Validate slide name and return safe path. Returns None if invalid.
+
+        The early string checks reject obvious bad inputs; the resolve()+relative_to()
+        check is the authoritative path traversal guard.
+        """
+        if '/' in name or '\\' in name or '..' in name:
+            return None
+        svg_file = (svg_dir / name).resolve()
+        try:
+            svg_file.relative_to(svg_dir.resolve())
+        except ValueError:
+            return None
+        return svg_file
+
+    def _get_annotation_snapshot(name: str):
+        """Return the page's complete staged annotation state, loading it once."""
+        annotations = app.config['ANNOTATIONS']
+        if name in annotations:
+            return annotations[name], None
+
+        svg_file = _safe_svg_path(name)
+        if svg_file is None:
+            return None, (jsonify({'error': 'Invalid slide name'}), 400)
+        if not svg_file.exists():
+            return None, (jsonify({'error': 'Slide not found'}), 404)
+
+        try:
+            root = ET.parse(str(svg_file)).getroot()
+        except ET.ParseError as exc:
+            logger.warning('slide parse failed: %s: %s', name, exc)
+            return None, (jsonify({'error': f'Failed to parse SVG: {exc}'}), 500)
+
+        assign_temp_ids(root)
+        annotations[name] = {
+            item['element_id']: item['annotation']
+            for item in parse_annotations(root)
+        }
+        return annotations[name], None
+
+    @app.route('/api/slide/<name>')
+    def get_slide(name: str):
+        svg_file = _safe_svg_path(name)
+        if svg_file is None:
+            return jsonify({'error': 'Invalid slide name'}), 400
+        if not svg_file.exists():
+            return jsonify({'error': 'Slide not found'}), 404
+
+        path_str = str(svg_file)
+        try:
+            mtime = svg_file.stat().st_mtime
+        except OSError as exc:

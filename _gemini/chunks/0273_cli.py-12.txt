@@ -1,0 +1,73 @@
+                    if propagate_images:
+                        self._propagate_companion_image_assets(canonical_markdown_path, project_dir)
+                    summary["notes"].append(
+                        f"{item}: skipped Excel auto-conversion because {canonical_markdown_path.name} already exists"
+                    )
+                    continue
+                markdown_path = canonical_markdown_path
+                try:
+                    self._import_excel(archived_path, markdown_path)
+                    summary["markdown"].append(str(markdown_path))
+                    if propagate_images:
+                        self._propagate_companion_image_assets(markdown_path, project_dir)
+                except Exception as exc:  # pragma: no cover - summary path
+                    summary["skipped"].append(f"{item}: Excel conversion failed ({exc})")
+            elif suffix in LEGACY_EXCEL_SUFFIXES:
+                summary["notes"].append(
+                    f"{item}: archived only; legacy .xls is not converted automatically. "
+                    "Resave as .xlsx to generate Markdown."
+                )
+            elif suffix in TABLE_TEXT_SUFFIXES:
+                summary["notes"].append(
+                    f"{item}: archived as a plain-text table source; no Markdown conversion needed"
+                )
+            elif suffix in DOC_SUFFIXES:
+                canonical_markdown_path = sources_dir / f"{archived_path.stem}.md"
+                if archived_path.stem in explicit_markdown_stems:
+                    summary["notes"].append(
+                        f"{item}: skipped document auto-conversion because a same-stem Markdown source was provided"
+                    )
+                    continue
+                if canonical_markdown_path.exists():
+                    summary["markdown"].append(str(canonical_markdown_path))
+                    if propagate_images:
+                        self._propagate_companion_image_assets(canonical_markdown_path, project_dir)
+                    summary["notes"].append(
+                        f"{item}: skipped document auto-conversion because {canonical_markdown_path.name} already exists"
+                    )
+                    continue
+                markdown_path = canonical_markdown_path
+                try:
+                    self._import_doc(archived_path, markdown_path)
+                    summary["markdown"].append(str(markdown_path))
+                    if propagate_images:
+                        self._propagate_companion_image_assets(markdown_path, project_dir)
+                except Exception as exc:  # pragma: no cover - summary path
+                    summary["skipped"].append(f"{item}: document conversion failed ({exc})")
+            elif suffix == ".txt":
+                markdown_path = self._normalize_text_source(archived_path, sources_dir)
+                summary["markdown"].append(str(markdown_path))
+            else:
+                summary["notes"].append(f"{item}: archived only, no automatic conversion")
+
+        # Cleanup: only a projects-local source directory may be removed after
+        # its files move into the target project. Every other location is copied
+        # and remains untouched, even when the caller passes --move.
+        for directory in supplied_dirs:
+            if copy or not is_within_path(directory, PROJECTS_ROOT):
+                continue
+            if directory.is_dir() and not any(directory.iterdir()):
+                try:
+                    directory.rmdir()
+                except OSError:
+                    continue
+                summary["notes"].append(
+                    f"{directory}: removed empty source directory after import"
+                )
+
+        return summary
+
+    def validate_project(self, project_path: str) -> tuple[bool, list[str], list[str]]:
+        project_path_obj = Path(project_path)
+        _, errors, warnings = validate_project_structure(
+            str(project_path_obj),

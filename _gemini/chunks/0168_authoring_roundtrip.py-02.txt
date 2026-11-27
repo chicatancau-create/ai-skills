@@ -1,0 +1,130 @@
+    asset_path: Path
+    origin_document: str
+    source_sha256: str
+    expected_asset_sha256: str
+    actual_asset_sha256: str
+
+    @property
+    def element_prefix(self) -> str:
+        return self.icon.rsplit("/", 1)[-1]
+
+    @property
+    def baseline_key(self) -> str:
+        stem = self.element_prefix
+        match = re.search(r"(slide_\d+_ill\d+)$", stem)
+        slot = match.group(1) if match else self.source_sha256
+        return f"{self.origin_document}:{slot}"
+
+    @property
+    def unchanged(self) -> bool:
+        return self.actual_asset_sha256 == self.expected_asset_sha256
+
+
+@dataclass(frozen=True)
+class RefOccurrence:
+    element: ET.Element
+    asset: VectorAssetRecord | None
+    root: ET.Element
+
+
+@dataclass(frozen=True)
+class AuthoringRoundtripResult:
+    svg_files: tuple[Path, ...]
+    authoring_files: tuple[Path, ...]
+    pages: tuple["RoundtripPage", ...]
+    page_plan_present: bool
+    report: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class RoundtripPage:
+    """One output page resolved from the optional deck-level plan."""
+
+    output_index: int
+    source_slide: int
+    svg_name: str
+    source_svg_name: str
+
+    @property
+    def svg_stem(self) -> str:
+        return Path(self.svg_name).stem
+
+
+def _local_name(name: object) -> str:
+    return name.rsplit("}", 1)[-1] if isinstance(name, str) else ""
+
+
+def _parse_svg(path: Path) -> ET.Element:
+    parser = ET.XMLParser(
+        target=ET.TreeBuilder(insert_comments=True, insert_pis=True),
+    )
+    try:
+        return ET.fromstring(path.read_bytes(), parser=parser)
+    except (OSError, ET.ParseError) as exc:
+        raise AuthoringRoundtripError(f"Cannot parse SVG {path}: {exc}") from exc
+
+
+def _load_json(path: Path, *, context: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise AuthoringRoundtripError(f"Missing {context}: {path}") from exc
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise AuthoringRoundtripError(f"Cannot read {context} {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise AuthoringRoundtripError(f"{context} must be a JSON object: {path}")
+    return payload
+
+
+def _resolve_inside(root: Path, value: str, *, context: str) -> Path:
+    try:
+        resolved_root = root.resolve()
+        path = (root / value).resolve()
+    except ValueError as exc:
+        raise AuthoringRoundtripError(
+            f"{context} contains an invalid path value: {value!r}"
+        ) from exc
+    try:
+        path.relative_to(resolved_root)
+    except ValueError as exc:
+        raise AuthoringRoundtripError(
+            f"{context} resolves outside {root}: {value!r}"
+        ) from exc
+    return path
+
+
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _source_element(root: ET.Element, path: tuple[int, ...]) -> ET.Element:
+    element = root
+    try:
+        for index in path:
+            element = list(element)[index]
+    except (IndexError, TypeError) as exc:
+        raise AuthoringRoundtripError(
+            f"Source-ref path no longer resolves: {list(path)}"
+        ) from exc
+    return element
+
+
+def _source_identity(element: ET.Element) -> str | None:
+    scope = element.get("data-pptx-shape-scope")
+    shape_id = element.get("data-pptx-shape-id")
+    if not scope or not shape_id:
+        return None
+    return f"{scope}:{shape_id}"
+
+
+def is_flat_authoring_bundle(authoring_dir: Path) -> bool:
+    """Return whether a directory declares the supported flat authoring IR."""
+    manifest_path = authoring_dir / AUTHORING_MANIFEST_NAME
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(manifest, dict)
+        and manifest.get("schema") == AUTHORING_SCHEMA
+        and manifest.get("projection_kind") == "flat"

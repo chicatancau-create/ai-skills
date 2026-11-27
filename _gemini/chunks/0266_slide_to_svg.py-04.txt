@@ -1,0 +1,106 @@
+    first body element so the output reads like a real slide.
+
+    Args:
+        role: 'master' or 'layout'. Used as the group_id_prefix to keep ids
+            unique when the workspace inlines multiple parts in a viewer.
+        parent_master: when ``role == "layout"``, pass the parent slide
+            master so theme-style background fills (``<p:bgRef idx=...>``)
+            can resolve via the theme attached to that master. For
+            ``role == "master"`` the master is its own parent and this
+            argument is ignored.
+    """
+    if role not in {"master", "layout"}:
+        raise ValueError(f"role must be 'master' or 'layout', got {role!r}")
+
+    ctx = AssemblyContext(
+        palette=palette,
+        pkg=pkg,
+        slide_part=part,
+        theme_fonts=theme_fonts or {},
+        media_subdir=media_subdir,
+        embed_images=embed_images,
+        keep_hidden=keep_hidden,
+        strict=strict,
+        group_id_prefix=f"{role}-",
+        render_graphic_previews=False,
+        asset_name_map=asset_name_map or {},
+        diagnostics=diagnostics if diagnostics is not None else [],
+    )
+    ctx.bind_palette()
+
+    canvas_w, canvas_h = pkg.slide_size_px
+    canvas_w_token, canvas_h_token = (
+        format_canvas_px_from_emu(value) for value in pkg.slide_size_emu
+    )
+
+    body_parts: list[str] = []
+
+    # Layered semantics: each part's standalone SVG must contain only that
+    # part's own contribution. The master gets its own bg, the layout gets
+    # its own bg only if it overrides the master's, and consumers re-stack
+    # the layers when they need a flat view. We therefore inspect <p:bg> on
+    # this part alone — never inherited from above. Theme-style fills
+    # (<p:bgRef idx=...>) still need the parent master's <a:fmtScheme> to
+    # resolve, hence the SlideRef.master plumbing below.
+    if role == "master":
+        master_for_theme: PartRef | None = part
+    else:
+        master_for_theme = parent_master
+    fake_slide = SlideRef(
+        index=0,
+        part=part,
+        layout=None,
+        master=master_for_theme,
+    )
+    try:
+        bg_xml = _emit_part_background(fake_slide, ctx, canvas_w, canvas_h)
+    except (ValueError, MediaResolutionError) as exc:
+        if strict:
+            raise
+        ctx.diagnose(
+            "background-omitted",
+            str(exc),
+            "omit the unsupported background and continue the part",
+        )
+        bg_xml = ""
+    if bg_xml:
+        body_parts.append(bg_xml)
+
+    # Walk shapes. Layered master/layout SVGs retain each placeholder's source
+    # appearance so mirror materialization can recover its editable decoration.
+    for node in walk_sp_tree(part.xml):
+        if _is_placeholder_node(node):
+            chunk = _convert_placeholder_guide(node, ctx, top_level=True)
+        else:
+            chunk = _convert_node(node, ctx, top_level=True)
+        if chunk:
+            body_parts.append(chunk)
+
+    defs_xml = "".join(ctx.defs) if ctx.defs else ""
+    defs_block = f"<defs>{defs_xml}</defs>" if defs_xml else ""
+
+    svg = (
+        f'<svg xmlns="http://www.w3.org/2000/svg" '
+        f'xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" '
+        f'width="{canvas_w_token}" height="{canvas_h_token}" '
+        f'viewBox="0 0 {canvas_w_token} {canvas_h_token}">'
+        f"{defs_block}"
+        + "\n".join(body_parts)
+        + "</svg>"
+    )
+    return svg, ctx.media
+
+
+# ---------------------------------------------------------------------------
+# Per-node dispatch
+# ---------------------------------------------------------------------------
+
+def _convert_node(node: ShapeNode, ctx: AssemblyContext, *, top_level: bool) -> str:
+    previous_node = ctx.current_node
+    ctx.current_node = node
+    try:
+        if node.hidden and not ctx.keep_hidden:
+            return ""
+        if node.kind == SHAPE:
+            return _convert_shape(node, ctx, top_level=top_level)
+        if node.kind == PICTURE:

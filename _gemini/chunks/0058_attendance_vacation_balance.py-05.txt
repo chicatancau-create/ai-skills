@@ -1,0 +1,108 @@
+        if keywords and not any(keyword in name_str for keyword in keywords):
+            continue
+        seen.add(code_str)
+        unit = normalize_leave_unit(first_nonempty(record, UNIT_KEYS))
+        source = first_nonempty(record, SOURCE_KEYS)
+        columns.append({"code": code_str, "name": name_str, "unit": unit, "source": str(source or "")})
+
+    return columns
+
+
+def build_balance_index(
+    user_ids: list[str],
+    balance_records: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    balance_index: dict[str, dict[str, Any]] = {user_id: {} for user_id in user_ids}
+    for record in balance_records:
+        user_id = extract_user_id(record, user_ids)
+        code = first_nonempty(record, LEAVE_CODE_KEYS)
+        name = first_nonempty(record, LEAVE_NAME_KEYS)
+        if not user_id or (not code and not name):
+            continue
+        value = format_balance_value(record)
+        if code:
+            balance_index.setdefault(user_id, {})[str(code)] = value
+        if name:
+            balance_index.setdefault(user_id, {})[str(name)] = value
+    return balance_index
+
+
+def extract_user_extra(record: dict[str, Any]) -> dict[str, str]:
+    return {
+        "entry_time": format_date(first_nonempty(record, ENTRY_TIME_KEYS)),
+        "first_work_time": format_date(first_nonempty(record, FIRST_WORK_TIME_KEYS)),
+    }
+
+
+def build_user_extra_index(
+    user_ids: list[str],
+    balance_records: list[dict[str, Any]],
+) -> dict[str, dict[str, str]]:
+    result = {
+        user_id: {"entry_time": "未设置", "first_work_time": "未设置"}
+        for user_id in user_ids
+    }
+    for record in balance_records:
+        user_id = extract_user_id(record, user_ids)
+        if not user_id:
+            continue
+        extra = extract_user_extra(record)
+        current = result.setdefault(user_id, {"entry_time": "未设置", "first_work_time": "未设置"})
+        if current["entry_time"] == "未设置" and extra["entry_time"] != "未设置":
+            current["entry_time"] = extra["entry_time"]
+        if current["first_work_time"] == "未设置" and extra["first_work_time"] != "未设置":
+            current["first_work_time"] = extra["first_work_time"]
+    return result
+
+
+def build_headers(leave_columns: list[dict[str, str]]) -> list[str]:
+    headers = BASE_HEADERS.copy()
+    for leave_column in leave_columns:
+        name = leave_column["name"]
+        unit = leave_column.get("unit") or ""
+        headers.append(f"{name}({unit})" if unit else name)
+    return headers
+
+
+def build_rows(
+    user_ids: list[str],
+    leave_columns: list[dict[str, str]],
+    balance_index: dict[str, dict[str, Any]],
+    user_extra_index: dict[str, dict[str, str]],
+    user_info_map: dict[str, cmn.UserInfo],
+) -> list[list[Any]]:
+    rows: list[list[Any]] = []
+    for user_id in user_ids:
+        user_info = user_info_map.get(user_id, cmn.UserInfo(name=user_id))
+        user_extra = user_extra_index.get(user_id, {})
+        user_balances = balance_index.get(user_id, {})
+        row: list[Any] = [
+            user_info.name or user_id,
+            user_info.dept_name,
+            user_extra.get("entry_time") or "未设置",
+            user_extra.get("first_work_time") or "未设置",
+        ]
+        for leave_column in leave_columns:
+            row.append(
+                user_balances.get(leave_column["code"], user_balances.get(leave_column["name"], "不适用"))
+            )
+        rows.append(row)
+    return rows
+
+
+def main() -> int:
+    args = parse_args()
+    raw_ids = [user_id.strip() for user_id in args.users.split(",") if user_id.strip()]
+    if not raw_ids:
+        cmn.error("--users 不能为空")
+        return 2
+
+    user_ids = cmn.resolve_users_from_input(raw_ids)
+    if not user_ids:
+        cmn.error("未能解析出任何有效员工 userId")
+        return 2
+    cmn.log(f"[users] 最终用户列表：{len(user_ids)} 人")
+
+    keywords = [keyword.strip() for keyword in args.leave_keywords.split(",") if keyword.strip()]
+    try:
+        leave_types = query_leave_types(args.inspect)

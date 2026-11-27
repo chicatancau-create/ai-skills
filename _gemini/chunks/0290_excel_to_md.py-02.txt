@@ -1,0 +1,113 @@
+def _content_bounds(worksheet, merged_values: dict[tuple[int, int], Any]) -> tuple[int, int, int, int] | None:
+    min_row = min_col = None
+    max_row = max_col = None
+
+    for row in worksheet.iter_rows():
+        for cell in row:
+            if _is_empty(cell.value):
+                continue
+            min_row = cell.row if min_row is None else min(min_row, cell.row)
+            max_row = cell.row if max_row is None else max(max_row, cell.row)
+            min_col = cell.column if min_col is None else min(min_col, cell.column)
+            max_col = cell.column if max_col is None else max(max_col, cell.column)
+
+    for row, col in merged_values:
+        min_row = row if min_row is None else min(min_row, row)
+        max_row = row if max_row is None else max(max_row, row)
+        min_col = col if min_col is None else min(min_col, col)
+        max_col = col if max_col is None else max(max_col, col)
+
+    if min_row is None or min_col is None or max_row is None or max_col is None:
+        return None
+    return min_row, min_col, max_row, max_col
+
+
+def _trim_trailing_empty_cells(row: list[Any]) -> list[Any]:
+    trimmed = list(row)
+    while trimmed and _is_empty(trimmed[-1]):
+        trimmed.pop()
+    return trimmed
+
+
+def _extract_rows(
+    worksheet,
+    bounds: tuple[int, int, int, int],
+    merged_values: dict[tuple[int, int], Any],
+    max_rows: int,
+    max_cols: int,
+) -> tuple[list[list[Any]], bool, bool]:
+    min_row, min_col, max_row, max_col = bounds
+
+    row_limit = max_row
+    col_limit = max_col
+    rows_truncated = False
+    cols_truncated = False
+
+    if max_rows > 0 and (max_row - min_row + 1) > max_rows:
+        row_limit = min_row + max_rows - 1
+        rows_truncated = True
+    if max_cols > 0 and (max_col - min_col + 1) > max_cols:
+        col_limit = min_col + max_cols - 1
+        cols_truncated = True
+
+    rows: list[list[Any]] = []
+    width = 0
+    for row_index in range(min_row, row_limit + 1):
+        row = [
+            _cell_value(worksheet, row_index, col_index, merged_values)
+            for col_index in range(min_col, col_limit + 1)
+        ]
+        row = _trim_trailing_empty_cells(row)
+        width = max(width, len(row))
+        rows.append(row)
+
+    if width == 0:
+        return [], rows_truncated, cols_truncated
+
+    normalized_rows = [row + [""] * (width - len(row)) for row in rows]
+    return normalized_rows, rows_truncated, cols_truncated
+
+
+def _is_caption_row(
+    row: list[Any],
+    row_index: int,
+    min_col: int,
+    merged_values: dict[tuple[int, int], Any],
+) -> bool:
+    """Return whether a leading row is a sheet title or source note, not a header.
+
+    Public datasets (World Bank, OECD, Eurostat exports) put a free-text
+    source line above the real header; it fills only the first cell or one
+    merged band, so every other column is empty or repeats the same value.
+    """
+    values = [value for value in row if not _is_empty(value)]
+    if len(values) != 1 and len({str(value) for value in values}) != 1:
+        return False
+    if len(values) == 1:
+        return len(row) > 1
+    return (row_index, min_col) in merged_values
+
+
+def _split_caption_rows(
+    rows: list[list[Any]],
+    min_row: int,
+    min_col: int,
+    merged_values: dict[tuple[int, int], Any],
+) -> tuple[list[str], list[list[Any]]]:
+    """Peel title/source rows off the top so the first table row is the header."""
+    captions: list[str] = []
+    while len(rows) > 1 and _is_caption_row(rows[0], min_row + len(captions), min_col, merged_values):
+        remaining = rows[1:]
+        if not any(len([v for v in row if not _is_empty(v)]) >= 2 for row in remaining):
+            break
+        captions.append(_format_cell_value(next(value for value in rows[0] if not _is_empty(value))))
+        rows = remaining
+    return captions, rows
+
+
+def _column_alignments(rows: list[list[Any]]) -> list[str]:
+    if not rows:
+        return []
+
+    width = len(rows[0])
+    alignments: list[str] = []

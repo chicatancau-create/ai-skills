@@ -1,0 +1,36 @@
+| `native-payloads/`, `analysis/` | Immutable native backing and tool-owned contracts | Tool-written; do not read, edit, or quote them |
+| `sources/source.pptx` | Exact source package | Read only through `source_to_md/ppt_to_md.py "<workspace>/sources/source.pptx" -o "<workspace>/validation/source_readback.md"` when you need page text without opening every SVG |
+| `validation/`, `exports/` | Diagnostics and published decks | Tool-written |
+
+**Hard rule — source proxies are atomic**: an `<image data-pptx-source-proxy="native-restore">` stands for an unsupported native object (SmartArt, complex effects, media frames). Leave it to restore the original; a Slide-local proxy may be deleted (an externally linked picture proxy must stay), an inherited Master/Layout proxy stays; editing a proxy or its preview asset fails export.
+
+---
+
+## 4. Plan the Output Deck
+
+**Defaults (may override when the user fixes the mapping, asks to preserve order, or asks for new pages)**: treat the roster as a slide library, not an outline — a source page's layout encodes a rhetorical shape (hero statement, lead-then-detail, comparison, progression, metric row, dense explanation), so match each message to a page whose structure expresses the same logic and drop content or the page rather than force a fit; the target story controls order, so source slides may move, drop, or repeat; the source deck is the skeleton — most output pages keep a source structure, sub-content recombines freely, and new pages appear where the story needs them.
+
+### 4.1 Page plan
+
+Write `page_plan.json` at the workspace root only when the output differs from the source roster (subset, reorder, repeat, or a copied page); without it export is the identity round trip.
+
+```json
+{
+  "schema": "ppt-master.roundtrip-page-plan.v1",
+  "pages": [
+    {"source_slide": 1},
+    {"source_slide": 4, "svg": "chapter_market.svg"},
+    {"source_slide": 7},
+    {"source_slide": 7, "svg": "kpi_second_half.svg"}
+  ]
+}
+```
+
+`pages` is the complete non-empty output order; `source_slide` is the one-based source index whose native slide backs the page; `svg` is the authoring filename inside `authoring-svg-flat/`, omitted to use that page's `slide_NN.svg` — to reuse a source page twice, list a copy of its SVG renamed for its content (the stem also keys its notes and motion row), since every output page needs a distinct file and every extra file must appear in the plan. Only these fields are accepted. **Forbidden — plans the exporter refuses**: a same-deck slide jump whose destination is omitted or repeated; unknown, duplicated, or cross-owned `svg` filenames; `source_slide` out of range. Omitting a slide drops the audio, video, or undecodable payloads only it owns (export prints a note). With a plan, presentation-level sections, custom shows, and a playback selection naming one are dropped and slide ids renumbered; every Master and Layout stays byte-for-byte, and a kept slide's theme override keeps its content under a new part name.
+
+**Combining pages**: one output page has exactly one skeleton (`source_slide`). To merge, pick the page whose layout carries the result, then bring objects from other pages only through the adopt command — never pasted raw SVG, because source refs are page-local. The adopted object materializes its effective inherited presentation attributes and ancestor transforms, loses native identity, and makes the page `rebuilt`; a source proxy cannot leave its page, so a merge that needs one keeps that page as the skeleton. The object lands at the end of the target page for normal editing.
+
+```bash
+python3 skills/ppt-master/scripts/svg_authoring_view.py "projects/<slug>_<YYYYMMDD>/authoring-svg-flat" --adopt-object slide_05.svg:<element-id> --into chapter_market.svg
+```
+

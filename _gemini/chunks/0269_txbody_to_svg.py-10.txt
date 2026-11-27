@@ -1,0 +1,131 @@
+            return face
+    return None
+
+
+def _theme_script_from_lang(lang: str | None) -> str | None:
+    """Map a DrawingML language tag to one theme supplemental-script key."""
+    if not lang:
+        return None
+    normalized = lang.strip().replace("_", "-").lower()
+    if not normalized:
+        return None
+    parts = normalized.split("-")
+    primary = parts[0]
+    if primary == "ja":
+        return "Jpan"
+    if primary == "ko":
+        return "Hang"
+    if primary != "zh":
+        return None
+    if any(part in {"hant", "cht", "tw", "hk", "mo"} for part in parts[1:]):
+        return "Hant"
+    return "Hans"
+
+
+def _theme_script_from_text(text: str) -> str | None:
+    """Infer a CJK theme script from glyph ranges, defaulting plain Han to Hans."""
+    if any(
+        0x3100 <= ord(char) <= 0x312F
+        or 0x31A0 <= ord(char) <= 0x31BF
+        for char in text
+    ):
+        return "Hant"
+    return {
+        "ko-KR": "Hang",
+        "ja-JP": "Jpan",
+        "zh-CN": "Hans",
+    }.get(detect_text_lang(text))
+
+
+def _run_theme_script(
+    text: str,
+    lang: str | None,
+    alt_lang: str | None,
+) -> str | None:
+    """Resolve EA script from run language first, then alternate language/text."""
+    return (
+        _theme_script_from_lang(lang)
+        or _theme_script_from_lang(alt_lang)
+        or _theme_script_from_text(text)
+    )
+
+
+def _resolve_theme_typeface(
+    face: str | None,
+    theme_fonts: dict[str, str],
+    *,
+    text: str = "",
+    lang: str | None = None,
+    alt_lang: str | None = None,
+) -> str | None:
+    """Resolve DrawingML major/minor Latin, EA, and complex-script tokens."""
+    if not face or not face.startswith("+"):
+        return face
+    code = face[1:]
+    if code == "mj-lt":
+        return theme_fonts.get("majorLatin") or face
+    if code == "mn-lt":
+        return theme_fonts.get("minorLatin") or face
+    if code in {"mj-ea", "mn-ea"}:
+        prefix = "major" if code.startswith("mj") else "minor"
+        script = _run_theme_script(text, lang, alt_lang)
+        script_face = (
+            theme_fonts.get(f"{prefix}Script{script}")
+            if script is not None else None
+        )
+        return (
+            theme_fonts.get(f"{prefix}EastAsia")
+            or script_face
+            or theme_fonts.get(f"{prefix}Latin")
+            or face
+        )
+    if code == "mj-cs":
+        return (
+            theme_fonts.get("majorComplexScript")
+            or theme_fonts.get("majorLatin")
+            or face
+        )
+    if code == "mn-cs":
+        return (
+            theme_fonts.get("minorComplexScript")
+            or theme_fonts.get("minorLatin")
+            or face
+        )
+    return face
+
+
+def _build_font_stack(latin: str | None, ea: str | None, cs: str | None) -> str:
+    """Build a CSS font-family stack: original PPT names first, then fallbacks."""
+    parts: list[str] = []
+    seen: set[str] = set()
+    for face in (latin, ea, cs):
+        if face and face not in seen:
+            parts.append(_quote_font(face))
+            seen.add(face)
+    # Generic fallback so the browser can render even if PPT fonts are absent.
+    parts.append("sans-serif")
+    return ", ".join(parts)
+
+
+def _quote_font(name: str) -> str:
+    """Quote a font name if it contains spaces or non-ASCII chars.
+
+    Uses XML entity-escaped double quotes (&quot;) so the resulting CSS string
+    survives being embedded inside an SVG attribute that itself uses double
+    quotes. CSS parsers accept the unescaped form after attribute parsing.
+    """
+    if any(c.isspace() or ord(c) > 127 for c in name):
+        return f"&quot;{name}&quot;"
+    return name
+
+
+def _resolve_bullet_prefix(
+    sources: tuple[ET.Element | None, ...],
+    level: int,
+    autonum_state: dict[int, int],
+) -> str:
+    """Render bullet glyphs / numbering as a literal text prefix."""
+    bu_none = _child_chain(sources, "a:buNone")
+    if bu_none is not None:
+        autonum_state.pop(level, None)
+        return ""

@@ -1,0 +1,101 @@
+                elem
+                for elem in anchor.iter()
+                if any(elem.get(name) is not None for name in ("x", "y", "dx", "dy"))
+            ]
+            if positioned:
+                errors.append(
+                    f"{label}: inline hyperlink cannot own x/y/dx/dy; "
+                    "put line positioning on an enclosing <tspan>"
+                )
+            direct_parent = parent_by_id.get(id(anchor))
+            if (
+                direct_parent is not None
+                and _local_name(direct_parent) == "text"
+                and (
+                    direct_parent.get("data-paragraph-line-height") is not None
+                    or any(
+                        _local_name(sibling) == "tspan"
+                        and any(
+                            sibling.get(name) is not None
+                            for name in ("x", "y", "dx", "dy")
+                        )
+                        for sibling in list(direct_parent)
+                    )
+                )
+            ):
+                errors.append(
+                    f"{label}: multi-line hyperlinks must be nested inside "
+                    "the owning line <tspan>"
+                )
+            visible_text = "".join(anchor.itertext())
+            if not visible_text.strip():
+                errors.append(f"{label}: inline hyperlink must contain visible text")
+        else:
+            if anchor.text and anchor.text.strip():
+                errors.append(
+                    f"{label}: shape hyperlink cannot contain direct text; "
+                    "wrap text in <text>"
+                )
+            visible_children = [
+                child for child in children
+                if child.get("data-pptx-part") != "geometry-detail"
+            ]
+            if not visible_children:
+                errors.append(
+                    f"{label}: shape hyperlink must wrap at least one visual element"
+                )
+            if any(_local_name(child) == "tspan" for child in children):
+                errors.append(
+                    f"{label}: shape hyperlink cannot contain a bare <tspan>; "
+                    "wrap inline runs in <text>"
+                )
+
+    for index, carrier in enumerate(
+        (
+            elem
+            for elem in root.iter()
+            if elem.get(SHAPE_HYPERLINK_ATTR) is not None
+        ),
+        1,
+    ):
+        label = carrier.get("id") or f"shape hyperlink transport {index}"
+        raw_target = carrier.get(SHAPE_HYPERLINK_ATTR) or ""
+        try:
+            parse_hyperlink_target(raw_target, slide_count=slide_count)
+        except HyperlinkContractError as exc:
+            errors.append(f"{label}: {exc}")
+        if _local_name(carrier) != "g":
+            errors.append(
+                f"{label}: {SHAPE_HYPERLINK_ATTR} is allowed only on <g>"
+            )
+        ancestors: list[ET.Element] = []
+        current = parent_by_id.get(id(carrier))
+        while current is not None:
+            ancestors.append(current)
+            current = parent_by_id.get(id(current))
+        if any(_local_name(elem) == "a" for elem in ancestors):
+            errors.append(
+                f"{label}: {SHAPE_HYPERLINK_ATTR} cannot be nested in <a>"
+            )
+        inline_anchors = [
+            elem
+            for elem in carrier.iter(f"{{{SVG_NS}}}a")
+            if any(
+                _local_name(ancestor) in _INLINE_CONTAINER_TAGS
+                for ancestor in _ancestors_of(elem, parent_by_id)
+            )
+        ]
+        if not inline_anchors:
+            errors.append(
+                f"{label}: {SHAPE_HYPERLINK_ATTR} is reserved for PPTX "
+                "round-trip groups that also contain inline hyperlinks"
+            )
+    return errors
+
+
+def _ancestors_of(
+    elem: ET.Element,
+    parent_by_id: dict[int, ET.Element],
+) -> list[ET.Element]:
+    """Return ancestors from nearest parent to the SVG root."""
+    ancestors: list[ET.Element] = []

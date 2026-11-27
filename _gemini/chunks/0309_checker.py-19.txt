@@ -1,0 +1,91 @@
+                        source_ref = candidate
+                current = parent_by_id.get(id(current))
+            if source_proxy:
+                continue
+            if source_owner is not None and source_ref is not None:
+                record = source_document.source_refs.get(source_ref)
+                if record is not None and record.representation == 'source-proxy':
+                    continue
+                owner_key = id(source_owner)
+                unchanged = unchanged_by_owner.get(owner_key)
+                if unchanged is None:
+                    baseline_owner = baseline_by_ref.get(source_ref)
+                    unchanged = bool(
+                        record is not None
+                        and baseline_owner is not None
+                        and authoring_source_ref_is_unchanged(
+                            source_owner,
+                            baseline_owner,
+                            current_assets,
+                            baseline_assets,
+                            changed_definition_ids=changed_definition_ids,
+                            current_root=root,
+                            baseline_root=baseline_root,
+                        )
+                    )
+                    unchanged_by_owner[owner_key] = unchanged
+                if unchanged:
+                    unchanged_text.add(id(text_element))
+                    continue
+                # The owner changed, but this text may be one of the owner's
+                # source texts moved vertically or left alone while a sibling
+                # was edited: same runs, same x, same anchor. The source deck
+                # already proved that it fits its frame, so it calibrates the
+                # estimator instead of being re-estimated against it.
+                baseline_owner = baseline_by_ref.get(source_ref)
+                if baseline_owner is not None:
+                    pool = baseline_signatures.get(owner_key)
+                    if pool is None:
+                        pool = Counter(
+                            SVGQualityChecker._roundtrip_text_signature(
+                                baseline_text,
+                                baseline_parent_by_id,
+                            )
+                            for baseline_text in baseline_owner.iter(
+                                f'{{{SVG_NS}}}text'
+                            )
+                        )
+                        baseline_signatures[owner_key] = pool
+                    signature = SVGQualityChecker._roundtrip_text_signature(
+                        text_element,
+                        parent_by_id,
+                    )
+                    if pool[signature] > 0:
+                        pool[signature] -= 1
+                        unchanged_text.add(id(text_element))
+                        continue
+            included.add(id(text_element))
+        return included, unchanged_text
+
+    @staticmethod
+    def _roundtrip_text_signature(
+        text_element: ET.Element,
+        parent_by_id: Dict[int, ET.Element],
+    ) -> Tuple:
+        """Width-relevant identity of one text: runs, style, x, anchor."""
+        clone = copy.deepcopy(text_element)
+        for node in clone.iter():
+            for name in ('y', 'dy', 'id'):
+                node.attrib.pop(name, None)
+            if node is not clone:
+                node.attrib.pop('x', None)
+        clone.attrib.pop('x', None)
+        effective = tuple(
+            (
+                name,
+                _effective_presentation_value(text_element, name, parent_by_id)
+                if _effective_presentation_value is not None
+                else text_element.get(name),
+            )
+            for name in (
+                'font-family',
+                'font-size',
+                'font-weight',
+                'font-style',
+                'letter-spacing',
+                'text-anchor',
+            )
+        )
+        return (
+            text_element.get('x'),
+            effective,

@@ -1,0 +1,102 @@
+                return f'{recommendations_file.name} selection_sha256 must match template_selection.json'
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        return f'template selection or installation is not ready: {exc}'
+    return None
+
+
+def _resolve_template_confirmation(
+    payload: dict,
+    candidates: dict[str, dict],
+    options_sha256: str,
+    project_path: Path,
+) -> dict:
+    """Resolve browser keys against the current server-owned candidate set."""
+    required_fields = {'mode', 'selection_keys'}
+    if set(payload) != required_fields:
+        raise ValueError('template confirmation accepts only mode and selection_keys')
+    mode = payload.get('mode')
+    if mode not in {'free_design', 'templates'}:
+        raise ValueError('mode must be free_design or templates')
+    selection_keys = payload.get('selection_keys')
+    if not isinstance(selection_keys, list):
+        raise ValueError('selection_keys must be an array')
+    if any(not isinstance(key, str) or not key for key in selection_keys):
+        raise ValueError('selection_keys must contain non-empty strings')
+    if len(selection_keys) != len(set(selection_keys)):
+        raise ValueError('selection_keys must not contain duplicates')
+    if mode == 'free_design' and selection_keys:
+        raise ValueError('free_design cannot carry selection_keys')
+    if mode == 'templates' and not selection_keys:
+        raise ValueError('templates mode requires at least one selection key')
+
+    unknown_keys = [key for key in selection_keys if key not in candidates]
+    if unknown_keys:
+        raise ValueError(
+            'selection_keys contains unavailable candidate keys: '
+            + ', '.join(unknown_keys)
+        )
+    selections = sorted([
+        _template_selection_from_candidate(candidates[key])
+        for key in selection_keys
+    ], key=lambda item: (
+        item['source'],
+        item.get('kind', ''),
+        item.get('id', ''),
+        item['workspace_root'],
+    ))
+    from apply_template import snapshot_template_roots
+
+    _validate_explicit_root_closure(selections, candidates)
+    root_snapshots = snapshot_template_roots(
+        project_path, sorted({item['workspace_root'] for item in selections}),
+    )
+    selection_sha256 = _template_selection_sha256(
+        mode,
+        selections,
+        options_sha256,
+        root_snapshots,
+    )
+    receipt = {
+        'schema_version': TEMPLATE_SCHEMA_VERSION,
+        'phase': 'template',
+        'status': 'confirmed',
+        'mode': mode,
+        'selections': selections,
+        'options_sha256': options_sha256,
+        'selection_sha256': selection_sha256,
+        'confirmed_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
+        'root_snapshots': root_snapshots,
+    }
+    _validate_template_selection(receipt)
+    return receipt
+
+
+def _confirmation_launch_error(confirm_dir: Path) -> Optional[str]:
+    """Allow a new recommendation revision or resume its existing selection."""
+    error = _stage1_ready_error(confirm_dir)
+    if error:
+        return error
+    result_file = confirm_dir / RESULT_NAME
+    if _fresh_template_restart(confirm_dir) or not result_file.exists():
+        return None
+    if _result_stage(result_file) == 'final':
+        return 'the previous run is complete; revise recommendations.stage1.json (revision for a new round)'
+    try:
+        _read_template_selection(confirm_dir / TEMPLATE_SELECTION_NAME)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        return f'invalid template selection: {exc}'
+    return None
+
+
+def _server_url(port: int, path: str = '') -> str:
+    """Return the loopback URL shown to users and used by readiness probes."""
+    suffix = path if path.startswith('/') or not path else f'/{path}'
+    return f'http://{PUBLIC_HOST}:{port}{suffix}'
+
+
+def _wait_for_server_ready(
+    port: int,
+    proc: subprocess.Popen,
+    project_path: Path,
+    timeout: int = STARTUP_TIMEOUT,
+) -> int:

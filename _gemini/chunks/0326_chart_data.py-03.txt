@@ -1,0 +1,128 @@
+        index_value = _number(raw_index, "data_labels.points idx")
+        if not index_value.is_integer():
+            raise RuntimeError("Native PPTX chart data_labels.points idx must be an integer")
+        index = int(index_value)
+        if index < 0 or index >= point_count:
+            raise RuntimeError("Native PPTX chart data_labels.points idx is outside point range")
+        if index in seen:
+            raise RuntimeError("Native PPTX chart data_labels.points idx values must be unique")
+        _data_label_position(
+            _first_present(data.get("position"), config.get("position")),
+            chart_type,
+            grouping,
+        )
+        if data.get("delete") is not None and not isinstance(data["delete"], bool):
+            raise RuntimeError(
+                "Native PPTX chart data_labels.points delete must be a boolean"
+            )
+        if data.get("text") is not None and (
+            not isinstance(data["text"], str) or not data["text"]
+        ):
+            raise RuntimeError(
+                "Native PPTX chart data_labels.points text must be a non-empty string"
+            )
+        seen.add(index)
+        data["idx"] = index
+        items.append(data)
+    return items
+
+
+_CATEGORY_CHART_TYPES = {
+    "area",
+    "bar",
+    "column",
+    "doughnut",
+    "line",
+    "of_pie",
+    "pie",
+    "radar",
+}
+_XY_CHART_TYPES = {"scatter", "bubble"}
+_CHARTEX_CHART_TYPES = {
+    "box_whisker",
+    "funnel",
+    "histogram",
+    "pareto",
+    "sunburst",
+    "treemap",
+    "waterfall",
+}
+_DEFERRED_CHART_TYPES = {
+    "bullet",
+    "gantt",
+    "heatmap",
+    "map",
+}
+_UNSUPPORTED_3D_CHART_TYPES = {
+    "area3d",
+    "bar3d",
+    "column3d",
+    "line3d",
+    "pie3d",
+    "surface",
+}
+_DEFAULT_CHART_COLORS = [
+    "4472C4",
+    "ED7D31",
+    "A5A5A5",
+    "FFC000",
+    "5B9BD5",
+    "70AD47",
+    "264478",
+    "9E480E",
+]
+
+_AXIS_ROLE_DEFAULTS = {
+    "category": ("text", "bottom"),
+    "secondary_category": ("text", "bottom"),
+    "secondary_value": ("value", "right"),
+    "value": ("value", "left"),
+    "x": ("value", "bottom"),
+    "y": ("value", "left"),
+}
+
+
+def _chart_axes(
+    payload: dict[str, Any],
+    allowed_roles: set[str],
+    *,
+    bar_orientation: bool = False,
+) -> dict[str, dict[str, Any]]:
+    """Normalize the narrow classic-chart axis contract."""
+    raw_axes = payload.get("axes")
+    if raw_axes is None:
+        return {}
+    if not isinstance(raw_axes, dict):
+        raise RuntimeError("Native PPTX chart axes must be an object")
+
+    unknown_roles = set(raw_axes) - allowed_roles
+    if unknown_roles:
+        roles = ", ".join(sorted(unknown_roles))
+        raise RuntimeError(f"Native PPTX chart axes contains unsupported role(s): {roles}")
+
+    axes: dict[str, dict[str, Any]] = {}
+    for role, raw_config in raw_axes.items():
+        if not isinstance(raw_config, dict):
+            raise RuntimeError(f"Native PPTX chart axes.{role} must be an object")
+        allowed_fields = {
+            "color", "cross_between", "font_family", "font_size", "kind",
+            "label_position", "major_gridlines", "major_unit", "maximum",
+            "minimum", "number_format", "position", "reverse", "tick_marks",
+            "visible",
+        }
+        unknown_fields = set(raw_config) - allowed_fields
+        if unknown_fields:
+            fields = ", ".join(sorted(unknown_fields))
+            raise RuntimeError(
+                f"Native PPTX chart axes.{role} contains unsupported field(s): {fields}"
+            )
+        default_kind, default_position = _AXIS_ROLE_DEFAULTS[role]
+        if bar_orientation and role == "category":
+            default_position = "left"
+        elif bar_orientation and role == "value":
+            default_position = "bottom"
+        kind = _compact_key(raw_config.get("kind") or default_kind)
+        if kind not in {"date", "text", "value"}:
+            raise RuntimeError(
+                f"Native PPTX chart axes.{role}.kind must be date, text, or value"
+            )

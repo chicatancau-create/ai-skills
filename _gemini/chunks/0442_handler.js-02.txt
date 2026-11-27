@@ -1,0 +1,157 @@
+  return (
+    value.virtual === true ||
+    (typeof value.content === 'string' && value.content.includes(REMINDER_HEADER))
+  );
+}
+
+function redactSensitiveText(text) {
+  let result = text;
+  for (const [pattern, replacement] of REDACTION_RULES) {
+    result = result.replace(pattern, replacement);
+  }
+  return result;
+}
+
+function sanitizeExcerptLine(line) {
+  let excerpt = redactSensitiveText(line.trim()).split('```').join("'''");
+  if (excerpt.length > MAX_EXCERPT_LENGTH) {
+    excerpt = `${excerpt.slice(0, MAX_EXCERPT_LENGTH)}…`;
+  }
+  return excerpt;
+}
+
+function collectTextFragments(value, out, depth = 0) {
+  if (depth > 4 || out.length > 200) {
+    return;
+  }
+  if (typeof value === 'string') {
+    out.push(value);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectTextFragments(item, out, depth + 1);
+    }
+    return;
+  }
+  if (isObject(value)) {
+    if (typeof value.text === 'string') {
+      out.push(value.text);
+    }
+    if ('content' in value) {
+      collectTextFragments(value.content, out, depth + 1);
+    }
+  }
+}
+
+function matchErrorPatternKey(line) {
+  for (const [pattern, patternKey] of ERROR_PATTERN_KEYS) {
+    if (line.includes(pattern)) {
+      return patternKey;
+    }
+  }
+  return null;
+}
+
+async function scanTranscriptForErrors(sessionFilePath) {
+  let raw;
+  try {
+    raw = await fs.readFile(sessionFilePath, 'utf-8');
+  } catch {
+    return [];
+  }
+
+  const excerpts = [];
+  const seen = new Set();
+
+  for (const jsonLine of raw.split('\n')) {
+    if (excerpts.length >= MAX_EXCERPTS) {
+      break;
+    }
+    const trimmed = jsonLine.trim();
+    if (!trimmed) {
+      continue;
+    }
+
+    let entry;
+    try {
+      entry = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (!isObject(entry) || !isObject(entry.message)) {
+      continue;
+    }
+
+    const fragments = [];
+    collectTextFragments(entry.message.content, fragments);
+
+    for (const fragment of fragments) {
+      for (const line of fragment.split('\n')) {
+        const patternKey = matchErrorPatternKey(line);
+        if (!patternKey) {
+          continue;
+        }
+        const excerpt = sanitizeExcerptLine(line);
+        if (!excerpt || seen.has(excerpt)) {
+          continue;
+        }
+        seen.add(excerpt);
+        excerpts.push({ excerpt, patternKey });
+        if (excerpts.length >= MAX_EXCERPTS) {
+          return excerpts;
+        }
+      }
+    }
+  }
+
+  return excerpts;
+}
+
+function resolveSessionFilePath(context, workspaceDir) {
+  const sessionEntry = isObject(context.previousSessionEntry)
+    ? context.previousSessionEntry
+    : isObject(context.sessionEntry)
+      ? context.sessionEntry
+      : {};
+
+  if (typeof sessionEntry.sessionFile === 'string' && sessionEntry.sessionFile.trim()) {
+    return sessionEntry.sessionFile;
+  }
+
+  const sessionId =
+    typeof sessionEntry.sessionId === 'string' ? sessionEntry.sessionId.trim() : '';
+  if (sessionId && workspaceDir) {
+    return path.join(workspaceDir, 'sessions', `${sessionId}.jsonl`);
+  }
+
+  return undefined;
+}
+
+function generateEntryId(timestamp) {
+  const yyyymmdd = timestamp.toISOString().slice(0, 10).replace(/-/g, '');
+  const suffix = Math.random().toString(36).slice(2, 5).toUpperCase().padEnd(3, '0');
+  return `ERR-${yyyymmdd}-${suffix}`;
+}
+
+function formatErrorEntry(params) {
+  const { excerpts, sessionKey, sessionFilePath, action, timestamp } = params;
+  const plural = excerpts.length === 1 ? '' : 's';
+  const patternKeys = [...new Set(excerpts.map((item) => item.patternKey))];
+
+  return [
+    `## [${generateEntryId(timestamp)}] openclaw_session_sweep`,
+    '',
+    `**Logged**: ${timestamp.toISOString()}`,
+    '**Priority**: medium',
+    '**Status**: pending',
+    '**Area**: config',
+    '',
+    '### Summary',
+    `Session-end sweep detected ${excerpts.length} possible error${plural} in the previous OpenClaw session.`,
+    '',
+    '### Error',
+    '```',
+    ...excerpts.map((item) => item.excerpt),
+    '```',
+    '',

@@ -1,0 +1,112 @@
+    if set(actual) != set(expected):
+        errors.append(
+            f"{context} placeholder idx roster is {sorted(actual)}, "
+            f"expected {sorted(expected)}"
+        )
+    for idx in sorted(set(actual).intersection(expected)):
+        placeholder = actual[idx]
+        binding = expected[idx]
+        if placeholder.placeholder_type != binding.placeholder_type:
+            errors.append(
+                f"{context} placeholder idx {idx} has type "
+                f"{placeholder.placeholder_type!r}, expected "
+                f"{binding.placeholder_type!r}"
+            )
+        if binding.assigned_idx is None:
+            if placeholder.raw_idx is not None:
+                errors.append(
+                    f"{context} title placeholder must use the omitted idx=0 form"
+                )
+        elif placeholder.raw_idx != binding.assigned_idx:
+            errors.append(
+                f"{context} placeholder idx {idx} must serialize explicit idx "
+                f"{binding.assigned_idx}"
+            )
+        if is_layout and placeholder.raw_type is None:
+            errors.append(
+                f"{context} Layout placeholder idx {idx} must serialize its type"
+            )
+        if (
+            not is_layout
+            and binding.placeholder_type != "obj"
+            and placeholder.raw_type is None
+        ):
+            errors.append(
+                f"{context} Slide placeholder idx {idx} must serialize type "
+                f"{binding.placeholder_type!r}"
+            )
+    return actual
+
+
+def _validate_layout_header_footer(
+    root: ET.Element,
+    bindings: tuple[TemplatePlaceholderBinding, ...],
+    context: str,
+    errors: list[str],
+) -> None:
+    placeholder_roles = {
+        binding.element.placeholder for binding in bindings
+    }
+    expected = {
+        "hdr": False,
+        "dt": "date" in placeholder_roles,
+        "ftr": "footer" in placeholder_roles,
+        "sldNum": "slide-number" in placeholder_roles,
+    }
+    header_footer = root.find(f"{{{PML_NS}}}hf")
+    if header_footer is None:
+        if any(expected.values()):
+            errors.append(
+                f"{context} has date/footer/slide-number placeholders but no p:hf"
+            )
+        return
+    for attr, expected_value in expected.items():
+        # CT_HeaderFooter boolean attributes default to true when omitted.
+        raw_value = header_footer.get(attr, "1").lower()
+        if raw_value not in {"0", "1", "false", "true"}:
+            errors.append(f"{context} p:hf@{attr} is not a valid boolean")
+            continue
+        actual_value = raw_value in {"1", "true"}
+        if actual_value != expected_value:
+            errors.append(
+                f"{context} p:hf@{attr} is {raw_value!r}, expected "
+                f"{'1' if expected_value else '0'}"
+            )
+
+
+def _shape_bounds(
+    shape: ET.Element,
+    context: str,
+    errors: list[str],
+) -> tuple[int, int, int, int] | None:
+    if shape.tag == f"{{{PML_NS}}}graphicFrame":
+        xfrm = shape.find(f"{{{PML_NS}}}xfrm")
+    else:
+        xfrm = shape.find(f"{{{PML_NS}}}spPr/{{{DML_NS}}}xfrm")
+    if xfrm is None:
+        errors.append(f"{context} has no direct placeholder transform")
+        return None
+    off = xfrm.find(f"{{{DML_NS}}}off")
+    ext = xfrm.find(f"{{{DML_NS}}}ext")
+    if off is None or ext is None:
+        errors.append(f"{context} placeholder transform has no a:off/a:ext")
+        return None
+    try:
+        bounds = (
+            int(off.attrib["x"]),
+            int(off.attrib["y"]),
+            int(ext.attrib["cx"]),
+            int(ext.attrib["cy"]),
+        )
+    except (KeyError, ValueError):
+        errors.append(f"{context} placeholder transform is invalid")
+        return None
+    if bounds[2] <= 0 or bounds[3] <= 0:
+        errors.append(f"{context} placeholder width/height must be positive")
+    return bounds
+
+
+def _direct_text_body(shape: ET.Element) -> ET.Element | None:
+    return shape.find(f"{{{PML_NS}}}txBody")
+
+

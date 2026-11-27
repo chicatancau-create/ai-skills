@@ -1,0 +1,151 @@
+✅ Authorization: Bearer eyJhbGci...      (header)
+❌ GET /users?token=eyJhbGci...            (URL — appears in logs)
+
+✅ 401 → "Who are you?"  (missing/invalid credentials)
+✅ 403 → "You can't do this"  (authenticated, no permission)
+✅ 404 → Hide resource existence  (use instead of 403 when needed)
+```
+
+**Rate Limit Headers (always include):**
+```
+X-RateLimit-Limit: 100
+X-RateLimit-Remaining: 42
+X-RateLimit-Reset: 1625097600
+Retry-After: 30
+```
+
+---
+
+## 6. Pagination & Filtering (HIGH)
+
+### Cursor vs Offset
+
+| Strategy | When | Pros | Cons |
+|----------|------|------|------|
+| **Cursor** (preferred) | Large/dynamic datasets | Consistent, no skips | Can't jump to page N |
+| **Offset** | Small/stable datasets, admin UIs | Simple, page jumps | Drift on insert/delete |
+
+**Cursor pagination response:**
+```json
+{
+  "data": [...],
+  "pagination": { "next_cursor": "eyJpZCI6MTIwfQ", "has_more": true }
+}
+```
+
+**Offset pagination response:**
+```json
+{
+  "data": [...],
+  "pagination": { "page": 3, "per_page": 20, "total": 256, "total_pages": 13 }
+}
+```
+
+**Always enforce:** Default 20 items, max 100 items.
+
+### Standard Filter Patterns
+
+```
+GET /orders?status=shipped&created_after=2025-01-01&sort=-created_at&fields=id,status
+```
+
+| Pattern | Convention |
+|---------|-----------|
+| Exact match | `?status=shipped` |
+| Range | `?price_gte=10&price_lte=100` |
+| Date range | `?created_after=2025-01-01&created_before=2025-12-31` |
+| Sort | `?sort=field` (asc), `?sort=-field` (desc) |
+| Sparse fields | `?fields=id,name,email` |
+| Search | `?q=search+term` |
+
+---
+
+## 7. Versioning (MEDIUM-HIGH)
+
+| Strategy | Format | Best For |
+|----------|--------|----------|
+| **URL path** (recommended) | `/v1/users` | Public APIs |
+| **Header** | `Api-Version: 2` | Internal APIs |
+| **Query param** | `?version=2` | Legacy (avoid) |
+
+**Non-breaking changes (no version bump):** New optional response fields, new endpoints, new optional params.
+
+**Breaking changes (new version required):** Removing/renaming fields, changing types, stricter validation, removing endpoints.
+
+**Deprecation headers:**
+```
+Sunset: Sat, 01 Mar 2026 00:00:00 GMT
+Deprecation: true
+Link: <https://api.example.com/v2/users>; rel="successor-version"
+```
+
+---
+
+## 8. Request / Response Design (MEDIUM)
+
+### Consistent Envelope
+
+```json
+{
+  "data": { "id": "ord_123", "status": "pending", "total": 99.50 },
+  "meta": { "request_id": "req_abc123", "timestamp": "2025-06-15T10:30:00Z" }
+}
+```
+
+### Key Rules
+
+| Rule | Correct | Wrong |
+|------|---------|-------|
+| Timestamps | `"2025-06-15T10:30:00Z"` (ISO 8601) | `"06/15/2025"` or `1718447400` |
+| Public IDs | UUID `"550e8400-..."` | Auto-increment `42` |
+| Null vs absent (PATCH) | `{ "nickname": null }` = clear field | Absent field = don't change |
+| HATEOAS (public APIs) | `"links": { "cancel": "/orders/123/cancel" }` | No discoverability |
+
+---
+
+## 9. Documentation — OpenAPI (MEDIUM)
+
+**Design-first workflow:**
+
+```
+1. Write OpenAPI 3.1 spec
+2. Review spec with stakeholders
+3. Generate server stubs + client SDKs
+4. Implement handlers
+5. Validate responses against spec in CI
+```
+
+Every endpoint documents: summary, all parameters, request body + examples, all response codes + schemas, auth requirements.
+
+---
+
+## 10. API Style Decision Tree
+
+```
+What kind of API?
+│
+├─ Browser + mobile clients, flexible queries
+│   └─ GraphQL
+│       Rules: DataLoader (no N+1), depth limit ≤7, Relay pagination
+│
+├─ Standard CRUD, public consumers, caching important
+│   └─ REST (this guide)
+│       Rules: Resources, HTTP methods, status codes, OpenAPI
+│
+├─ Service-to-service, high throughput, strong typing
+│   └─ gRPC
+│       Rules: Protobuf schemas, streaming for large data, deadlines
+│
+├─ Full-stack TypeScript, same team owns client + server
+│   └─ tRPC
+│       Rules: Shared types, no code generation needed
+│
+└─ Real-time bidirectional
+    └─ WebSocket / SSE
+        Rules: Heartbeat, reconnection, message ordering
+```
+
+---
+
+## Anti-Patterns Checklist
+

@@ -1,0 +1,134 @@
+- **attrs**（全部 optional，但 src 语义必传）:
+  - `src?: string` — 视频地址
+  - `type?: string` — 平台标识（`"bilibili"` / `"youku"` / `"mp4"` 等）
+  - `poster?: string` — 封面图 URL
+- **children**: 无
+- **示例**:
+
+```json
+["onlineVideo", {"uuid": "ov1", "src": "https://example.com/video.mp4"}]
+["onlineVideo", {"uuid": "ov2", "src": "https://player.bilibili.com/player.html?aid=1", "type": "bilibili", "poster": "https://example.com/poster.jpg"}]
+```
+
+### card（河图组件 / 富卡片）
+
+- **tag**: `"card"`
+- **attrs**:
+  - `cardType: string` — 卡片类型标识（如 `"groupChatCard"`、`"vote"`）
+  - `metadata: {id: string, ...}` — 组件元数据，必须包含 id
+  - `height?: number`
+- **children**: 服务端 serialize 通常返回带一个空的 span/leaf 占位子节点，写入时建议保留以避免反序列化差异
+- **示例**:
+
+```json
+["card", {"uuid": "cd1", "cardType": "vote", "metadata": {"id": "card_abc123"}},
+  ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, ""]]]
+```
+
+- **注意**: card 节点的重数据存储在独立 parts 层，body 中只存轻量引用
+
+### toc（目录）
+
+- **tag**: `"toc"`（void 块）
+- **attrs**（全部 **required**，缺失逐个 validator 报错）:
+  - `title: string` — 目录标题
+  - `mode: "outline" | "column"` — 展示模式（其他值 validator 报错 `无效值`）
+  - `styles: object` — 样式配置
+    - `styles.global: {maxLevel: number, bgColor: string, css: object}`
+    - `styles.title: {font: string, color: string, numbering: boolean, css: object}`
+    - `styles.item: {symbol: "disc" | "none", css: object}`
+  - `content: TocItem[]` — 目录条目数组；**写入时填 `[]` 即可**，服务端基于文档 heading 自动重建
+    - 每项: `{uuid, anchorId: string|null, level, children: TocItem[]}`
+- **children**: 无
+- **示例**:
+
+```json
+["toc", {"uuid": "toc1", "title": "目录", "mode": "outline",
+  "styles": {
+    "global": {"maxLevel": 5, "bgColor": "#F0EBF7", "css": {}},
+    "title": {"font": "", "color": "#000", "numbering": false, "css": {}},
+    "item": {"symbol": "disc", "css": {}}
+  },
+  "content": []
+}]
+```
+
+### refblock（引用块）
+
+- **tag**: `"refblock"`
+- **attrs**:
+  - `docKey?: string` — 所属/被引文档标识（语义必传）
+  - `refblockUUID?: string` — 引用块唯一标识（语义必传）
+- **children**: 块级节点（降级显示快照；真实内容由服务端按 docKey/refblockUUID 拉取覆写）
+- **示例**:
+
+```json
+["refblock", {"uuid": "rb1", "docKey": "doc123", "refblockUUID": "block456"},
+  ["p", {"uuid": "rb1p1"}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "（引用预览内容，服务端会回填）"]]]
+]
+```
+
+- **注意**: 主块 (host)：`docKey === refblockUUID`；副块 (copy)：`docKey !== refblockUUID`
+
+---
+
+## Inline 节点
+
+所有 inline 节点 tag 白名单（validator `validInlineTags`）：
+`text`（legacy） / `a` / `img` / `span` / `tag` / `inlineCode` / `br` / `cangjie-textinline` / `cangjie-voidinline`
+
+block tag 也可出现在 inline 上下文（如 `img` 既是 block 又是 inline）。未在白名单的 tag 会触发警告并给出 Levenshtein 建议。
+
+### a（链接）
+
+- **tag**: `"a"`
+- **attrs**（全部 optional，但 href 语义必传）:
+  - `href?: string` — 链接地址（缺失时 validator 警告 `link 缺少 href`）
+  - `cardInfo?: object` — 链接卡片信息
+    - `cardInfo.displayType?: "link" | "card"` — 展示模式
+    - `cardInfo.title?: string`, `cardInfo.desc?: string`, `cardInfo.imgURL?: string`
+  - `metadata?: object` — 扩展业务信息
+- **children**: 链接的展示文本（直接字符串，与 block 上下文不同）
+- **示例**（作为 paragraph 的 inline 子节点）:
+
+```json
+["p", {"uuid": "p1"},
+  ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "请访问"]],
+  ["a", {"href": "https://example.com"}, "链接文字"]
+]
+```
+
+### img（图片）
+
+- **tag**: `"img"`（既可作 block 也可作 inline 子节点）
+- **attrs**（全部 optional，但 src 语义必传）:
+  - `src?: string` — 图片地址
+  - `width?: number` — 宽度（px）
+  - `height?: number` — 高度（px）
+  - `rectClip?: {left?, right?, top?, bottom?}` — 裁剪比例（0-1）
+  - `rotation?: number` — 旋转角度
+  - `radius?: number` — 圆角（px）
+  - `shadow?: string` — CSS shadow
+  - `outline?: {width?, type?, color?}` — 边框
+- **children**: 构造时无需传子节点；真实文档中可能含内部配置数据
+- **示例**:
+
+```json
+["img", {"uuid": "img1", "src": "https://example.com/photo.png", "width": 400, "height": 300}]
+```
+
+- **注意**: 不存在 `layout` 属性，布局由 UI 层控制
+
+### mention（@提及）
+
+- **tag**: `"span"`
+- **attrs**:
+  - `data-type: "mention"` — **必传**，固定标识
+  - `id?: string` — 被@用户 ID（语义必传）
+  - `name?: string` — 被@用户名（语义必传）
+  - `login?: string` — 登录名
+  - `metadata?: object` — 扩展元数据
+- **children**: 显示文本
+- **示例**:
+
+```json

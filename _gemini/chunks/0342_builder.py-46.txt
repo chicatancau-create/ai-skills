@@ -1,0 +1,103 @@
+        referenced_layouts.add(
+            _resolve_package_target(f"ppt/slides/slide{slide_num}.xml", target)
+        )
+
+    pruned = 0
+    content_types_path = extract_dir / "[Content_Types].xml"
+    for master_part in sorted(set(structure.slide_master_parts.values())):
+        master_path = extract_dir / master_part
+        master_rels_path = _relationships_path_for_part(extract_dir, master_part)
+        layout_rels = {
+            rel_id: _resolve_package_target(master_part, attrs.get("Target", ""))
+            for rel_id, attrs in _read_relationships(master_rels_path).items()
+            if attrs.get("Type") == SLIDE_LAYOUT_REL_TYPE
+        }
+        if not any(part in referenced_layouts for part in layout_rels.values()):
+            continue
+
+        master_xml = master_path.read_text(encoding="utf-8")
+        for rel_id, layout_part in sorted(layout_rels.items()):
+            if layout_part in referenced_layouts:
+                continue
+            entry_re = re.compile(
+                rf'[ \t]*<p:sldLayoutId\b[^>]*\br:id="{re.escape(rel_id)}"[^>]*/>[ \t]*\n?'
+            )
+            master_xml, removed = entry_re.subn("", master_xml, count=1)
+            if not removed:
+                raise RuntimeError(
+                    f"Slide master {master_part} has no sldLayoutId entry for {rel_id}"
+                )
+            _remove_relationship(master_rels_path, rel_id)
+            (extract_dir / layout_part).unlink()
+            layout_rels_path = _relationships_path_for_part(extract_dir, layout_part)
+            if layout_rels_path.exists():
+                layout_rels_path.unlink()
+            _remove_content_type_override(content_types_path, layout_part)
+            pruned += 1
+        master_path.write_text(master_xml, encoding="utf-8")
+
+    if verbose and pruned:
+        print(f"  Layout prune: removed {pruned} unused base layout(s)")
+    return pruned
+
+
+def _flat_structure_name(value: str | None) -> str:
+    """Return one compact package identity for a free-design deck."""
+    normalized = " ".join((value or "").split()).strip()
+    return (normalized or "Free Design")[:120]
+
+
+def _flat_placeholder_type(shape: ET.Element) -> str | None:
+    """Return one system placeholder type carried by a top-level shape."""
+    if shape.tag != f"{{{PML_NS}}}sp":
+        return None
+    placeholder = shape.find(
+        f"{{{PML_NS}}}nvSpPr/{{{PML_NS}}}nvPr/{{{PML_NS}}}ph"
+    )
+    return placeholder.get("type") if placeholder is not None else None
+
+
+def _clean_flat_structure_part(
+    part_path: Path,
+    name: str,
+    *,
+    is_layout: bool,
+) -> tuple[int, tuple[str, ...]]:
+    """Keep only standard footer hooks in one project-owned flat shell."""
+    try:
+        tree = ET.parse(part_path)
+    except (OSError, ET.ParseError) as exc:
+        raise RuntimeError(
+            f"Cannot parse flat structure part {part_path}: {exc}"
+        ) from exc
+    root = tree.getroot()
+    common_slide = root.find(f"{{{PML_NS}}}cSld")
+    if common_slide is None:
+        raise RuntimeError(f"Flat structure part has no p:cSld: {part_path}")
+    shape_tree = common_slide.find(f"{{{PML_NS}}}spTree")
+    if shape_tree is None:
+        raise RuntimeError(f"Flat structure part has no p:spTree: {part_path}")
+
+    removed = 0
+    retained: list[str] = []
+    for child in list(shape_tree):
+        if child.tag not in _TOP_LEVEL_SHAPE_TAGS:
+            continue
+        placeholder_type = _flat_placeholder_type(child)
+        if placeholder_type in _FLAT_SYSTEM_PLACEHOLDER_TYPES:
+            retained.append(placeholder_type)
+            continue
+        shape_tree.remove(child)
+        removed += 1
+    for parent in (common_slide, root):
+        for extension_list in parent.findall(f"{{{PML_NS}}}extLst"):
+            parent.remove(extension_list)
+
+    common_slide.set("name", name)
+    if is_layout:
+        root.set("type", "blank")
+        root.set("preserve", "1")
+    _write_xml_tree(part_path, tree)
+    return removed, tuple(retained)
+
+

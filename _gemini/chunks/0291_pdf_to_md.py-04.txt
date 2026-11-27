@@ -1,0 +1,117 @@
+                noise_texts.add(text)
+
+    return noise_texts
+
+
+def _is_hangul(char: str) -> bool:
+    return "\uac00" <= char <= "\ud7a3" or "\u1100" <= char <= "\u11ff" or "\u3130" <= char <= "\u318f"
+
+
+def join_wrapped_text(head: str, tail: str) -> str:
+    """Join two wrapped PDF lines.
+
+    Chinese and Japanese wrap between characters, so a break between wide
+    characters takes no space; Korean spaces its words and wraps at them, so
+    a break touching Hangul keeps one.
+    """
+    if (
+        head and tail
+        and unicodedata.east_asian_width(head[-1]) in {"W", "F"}
+        and unicodedata.east_asian_width(tail[0]) in {"W", "F"}
+        and not (_is_hangul(head[-1]) or _is_hangul(tail[0]))
+    ):
+        return head + tail
+    return f"{head} {tail}"
+
+
+def merge_adjacent_headings(elements: list) -> list:
+    """
+    Merge adjacent same-level short headings.
+    Example: '# Agent Tools &' + '# Interoperability' -> '# Agent Tools & Interoperability'
+    """
+    if not elements:
+        return elements
+
+    merged = []
+    i = 0
+
+    while i < len(elements):
+        el = elements[i]
+
+        # Only process heading elements
+        if el.get("type") != 0 or not el.get("is_heading"):
+            merged.append(el)
+            i += 1
+            continue
+
+        content = el["content"]
+        # Extract heading level
+        match = re.match(r'^(#{1,6})\s+(.+)$', content)
+        if not match:
+            merged.append(el)
+            i += 1
+            continue
+
+        level = match.group(1)
+        title_text = match.group(2)
+
+        # If heading is short and the next one is also the same level, try to merge
+        j = i + 1
+        while j < len(elements) and len(title_text) < 60:
+            next_el = elements[j]
+            if next_el.get("type") != 0 or not next_el.get("is_heading"):
+                break
+
+            next_match = re.match(r'^(#{1,6})\s+(.+)$', next_el["content"])
+            if not next_match or next_match.group(1) != level:
+                break
+
+            next_text = next_match.group(2)
+            # Only merge short heading fragments
+            if len(next_text) > 40:
+                break
+
+            # Merge
+            title_text = join_wrapped_text(title_text, next_text)
+            j += 1
+
+        # Create merged element
+        merged_el = el.copy()
+        merged_el["content"] = f"{level} {title_text}"
+        merged.append(merged_el)
+        i = j
+
+    return merged
+
+
+# Image filtering thresholds
+MIN_IMAGE_PIXELS = 100       # Minimum pixel dimension (width AND height)
+MIN_IMAGE_AREA = 30000       # Minimum pixel area (e.g. 200x150)
+MIN_IMAGE_BYTES = 2048       # Minimum image data size (2KB)
+MIN_PAGE_RATIO = 0.05        # Minimum render size relative to page (5%)
+MIN_VISIBLE_IMAGE_WIDTH = 40
+MIN_VISIBLE_IMAGE_HEIGHT = 40
+MIN_VISIBLE_IMAGE_AREA_RATIO = 0.01
+MAX_ASPECT_RATIO = 12        # Maximum aspect ratio (filters decorative bars)
+MAX_LOW_INFO_BPP = 0.08      # Bytes-per-pixel threshold for low-info images
+MAX_LOW_INFO_AREA = 500000   # Area threshold: only apply bpp filter below this
+MIN_VECTOR_FIGURE_WIDTH = 100
+MIN_VECTOR_FIGURE_HEIGHT = 80
+MIN_VECTOR_FIGURE_AREA = 30000
+MAX_VECTOR_FIGURE_ASPECT_RATIO = 8
+VECTOR_FIGURE_PADDING = 4
+VECTOR_FIGURE_DPI = 180
+VECTOR_CAPTION_SEARCH_HEIGHT = 380
+VECTOR_CAPTION_HORIZONTAL_GAP = 90
+MAX_VECTOR_BACKGROUND_AREA_RATIO = 1.9
+# Caption delimiters: ``Figure 1:`` / ``Figure 1.`` (classic) and ``Figure 1 |``
+# (the DeepMind / Distill / Nature house style used by many ML papers, incl.
+# full-width ``｜``). Without the pipe variants, captioned vector figures route
+# to the generic per-drawing fallback, which discards fine-grained line plots
+# (each plot is hundreds of tiny primitives, none large enough on its own).
+FIGURE_CAPTION_RE = re.compile(r'^(?:Figure|Fig\.?)\s*\d+\s*[:.|｜]', re.IGNORECASE)
+
+
+TABLE_CAPTION_RE = re.compile(
+    r'^\u8868\s*\d+(?:\.\d+)*\s+(?!(?:\u7684|\u5217\u793a|\u6240\u793a|\u4e3a)).+'
+)

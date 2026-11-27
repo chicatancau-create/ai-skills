@@ -1,0 +1,57 @@
+    out = [check_claude(apply_), check_codex(apply_)]
+    # The default window is junctions into the library, so a shell delete of the
+    # window destroys the library (happened 2026-11-15 02:04:06).  Keep a mirror
+    # outside the junction graph and repair from it.
+    if apply_:
+        try:
+            import skill_shield
+            for a in skill_shield.tick(verbose=False):
+                log("shield: " + a)
+                out.append("shield: " + a)
+        except Exception as e:
+            out.append("shield: error %s: %s" % (type(e).__name__, e))
+        # The git remotes are the real backup (user: no local backups).  Keep them
+        # current.  Internally debounced to one attempt per 10 min and only when
+        # the tree actually changed, so this is a no-op on most ticks.
+        try:
+            import git_backup
+            for p, n in git_backup.REPOS:
+                if git_backup.sync(p, n):
+                    out.append("backup: %s pushed" % n)
+        except Exception as e:
+            out.append("backup: error %s: %s" % (type(e).__name__, e))
+        # proxy-guard 看门狗：心跳停跳就重拉（零新增常驻进程，复用本 watch 循环）
+        try:
+            r = proxy_guard_watchdog()
+            if r:
+                out.append(r)
+        except Exception as e:
+            out.append("proxy-guard: error %s: %s" % (type(e).__name__, e))
+    return out
+
+
+def main():
+    args = sys.argv[1:]
+    if "--watch" in args:
+        log("watch started (interval %ds, pid %d)" % (INTERVAL, os.getpid()))
+        prev = None
+        while True:
+            try:
+                res = tick(True)
+                key = tuple(res)
+                if key != prev:
+                    for r in res:
+                        log(r)
+                    prev = key
+            except Exception as e:
+                log("tick error: %s: %s" % (type(e).__name__, e))
+            time.sleep(INTERVAL)
+    apply_ = "--once" in args or "--apply" in args
+    for r in tick(apply_):
+        print(r)
+    if not apply_:
+        print("(report only; use --once to fix, --watch to keep it fixed)")
+
+
+if __name__ == "__main__":
+    main()

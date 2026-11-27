@@ -1,0 +1,101 @@
+            target_tag = (_svg_element_tag(target) or str(target.tag)).lower()
+            is_text_image_fill = (
+                target_tag == 'pattern'
+                and target.get(PROJECT_TEXT_IMAGE_FILL_ATTR) is not None
+            )
+            if is_text_image_fill and not (
+                property_name == 'fill'
+                and elem_tag_lower in {'text', 'tspan'}
+            ):
+                errors.add(
+                    f'<{elem_tag}> {property_name}=url(#{reference_id}) uses a '
+                    'text image fill pattern outside <text>/<tspan>'
+                )
+                continue
+            if target_tag not in allowed_tags:
+                tag_labels = {
+                    'lineargradient': 'linearGradient',
+                    'radialgradient': 'radialGradient',
+                    'pattern': 'pattern',
+                }
+                expected = '/'.join(tag_labels[tag] for tag in allowed_tags)
+                errors.add(
+                    f'<{elem_tag}> {property_name}=url(#{reference_id}) resolves '
+                    f'to <{_svg_element_tag(target) or target.tag}>; expected '
+                    f'{expected}'
+                )
+                continue
+
+            if property_name == 'fill' and elem_tag_lower in {'text', 'tspan'} and target_tag == 'pattern':
+                try:
+                    resolve_project_text_image_fill(target)
+                except ValueError as exc:
+                    errors.add(
+                        f'<{elem_tag}> fill=url(#{reference_id}) has an invalid '
+                        f'text image fill: {exc}'
+                    )
+    return sorted(errors)
+
+
+def project_mask_errors(root: ET.Element) -> list[str]:
+    """Reject SVG masks that native PPTX conversion cannot preserve."""
+    errors: set[str] = set()
+    for elem in root.iter():
+        label = _transform_element_label(elem)
+        if _svg_element_tag(elem) == 'mask':
+            errors.add(
+                f'{label} is an unsupported SVG mask definition; replace it '
+                'with editable overlay or Boolean/cutout shapes, an image '
+                'clip-path, or pre-rendered alpha imagery'
+            )
+
+        sources: list[str] = []
+        if any(
+            name.rsplit('}', 1)[-1].lower() == 'mask'
+            for name in elem.attrib
+        ):
+            sources.append('mask attribute')
+        if 'mask' in parse_inline_style(elem.get('style')):
+            sources.append('inline style mask property')
+        if sources:
+            errors.add(
+                f'{label} uses unsupported SVG mask presentation via '
+                f'{", ".join(sources)}; native PPTX export would drop the '
+                'effect. Use editable overlay or Boolean/cutout shapes, an '
+                'image clip-path, or pre-rendered alpha imagery'
+            )
+    return sorted(errors)
+
+
+def parse_project_gradient_ratio(raw: str) -> float:
+    """Parse one normalized gradient coordinate or stop offset."""
+    number, unit = _parse_svg_length_parts(raw)
+    if unit == '%':
+        number /= 100.0
+    elif unit:
+        raise ValueError('must be unitless or a percentage')
+    if not 0.0 <= number <= 1.0:
+        raise ValueError('must be within 0..1 or 0%..100%')
+    return number
+
+
+def parse_project_linear_gradient_coordinate(raw: str) -> float:
+    """Parse one objectBoundingBox linear-gradient projection coordinate."""
+    number, unit = _parse_svg_length_parts(raw)
+    if unit == '%':
+        number /= 100.0
+    elif unit:
+        raise ValueError('must be unitless or a percentage')
+    if not (
+        PROJECT_LINEAR_GRADIENT_COORDINATE_MIN
+        <= number
+        <= PROJECT_LINEAR_GRADIENT_COORDINATE_MAX
+    ):
+        raise ValueError(
+            'must be within -0.105..1.105 or -10.5%..110.5%'
+        )
+    return number
+
+
+def is_project_radial_focus_point(focus_x: float, focus_y: float) -> bool:
+    """Return whether a focus lies inside the canonical SVG radial circle."""

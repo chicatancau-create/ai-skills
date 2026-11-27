@@ -1,0 +1,56 @@
+        elem,
+        "dist",
+        non_negative=True,
+        maximum=OOXML_COORDINATE_MAX,
+    )
+    direction_deg = direction_units / 60000.0
+    dist_px = emu_to_px(dist_emu)
+    rad = math.radians(direction_deg)
+    return dist_px * math.cos(rad), dist_px * math.sin(rad)
+
+
+def _blur_radius(elem: ET.Element, attr: str) -> float:
+    return emu_to_px(_effect_integer(
+        elem,
+        attr,
+        non_negative=True,
+        maximum=OOXML_COORDINATE_MAX,
+    ))
+
+
+def _outer_shadow(
+    elem: ET.Element,
+    palette: ColorPalette | None,
+) -> str:
+    dx, dy = _direction_offset(elem)
+    blur = _blur_radius(elem, "blurRad")
+    dx_token = fmt_num(dx, 8)
+    dy_token = fmt_num(dy, 8)
+    if abs(float(dx_token)) <= 0.01 and abs(float(dy_token)) <= 0.01:
+        raise ValueError("offset-is-not-classifiable")
+    color, alpha = _color_alpha(elem, palette)
+    # std deviation ~= blur radius / 2 (rough; PowerPoint shadows are larger)
+    std = blur / 2.0
+    # Use feDropShadow for compactness — it's well-supported in modern browsers.
+    return (
+        f'<feDropShadow dx="{dx_token}" dy="{dy_token}" '
+        f'stdDeviation="{fmt_num(std, 8)}" '
+        f'flood-color="{color}" '
+        f'flood-opacity="{format_ooxml_alpha(alpha)}"/>'
+    )
+
+
+def _glow(elem: ET.Element, palette: ColorPalette | None) -> str:
+    if elem.get("rad") is None:
+        raise ValueError("missing-rad")
+    rad = _blur_radius(elem, "rad")
+    color, alpha = _color_alpha(elem, palette)
+    # svg_to_pptx maps stdDeviation directly back to a:glow@rad.
+    std = rad
+    return (
+        f'<feGaussianBlur in="SourceAlpha" stdDeviation="{fmt_num(std, 8)}" result="blurred"/>'
+        f'<feFlood flood-color="{color}" '
+        f'flood-opacity="{format_ooxml_alpha(alpha)}" result="flood"/>'
+        f'<feComposite in="flood" in2="blurred" operator="in" result="glow"/>'
+        f'<feMerge><feMergeNode in="glow"/><feMergeNode in="SourceGraphic"/></feMerge>'
+    )

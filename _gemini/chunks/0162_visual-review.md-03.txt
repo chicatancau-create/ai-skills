@@ -1,0 +1,49 @@
+### §4.1 Iteration loop
+
+Default budget is **1 iteration**; more requires explicit opt-in in the orchestrator prompt and roughly doubles render cost per iteration. Iteration 1: scan all Hard + Soft → fix → re-render only if budget ≥ 2. Iteration 2 (opt-in): re-verify changed elements + scan for new Hard hits → fix → re-render. Iteration 3 (opt-in): report only. Hard rules have no per-round cap; Soft rules ≤ 2 fixes per iteration, remainder to `untouched_concerns`.
+
+### §4.2 Termination conditions
+
+Rollback: a fix introduces a new Hard hit → `cp` the backup back, status `needs_human`, record "rolled back fix X — created Hard Y". Soft thrash (budget ≥ 2): iteration 2 introduces a new Soft hit → stop, `needs_human`, "fixes are competing". Clean exit: zero Hard hits and ≤ 1 Soft hit remaining → `ok` if nothing was applied, `fixed` otherwise.
+
+### §4.3 Backup discipline
+
+Before the first edit on a page in iteration `N`: `cp <project>/svg_output/<page>.svg <project>/.review/backup/<page>.iter<N>.svg`; record the path in every finding's `backup_path`.
+
+## §5 Output schema
+
+One file per page at `<project>/.review/<page>.json`; every `needs_human_items` entry carries a `suggested_fix_summary`, never a bare problem description.
+
+```json
+{
+  "page": "02_three_steps.svg",
+  "page_role": "content",
+  "canvas": {"view_box": [0, 0, 1242, 1660], "width": 1242, "height": 1660, "png_width": 1242, "png_height": 1660},
+  "status": "ok" | "fixed" | "needs_human" | "render_failed" | "prereq_failed",
+  "iterations_run": 1,
+  "screenshot_paths": [".preview/02_three_steps.png", ".preview/02_three_steps.iter1.png"],
+  "findings": [{
+    "iter": 1, "rule": "S6", "severity": "soft",
+    "evidence": "letter-spacing=10 on font-size=84, ratio=11.9% > 5%",
+    "fix_applied": {"element": "#hero-statement text[font-size='84']", "before": "letter-spacing=\"10\"", "after": "letter-spacing=\"2\""},
+    "verified_in_iter": 2,
+    "backup_path": ".review/backup/02_three_steps.iter1.svg"
+  }],
+  "untouched_concerns": [{"rule": "S1", "evidence": "...", "reason": "soft-cap reached" | "ambiguous_design_intent" | "deck_wide"}],
+  "needs_human_items": [{"rule": "H9", "suggested_fix_summary": "Hero subtitle declared in spec §IX.4 missing; add a <text> at (80,496) per design language"}],
+  "design_intent_check": {"spec_says": "TL;DR — emphasize 意图 as the core abstraction", "render_delivers": true, "note": "..."}
+}
+```
+
+## §6 Dispatch & messaging contract
+
+### §6.1 Orchestrator → subagent (batched dispatch)
+
+The orchestrator partitions N pages into `ceil(N/K)` batches of ≤ K pages (default **K = 5**, configurable per run) and spawns one subagent per batch, all in one assistant message (parallel `Agent` calls). Each prompt is self-contained — absolute paths for inputs 1–5 plus the full batch records; no prior context assumed. `subagent_type: general-purpose`; tools Read, Edit, Bash (`cp` backups), Write (JSON); no playwright — the orchestrator pre-renders. Dispatch must work with anonymous subagents when `name` / `team_name` are unavailable.
+
+Batched dispatch exists because the rubric (~2.5K tokens), `design_spec.md` (~4–5K), and `spec_lock.md` (~1K) are identical across pages and do not share a prompt cache between siblings: K=5 cuts fixed-document re-reads by ~75% on a 20-page deck and bounds failure blast radius. Guidance: K=5 default (decks to ~50 pages), K=3 for high-fidelity short decks, K=10 for token-sensitive large decks; beyond ~10 pages subagent context compression starts dropping early findings, so keep `K × (avg_svg_size + image_token_cost + report_size)` well under the subagent budget.
+
+### §6.2 Subagent → orchestrator
+
+The subagent's final action before idling is `SendMessage(to=<lead>)` listing one JSON path per processed page and a ≤150-word summary of the batch; idling without messaging or with a partial batch is a violation. A mid-batch abort still sends the report with aborted pages marked `needs_human` or `render_failed`.
+

@@ -1,0 +1,81 @@
+                raise TemplateStructureError(
+                    f"{svg_path.name}: placeholder {element_id!r} must be declared "
+                    "on a root-level <g> authoring boundary"
+                )
+            wrapper_visual_attrs = sorted(
+                name
+                for name in elem.attrib
+                if name != "id" and not name.startswith("data-pptx-")
+            )
+            if wrapper_visual_attrs:
+                raise TemplateStructureError(
+                    f"{svg_path.name}: placeholder group {element_id!r} must be a "
+                    "render-neutral authoring boundary; move these attributes to "
+                    "its content: " + ", ".join(wrapper_visual_attrs)
+                )
+            placeholder_binding = (binding_raw or "carrier").strip().lower()
+            if binding_raw is not None and not binding_raw.strip():
+                raise TemplateStructureError(
+                    f"{svg_path.name}: placeholder {element_id!r} has an empty "
+                    "data-pptx-binding"
+                )
+            if placeholder_binding not in PLACEHOLDER_BINDING_MODES:
+                allowed = ", ".join(sorted(PLACEHOLDER_BINDING_MODES))
+                raise TemplateStructureError(
+                    f"{svg_path.name}: placeholder {element_id!r} binding must be "
+                    f"one of: {allowed}"
+                )
+            visual_children = [
+                child for child in elem if _local_tag(child) not in _NON_VISUAL_TAGS
+            ]
+            carrier_children = [
+                child
+                for child in visual_children
+                if (child.get("data-pptx-carrier") or "")
+                .strip()
+                .lower()
+                == "true"
+            ]
+            for child in elem:
+                marker = child.get("data-pptx-carrier")
+                if marker is not None and marker.strip().lower() != "true":
+                    raise TemplateStructureError(
+                        f"{svg_path.name}: placeholder {element_id!r} carrier marker "
+                        "must be exactly 'true'"
+                    )
+                illegal_child_attrs = [
+                    attr
+                    for attr in _structure_attrs(child)
+                    if attr != "data-pptx-carrier"
+                ]
+                if illegal_child_attrs:
+                    raise TemplateStructureError(
+                        f"{svg_path.name}: placeholder {element_id!r} child uses "
+                        "nested structure metadata: " + ", ".join(illegal_child_attrs)
+                    )
+                for descendant in child.iter():
+                    if descendant is child:
+                        continue
+                    nested_attrs = _structure_attrs(descendant)
+                    if nested_attrs:
+                        nested_id = descendant.get("id") or _local_tag(descendant)
+                        raise TemplateStructureError(
+                            f"{svg_path.name}: {nested_id} uses nested structure "
+                            "metadata: " + ", ".join(nested_attrs)
+                        )
+            if placeholder_binding == "proxy":
+                if placeholder != "object":
+                    raise TemplateStructureError(
+                        f"{svg_path.name}: placeholder {element_id!r} may use proxy "
+                        "binding only with data-pptx-placeholder='object'"
+                    )
+                if carrier_children:
+                    raise TemplateStructureError(
+                        f"{svg_path.name}: proxy placeholder {element_id!r} must not "
+                        "declare a carrier child"
+                    )
+                if not visual_children:
+                    raise TemplateStructureError(
+                        f"{svg_path.name}: proxy placeholder {element_id!r} must "
+                        "contain visible Slide-local content"
+                    )

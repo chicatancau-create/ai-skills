@@ -1,0 +1,142 @@
+"""CLI entry point for svg_to_pptx."""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import binascii
+import copy
+import hashlib
+import json
+import math
+import posixpath
+import re
+import shutil
+import sys
+import tempfile
+import zipfile
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from urllib.parse import unquote
+from xml.etree import ElementTree as ET
+
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from attribution_guard import require_skill_integrity  # noqa: E402
+from authoring_roundtrip import (  # noqa: E402
+    AuthoringRoundtripError,
+    RoundtripPage,
+    is_flat_authoring_bundle,
+    materialize_flat_authoring_roundtrip,
+    roundtrip_source_fingerprint,
+)
+from console_encoding import configure_utf8_stdio  # noqa: E402
+from language_tags import (  # noqa: E402
+    LanguageTagError,
+    normalize_language_tag,
+)
+from native_payloads import PAYLOAD_STORE_RELATIVE_PATH  # noqa: E402
+from pptx_embedded_fonts import (  # noqa: E402
+    EmbeddedFontBundle,
+    EmbeddedFontError,
+    load_embedded_font_bundle,
+)
+from pptx_animations import (  # noqa: E402
+    ANIMATIONS,
+    animation_seconds_to_milliseconds,
+    normalize_animation_effect,
+    normalize_animation_trigger,
+    read_slide_click_dependencies,
+)
+from pptx_transitions import (  # noqa: E402
+    DEFAULT_TRANSITION_DURATION,
+    LEGACY_TRANSITION_KEYS,
+    NATIVE_TRANSITION_KEYS,
+    normalize_transition_effect_request,
+    validate_seconds,
+)
+from pptx_workspace import (  # noqa: E402
+    AUTHORING_SVG_FLAT_DIR,
+    ROUNDTRIP_MANIFEST_PATH,
+    ROUNDTRIP_PAGE_PLAN_PATH,
+    WorkspaceResourceSpec,
+    conversion_report_path,
+    load_roundtrip_manifest,
+    native_structure_path,
+    slide_animation_config_sha256,
+    source_pptx_path,
+    workspace_resource_specs,
+)
+from slide_roster import discover_slide_svgs  # noqa: E402
+
+configure_utf8_stdio()
+
+if __package__ in {None, ''}:
+    import types
+
+    package = types.ModuleType('svg_to_pptx')
+    package.__path__ = [str(Path(__file__).resolve().parent)]  # type: ignore[attr-defined]
+    sys.modules.setdefault('svg_to_pptx', package)
+    __package__ = 'svg_to_pptx'
+
+from .dimensions import CANVAS_FORMATS, get_project_info
+from .discovery import NotesFileReadError, find_notes_files, find_svg_files
+from .builder import RoundtripSlidePatch, create_pptx_with_native_svg
+from ..native_objects import (
+    native_fallback_kind,
+    native_object_projection_warnings,
+    native_replacement_kind,
+    native_replacement_status,
+)
+from ..native_objects.marker_status import native_marker_release_block_reason
+from ..drawingml.theme_colors import (
+    ThemeColorError,
+    ThemeColorSpec,
+    load_theme_color_spec,
+)
+from ..drawingml.context import (
+    TEXT_FLOW_PRESERVE,
+    TEXT_FLOW_REFLOW,
+    TEXT_FLOW_SPLIT,
+)
+from ..drawingml.theme_fonts import (
+    ThemeFontError,
+    ThemeFontFace,
+    ThemeFontSpec,
+    infer_master_text_style_spec,
+    load_master_text_style_spec,
+    load_theme_font_spec,
+    load_theme_font_spec_from_pages,
+)
+from ..drawingml.utils import unsafe_exported_font_faces
+from .narration import (
+    DEFAULT_NARRATION_START_FLOOR,
+    NARRATION_EXTENSIONS,
+    find_narration_files,
+    probe_audio_duration,
+)
+from .template_structure import (
+    PptxStructureLock,
+    SOURCE_THEMES_FILENAME,
+    TemplateStructureError,
+    load_native_structure_contract,
+    load_pptx_structure_lock,
+    load_template_source_themes,
+    parse_optional_layout_slides,
+    parse_template_slides,
+    structured_layout_definition_files,
+    template_lock_errors,
+    template_prototype_errors,
+)
+from ..animation_config import (
+    animation_group_effect_entries,
+    load_animation_config,
+    resolve_slide_animation_config,
+    validate_animation_config,
+    validate_animation_config_errors,
+    validate_transition_config,
+)
+def _as_dict(value: object) -> dict:

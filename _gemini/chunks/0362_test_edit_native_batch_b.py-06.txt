@@ -1,0 +1,70 @@
+        wrapper = ET.Element('{%s}g' % NS['s'], {'transform': 'translate(30 0)'})
+        for node in list(root):
+            if node.get('data-pptx-source-ref', '').startswith('slide:'):
+                root.remove(node)
+                wrapper.append(node)
+        root.append(wrapper)
+        path.write_bytes(_xml(root))
+        with zipfile.ZipFile(self.export()) as archive:
+            slide = ET.fromstring(archive.read('ppt/slides/slide1.xml'))
+            offsets = [node.get('x') for node in slide.findall('.//p:sp/p:spPr/a:xfrm/a:off', NS)]
+            self.assertEqual(offsets, [str(126 * 9525)] * 2)
+
+    def test_b4_fill_edit_preserves_unchanged_native_text(self) -> None:
+        def rich_text(entries):
+            part = 'ppt/slides/slide1.xml'
+            root = ET.fromstring(entries[part])
+            tx = root.find('.//p:sp/p:txBody', NS)
+            body = tx.find('a:bodyPr', NS)
+            for child in list(body):
+                body.remove(child)
+            ET.SubElement(body, '{%s}normAutofit' % NS['a'], {'fontScale': '80000'})
+            para = tx.find('a:p', NS)
+            props = ET.Element('{%s}pPr' % NS['a'])
+            ET.SubElement(props, '{%s}buAutoNum' % NS['a'], {'type': 'arabicPeriod'})
+            para.insert(0, props)
+            para.find('a:r/a:rPr', NS).set('lang', 'fr-FR')
+            fld = ET.SubElement(para, '{%s}fld' % NS['a'], {
+                'id': '{11111111-1111-1111-1111-111111111111}', 'type': 'datetime1',
+            })
+            ET.SubElement(fld, '{%s}rPr' % NS['a'], {'lang': 'fr-FR'})
+            ET.SubElement(fld, '{%s}t' % NS['a']).text = '2026'
+            entries[part] = _xml(root)
+        self.import_source(mutate=rich_text)
+        path, root = self.page()
+        obj = next(node for node in root.iter() if node.get('data-pptx-source-ref') == 'slide:2')
+        obj.find('*[@data-pptx-part="geometry"]').set('fill', '#FF0000')
+        path.write_bytes(_xml(root))
+        with zipfile.ZipFile(self.source) as source, zipfile.ZipFile(self.export()) as output:
+            expected = ET.fromstring(source.read('ppt/slides/slide1.xml')).find('.//p:sp/p:txBody', NS)
+            result = ET.fromstring(output.read('ppt/slides/slide1.xml'))
+            actual = result.find('.//p:sp/p:txBody', NS)
+            actual.tail = expected.tail = None
+            self.assertEqual(ET.tostring(actual), ET.tostring(expected))
+            self.assertIsNotNone(result.find('.//a:srgbClr[@val="FF0000"]', NS))
+
+    def test_b5_page_plan_resets_custom_show_selection(self) -> None:
+        _source(self.source, mutate=_show_fixture)
+        output = self.root / 'clone.pptx'
+        clone_presentation_slides(self.source, (1,), output)
+        with zipfile.ZipFile(output) as archive:
+            props = ET.fromstring(archive.read('ppt/presProps.xml'))
+            self.assertIsNone(props.find('p:showPr/p:custShow', NS))
+
+    def test_b4_fill_edit_keeps_placeholder_and_text_effects(self) -> None:
+        def effects(entries):
+            part = 'ppt/slides/slide1.xml'
+            root = ET.fromstring(entries[part])
+            rpr = root.find('.//p:sp/p:txBody/a:p/a:r/a:rPr', NS)
+            effects = ET.SubElement(rpr, '{%s}effectLst' % NS['a'])
+            glow = ET.SubElement(effects, '{%s}glow' % NS['a'], {'rad': '63500'})
+            ET.SubElement(glow, '{%s}srgbClr' % NS['a'], {'val': 'FFFF00'})
+            shape_effect = ET.SubElement(root.find('.//p:sp/p:spPr', NS), '{%s}effectLst' % NS['a'])
+            shadow = ET.SubElement(shape_effect, '{%s}outerShdw' % NS['a'], {
+                'blurRad': '38100', 'dist': '19050', 'dir': '5400000', 'algn': 'ctr', 'rotWithShape': '0',
+            })
+            ET.SubElement(shadow, '{%s}srgbClr' % NS['a'], {'val': '000000'})
+            entries[part] = _xml(root)
+        self.import_source(placeholder=True, mutate=effects)
+        path, root = self.page()
+        obj = next(node for node in root.iter() if node.get('data-pptx-source-ref') == 'slide:2')

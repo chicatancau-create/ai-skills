@@ -1,0 +1,71 @@
+            slide={'index': 1, 'showInheritedShapes': True}, slide_root=slide,
+            slot_plans=[],
+        )
+        line = next(e for e in result.iter() if e.get('id') == 'line')
+        self.assertEqual(line.tag, f'{{{SVG_NS}}}path')
+        self.assertEqual(line.get('d'), 'M 0 80 L 1280 80')
+
+    def test_a_type_b_has_actionable_rejection(self) -> None:
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            code = mirror.main([str(self.root), str(self.root / 'destination')])
+        self.assertEqual(code, 1)
+        self.assertIn('mirror publishes only pptx_template_import.py workspaces', stderr.getvalue())
+        self.assertIn('apply_template.py', stderr.getvalue())
+        self.assertNotIn('Traceback', stderr.getvalue())
+        _write_json(self.root / 'authoring-svg' / mirror.AUTHORING_MANIFEST_NAME, {
+            'schema': mirror.AUTHORING_SCHEMA, 'projection_kind': 'generic',
+        })
+        with self.assertRaisesRegex(mirror.MirrorMaterializationError, 'apply_template.py'):
+            mirror._load_authoring_documents(self.root, set())
+
+    def test_b_language_normalization_keeps_the_confirmed_round(self) -> None:
+        confirm = self.root / 'confirm_ui'
+        _write_json(confirm / 'recommendations.stage1.json', {
+            **_stage1(), 'primary_language': 'AR_sa',
+        })
+        client = server.create_app(self.root).test_client()
+        data = client.get('/api/recommendations').get_json()
+        self.assertEqual(data['primary_language'], 'ar-SA')
+        response = client.post('/api/confirm', json={
+            'stage': 'stage1', 'options_sha256': data['template_options']['options_sha256'],
+            'template_selection': {'mode': 'free_design', 'selection_keys': []},
+        })
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertFalse(server._fresh_template_restart(confirm))
+        self.assertIsNone(server._stage2_ready_error(self.root, confirm))
+
+    def test_b_embedded_options_and_equal_mtimes_allow_free_design(self) -> None:
+        confirm = self.root / 'confirm_ui'
+        rec = confirm / 'recommendations.stage1.json'
+        _write_json(rec, _stage1())
+        self.assertIsNone(server._confirmation_launch_error(confirm))
+        client = server.create_app(self.root).test_client()
+        response = client.post('/api/confirm', json={
+            'stage': 'stage1',
+            'options_sha256': server._build_template_options(confirm)[0]['options_sha256'],
+            'template_selection': {'mode': 'free_design', 'selection_keys': []},
+        })
+        self.assertEqual(response.status_code, 200, response.get_json())
+        for path in confirm.iterdir():
+            os.utime(path, ns=(1_000_000_000, 1_000_000_000))
+        self.assertIsNone(server._stage2_ready_error(self.root, confirm))
+        previous = json.loads((confirm / 'template_selection.json').read_text())
+        data = _stage1()
+        data['revision'] = 2
+        _write_json(rec, data)
+        os.utime(rec, ns=(1_000_000_000, 1_000_000_000))
+        self.assertTrue(server._fresh_template_restart(confirm))
+        self.assertIsNone(server._confirmation_launch_error(confirm))
+        self.assertIsNotNone(server._stage2_ready_error(self.root, confirm))
+        self.assertEqual(server._active_recommendations_path(confirm), rec)
+        self.assertIsNone(server._wait_result_status(confirm / 'result.json', 'stage1'))
+        response = client.post('/api/confirm', json={
+            'stage': 'stage1',
+            'options_sha256': server._build_template_options(confirm)[0]['options_sha256'],
+            'template_selection': {'mode': 'free_design', 'selection_keys': []},
+        })
+        self.assertEqual(response.status_code, 200, response.get_json())
+        current = json.loads((confirm / 'template_selection.json').read_text())
+        self.assertNotEqual(previous['selection_sha256'], current['selection_sha256'])
+

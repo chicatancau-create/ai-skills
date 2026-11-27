@@ -1,0 +1,56 @@
+---
+name: reference-claude-desktop-msix-launch
+description: Claude desktop on this box is a Developer-signed MSIX; 0x80070020 launch failure (after auto-update OR manual reinstall) is a kernel job/silo leak only logoff/reboot clears; moving it to D: works but InstallLocation lies via Junction; official Simplified Chinese covers the shell layer only.
+metadata:
+  type: reference
+---
+
+# Claude desktop (MSIX) on this machine
+
+**Install shape** — package family `Claude_pzs8sxrjxfjjc`, `SignatureKind = Developer` (side-loaded, not Store),
+installed at `C:\Program Files\WindowsApps\Claude_<ver>_x64__pzs8sxrjxfjjc`, AUMID `Claude_pzs8sxrjxfjjc!Claude`.
+Launch from CLI: `Start-Process explorer.exe -ArgumentList 'shell:AppsFolder\Claude_pzs8sxrjxfjjc!Claude'`.
+User data is **outside** the container at `%LOCALAPPDATA%\Claude-3p` (logs, config.json, window-state.json,
+`stealth-relaunch`, vm_bundles) — reinstalling the package does not lose it. Service logs:
+`C:\ProgramData\Claude\Logs\cowork-service.log`. Main app log: `%LOCALAPPDATA%\Claude-3p\logs\main.log`.
+
+**Task Manager lies about "running".** The `Claude` group with a `cowork-svc.exe` child is
+`CoworkVMService` (SCM service, Type 0x210 = packaged service, LocalSystem, binary inside the package).
+It runs whether or not the app does. So "it's in the background but I can't open it" = the app is *not* running;
+check for a process named `Claude` and for `Microsoft-Windows-AppModel-Runtime/Admin` events 208/215.
+
+**The 0x80070020 failure mode** (recurs across auto-update cycles):
+`main.log` ends with `beforeQuitForUpdate handler fired, going down for update` → app quits to apply a stealth
+update → every later activation logs event 215 `Cannot create the Desktop AppX container ... error encountered
+converting the job` + event 208 `... configuring runtime [LaunchProcess]`, HRESULT `0x80070020`.
+Upstream: anthropics/claude-code issues #89680, #53247, #59934, #84792, #93220.
+
+**Verified dead ends on this box (2026-10-01), do not repeat:**
+- `Stop-Service CoworkVMService` (0 cowork processes) → still fails. Its `StartupType` cannot be set to Disabled
+  (`Set-Service`/`sc config` → Access denied even elevated; packaged service is config-protected).
+- `Add-AppxPackage -Register -DisableDevelopmentMode AppxManifest.xml` → succeeds, changes nothing.
+- Control tests: Calculator and Microsoft Store both launch fine, so AppContainer/HCS and the `H:\WpSystem`
+  package-data junctions are healthy — do not chase those.
+- Token scan proved no process still carries the package SID → the stale silo/job is kernel-side, **nothing is killable**.
+
+**Only cure: log off + log back on, or reboot.**
+
+**Machine-specific traps found alongside it:** package data folders are junctioned to `H:\WpSystem\...` and a batch
+of other packages still point at `G:\WpSystem\...` — **G: no longer exists**, so those are dead links
+(BaiduNetdisk, PixPin, WeixinShare, UNISUnzip, WinAppRuntime 1.7, 3AD8A913/903DB504 store helpers).
+See [[reference-windows-ie-and-shell-traps]] for another shell-folder trap on this box.
+
+## 2026-10-06 补充：把它搬到 D 盘的可行做法（已实测）
+
+`InstallLocation` 报的路径**不能用来判断物理盘** —— Windows 在新卷上放实体，在 `C:\Program Files\WindowsApps\`
+留同名 **Junction**。判据：`Get-Item <C路径> -Force` 的 `Attributes` 含 `ReparsePoint`、`LinkType=Junction`、
+`Target=D:\WindowsApps\...`，或 `fsutil reparsepoint query <C路径>`。核实物理占用：`Get-ChildItem <D路径> -Recurse -File -Force`
+（本次实测 3,816 文件 / 679.4 MB 在 D:）。
+
+- 先让用户在 设置 → 系统 → 存储 → 高级存储设置 → 新内容的保存位置 把「新的应用将保存到」改成 D:，`D:\WindowsApps` 才会建立；
+  `Get-AppxVolume` 里 D 卷的 `PackageStorePath = D:\WindowsApps`。
+- `Add-AppxVolume -Path 'D:\'` 会报「应存在尾随反斜杠」，写成 `Add-AppxVolume -Path 'D:'` 才通过（本机陷阱，方向反直觉）。
+- **只给 `Add-AppxPackage -Volume <D卷>` 不管用**：该版本包内容若已在别的卷以 `Status=Servicing` 暂存，激活会复用旧暂存内容，
+  结果仍落在 C:。必须**先 `Remove-AppxPackage` 掉现有注册**（此时 `Get-AppxPackage -AllUsers` 只剩 Servicing 那条，
+  删它会报 `0x80073CF1`「当前用户未安装」，属正常），再 `Add-AppxPackage -Path <msix> -Volume <D卷>` → `Register` 事件 400
+  显示「以目标 D: 执行的操作 Register 已成功完成」。

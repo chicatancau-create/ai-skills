@@ -1,0 +1,91 @@
+                    asset.asset_path.parent / unquote(parsed.path)
+                ).resolve()
+                normalized_ref = f"asset-resource:{resolved.as_posix()}"
+                if parsed.query:
+                    normalized_ref += f"?{parsed.query}"
+                if parsed.fragment:
+                    normalized_ref += f"#{parsed.fragment}"
+                item.set(name, normalized_ref)
+        icon = item.get("data-icon")
+        record = assets.get(icon or "")
+        if record is not None:
+            token = f"asset-slot:{record.baseline_key}"
+            if not record.unchanged:
+                token += f":edited:{record.actual_asset_sha256}"
+            item.set("data-icon", token)
+    normalize_single_child_group_filters(normalized)
+    _collapse_hash_only_groups(normalized)
+    return semantic_subtree_sha256(
+        normalized,
+        ignored_attributes=frozenset({SOURCE_REF_ATTRIBUTE}),
+    )
+
+
+def _contextual_authoring_element(element: ET.Element, root: ET.Element | None) -> ET.Element:
+    """Resolve the same effective context used when moving an authored object."""
+    if root is None:
+        return element
+    resolved = copy.deepcopy(element)
+    _materialize_adopted_context(root, element, ET.Element(f"{{{SVG_NS}}}svg"), resolved)
+    links = [
+        dict(ancestor.attrib)
+        for ancestor in _element_chain(root, element)[:-1]
+        if _local_name(ancestor.tag) == "a"
+    ]
+    if links:
+        resolved.set("data-pptx-runtime-ancestor-links", json.dumps(links, sort_keys=True))
+    return resolved
+
+
+def _source_jump_links(current_root: ET.Element, baseline_root: ET.Element) -> dict[ET.Element, tuple[str, str]]:
+    """Identify surviving links by their source owner and position in that owner."""
+    def links(root: ET.Element) -> dict[tuple, tuple[ET.Element, str, str]]:
+        found = {}
+
+        def visit(node: ET.Element, owner: str | None = None, path: tuple = ()) -> None:
+            source_ref = node.get(SOURCE_REF_ATTRIBUTE)
+            if source_ref:
+                owner, path = source_ref, ()
+            attrs = [SHAPE_HYPERLINK_ATTR]
+            if _local_name(node.tag) == "a":
+                attrs.extend(("href", f"{{{XLINK_NS}}}href"))
+            for name in attrs:
+                href = node.get(name, "")
+                if not re.fullmatch(r"#slide-[1-9]\d*", href):
+                    continue
+                if owner:
+                    key = (owner, path, name)
+                else:
+                    descendants = tuple(item.get(SOURCE_REF_ATTRIBUTE) for item in node.iter()
+                                        if item.get(SOURCE_REF_ATTRIBUTE))
+                    if not descendants:
+                        continue
+                    key = (descendants, name)
+                found[key] = (node, name, href)
+            for index, child in enumerate(node):
+                visit(child, owner, path + ((child.tag, index),))
+
+        visit(root)
+        return found
+
+    baseline = links(baseline_root)
+    return {
+        node: (name, href)
+        for key, (node, name, href) in links(current_root).items()
+        if key in baseline and baseline[key][2] == href
+        and (baseline[key][0].get(SOURCE_HREF_ATTR) is None or node.get(SOURCE_HREF_ATTR) == href)
+    }
+
+
+def preserve_adopted_source_links(
+    authoring_dir: Path, source_name: str, source_root: ET.Element,
+    source_element: ET.Element, adopted: ET.Element,
+) -> None:
+    """Carry source jump provenance across adoption after native identity is removed."""
+    project_path = authoring_dir.parent
+    if not (project_path / ROUNDTRIP_MANIFEST_PATH).is_file():
+        return
+    source_dir, proxy_dir, documents, _, _ = _load_documents(project_path, authoring_dir)
+    pages, _ = _load_page_plan(project_path, authoring_dir, documents)
+    output_docs = {doc.name: doc for doc in _output_documents(pages, documents, authoring_dir)}
+    document = output_docs.get(source_name) or documents.get(source_name)

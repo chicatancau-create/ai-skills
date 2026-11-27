@@ -1,0 +1,108 @@
+            relationship_id in emitted_relationship_ids
+            or relationship_id in seen_relationship_ids
+        ):
+            continue
+        if relationship_id:
+            seen_relationship_ids.add(relationship_id)
+
+        name = "ChartEx chart"
+        current = graphic_data
+        while current is not None:
+            name_element = current.find(f".//{{{PRESENTATIONML_NS}}}cNvPr")
+            if name_element is not None and name_element.get("name"):
+                name = name_element.get("name")
+                break
+            current = current.getparent() if hasattr(current, "getparent") else None
+        chart_name = normalize_text(str(name)).replace("\n", " ") or "ChartEx chart"
+        header = f"> [Chart] {chart_name} — ChartEx"
+        blocks.append(_chart_data_unavailable(header, "unsupported ChartEx data model"))
+    return blocks
+
+
+def _image_part_for_shape(shape: object) -> tuple[object | None, str | None]:
+    """Return the first referenced image part plus any resolution failure."""
+    element = getattr(shape, "element", None)
+    if element is None:
+        return None, "shape XML is unavailable while inspecting image references"
+
+    try:
+        blips = element.xpath(".//a:blip")
+    except Exception as exc:
+        return None, (
+            "image reference scan failed "
+            f"({type(exc).__name__}: {exc})"
+        )
+
+    part = getattr(shape, "part", None)
+    failures: list[str] = []
+    for blip in blips:
+        rel_id = blip.get(qn("r:embed")) or blip.get(qn("r:link"))
+        if not rel_id:
+            continue
+        try:
+            return part.related_part(rel_id), None
+        except Exception as exc:
+            failures.append(f"{rel_id} ({type(exc).__name__}: {exc})")
+    if failures:
+        return None, "image relationship resolution failed: " + "; ".join(failures)
+    return None, None
+
+
+def _image_size_from_bytes(blob: bytes) -> tuple[int | None, int | None]:
+    """Return bitmap dimensions when Pillow can decode the bytes."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return None, None
+    try:
+        with Image.open(BytesIO(blob)) as img:
+            return img.width, img.height
+    except (OSError, ValueError):
+        return None, None
+
+
+def _shape_emu(shape: object, attr: str) -> int:
+    value = getattr(shape, attr, 0) or 0
+    return int(value)
+
+
+def _shape_occurrence(
+    shape: object,
+    slide_index: int,
+) -> dict[str, object]:
+    """Return slide-specific image placement metadata."""
+    display_width_emu = _shape_emu(shape, "width")
+    display_height_emu = _shape_emu(shape, "height")
+    display_ratio = (
+        display_width_emu / display_height_emu
+        if display_width_emu > 0 and display_height_emu > 0
+        else None
+    )
+    return {
+        "slide_index": slide_index,
+        "shape_name": str(getattr(shape, "name", "")),
+        "display_left_emu": _shape_emu(shape, "left"),
+        "display_top_emu": _shape_emu(shape, "top"),
+        "display_width_emu": display_width_emu,
+        "display_height_emu": display_height_emu,
+        "display_width_in": round(display_width_emu / EMU_PER_INCH, 4) if display_width_emu else None,
+        "display_height_in": round(display_height_emu / EMU_PER_INCH, 4) if display_height_emu else None,
+        "display_ratio": round(display_ratio, 6) if display_ratio else None,
+    }
+
+
+def _update_manifest_usage(entry: dict[str, object]) -> None:
+    """Refresh aggregate fields after adding an occurrence."""
+    occurrences = entry.get("occurrences")
+    if not isinstance(occurrences, list):
+        occurrences = []
+    entry["usage_count"] = len(occurrences)
+    ratios = sorted({
+        occurrence.get("display_ratio")
+        for occurrence in occurrences
+        if isinstance(occurrence, dict)
+        and isinstance(occurrence.get("display_ratio"), (int, float))
+    })
+    if ratios:
+        entry["display_ratio_variants"] = ratios
+        if entry.get("display_ratio") is None:

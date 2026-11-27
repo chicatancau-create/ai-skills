@@ -1,0 +1,98 @@
+    # <p:grpSp> so PowerPoint can animate the group as one unit.
+    min_x = min_y = float('inf')
+    max_x = max_y = float('-inf')
+
+    for child_result in child_results:
+        bounds = child_result.bounds_emu
+        if bounds is None:
+            continue
+        min_x = min(min_x, bounds[0])
+        min_y = min(min_y, bounds[1])
+        max_x = max(max_x, bounds[2])
+        max_y = max(max_y, bounds[3])
+
+    if min_x == float('inf'):
+        return ShapeResult(xml='\n'.join(result.xml for result in child_results))
+
+    group_x = int(min_x)
+    group_y = int(min_y)
+    group_w = max(int(max_x - min_x), 1)
+    group_h = max(int(max_y - min_y), 1)
+
+    # ``rotate(angle, cx, cy)`` rotates around the SVG pivot, but DrawingML
+    # grpSp ``rot`` always rotates around the group's own bbox centre. When
+    # those centres differ, the visual position drifts by exactly the
+    # translation a rotate-around-pivot equals. Compensate by offsetting the
+    # outer <a:off> only; <a:chOff> stays on the unshifted bbox so children
+    # (still at their original SVG positions because rotate_pivot suppressed
+    # the dx/dy translation above) remain aligned inside the group.
+    off_x = group_x
+    off_y = group_y
+    if rotate_pivot is not None and angle_deg:
+        cx_svg, cy_svg = rotate_pivot
+        pivot_ex = (cx_svg + ctx.translate_x) * EMU_PER_PX
+        pivot_ey = (cy_svg + ctx.translate_y) * EMU_PER_PX
+        bbox_cx = group_x + group_w / 2
+        bbox_cy = group_y + group_h / 2
+        theta = math.radians(angle_deg)
+        cos_t = math.cos(theta)
+        sin_t = math.sin(theta)
+        # Where the bbox centre lands after rotating around the pivot, minus
+        # where DrawingML's grpSp rot would leave it (i.e. unchanged).
+        delta_x = (bbox_cx - pivot_ex) * cos_t - (bbox_cy - pivot_ey) * sin_t + pivot_ex - bbox_cx
+        delta_y = (bbox_cx - pivot_ex) * sin_t + (bbox_cy - pivot_ey) * cos_t + pivot_ey - bbox_cy
+        off_x = int(round(group_x + delta_x))
+        off_y = int(round(group_y + delta_y))
+
+    shapes_xml = '\n'.join(result.xml for result in child_results)
+    group_id = (
+        ctx.claim_shape_id(
+            elem.get('data-pptx-shape-id'),
+            elem.get('data-pptx-shape-scope'),
+        )
+        if elem.get('data-pptx-object') == 'group'
+        else ctx.next_id()
+    )
+
+    # Record top-level semantic groups (e.g. <g id="p02-title">) so the
+    # PPTX builder can emit per-element object timing. Only the outermost
+    # multi-child wrapper qualifies — flattened single-child groups have no
+    # <p:grpSp> to anchor a timing target on, and nested groups are
+    # ignored to keep the animation budget at ~per-section granularity.
+    if should_animate_group:
+        ctx.anim_targets.append((group_id, elem_id))
+
+    group_effect = ''
+    if filter_id and filter_id in ctx.defs:
+        group_effect = build_effect_xml(
+            ctx.defs[filter_id],
+            child_ctx.opacity_multiplier,
+        )
+
+    rot_emu = 0 if matrix_supported else int(angle_deg * 60000)
+    rot_attr = f' rot="{rot_emu}"' if rot_emu else ''
+    validate_ooxml_xfrm(off_x, off_y, group_w, group_h)
+    validate_ooxml_xfrm(group_x, group_y, group_w, group_h)
+
+    return ShapeResult(xml=f'''<p:grpSp>
+<p:nvGrpSpPr>
+<p:cNvPr id="{group_id}" name="{_xml_escape(shape_display_name(elem, f'Group {group_id}'))}"/>
+<p:cNvGrpSpPr/>
+<p:nvPr/>
+</p:nvGrpSpPr>
+<p:grpSpPr>
+<a:xfrm{rot_attr}>
+<a:off x="{off_x}" y="{off_y}"/>
+<a:ext cx="{group_w}" cy="{group_h}"/>
+<a:chOff x="{group_x}" y="{group_y}"/>
+<a:chExt cx="{group_w}" cy="{group_h}"/>
+</a:xfrm>
+{group_effect}
+</p:grpSpPr>
+{shapes_xml}
+</p:grpSp>''', bounds_emu=(group_x, group_y, group_x + group_w, group_y + group_h))
+
+
+def convert_a(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
+    """Convert one standard SVG anchor into a clickable DrawingML object."""
+    # A bare anchor around one <g> is transparent: the group converts at the

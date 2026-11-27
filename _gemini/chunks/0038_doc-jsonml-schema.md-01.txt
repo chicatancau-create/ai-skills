@@ -1,0 +1,114 @@
+# 文档 JSONML 节点结构参考
+
+> **权威定义**：合法节点类型、允许的子节点和属性约束以 `wukong/products/jsonml-schema-v2.json` 为准。本文为可读版摘要，若与 schema-v2.json 冲突以后者为准。
+
+本文档定义钉钉文档 body JSONML 中所有节点类型的结构，供 agent 编辑文档时参考。
+**写法范例**见 [doc-jsonml-cookbook.md](./doc-jsonml-cookbook.md)；本文聚焦字段定义、枚举与约束。
+
+## 格式说明
+
+JSONML 是文档内容树的序列化格式：
+
+```
+[tag, attrs?, ...children]
+```
+
+- `tag` — 字符串，节点类型标识
+- `attrs` — 可选对象，节点属性（写入时**强烈建议**始终传 `{}` 而非省略）
+- `children` — 子节点数组；可以是嵌套节点或（仅 inline 上下文中）字符串
+
+文档 body 是一个以 `"root"` 为根的 JSONML 节点，`dws doc read --content-format jsonml` 返回此格式：
+
+```json
+["root", {"sectPr": {"pgSz": {"w": 11906, "h": 16838}}},
+  ["p", {"uuid": "p1"}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "第一段"]]],
+  ["p", {"uuid": "p2"}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "第二段"]]]
+]
+```
+
+- 第一个元素固定为 `"root"`
+- 第二个元素为文档级属性对象（如 `sectPr` 页面设置），可选
+- 后续元素为块级节点（每个 block 节点应带 `uuid`）
+
+全量覆写（overwrite）时，CLI 接受三种 body 形态：
+
+1. `["root", {sectPr}, ...blocks]` — 服务端 canonical 形式，`doc read` 输出
+2. `[blocks, ...]` — 纯块数组（缺少 root，validator 会 warn 但不阻断）
+3. 单个 `[tag, ...]` — 当作单 block，validator warn
+
+## CLI 行为概览（validator + normalize）
+
+写入端（`doc create/update`、`block insert/update`）默认会走 **normalize → validate** 两步：
+
+| 行为 | 缺省 | `--fix-jsonml` | `--no-fix-jsonml` |
+|------|------|----------------|-------------------|
+| JSON 语法修复（括号/逗号补全） | ✗ | ✓（打印 `[FIX]`） | ✗ |
+| 解包单 block 为 body | ✓ | ✓ | ✗ |
+| **attrs 槽完全缺失**时补 `attrs` + `uuid` | ✓ | ✓ | ✗ |
+| 裸字符串 → `span/text + span/leaf` 自动包裹 | ✓（打印 `[FIX]`） | ✓（打印 `[FIX]`） | ✗ |
+| validator 阻断（HasErrors → 拒绝发送） | ✓ | ✓ | ✓ |
+| validator 警告（warnings → 仅 stderr） | ✓ | ✓ | ✓ |
+
+> **uuid 注入的边界**：仅当 attrs 槽**完全缺失**（如 `["p", "text"]`）才补 `attrs` + `uuid`。当生产者已显式给出 `attrs`（哪怕是 `{}` 或不含 uuid），normalize 一律不再补 uuid —— 视为生产者明确意图。这避免 `doc read → doc update` 回灌时污染原文档中未修改的节点（真实文档中常见 `["h1", {}, ...]` 形态）。
+
+三态设计：缺省 = 结构修复 ON + JSON 语法修复 OFF；`--fix-jsonml` 全开（含 JSON repair，推荐 agent 调用）；`--no-fix-jsonml` 全关（用于排查原始错误）。校验始终执行，不可跳过。
+
+报错格式（面向 agent）：
+
+```
+$[2][2]: paragraph child must be span wrapper, got raw string.
+Suggestion: ["span",{"data-type":"text"},["span",{"data-type":"leaf"},"<your text>"]]
+```
+
+`$` 表示输入根，`[i]` 是数组下标，`.attrs.k` 是属性名。
+
+## 文本节点（Text）
+
+**Canonical 形式**（服务端 serialize 输出、`doc read --content-format jsonml` 返回的就是这个）：
+
+```json
+["span", {"data-type": "text"},
+  ["span", {"data-type": "leaf", "bold": true}, "加粗文本"],
+  ["span", {"data-type": "leaf"}, "普通文本"]
+]
+```
+
+- **text 容器**：`["span", {"data-type": "text"}, ...leaves]` — 包裹所有 leaf
+- **leaf 节点**：`["span", {"data-type": "leaf", ...marks}, "<文本>"]` — 实际承载文字与样式
+- 一个 block 通常只有一个 text 容器，可以含多个 leaf（不同样式片段）
+- text 容器与 `["a", ...]`、`["img", ...]`、`["tag", ...]` 等其他 inline 节点**并列**作为 block 的子节点
+
+### 文本样式属性（Marks，写在 leaf 的 attrs 上）
+
+所有 marks 均为 optional，按需组合。
+
+| 属性 | 类型 | 格式/枚举 | 说明 |
+|------|------|-----------|------|
+| `bold` | `boolean` | `true` / `false` | 加粗。`false` 可反向取消继承 |
+| `italic` | `boolean` | `true` | 斜体 |
+| `strike` | `boolean` | `true` / `false` | 单删除线 |
+| `dstrike` | `boolean` | `true` / `false` | 双删除线（独立于 strike） |
+| `underline` | `object` | `{value, color?}` | 下划线。value: `"single"` \| `"dash"` \| `"wave"` \| `"double"` \| `"none"` |
+| `color` | `string` | CSS 颜色 | 文字颜色，如 `"#ff0000"` |
+| `highlight` | `string` | CSS 颜色 | 文字高亮背景色 |
+| `shd` | `object` | `{val?, color?, fill?}` | OOXML 底纹（Word 导入保留） |
+| `sz` | `number` | 数值 | 字号，配合 `szUnit` |
+| `szUnit` | `string` | `"px"` \| `"pt"` | 字号单位，默认 `"px"` |
+| `fonts` | `object` | `{ascii, hAnsi, cs, eastAsia}` | OOXML 四分区字体 |
+| `vertAlign` | `string` | `"superscript"` \| `"subscript"` \| `"baseline"` | 上标/下标/基线 |
+| `spacing` | `number` | 数值（pt） | 字间距 |
+
+示例：
+
+```json
+["span", {"data-type": "text"},
+  ["span", {"data-type": "leaf", "bold": true, "italic": true, "color": "#1a73e8"}, "加粗斜体蓝字"]
+]
+["span", {"data-type": "text"},
+  ["span", {"data-type": "leaf", "underline": {"value": "single", "color": "#ff0000"}, "sz": 14, "szUnit": "px"}, "红色下划线"]
+]
+```
+
+### 历史/兼容形式
+
+| 写法 | validator | 服务端 | 建议 |

@@ -1,0 +1,115 @@
+) -> FormulaVerticalExtent:
+    if not extents:
+        return FormulaVerticalExtent(0.0, 0.0)
+    return FormulaVerticalExtent(
+        max(extent.ascent_em for extent in extents),
+        max(extent.descent_em for extent in extents),
+    )
+
+
+def _scaled_vertical_extent(
+    extent: FormulaVerticalExtent,
+    scale: float,
+) -> FormulaVerticalExtent:
+    return FormulaVerticalExtent(
+        extent.ascent_em * scale,
+        extent.descent_em * scale,
+    )
+
+
+def _script_vertical_extent(
+    base: FormulaVerticalExtent,
+    subscript: Sequence | None,
+    superscript: Sequence | None,
+) -> FormulaVerticalExtent:
+    ascent = base.ascent_em
+    descent = base.descent_em
+    if superscript is not None:
+        upper = _scaled_vertical_extent(
+            _node_vertical_extent(superscript),
+            _SCRIPT_SCALE,
+        )
+        baseline_shift = 0.55
+        ascent = max(ascent, baseline_shift + upper.ascent_em)
+        descent = max(descent, upper.descent_em - baseline_shift)
+    if subscript is not None:
+        lower = _scaled_vertical_extent(
+            _node_vertical_extent(subscript),
+            _SCRIPT_SCALE,
+        )
+        baseline_shift = 0.30
+        ascent = max(ascent, lower.ascent_em - baseline_shift)
+        descent = max(descent, baseline_shift + lower.descent_em)
+    return FormulaVerticalExtent(ascent, descent)
+
+
+def _limit_vertical_extent(
+    base: FormulaVerticalExtent,
+    lower: Sequence | None,
+    upper: Sequence | None,
+) -> FormulaVerticalExtent:
+    ascent = base.ascent_em
+    descent = base.descent_em
+    if upper is not None:
+        upper_extent = _node_vertical_extent(upper)
+        ascent += 0.14 + _SCRIPT_SCALE * upper_extent.height_em
+    if lower is not None:
+        lower_extent = _node_vertical_extent(lower)
+        descent += 0.14 + _SCRIPT_SCALE * lower_extent.height_em
+    return FormulaVerticalExtent(ascent, descent)
+
+
+def _rows_vertical_extent(
+    rows: tuple[tuple[Sequence, ...], ...] | tuple[Sequence, ...],
+) -> FormulaVerticalExtent:
+    row_heights: list[float] = []
+    for row in rows:
+        cells = row if isinstance(row, tuple) else (row,)
+        row_extent = _max_vertical_extent(
+            *(_node_vertical_extent(cell) for cell in cells)
+        )
+        row_heights.append(
+            max(_BASE_VERTICAL_EXTENT.height_em, row_extent.height_em)
+        )
+    if not row_heights:
+        return _BASE_VERTICAL_EXTENT
+    total_height = sum(row_heights) + 0.18 * (len(row_heights) - 1)
+    return FormulaVerticalExtent(
+        max(_BASE_VERTICAL_EXTENT.ascent_em, total_height * 0.55),
+        max(_BASE_VERTICAL_EXTENT.descent_em, total_height * 0.45),
+    )
+
+
+def _node_vertical_extent(node: Node) -> FormulaVerticalExtent:
+    if isinstance(node, Text):
+        return _BASE_VERTICAL_EXTENT
+    if isinstance(node, AlignmentPoint):
+        return FormulaVerticalExtent(0.0, 0.0)
+    if isinstance(node, Sequence):
+        return _max_vertical_extent(
+            *(_node_vertical_extent(child) for child in node.children)
+        )
+    if isinstance(node, Styled):
+        return _node_vertical_extent(node.body)
+    if isinstance(node, Fraction):
+        numerator = _node_vertical_extent(node.numerator)
+        denominator = _node_vertical_extent(node.denominator)
+        return FormulaVerticalExtent(
+            max(
+                _BASE_VERTICAL_EXTENT.ascent_em,
+                0.28 + _FRACTION_SCALE * numerator.height_em,
+            ),
+            max(
+                _BASE_VERTICAL_EXTENT.descent_em,
+                0.06 + _FRACTION_SCALE * denominator.height_em,
+            ),
+        )
+    if isinstance(node, Radical):
+        body = _node_vertical_extent(node.body)
+        ascent = body.ascent_em + 0.20
+        if node.degree is not None:
+            degree = _scaled_vertical_extent(
+                _node_vertical_extent(node.degree),
+                0.50,
+            )
+            ascent = max(ascent, 0.55 + degree.ascent_em)

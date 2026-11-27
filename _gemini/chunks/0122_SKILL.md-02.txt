@@ -1,0 +1,19 @@
+| 删应用/插件目录时 `Remove-Item -Recurse` 反复报「对路径 xxx 的访问被拒绝」，管理员重试也没用 | `03-通用/03-调试与验证/踩坑-删插件目录被拒是内核驱动与被注入DLL占用-先改父目录名再登记开机删除.md`（`verified`：2026-11-20 实测三层真因＝宿主按 `service.auto_start` 反复拉起伴生 exe、目录内 `.sys` 已被 `sc create` 注册成 **Running 内核驱动服务**（`RTCoreMini64`）、`.dll` 被全局钩子注入到 `svchost.exe` 等进程。修法＝先 `Move-Item` 把父目录整体改名移出应用目录（应用立刻干净）→ `sc.exe stop/delete` 驱动服务 → 剩余锁文件 `MoveFileEx(...,MOVEFILE_DELAY_UNTIL_REBOOT=4)` + `HKCU\...\RunOnce` 兜底；提权 worker 日志必须写 `%LOCALAPPDATA%\Temp`，写项目盘有时静默不生成） |
+| 开/关 DeepSeek Harness 弹黑色命令框、停在「请按住任意键继续」必须按键；或自建的启动守卫 bat 在 GUI 起来前卡住不放 | `03-通用/03-调试与验证/踩坑-DSH启动弹黑框等按键-守卫pause叠加遗留中间态目录.md`（`verified`：两层叠加＝守卫脚本对 rc=2 用 `pause` + 可见普通窗口，且它自己 `rmtree(..., ignore_errors=True)` 删不掉的 `.__guard_bak` 被同一脚本判成待人工确认。修法＝删 pause、输出重定向日志、`wscript` 里 `sh.Run bat,0,False` 隐藏启动且快捷方式 `WindowStyle=7`、中间态改「相对路径+大小+小文件 SHA256 全覆盖」判冗余后自动清、`--popup` 只在真有问题时弹中文框。验收：运行中 `Get-Process cmd,powershell` 的 `MainWindowHandle` 全 0） |
+| DSH 插件「整体消失」：自己注册的 agent 工具调不到、client slot 按钮不见、profile 依赖与源码都正常，重启也不恢复 | `03-通用/03-调试与验证/踩坑-DSH插件package.json带BOM致整包被内核静默跳过.md`（`verified`：PowerShell 5.1 `Set-Content -Encoding UTF8` 给插件 `package.json` 加了 `EF BB BF`，内核 `loadProfileDirectory` 的 `JSON.parse` 抛 `SyntaxError: Unexpected token '` → 按设计把该 bundle 丢进 `skippedBundles` 且只写 stderr（GUI 启动没人看），bundle patch 整层不入组合。查法：`ELECTRON_RUN_AS_NODE=1` import `app.asar/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js`，调 `loadProfileDirectory(...,{userLayer:false})` 看 `skippedBundles`／`composeEntries` 条目数；修法：`[System.IO.File]::WriteAllText(..., UTF8Encoding($false))` 去 BOM 并复检首三字节） |
+| 预设里明明配了 `tool-subagent`，会话却调不到 `subagent` / `subagent_fork` 工具；或 `plugin_manager list_bundles` 报 `error.code: "incompatible-version"`（profile 里装着旧内核同名包） | `03-通用/03-调试与验证/经验-DSH装插件与删provider的四个动作点.md` 的「2026-11-22 补」节（`verified`：`node_modules` 里 `@deepseek-ai/dsh-tool-subagent@0.2.2-rc.3` 的 peerDeps 把 `dsh-agent/dsh-llm/dsh-session/dsh-subagent/dsh-tools/dsh-system-prompt/dsh-session-projection` 全钉 rc.3，遮蔽 asar 内 rc.5 ⇒ 版本门禁不过、两行插件激活失败。修法＝**先 `remove_bundle` 再 `install_bundle` 并显式带版本**（这些包 npm `latest` 是占位 `0.0.1-rc.1`，真版本在 `next`/`alpha` tag）；装完必须**新开会话**才见新工具） |
+| 升级带原生依赖的 DSH 插件时 pnpm 报 `[ERR_PNPM_EPERM] [importPackage ...\@img\sharp-win32-x64] ... rename ..._tmp_ -> ...`，而 `plugin_manager` 说是 `kind: "permission"`「DSH 写不了 profile 目录」 | 同上文件「2026-11-22 补」节第②条（`verified`：**不是权限问题**——同目录 `Rename-Item` 成功、`Remove-Item` 失败，锁的持有者是运行中的 DeepSeek Harness 进程（`libvips-42.dll` / `sharp-win32-x64-0.35.5.node` 已映射）。修法＝把被锁目录**改名挪开**再让 pnpm 往原路径装新份，`.bak-*` 重启 DSH 后删。判真假权限用「能改名但不能删」） |
+| DSH 宿主升级后（如 0.2.2-rc.5 → 0.2.3.0 / 内核 `0.2.3-alpha.2`）装插件报 `incompatible-version`，或升级后某个第三方插件界面整块消失 | `03-通用/03-调试与验证/经验-DSH装插件与删provider的四个动作点.md` 第 12 节（`verified` 2026-11-23：①`latest`/`next` tag 都追不上内核，只有显式 `@0.2.3-alpha.2` 能过版本门禁，先 `remove_bundle` 再 `install_bundle` 带全版本；②升级器会把第三方 bundle 留成 `enabled:false, installed:true`（本次 `dsh-better-sidebar`），用 `plugin_manager set_bundle {target, enabled:true}` 一行恢复，不必重装；③`@img/sharp-win32-x64` EPERM 每次升级都会再犯，改名挪开后重装，`.bak` 要关 DSH 才能删） |
+| 某域名直连一律超时、走代理秒回 | `踩坑-虚拟网卡空metric抢走默认路由致域名假超时.md` |
+| 当前是哪块网卡抢了默认路由 | `规则-默认路由抢占网卡已换为RadminVPN.md` |
+| 面板「连接失败 / 耗时 1ms」 | `踩坑-AI面板连接失败耗时1ms是没填密钥而非网络.md` |
+| AI 客户端卡「思考中」、切路由无效、用量看不到 | `踩坑-第三方Claude客户端自带服务商配置切全局路由无效.md` |
+| 插件报「搜索没跑完」、只在中文 Windows 上失败 | `踩坑-中文注册表值触发PS兜底且param不绑定致插件查不完.md` |
+| xlsx 在 Excel 里行高被裁字、文字重叠 | `踩坑-openpyxl写的xlsx在Excel里行高被裁字.md` |
+| Excel 打不开整本 xlsx、报 `0x800A03EC` | `踩坑-xlsx字符串以等号开头致Excel打不开簿.md` |
+| Windows 新窗口居中、托盘图标取证、DPI-aware | `规则-Windows新窗口默认居中只能常驻监视器.md`、`踩坑-Win11托盘图标在独立溢出窗口且取证须先设DPI-aware.md` |
+| 脚本驱动 MSVC / vcvars / qt-cmake | `踩坑-脚本驱动MSVC时vcvars传参与qt-cmake不透传build.md` |
+| 缩放/适配后窗口或控件"该缩的没缩"，框比原图大就原样返回 | `踩坑-同一函数既当不放大守卫又当按框缩放致该缩的不缩.md` |
+| 休眠/关机收尾窗口里 taskkill /F 杀不掉进程，代理软件残留 | `踩坑-休眠挂起窗口内taskkill子进程杀不掉进程致代理残留.md` |
+| 唤醒后没人拉起应用（收尾被休眠冻结、唤醒广播丢失） | `踩坑-休眠冻结收尾致唤醒广播丢失须主动补唤醒.md` |
+| 唤醒后代理软件在跑但全机没代理（ProxyEnable 没自动开回） | `踩坑-代理软件重启后不自动恢复系统代理开关唤醒须补开.md` |

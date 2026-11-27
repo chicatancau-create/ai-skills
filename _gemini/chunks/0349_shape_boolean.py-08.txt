@@ -1,0 +1,128 @@
+        )
+        commands.extend(transform_path_commands(child_commands, matrix))
+    if not commands:
+        raise ValueError(
+            f"Compact authored preset {_element_label(group)} has no filled "
+            "silhouette"
+        )
+    return commands
+
+
+def _close_filled_commands(
+    commands: Sequence[PathCommand],
+    label: str,
+) -> list[PathCommand]:
+    closed: list[PathCommand] = []
+    open_subpath = False
+    drew_segment = False
+    for command in commands:
+        if command.cmd == "M":
+            if open_subpath:
+                if not drew_segment:
+                    raise ValueError(f"{label} has an empty subpath")
+                closed.append(PathCommand("Z", []))
+            open_subpath = True
+            drew_segment = False
+        elif command.cmd in {"L", "C"}:
+            if not open_subpath:
+                raise ValueError(f"{label} draws before its first move")
+            drew_segment = True
+        elif command.cmd == "Z":
+            if not open_subpath:
+                raise ValueError(f"{label} closes without an open subpath")
+            if not drew_segment:
+                raise ValueError(f"{label} has an empty subpath")
+            open_subpath = False
+        closed.append(command)
+    if open_subpath:
+        if not drew_segment:
+            raise ValueError(f"{label} has an empty subpath")
+        closed.append(PathCommand("Z", []))
+    if not closed:
+        raise ValueError(f"{label} has no drawable contour")
+    return closed
+
+
+def _require_closed_commands(
+    commands: Sequence[PathCommand],
+    label: str,
+) -> None:
+    open_subpath = False
+    drew_segment = False
+    closed_contour = False
+    for command in commands:
+        if command.cmd == "M":
+            if open_subpath:
+                raise ValueError(f"{label} contains an open subpath")
+            open_subpath = True
+            drew_segment = False
+        elif command.cmd in {"L", "C"}:
+            if not open_subpath:
+                raise ValueError(f"{label} draws before its first move")
+            drew_segment = True
+        elif command.cmd == "Z":
+            if not open_subpath:
+                raise ValueError(f"{label} closes without an open subpath")
+            if not drew_segment:
+                raise ValueError(f"{label} has an empty subpath")
+            open_subpath = False
+            closed_contour = True
+    if open_subpath:
+        raise ValueError(f"{label} contains an open subpath")
+    if not closed_contour:
+        raise ValueError(f"{label} has no drawable closed contour")
+
+
+def _commands_to_pathops(
+    commands: Sequence[PathCommand],
+    pathops: Any,
+) -> Any:
+    result = pathops.Path(fillType=pathops.FillType.WINDING)
+    for command in commands:
+        args = command.args
+        if command.cmd == "M":
+            result.moveTo(args[0], args[1])
+        elif command.cmd == "L":
+            result.lineTo(args[0], args[1])
+        elif command.cmd == "C":
+            result.cubicTo(*args)
+        elif command.cmd == "Z":
+            result.close()
+        else:
+            raise AssertionError(
+                f"Unexpected normalized path command: {command.cmd}"
+            )
+    return result
+
+
+def _merge_paths(
+    operation: str,
+    operands: Sequence[Any],
+    pathops: Any,
+) -> Any:
+    operator_by_name = {
+        "combine": pathops.PathOp.XOR,
+        "intersect": pathops.PathOp.INTERSECTION,
+        "subtract": pathops.PathOp.DIFFERENCE,
+        "union": pathops.PathOp.UNION,
+    }
+    operator = operator_by_name[operation]
+    result = operands[0]
+    for operand in operands[1:]:
+        result = _path_op(result, operand, operator, pathops)
+        if _path_is_empty(result) and operation in {"intersect", "subtract"}:
+            break
+    return result
+
+
+def _path_op(
+    first: Any,
+    second: Any,
+    operator: Any,
+    pathops: Any,
+) -> Any:
+    try:
+        return pathops.op(
+            first,
+            second,
+            operator,

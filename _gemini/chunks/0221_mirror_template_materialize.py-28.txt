@@ -1,0 +1,78 @@
+        f"canvas_width: {format_coordinate(width)}", f"canvas_height: {format_coordinate(height)}",
+        f'canvas_viewbox: "{viewbox}"', f'source_viewbox: "{viewbox}"',
+        f"page_count: {len(pages)}", "---", "", "# Mirror Template Design Spec", "",
+        "## I. Template Overview", "", "<!-- TODO -->", "",
+        "## II. Color Scheme", "", "<!-- TODO -->", "",
+        "## III. Typography", "", "<!-- TODO -->", "",
+        "## IV. Signature Design Elements", "", "<!-- TODO -->", "",
+        "## V. Page Roster", "",
+        "| File | Master | Layout key | PowerPoint picker name | Slots |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for path, root in pages:
+        slots = ", ".join(
+            f"{e.get('id')}: {e.get('data-pptx-placeholder')}"
+            for e in root.iter() if e.get("data-pptx-placeholder")
+        ) or "none"
+        cells = [f"`{path.name}`", root.get("data-pptx-master", ""),
+                 root.get("data-pptx-layout", ""), root.get("data-pptx-layout-name", ""), slots]
+        lines.append("| " + " | ".join(c.replace("|", "\\|").replace("\n", " ") for c in cells) + " |")
+    lines += ["", "Slots `none` means the source package declared no PowerPoint placeholder; "
+              "editable text targets are listed in `template_execution/<prototype>.text-slots.json`.",
+              "", "### Source Preservation Map", "",
+              f"Source package SHA-256: `{native['source']['sha256']}`", "",
+              "| Source slide | Template | Master | Layout |", "| --- | --- | --- | --- |"]
+    for slide, (path, root) in zip(sorted(native["slides"], key=lambda item: int(item["index"])), pages):
+        lines.append(f"| {slide['index']} | `{path.name}` | {root.get('data-pptx-master')} | {root.get('data-pptx-layout')} |")
+    lines += ["", "Only source-slide-reachable Masters and Layouts are retained.", "",
+              "## VI. Assets", "", "<!-- TODO -->", ""]
+    return "\n".join(lines)
+
+
+def materialize_mirror_template(
+    import_workspace: Path,
+    template_workspace: Path,
+    *,
+    kind: str = "deck",
+) -> dict[str, Any]:
+    """Publish source Slide prototypes with their reachable mirror structure."""
+    if kind not in {"layout", "deck"}:
+        raise MirrorMaterializationError("Mirror publication kind must be layout or deck")
+    native = _load_native_graph(import_workspace)
+    inheritance = _load_inheritance(import_workspace)
+    masters: dict[str, dict[str, Any]] = {}
+    for index, item in enumerate(
+        _require_list(native.get("masters"), context="native masters")
+    ):
+        if not isinstance(item, dict):
+            raise MirrorMaterializationError(
+                f"native masters[{index}] must be an object"
+            )
+        key = _require_string(item.get("key"), context=f"native masters[{index}].key")
+        if key in masters:
+            raise MirrorMaterializationError(f"Duplicate native Master key: {key}")
+        masters[key] = item
+    layouts: dict[str, dict[str, Any]] = {}
+    for index, item in enumerate(
+        _require_list(native.get("layouts"), context="native layouts")
+    ):
+        if not isinstance(item, dict):
+            raise MirrorMaterializationError(
+                f"native layouts[{index}] must be an object"
+            )
+        key = _require_string(item.get("key"), context=f"native layouts[{index}].key")
+        if key in layouts:
+            raise MirrorMaterializationError(f"Duplicate native Layout key: {key}")
+        layouts[key] = item
+    slides: list[dict[str, Any]] = []
+    for index, item in enumerate(
+        _require_list(native.get("slides"), context="native slides")
+    ):
+        if not isinstance(item, dict) or not isinstance(item.get("index"), int):
+            raise MirrorMaterializationError(
+                f"native slides[{index}] requires an integer index"
+            )
+        slides.append(item)
+    slides.sort(key=lambda item: int(item["index"]))
+    if not slides:
+        raise MirrorMaterializationError(

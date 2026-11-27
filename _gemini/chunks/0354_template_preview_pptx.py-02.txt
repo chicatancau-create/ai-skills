@@ -1,0 +1,111 @@
+_TEMPLATE_SPEC_NAME_RE = re.compile(
+    r"design_spec\.(?P<kind>brand|style|layout|deck)\.[^/\\]+\.md"
+)
+
+
+def _roster_spec(directory: Path) -> Path | None:
+    """Return the effective spec that owns this directory's SVG roster.
+
+    A library workspace keeps the exact ``design_spec.md``. A project workspace
+    shares one ``templates/`` across kinds. Layout owns structure when both
+    Layout and Deck are present; otherwise Deck owns it.
+    """
+    if not directory.is_dir():
+        return None
+    exact = directory / "design_spec.md"
+    qualified = []
+    for item in sorted(directory.glob("design_spec.*.md")):
+        match = _TEMPLATE_SPEC_NAME_RE.fullmatch(item.name)
+        if match is not None:
+            qualified.append((item, match.group("kind")))
+    if exact.is_file() and qualified:
+        raise ValueError(
+            "design_spec.md and design_spec.<kind>.<id>.md cannot share "
+            f"{directory}; rename the bare spec to its kind-qualified name"
+        )
+    kinds = [kind for _item, kind in qualified]
+    duplicate_kinds = sorted({
+        kind for kind in kinds if kinds.count(kind) > 1
+    })
+    if duplicate_kinds:
+        raise ValueError(
+            f"{directory} declares the same kind more than once: "
+            + ", ".join(duplicate_kinds)
+        )
+    try:
+        from register_template import (
+            SpecParseError,
+            validate_qualified_spec_identity,
+        )
+        for item, _kind in qualified:
+            validate_qualified_spec_identity(item)
+    except ImportError as exc:
+        raise ValueError(
+            f"Qualified Design Spec validator could not be imported: {exc}"
+        ) from exc
+    except (OSError, SpecParseError) as exc:
+        raise ValueError(str(exc)) from exc
+    if exact.is_file():
+        return exact
+    for preferred_kind in ("layout", "deck"):
+        for item, kind in qualified:
+            if kind == preferred_kind:
+                return item
+    return None
+
+
+def _resolve_workspace(path: Path) -> tuple[Path, Path]:
+    """Resolve one workspace root and its canonical template-source directory."""
+    candidate = path.expanduser().resolve()
+    if _roster_spec(candidate / "templates") is not None:
+        return candidate, candidate / "templates"
+    raise ValueError(
+        "template workspace root must contain templates/design_spec.md or "
+        "templates/design_spec.<layout|deck>.<id>.md"
+    )
+
+
+def _template_id(spec_path: Path) -> str:
+    """Read the required portable template id."""
+    text = spec_path.read_text(encoding="utf-8")
+    match = _FRONTMATTER_ID_RE.search(text)
+    if match is None:
+        raise ValueError(
+            f"{spec_path.name} frontmatter must declare layout_id or deck_id"
+        )
+    raw = match.group(1).strip().strip("'\"")
+    safe = _FILENAME_UNSAFE_RE.sub("_", raw).strip(" ._")
+    return safe or "template"
+
+
+def _replication_mode(spec_path: Path) -> str:
+    """Read the required template replication mode."""
+    text = spec_path.read_text(encoding="utf-8")
+    match = _REPLICATION_MODE_RE.search(text)
+    if match is None:
+        raise ValueError(
+            f"{spec_path.name} frontmatter must declare replication_mode"
+        )
+    return match.group(1)
+
+
+def _canvas_viewbox(spec_path: Path) -> str | None:
+    """Read the template's locked root canvas when declared."""
+    text = spec_path.read_text(encoding="utf-8")
+    if not text.startswith("---\n"):
+        return None
+    end = text.find("\n---\n", 4)
+    if end == -1:
+        return None
+    match = _CANVAS_VIEWBOX_RE.search(text[4:end])
+    return match.group(1).strip() if match else None
+
+
+def _verify_output(
+    output_path: Path,
+    *,
+    require_full_placeholder_frames: bool,
+) -> tuple[int, int, int, int]:
+    """Reopen the review deck and verify counts plus authored placeholder frames."""
+    presentation = Presentation(str(output_path))
+    master_count = len(presentation.slide_masters)

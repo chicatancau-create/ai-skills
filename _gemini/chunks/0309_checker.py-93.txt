@@ -1,0 +1,84 @@
+                        f"{svg_file.name}: reusable template prototypes must omit "
+                        "legacy data-pptx-layout-kind metadata",
+                    ))
+                if any(
+                    child.get('data-pptx-placeholder') is not None
+                    and child.tag.rsplit('}', 1)[-1] != 'g'
+                    for child in list(root)
+                ):
+                    legacy_structure_detected = True
+                missing_bounds = [
+                    child.get('id') or child.tag.rsplit('}', 1)[-1]
+                    for child in list(root)
+                    if child.get('data-pptx-placeholder') is not None
+                    and child.get('data-pptx-bounds') is None
+                ]
+                if missing_bounds:
+                    legacy_structure_detected = True
+                    self._template_issues.append((
+                        'error',
+                        'placeholder_bounds_missing',
+                        f"{svg_file.name}: reusable templates require "
+                        "explicit design-zone data-pptx-bounds; missing: "
+                        + ', '.join(missing_bounds),
+                    ))
+            if native_contract_path.exists() or source_template_path.exists():
+                legacy_structure_detected = True
+                self._template_issues.append((
+                    'error',
+                    'legacy_native_structure_pair',
+                    "source-analysis native_structure/source.pptx contracts "
+                    "must not be packaged as reusable template inputs; rebuild "
+                    "through "
+                    "skills/ppt-master/workflows/create-template.md",
+                ))
+
+            if declared_structure_mode != 'structured':
+                legacy_structure_detected = True
+                if not mode_error_recorded:
+                    self._template_issues.append((
+                        'error',
+                        'explicit_structure_mode',
+                        "design_spec.md frontmatter must declare "
+                        "native_structure_mode: structured",
+                    ))
+            if legacy_structure_detected:
+                self._template_issues.append((
+                    'error',
+                    'legacy_structure_contract',
+                    "legacy template structure detected; create a new current "
+                    "workspace through skills/ppt-master/workflows/"
+                    "create-template.md before Step 3 consumption",
+                ))
+        spec_pages = self._extract_spec_roster(spec_text) if spec_text else []
+        custom_contract = self._extract_frontmatter_placeholders(spec_text) if spec_text else {}
+
+        on_disk = {p.stem for p in svg_files}
+        self._template_roster_pages = len(spec_pages)
+
+        if spec_pages:
+            spec_set = set(spec_pages)
+            orphan = sorted(on_disk - spec_set)
+            missing = sorted(spec_set - on_disk)
+            for page in orphan:
+                self._template_issues.append((
+                    'error',
+                    'roster_orphan',
+                    f"{page}.svg exists on disk but is not listed in design_spec.md Page Roster",
+                ))
+            for page in missing:
+                self._template_issues.append((
+                    'error',
+                    'roster_missing',
+                    f"design_spec.md Page Roster lists {page} but {page}.svg is missing on disk",
+                ))
+        elif spec_path is not None and spec_path.exists():
+            # design_spec.md is present but the roster parser found nothing —
+            # reusable template workspaces always fail closed.
+            self._template_issues.append((
+                'error',
+                'roster_unknown',
+                f"could not extract page roster from {spec_path.name}; "
+                "skipping orphan/missing checks",
+            ))
+        else:

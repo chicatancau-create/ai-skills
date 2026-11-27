@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""Focused tests for the authoring-time text measurement CLI."""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+import unittest
+from pathlib import Path
+from xml.etree import ElementTree as ET
+
+
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from svg_to_pptx.drawingml.elements import (  # noqa: E402
+    estimate_single_line_text_frame_width,
+)
+from svg_to_pptx.drawingml.utils import estimate_text_cluster_widths  # noqa: E402
+from text_measure import (  # noqa: E402
+    _CLOSING_PUNCTUATION,
+    _OPENING_PUNCTUATION,
+    _render_wrapped_svg,
+    measure_text,
+    text_box,
+    wrap_text,
+)
+from svg_quality.checker import SVGQualityChecker  # noqa: E402
+
+
+SCRIPT = SCRIPTS_DIR / 'text_measure.py'
+SAMPLE = 'Current macro-free package; the main editable format in modern PowerPoint'
+CJK_PARAGRAPHS = (
+    '通体蓝瓦圆顶对应天穹，不靠体量压人，而用“圆”与“空”消解人与天地的隔阂；'
+    '蓝瓦贴合青天之色，模糊人间与天宇的边界。',
+    '三层汉白玉圆台层层递进，暗藏天时历法；古人在此祭天，以高台承接天地阳气，'
+    '把四时流转、阴阳交替的规律固化为仪式。',
+)
+
+
+def _run_cli(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), *args],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+
+class CalibrateRoleWeightTests(unittest.TestCase):
+    def test_role_argument_accepts_a_bold_suffix(self) -> None:
+        from text_measure import _role_argument
+
+        self.assertEqual(_role_argument('title:Arial:36'), ('title', 'Arial', 36.0, 'normal'))
+        self.assertEqual(_role_argument('title:Arial:36:bold'), ('title', 'Arial', 36.0, 'bold'))
+
+    def test_bold_role_calibrates_wider(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from text_measure import _calibration_payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            normal = _calibration_payload(
+                [('title', 'Arial', 36.0)], project_path=Path(tmp),
+                source='--role', include_outline=False,
+            )['roles']['title']
+            bold = _calibration_payload(
+                [('title', 'Arial', 36.0)], project_path=Path(tmp),
+                source='--role', include_outline=False, weights={'title': 'bold'},
+            )['roles']['title']
+        self.assertEqual(bold['weight'], 'bold')
+        self.assertLess(bold['latin_chars_per_100px'], normal['latin_chars_per_100px'])
+
+
+class WrapUnitTests(unittest.TestCase):
+    def test_percent_sign_stays_with_its_number(self) -> None:
+        from text_measure import wrap_text
+
+        lines, _widths, _oversized = wrap_text(
+            'xxxx yyyy 71% of the cohort', size=26, max_width=175, family='Arial',
+        )
+        self.assertEqual(lines, ['xxxx yyyy', '71% of the', 'cohort'])
+
+
+class TextMeasureTests(unittest.TestCase):
+    def test_measure_matches_checker_estimator(self) -> None:
+        run = {
+            'text': SAMPLE,
+            'font_size': 22.0,
+            'font_family': 'Calibri',
+            'font_weight': 'normal',
+            'letter_spacing': 0.0,
+        }
+        expected = estimate_single_line_text_frame_width([run])
+
+        self.assertAlmostEqual(measure_text(SAMPLE, size=22), expected)
+        result = _run_cli('measure', SAMPLE, '--size', '22')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, f'736.5\t{SAMPLE}\n')
+
+    def test_arial_raw_width_matches_reference_lines(self) -> None:
+        cases = (
+            (
+                'The dissemination layer covers the poster you stand next to at a conference session',
+                16, 'normal', 596,
+            ),
+            (
+                'The fill loop is discrete: five verdict bands, one section edited per round,',
+                28, 'bold', 966,
+            ),
+        )
+        for text, size, weight, expected in cases:
+            with self.subTest(weight=weight):

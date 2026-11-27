@@ -1,0 +1,113 @@
+                    result.diagnostics,
+                    slide_fonts,
+                    inheritance_mode="flat",
+                )
+                result.flat_slides.append(artifact)
+
+        # Layered mode: also render each master / layout once.
+        if emit_layered:
+            _convert_inheritance_parts(pkg, default_theme, options, result)
+        if options.roundtrip:
+            result.native_structure = _roundtrip_native_structure(pkg, pptx_path)
+            result.source_pptx_path = pptx_path
+            _annotate_roundtrip_slide_roots(
+                result.slides,
+                result.native_structure,
+            )
+
+    if output_dir is not None:
+        _write_artifacts(output_dir, result, options)
+
+    return result
+
+
+def _read_back_slide_transition(
+    pkg: OoxmlPackage,
+    slide: SlideRef,
+    result: ConvertResult,
+    options: ConvertOptions,
+) -> None:
+    """Recover one supported slide transition into the sidecar."""
+    try:
+        transition = import_slide_transition(
+            pkg,
+            slide,
+            media_subdir=options.sound_subdir,
+            resource_path_map=result.resource_inventory.path_map(),
+        )
+    except TransitionImportError as exc:
+        message = f"Slide transition was not reconstructed: {exc}"
+        if options.strict:
+            raise ValueError(message) from exc
+        append_diagnostic(
+            result.diagnostics,
+            ImportDiagnostic(
+                code="transition-not-reconstructed",
+                message=message,
+                fallback=(
+                    "keep this transition in the source PPTX through direct "
+                    "native preservation"
+                ),
+                part_path=slide.part.path,
+                slide_index=slide.index,
+            ),
+        )
+    else:
+        if transition is not None:
+            slides = result.animation_config["slides"]
+            if not isinstance(slides, dict):
+                raise RuntimeError("internal animations.json slides must be an object")
+            slides[f"slide_{slide.index:02d}"] = {
+                "transition": transition.config,
+            }
+            for filename, payload in transition.media_files.items():
+                existing = result.animation_media_files.get(filename)
+                if existing is not None and existing != payload:
+                    raise RuntimeError(
+                        "Transition sound filename collision with different bytes: "
+                        f"{filename}"
+                    )
+                result.animation_media_files[filename] = payload
+
+
+
+def _read_back_slide_animation(
+    pkg: OoxmlPackage,
+    slide: SlideRef,
+    artifact: SlideArtifact,
+    result: ConvertResult,
+    options: ConvertOptions,
+) -> None:
+    """Recover one finite object-animation sequence into the sidecar."""
+    try:
+        animation = import_slide_animation(
+            pkg,
+            slide,
+            slide_svg=artifact.svg,
+        )
+    except AnimationImportError as exc:
+        message = f"Object animation timing was not reconstructed: {exc}"
+        if options.strict:
+            raise ValueError(message) from exc
+        append_diagnostic(
+            result.diagnostics,
+            ImportDiagnostic(
+                code="animation-not-reconstructed",
+                message=message,
+                fallback=(
+                    "keep this timing in the source PPTX through direct "
+                    "native preservation"
+                ),
+                part_path=slide.part.path,
+                slide_index=slide.index,
+            ),
+        )
+        return
+    if animation is None:
+        return
+
+    slides = result.animation_config["slides"]
+    if not isinstance(slides, dict):
+        raise RuntimeError("internal animations.json slides must be an object")
+    slide_config = slides.setdefault(f"slide_{slide.index:02d}", {})
+    if not isinstance(slide_config, dict):

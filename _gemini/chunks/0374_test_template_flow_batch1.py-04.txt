@@ -1,0 +1,69 @@
+        self.assertIsNone(server._stage2_ready_error(self.project, self.project / 'confirm_ui'))
+
+
+class TemplateBuilderTests(unittest.TestCase):
+    def _backgrounds(self, colors: list[str], *, baked: bool = False, public_count: int = 1):
+        with tempfile.TemporaryDirectory() as tmp:
+            root_dir = Path(tmp)
+            item = TemplateElementSpec('background', 0, 'rect', layer='master', is_background=True)
+            states = []
+            for num, color in enumerate(colors, 1):
+                root = ET.fromstring(f'<p:sld xmlns:p="{PML}" xmlns:a="{DML}"><p:cSld><p:spTree/></p:cSld></p:sld>')
+                shape = ET.fromstring(
+                    f'<p:sp xmlns:p="{PML}" xmlns:a="{DML}"><p:spPr>'
+                    '<a:xfrm><a:off x="0" y="0"/><a:ext cx="1280" cy="720"/></a:xfrm>'
+                    f'<a:prstGeom prst="rect"/><a:solidFill><a:srgbClr val="{color}"/></a:solidFill>'
+                    '</p:spPr></p:sp>'
+                )
+                if baked:
+                    root.find(f'{{{PML}}}cSld').insert(0, ET.fromstring(
+                        builder._solid_background_xml_from_shape(shape, (1280, 720)),
+                    ))
+                else:
+                    root.find(f'.//{{{PML}}}spTree').append(shape)
+                path = root_dir / f'slide{num}.xml'
+                ET.ElementTree(root).write(path, encoding='utf-8')
+                spec = TemplateSlideSpec(
+                    num, Path(f'page{num}.svg'), 'm', 'M', str(num), str(num), True, True, (item,),
+                )
+                states.append(builder._TemplateRuntimeSlide(
+                    spec, path, path.with_suffix('.rels'), ET.ElementTree(root), root, {},
+                    {} if baked else {'2': shape}, {} if baked else {'background': ['2']},
+                ))
+            target = root_dir / 'master.xml'
+            target.write_text(
+                f'<p:sldMaster xmlns:p="{PML}"><p:cSld><p:spTree/></p:cSld></p:sldMaster>',
+                encoding='utf-8',
+            )
+            result = builder._move_template_static_shape(
+                states, item, target, root_dir / 'master.rels', (1280, 720), public_slide_count=public_count,
+            )
+            self.assertTrue(all(not list(state.root.iter(f'{{{PML}}}sp')) for state in states))
+            return result
+
+    def test_n2_public_background_wins_over_unused_prototype(self) -> None:
+        for baked in (False, True):
+            with self.subTest(baked=baked):
+                self.assertIn('FAFAFA', self._backgrounds(['FAFAFA', 'FFFFFF'], baked=baked))
+
+    def test_n2_inconsistent_public_backgrounds_still_fail(self) -> None:
+        for baked in (False, True):
+            with self.subTest(baked=baked), self.assertRaises(TemplateStructureError):
+                self._backgrounds(['FAFAFA', 'FFFFFF'], baked=baked, public_count=2)
+
+    def test_n2_master_without_public_pages_uses_its_prototype(self) -> None:
+        self.assertIn('FFFFFF', self._backgrounds(['FFFFFF'], public_count=0))
+
+    def test_n7_custom_faces_survive_slide_and_layout_placeholder_rebuild(self) -> None:
+        fonts = ThemeFontSpec(ThemeFontFace('Arial', 'SimSun', 'Arial'),
+                              ThemeFontFace('Arial', 'SimSun', 'Arial'), 'Arial', 'Arial')
+        for kind in ('title', 'body'):
+            for face, expected in (('Arial Black', 'Arial Black'), ('Arial', '+mj-lt' if kind == 'title' else '+mn-lt'),
+                                   ('+mn-lt', '+mj-lt' if kind == 'title' else '+mn-lt')):
+                with self.subTest(kind=kind, face=face):
+                    shape = ET.fromstring(
+                        f'<p:sp xmlns:p="{PML}" xmlns:a="{DML}"><p:nvSpPr><p:nvPr/></p:nvSpPr>'
+                        '<p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r>'
+                        f'<a:rPr><a:latin typeface="{face}"/></a:rPr><a:t>01</a:t>'
+                        '</a:r></a:p></p:txBody></p:sp>'
+                    )

@@ -1,0 +1,79 @@
+                    bindings_by_element = {
+                        binding.element.element_id: binding
+                        for binding in bindings
+                    }
+                    for item in spec.placeholders:
+                        proxy_binding = is_proxy_placeholder(item)
+                        carrier_name = (
+                            f"{item.element_id} Proxy Content"
+                            if proxy_binding
+                            else f"{item.element_id} Placeholder Carrier"
+                        )
+                        carrier = _top_level_shape_by_name(slide_root, carrier_name)
+                        carrier_placeholder = (
+                            carrier.find(f".//{{{PML_NS}}}ph")
+                            if carrier is not None
+                            else None
+                        )
+                        if proxy_binding:
+                            if carrier_placeholder is not None:
+                                errors.append(
+                                    f"Slide {spec.slide_num} proxy content "
+                                    f"{carrier_name!r} must remain ordinary"
+                                )
+                        elif carrier is not None and carrier_placeholder is None:
+                            errors.append(
+                                f"Slide {spec.slide_num} carrier "
+                                f"{carrier_name!r} must own its p:ph binding"
+                            )
+                        if not proxy_binding:
+                            continue
+                        placeholder_binding = bindings_by_element[item.element_id]
+                        binding_name = (
+                            "Placeholder Binding "
+                            f"{placeholder_binding.placeholder_type} "
+                            f"{placeholder_binding.effective_idx}"
+                        )
+                        binding_shape = _top_level_shape_by_name(
+                            slide_root,
+                            binding_name,
+                        )
+                        if binding_shape is None:
+                            continue
+                        c_nv_pr = next(
+                            binding_shape.iter(f"{{{PML_NS}}}cNvPr"),
+                            None,
+                        )
+                        if (
+                            c_nv_pr is None
+                            or c_nv_pr.get("hidden", "0").lower()
+                            not in {"1", "true"}
+                        ):
+                            errors.append(
+                                f"Slide {spec.slide_num} binding proxy "
+                                f"{binding_name!r} must be hidden"
+                            )
+                        if binding_shape.find(f".//{{{PML_NS}}}ph") is None:
+                            errors.append(
+                                f"Slide {spec.slide_num} binding proxy "
+                                f"{binding_name!r} has no p:ph"
+                            )
+                        alpha_values = {
+                            alpha.get("val")
+                            for alpha in binding_shape.findall(
+                                f".//{{{DML_NS}}}srgbClr/{{{DML_NS}}}alpha"
+                            )
+                        }
+                        proxy_text = "".join(
+                            node.text or ""
+                            for node in binding_shape.findall(
+                                f".//{{{DML_NS}}}t"
+                            )
+                        )
+                        if "0" not in alpha_values or proxy_text != "\u200b":
+                            errors.append(
+                                f"Slide {spec.slide_num} binding proxy "
+                                f"{binding_name!r} must contain exactly one fully "
+                                "transparent zero-width run"
+                            )
+

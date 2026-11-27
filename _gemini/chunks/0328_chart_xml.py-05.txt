@@ -1,0 +1,100 @@
+    data_labels: dict[str, Any] | None = None,
+    data_label_font_size: int = 900,
+    data_label_color: str | None = None,
+    data_label_font_face: str | None = None,
+    language: str | None = None,
+    category_column: int = 1,
+    color_start_index: int | None = None,
+    series_indices: list[int] | None = None,
+    start_column: int = 2,
+    start_index: int = 0,
+) -> str:
+    parts: list[str] = []
+    category_xml = _category_reference_xml(
+        categories,
+        column_index=category_column,
+        numeric=category_is_numeric,
+        number_format=category_number_format,
+    )
+    for offset, item in enumerate(series):
+        index = (
+            series_indices[offset]
+            if series_indices is not None
+            else start_index + offset
+        )
+        color_index = (
+            color_start_index
+            if color_start_index is not None
+            else start_index
+        ) + offset
+        column_index = offset + start_column
+        fill_opacity = item.get("fill_opacity") if chart_type == "area" else None
+        line_width = item.get("line_width") if chart_type in {"area", "line"} else None
+        series_color = _chart_color(colors, color_index)
+        # An area is a filled region: it draws an outline only when the payload
+        # asks for one with line_width, otherwise the fill edge is the shape.
+        color_xml = _series_color_xml(
+            series_color,
+            line=chart_type != "area" or line_width is not None,
+            fill_opacity=fill_opacity,
+            line_width=line_width,
+        )
+        point_colors_xml = ""
+        marker_xml = ""
+        smooth_xml = ""
+        if chart_type in {"doughnut", "of_pie", "pie"}:
+            color_xml = ""
+            point_count = (
+                len(categories) + 1
+                if chart_type == "of_pie"
+                else len(categories)
+            )
+            point_colors_xml = _data_point_colors_xml(
+                point_count,
+                item.get("point_colors") or colors,
+            )
+        elif chart_type in {"bar", "column"} and item.get("point_colors"):
+            point_colors_xml = _data_point_colors_xml(
+                len(item["values"]),
+                item["point_colors"],
+                disable_negative_invert=True,
+            )
+        if chart_type == "line":
+            size_pt = _marker_size_pt(
+                item.get("marker_size") if item.get("marker_size") is not None else marker_size
+            )
+            marker_xml = _marker_xml(
+                "circle" if line_style == "lineMarker" else "none",
+                size_pt=size_pt,
+                color=series_color if line_style == "lineMarker" else None,
+            )
+            if item.get("point_colors"):
+                point_colors_xml = _line_point_markers_xml(
+                    item["point_colors"],
+                    size_pt=size_pt,
+                )
+            smooth_xml = '<c:smooth val="0"/>'
+        if chart_type == "radar":
+            if radar_style == "filled":
+                color_xml = _series_color_xml(
+                    _chart_color(colors, color_index),
+                    line=False,
+                )
+            marker_xml = _marker_xml(radar_marker_style)
+        invert_xml = '<c:invertIfNegative val="0"/>' if chart_type in {"bar", "column"} else ""
+        item_data_labels = _data_labels_config(item)
+        effective_data_labels = (
+            item_data_labels if item_data_labels is not None else data_labels
+        )
+        data_labels_xml = (
+            _data_labels_xml(
+                effective_data_labels,
+                chart_type=chart_type,
+                grouping=grouping,
+                point_count=len(item["values"]),
+                font_size=data_label_font_size,
+                default_color=data_label_color,
+                default_font_face=data_label_font_face,
+                language=language,
+            )
+            if (

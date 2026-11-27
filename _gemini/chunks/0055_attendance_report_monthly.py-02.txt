@@ -1,0 +1,110 @@
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _ensure_calendar_metrics(
+    matched: list[dict],
+    all_cols: list[dict],
+) -> list[dict]:
+    """
+    确保 CALENDAR_METRICS 中的 3 个指标字段（班次名称/考勤结果/工作时长）
+    出现在最终查询字段集中（即使用户传入的 --column-keywords 没匹配到）。
+
+    日历表 sheet2 强依赖这 3 个字段，缺一不可。
+    """
+    existing_names = {c["_column_name"] for c in matched}
+    name_to_col: dict[str, dict] = {}
+    for col in all_cols:
+        cid = cmn._first_nonempty(col, ("id", "columnId", "code", "key"))
+        name = cmn._first_nonempty(col, ("name", "columnName", "title", "label"))
+        if cid is not None and name:
+            name_to_col[str(name)] = {
+                "_column_id": str(cid),
+                "_column_name": str(name),
+            }
+
+    appended: list[str] = []
+    for metric_name in CALENDAR_METRICS:
+        if metric_name in existing_names:
+            continue
+        col = name_to_col.get(metric_name)
+        if col is None:
+            cmn.log(
+                f"[calendar] 警告：月历指标字段「{metric_name}」在"
+                f" report columns 中未找到，月历对应行可能为空"
+            )
+            continue
+        matched.append(col)
+        appended.append(metric_name)
+    if appended:
+        cmn.log(f"[calendar] 已强制追加月历指标字段：{appended}")
+    return matched
+
+
+def resolve_columns(args: argparse.Namespace) -> list[dict]:
+    all_cols_payload = cmn.run_dws(["attendance", "report", "columns"])
+    all_cols = cmn.extract_records(all_cols_payload)
+
+    if args.columns.strip():
+        cids = [c.strip() for c in args.columns.split(",") if c.strip()]
+        id_to_name: dict[str, str] = {}
+        for col in all_cols:
+            cid = cmn._first_nonempty(col, ("id", "columnId", "code", "key"))
+            name = cmn._first_nonempty(col, ("name", "columnName", "title", "label"))
+            if cid is not None:
+                id_to_name[str(cid)] = str(name) if name else str(cid)
+        matched = [{"_column_id": cid, "_column_name": id_to_name.get(cid, cid)}
+                   for cid in cids]
+        return _ensure_calendar_metrics(matched, all_cols)
+
+    keywords = (
+        [k.strip() for k in args.column_keywords.split(",") if k.strip()]
+        if args.column_keywords.strip()
+        else DEFAULT_KEYWORDS
+    )
+    cmn.log(f"[columns] 使用关键词匹配字段：{keywords}")
+    cmn.log(f"[columns] dws 返回 {len(all_cols)} 个字段")
+    matched = cmn.match_columns_by_keywords(all_cols, keywords)
+    if not matched:
+        raise RuntimeError(
+            f"未匹配到任何字段。可用字段示例："
+            f"{[cmn._first_nonempty(c, ('name','columnName','title','label')) for c in all_cols[:10]]}"
+        )
+    cmn.log(f"[columns] 匹配到 {len(matched)} 个字段：{[c['_column_name'] for c in matched]}")
+    return _ensure_calendar_metrics(matched, all_cols)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 接口调用（与 detail 一致）
+# ─────────────────────────────────────────────────────────────────────────────
+
+def query_one_batch(
+    user_batch: list[str],
+    column_ids: list[str],
+    date_slice: cmn.DateSlice,
+    stats: cmn.CallStats,
+    *,
+    column_id_to_name: dict[str, str] | None = None,
+    inspect: bool = False,
+    inspected_flag: list[bool] = None,
+) -> list[dict]:
+    cmn.log(
+        f"[query] users={len(user_batch)} cols={len(column_ids)} "
+        f"slice={date_slice.label}"
+    )
+    try:
+        payload = cmn.run_dws([
+            "attendance", "report", "query-data",
+            "--users", ",".join(user_batch),
+            "--columns", ",".join(column_ids),
+            "--start", date_slice.start_str,
+            "--end", date_slice.end_str,
+        ])
+        stats.total_dws_calls += 1
+    except cmn.DwsCallError as e:
+        stats.total_dws_calls += 1
+        stats.failed_calls += 1
+        if e.is_permission_error:
+            cmn.error(
+                "权限错误：当前账号无管理员权限，无法导出考勤报表。"
+                "请联系考勤管理员或换号重试。"
+            )
+            raise SystemExit(2) from e

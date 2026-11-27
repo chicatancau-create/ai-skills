@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""Shared diagnostic contract for unsupported imported object effects."""
+
+from __future__ import annotations
+
+import base64
+import binascii
+import hashlib
+import json
+from xml.etree import ElementTree as ET
+
+
+EFFECT_STATUS_ATTR = "data-pptx-effect-status"
+EFFECT_REASON_ATTR = "data-pptx-effect-reason"
+NATIVE_EFFECT_ATTR = "data-pptx-effect-ooxml"
+NATIVE_EFFECT_SHA256_ATTR = "data-pptx-effect-ooxml-sha256"
+UNSUPPORTED_EFFECT_STATUS = "unsupported"
+_EFFECT_OBJECT_IDENTITY_ATTRS = (
+    "data-pptx-object",
+    "data-pptx-shape-id",
+    "data-pptx-shape-scope",
+)
+_DML_NAMESPACE = "http://schemas.openxmlformats.org/drawingml/2006/main"
+_TEXT_PROPERTY_TAGS = frozenset({
+    f"{{{_DML_NAMESPACE}}}defRPr",
+    f"{{{_DML_NAMESPACE}}}endParaRPr",
+    f"{{{_DML_NAMESPACE}}}rPr",
+})
+_RUN_EFFECT_CONTAINER_TAGS = frozenset({
+    f"{{{_DML_NAMESPACE}}}effectLst",
+    f"{{{_DML_NAMESPACE}}}effectDag",
+})
+_NATIVE_EFFECT_CONTAINER_TAGS = frozenset({
+    f"{{{_DML_NAMESPACE}}}effectLst",
+    f"{{{_DML_NAMESPACE}}}effectDag",
+})
+_RELATIONSHIPS_NAMESPACE = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+)
+
+
+def project_effect_status_errors(root: ET.Element) -> list[str]:
+    """Return blocking diagnostics for invalid or unsupported effect metadata."""
+    errors: set[str] = set()
+    parents = {
+        child: parent
+        for parent in root.iter()
+        for child in parent
+    }
+    for elem in root.iter():
+        raw_status = elem.get(EFFECT_STATUS_ATTR)
+        raw_reason = elem.get(EFFECT_REASON_ATTR)
+        raw_native = elem.get(NATIVE_EFFECT_ATTR)
+        raw_native_sha256 = elem.get(NATIVE_EFFECT_SHA256_ATTR)
+        if (
+            raw_status is None
+            and raw_reason is None
+            and raw_native is None
+            and raw_native_sha256 is None
+        ):
+            continue
+        parent = parents.get(elem)
+        if (
+            parent is not None
+            and parent.get(EFFECT_STATUS_ATTR) == raw_status
+            and parent.get(EFFECT_REASON_ATTR) == raw_reason
+            and _same_source_object(parent, elem)
+        ):
+            # Import duplicates the marker on the logical object and carrier
+            # so stripping either copy cannot erase the block. Report it once.
+            continue
+        label = _element_label(elem)
+        status = (raw_status or "").strip()
+        if status != UNSUPPORTED_EFFECT_STATUS:
+            errors.add(
+                f'{label} {EFFECT_STATUS_ATTR} must equal '
+                f'{UNSUPPORTED_EFFECT_STATUS!r}; got {raw_status!r}'
+            )
+            continue
+        reason = (raw_reason or "").strip()
+        if not reason:
+            errors.add(
+                f'{label} {EFFECT_REASON_ATTR} requires a non-empty reason'
+            )
+            continue
+        if raw_native is not None or raw_native_sha256 is not None:
+            try:
+                preserved_native_effect_xml(elem)
+            except ValueError as exc:
+                errors.add(f"{label} has invalid preserved PPTX effect: {exc}")
+            else:
+                # The complete native effect container is the registered
+                # round-trip fallback for effects outside the SVG subset.
+                continue
+        errors.add(f'{label} has unsupported source PPTX effect: {reason}')
+    return sorted(errors)
+
+
+def native_effect_metadata(effect_container: ET.Element) -> dict[str, str]:
+    """Encode one relationship-free DrawingML effect container for round-trip."""
+    _validate_native_effect_container(effect_container)
+    raw = ET.tostring(effect_container, encoding="utf-8")
+    return {
+        NATIVE_EFFECT_ATTR: base64.b64encode(raw).decode("ascii"),
+        NATIVE_EFFECT_SHA256_ATTR: hashlib.sha256(raw).hexdigest(),
+    }
+
+
+def preserved_native_effect_xml(elem: ET.Element) -> str | None:
+    """Decode and validate one preserved DrawingML effect container."""
+    encoded = elem.get(NATIVE_EFFECT_ATTR)

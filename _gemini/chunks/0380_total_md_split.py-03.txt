@@ -1,0 +1,113 @@
+                print(f"  Error: Unable to write file {output_path}: {e}")
+
+    if verbose:
+        print(f"\n[Done] Successfully generated {success_count}/{len(notes)} file(s)")
+
+    return success_count == len(notes)
+
+
+def main() -> None:
+    """Run the CLI entry point."""
+    parser = argparse.ArgumentParser(
+        description='PPT Master - Speaker Notes Splitting Tool',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+    %(prog)s projects/<svg_title>_ppt169_YYYYMMDD
+    %(prog)s projects/<svg_title>_ppt169_YYYYMMDD -o notes
+    %(prog)s projects/<svg_title>_ppt169_YYYYMMDD -q
+
+Features:
+    - Reads the total.md speaker notes file
+    - Checks the mapping between SVG files and notes
+    - Splits notes into multiple individual files
+    - Output filenames match SVG filenames
+'''
+    )
+
+    parser.add_argument('project_path', type=str, help='Project directory path')
+    parser.add_argument('-o', '--output', type=str, default=None, help='Output directory path (default: notes directory under project)')
+    parser.add_argument('-q', '--quiet', action='store_true', help='Quiet mode')
+
+    args = parser.parse_args()
+
+    project_path = Path(args.project_path)
+    if not project_path.exists():
+        print(f"Error: Path does not exist: {project_path}")
+        sys.exit(1)
+
+    # Determine output directory
+    if args.output:
+        output_dir = Path(args.output)
+    else:
+        output_dir = project_path / 'notes'
+
+    verbose = not args.quiet
+
+    if verbose:
+        print("PPT Master - Speaker Notes Splitting Tool")
+        print("=" * 50)
+        print(f"  Project path: {project_path}")
+        print(f"  Output directory: {output_dir}")
+        print()
+
+    # Find SVG files
+    svg_files = find_svg_files(project_path)
+
+    if not svg_files:
+        print("Error: No SVG files found")
+        sys.exit(1)
+
+    if verbose:
+        print(f"  Found {len(svg_files)} SVG file(s)")
+
+    # Parse total.md
+    total_md_path = project_path / 'notes' / 'total.md'
+    svg_stems = [p.stem for p in svg_files]
+    notes = parse_total_md(total_md_path, svg_stems, verbose)
+
+    if not notes:
+        print("Error: No notes content found")
+        sys.exit(1)
+
+    if verbose:
+        print(f"  Found {len(notes)} notes section(s)")
+        print()
+
+    # Check mapping
+    all_match, missing_notes = check_svg_note_mapping(svg_files, notes)
+
+    if not all_match:
+        print("Error: SVG files and notes do not match")
+        print(f"  Missing notes: {', '.join(missing_notes)}")
+        print("\nPlease regenerate the notes file to ensure every SVG has corresponding notes.")
+        sys.exit(1)
+
+    if verbose:
+        print("[OK] SVG files and notes have one-to-one correspondence")
+        print()
+
+    # Split notes
+    success = split_notes(notes, output_dir, verbose)
+
+    # A renamed, dropped, or renumbered page leaves its old per-page file
+    # behind; nothing reads it now, but a page that returns to that stem would.
+    stale = sorted(
+        p.name for p in output_dir.glob('*.md')
+        if p.stem not in notes and extract_leading_number(p.stem) is not None
+    )
+    if stale:
+        print(f"[ADVISORY] {len(stale)} per-page notes file(s) match no current page; "
+              f"delete them if they are leftovers: {', '.join(stale)}")
+
+    if success:
+        if verbose:
+            print(f"\n[Done] Notes splitting complete")
+        sys.exit(0)
+    else:
+        print(f"\n[Failed] Notes splitting failed")
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()

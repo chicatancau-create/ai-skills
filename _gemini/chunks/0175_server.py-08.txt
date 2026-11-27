@@ -1,0 +1,90 @@
+    exposed: dict[str, set[str]] = {}
+    for candidate in candidates.values():
+        if candidate['source'] == 'explicit':
+            exposed.setdefault(candidate['workspace_root'], set()).add(
+                candidate['kind']
+            )
+    chosen: dict[str, set[str]] = {}
+    for selection in selections:
+        if selection['source'] == 'explicit':
+            chosen.setdefault(selection['workspace_root'], set()).add(
+                selection['kind']
+            )
+    for root, kinds in chosen.items():
+        missing = sorted(exposed.get(root, set()) - kinds)
+        if missing:
+            raise ValueError(
+                f'{TEMPLATE_SELECTION_NAME} selects workspace root {root} '
+                f'without every kind it exposes; missing: {", ".join(missing)}'
+            )
+
+
+def _read_template_selection(selection_file: Path) -> dict:
+    """Check the frozen choice, source bytes, and still-current options/indexes."""
+    from apply_template import validate_template_snapshot_sources
+
+    data = _read_json_object(selection_file)
+    _validate_template_selection(data)
+    validate_template_snapshot_sources(
+        selection_file.parent.parent, data['root_snapshots'], data['selection_sha256'],
+    )
+    options, candidates = _build_template_options(selection_file.parent, data['root_snapshots'])
+    if data['options_sha256'] != options['options_sha256']:
+        raise ValueError(
+            f'{TEMPLATE_SELECTION_NAME} options_sha256 no longer matches current options'
+        )
+    available_selections = {
+        _json_sha256(_template_selection_from_candidate(candidate))
+        for candidate in candidates.values()
+    }
+    for selection in data['selections']:
+        if _json_sha256(selection) not in available_selections:
+            raise ValueError(
+                f'{TEMPLATE_SELECTION_NAME} references an unavailable candidate'
+            )
+
+    _validate_explicit_root_closure(data['selections'], candidates)
+    return data
+
+
+def _read_template_installation(project_path: Path) -> dict:
+    """Verify the current selection and the installer's actual output."""
+    from apply_template import read_template_install
+
+    selection = _read_template_selection(
+        project_path / CONFIRM_DIR_NAME / TEMPLATE_SELECTION_NAME,
+    )
+    if selection['mode'] == 'templates':
+        read_template_install(project_path, selection['root_snapshots'], selection['selection_sha256'])
+    return selection
+
+
+def _stage1_ready_error(confirm_dir: Path) -> Optional[str]:
+    """Return why the combined template/Stage-1 page cannot be exposed."""
+    try:
+        data = _read_json_object(confirm_dir / RECOMMENDATION_STAGE_NAMES[1])
+        if _recommendation_stage(data) != 1:
+            return 'recommendations.stage1.json must declare stage1'
+        _build_template_options(confirm_dir)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        return f'invalid Stage 1 recommendations: {exc}'
+    return None
+
+
+def _stage2_ready_error(
+    project_path: Path,
+    confirm_dir: Path,
+    recommendations_file: Optional[Path] = None,
+) -> Optional[str]:
+    """Bind Stage 2 to the confirmed choice and verified installation."""
+    try:
+        selection = _read_template_installation(project_path)
+        result_file = confirm_dir / RESULT_NAME
+        if _fresh_template_restart(confirm_dir) or _result_stage(result_file) != 'stage1':
+            return f'{RESULT_NAME} does not contain the current stage1-confirmed result'
+        result = _read_result_object(result_file)
+        if result.get('selection_sha256') != selection['selection_sha256']:
+            return f'{RESULT_NAME} selection_sha256 does not match the current selection'
+        if recommendations_file is not None:
+            recommendations = _read_json_object(recommendations_file)
+            if recommendations.get('selection_sha256') != selection['selection_sha256']:

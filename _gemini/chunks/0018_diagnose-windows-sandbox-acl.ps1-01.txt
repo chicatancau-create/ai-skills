@@ -1,0 +1,81 @@
+<#
+.SYNOPSIS
+    Diagnose the DSH sandbox ACL failures on Windows and repair them in one run.
+
+.DESCRIPTION
+    A denial inside the DSH sandbox is worth diagnosing only when it contradicts
+    what the active mode promises: writes inside the workspace, or reads that the
+    signed-in user should plainly have. One invocation reads each requested path
+    and every ancestor, then repairs what it can in the same run:
+
+      * every directory on that chain inside -AllowRoot that lacks effective
+        WRITE_DAC or WRITE_OWNER gets a FullControl allow ACE for the current
+        user, so the sandbox can provision the grant it needs; and
+      * every explicit AppContainer package allow ACE (S-1-15-2-*, excluding the
+        well-known groups ending in 1 or 2) is removed at its source, ancestor
+        first, which also removes that package's access to the tree.
+
+    A directory the caller cannot provision is the state the sandbox reports on the
+    workspace root, while the conflicting entry often sits deeper; the authorized root
+    is examined for the same reason. For either case the same run also collects explicit
+    package allow ACEs under the requested directory, so they do not need a second call.
+    The walk is bounded, enters no reparse point or managed application tree, and reports
+    truncation and unreadable directories instead of claiming a complete walk.
+
+    Every observation, change, verification and recovery command is printed as it
+    happens, so one run shows the caller the complete set of actions.
+
+    -AllowRoot bounds every change: an object is modified only when it is that
+    directory or strictly inside it, so a caller can repair its own workspace
+    root. Reparse paths and managed application trees are refused. Each modified
+    object is backed up first, with an independent recovery script, and every DACL
+    write is verified by re-reading it. A failed repair restores all attempted
+    DACL changes from this invocation in reverse order and stops.
+
+    The script never creates, deletes, or writes the contents of any file. Its
+    only writes are the recovery artifacts under -Out and the DACLs it repairs.
+
+.PARAMETER Path
+    One or more failing paths. Each is diagnosed and repaired together with its ancestors.
+
+.PARAMETER AllowRoot
+    Required. Every modified object must be this directory or strictly inside it.
+
+.PARAMETER Out
+    Required for a repair. Receives one recovery record and one recovery script
+    per change, so an object repaired twice keeps both recovery points.
+
+.PARAMETER Restore
+    Restore the DACL recovery record for exactly one -Path instead of repairing.
+    Requires -AllowRoot and WRITE_DAC, preserves owner and SACL.
+
+.EXAMPLE
+    pwsh -File diagnose-windows-sandbox-acl.ps1 -Path '<failing path>' -AllowRoot '<authorized directory>' -Out '<recovery directory>'
+
+.EXAMPLE
+    pwsh -File diagnose-windows-sandbox-acl.ps1 -Path '<failing path>' -AllowRoot '<authorized directory>' -Restore '<recovery record>'
+#>
+[CmdletBinding()]
+param(
+  [Parameter(Mandatory = $true)][string[]]$Path,
+  [string]$AllowRoot,
+  [string]$Out,
+  [string]$Restore
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+# These two well-known groups name all packages, not one conflicting package.
+$PACKAGE_SID = '^S-1-15-2-(?![12]$)'
+$LOW_LABEL_SID = 'S-1-16-4096'
+# Upper bound on the directories one subtree scan may visit, so a huge workspace
+# cannot turn one approved repair into an unbounded walk. Truncation is reported.
+$SCAN_LIMIT = 2000
+
+function Write-Line { param([string]$Text) Write-Output $Text }
+
+# Reports bypass the success pipeline so diagnostics cannot become a function's
+# return value. Each JSON record occupies one stdout line, including paths/errors.
+function Write-Report {
+  param([string]$Kind, [string]$Operation, [string]$Target, [string]$Status, [string]$Reason, $Details = @{})

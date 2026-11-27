@@ -1,0 +1,89 @@
+        "may sit on a painted backing panel the key could not remove — look at "
+        "the slice, and regenerate with the element alone on the key if so"
+    )
+
+
+def _edge_drift(
+    trim_mask: Optional[Image.Image],
+    diff: Optional[Image.Image],
+    touched_edges: list[str],
+) -> Optional[tuple[int, int, bool]]:
+    """Return (pixel count, max key distance, isolated) when every pixel on
+    the touched edges stays near the key, or None when real content reaches
+    an edge. ``isolated`` is True for a handful of stray pixels; False means
+    the whole edge is near-key noise (JPEG ringing, a slightly off key), which
+    is still keying drift rather than content."""
+    if trim_mask is None or diff is None:
+        return None
+    width, height = trim_mask.size
+    mask_px = trim_mask.load()
+    diff_px = diff.load()
+    coords = set()
+    if "left" in touched_edges:
+        coords.update((0, y) for y in range(height))
+    if "right" in touched_edges:
+        coords.update((width - 1, y) for y in range(height))
+    if "top" in touched_edges:
+        coords.update((x, 0) for x in range(width))
+    if "bottom" in touched_edges:
+        coords.update((x, height - 1) for x in range(width))
+    hits = [diff_px[x, y] for x, y in coords if mask_px[x, y]]
+    if not hits:
+        return None
+    distance = max(hits)
+    if distance > _KEY_DRIFT_MAX_TOLERANCE:
+        return None
+    return len(hits), distance, len(hits) <= _EDGE_DRIFT_MAX_PIXELS
+
+
+def _log_keying_findings(
+    findings: list[str],
+    *,
+    sheet_border: tuple[tuple[int, int, int], int, int] | None = None,
+    tolerance: int,
+    notices: list[str] | None = None,
+) -> None:
+    """Report incomplete flat-background keying."""
+    _log("\n[WARN] Alpha extraction is incomplete — the key field or cell")
+    _log("       isolation failed:")
+    for finding in findings:
+        _log(f"       - {finding}")
+    # A field recovered as haze is an off-key ground, not a panel: keep the
+    # measured-border rerun advice for it instead of the panel verdict.
+    hazy = any("semi-transparent" in finding for finding in findings)
+    panel_notices = [] if hazy else [n for n in (notices or []) if "backing panel" in n]
+    for notice in panel_notices:
+        _log(f"       - {notice}")
+    if panel_notices:
+        _log("       Cells painted as panels or cards keep their own ground "
+             "inside the key gutters: no --bg/--tolerance rerun on the outer "
+             "key can remove them. Regenerate with each element alone on the "
+             "key, or key each cell on its measured inner ground.")
+        return
+    _log("       Fix: regenerate with one genuinely flat ground and keep every "
+         "element/effect")
+    _log("       inside its cell with a clear key-only gutter, or rerun with an "
+         "explicit")
+    _log("       --bg <hex> and a larger --tolerance; use --inset when a drawn "
+         "outer gutter is isolated from every element, or when the model drew "
+         "grid lines between cells (--inset 0.02, or H,V for wide cells).")
+    if sheet_border is not None:
+        dominant, drift, outlier = sheet_border
+        hex_bg = "#{:02X}{:02X}{:02X}".format(*dominant)
+        _log(
+            "       Measured outer 1% border/gutter: "
+            f"dominant {hex_bg}; key spread {drift}; farthest pixel {outlier} "
+            "from the key."
+        )
+        if outlier > _KEY_DRIFT_MAX_TOLERANCE:
+            _log(
+                "       The gutter holds pixels far from the key: content or an "
+                "effect crosses it. Regenerate with a clear key-only gutter; a "
+                "larger --tolerance would eat into the elements."
+            )
+        elif (
+            outlier <= tolerance
+            and any("content reaches the" in finding for finding in findings)
+            and not any("boundary pixels stayed opaque" in finding for finding in findings)
+        ):
+            # The key itself passed at this tolerance; only element tips

@@ -1,0 +1,104 @@
+        if self.depth > _MAX_PARSE_DEPTH:
+            self._fail(f"Formula nesting exceeds {_MAX_PARSE_DEPTH} levels")
+        try:
+            return self._parse_sequence(**kwargs)
+        finally:
+            self.depth -= 1
+
+    def _parse_nested_atom(self) -> Node:
+        self.depth += 1
+        if self.depth > _MAX_PARSE_DEPTH:
+            self._fail(f"Formula nesting exceeds {_MAX_PARSE_DEPTH} levels")
+        try:
+            return self._parse_complete_atom()
+        finally:
+            self.depth -= 1
+
+    def _parse_nested_bare_atom(self) -> Node:
+        self.depth += 1
+        if self.depth > _MAX_PARSE_DEPTH:
+            self._fail(f"Formula nesting exceeds {_MAX_PARSE_DEPTH} levels")
+        try:
+            return self._parse_atom()
+        finally:
+            self.depth -= 1
+
+    def _parse_complete_atom(self) -> Node:
+        atom = self._parse_atom()
+        if isinstance(atom, (Nary, Function)):
+            atom = self._parse_limit_modifier(atom)
+        atom = self._parse_scripts(atom)
+        if isinstance(atom, (Nary, Function)):
+            atom = self._parse_limit_modifier(atom)
+            atom = self._parse_owned_body(atom)
+        return atom
+
+    def _parse_scripts(self, base: Node) -> Node:
+        subscript: Sequence | None = None
+        superscript: Sequence | None = None
+        while True:
+            saved_position = self.position
+            self._skip_whitespace()
+            if self.position >= len(self.source) or self.source[self.position] not in "^_":
+                self.position = saved_position
+                break
+            marker = self.source[self.position]
+            self.position += 1
+            argument = self._parse_required_argument(f"script marker {marker!r}")
+            if marker == "_":
+                if subscript is not None:
+                    self._fail("Duplicate subscript for one base")
+                subscript = argument
+            else:
+                if superscript is not None:
+                    self._fail("Duplicate superscript for one base")
+                superscript = argument
+        if subscript is None and superscript is None:
+            return base
+        if isinstance(base, Nary):
+            return Nary(
+                base.symbol,
+                base.category,
+                subscript,
+                superscript,
+                base.body,
+                base.limit_modifier,
+            )
+        if isinstance(base, Function):
+            return Function(
+                base.name,
+                base.body,
+                subscript,
+                superscript,
+                base.limit_style,
+                base.limit_modifier,
+            )
+        if isinstance(base, GroupChar):
+            return Limit(base, lower=subscript, upper=superscript)
+        if isinstance(base, Limit):
+            return Limit(
+                base.base,
+                lower=subscript or base.lower,
+                upper=superscript or base.upper,
+            )
+        return Script(base, subscript=subscript, superscript=superscript)
+
+    def _parse_prescript(self) -> Prescript:
+        subscript: Sequence | None = None
+        superscript: Sequence | None = None
+        while self.position < len(self.source) and self.source[self.position] in "^_":
+            marker = self.source[self.position]
+            self.position += 1
+            argument = self._parse_required_argument(f"pre-script marker {marker!r}")
+            if marker == "_":
+                if subscript is not None:
+                    self._fail("Duplicate pre-subscript")
+                subscript = argument
+            else:
+                if superscript is not None:
+                    self._fail("Duplicate pre-superscript")
+                superscript = argument
+            self._skip_whitespace()
+        if self.position >= len(self.source):
+            self._fail("Pre-script has no base")
+        base = self._parse_nested_atom()

@@ -1,0 +1,98 @@
+            ('restart', actual.restart, expected_restart),
+            (
+                'playback_duration_ms',
+                actual.playback_duration_ms,
+                expected_playback_duration_ms,
+            ),
+        )
+        for field, actual_value, expected_value in timing_pairs:
+            if actual_value != expected_value:
+                errors.append(
+                    f'animation row {index} {field} is {actual_value!r}; '
+                    f'expected {expected_value!r}'
+                )
+        if actual.after_effect != target.after_effect:
+            errors.append(
+                f'animation row {index} after_effect is '
+                f'{actual.after_effect!r}; expected {target.after_effect!r}'
+            )
+        if actual.after_effect_color != target.after_effect_color:
+            errors.append(
+                f'animation row {index} after_effect_color is '
+                f'{actual.after_effect_color!r}; '
+                f'expected {target.after_effect_color!r}'
+            )
+        if actual.sound_relationship_id != target.sound_relationship_id:
+            errors.append(
+                f'animation row {index} sound relationship is '
+                f'{actual.sound_relationship_id!r}; '
+                f'expected {target.sound_relationship_id!r}'
+            )
+        if actual.sound_name != target.sound_name:
+            errors.append(
+                f'animation row {index} sound name is '
+                f'{actual.sound_name!r}; expected {target.sound_name!r}'
+            )
+    if errors:
+        raise ValueError('; '.join(errors))
+    resolved_rows = tuple(
+        replace(actual, effect=target.effect)
+        for actual, target in zip(summary.rows, expected)
+    )
+    return replace(summary, rows=resolved_rows)
+
+
+def validate_pptx_animation_package(
+    pptx_path: str | Path,
+    *,
+    require_supported_effects: bool = False,
+    skip_slide_numbers: set[int] | None = None,
+) -> None:
+    """Validate generated timing, excluding byte-preserved source slides."""
+    path = Path(pptx_path)
+    skipped = skip_slide_numbers or set()
+    errors: list[str] = []
+    try:
+        with zipfile.ZipFile(path) as package:
+            names = sorted(
+                name
+                for name in package.namelist()
+                if re.fullmatch(r'ppt/slides/slide\d+\.xml', name)
+            )
+            for name in names:
+                match = re.search(r'slide(\d+)\.xml$', name)
+                if match is not None and int(match.group(1)) in skipped:
+                    continue
+                slide_data = package.read(name)
+                try:
+                    root = ET.fromstring(slide_data)
+                except ET.ParseError as exc:
+                    errors.append(f'{name}: invalid XML: {exc}')
+                    continue
+                for error in validate_slide_animation_structure(
+                    root,
+                    require_supported_effects=require_supported_effects,
+                ):
+                    errors.append(f'{name}: {error}')
+                try:
+                    summary = read_slide_animation_sequence(slide_data)
+                except ValueError:
+                    continue
+                sound_ids = {
+                    row.sound_relationship_id
+                    for row in summary.rows
+                    if row.sound_relationship_id is not None
+                }
+                if not sound_ids:
+                    continue
+                slide_leaf = posixpath.basename(name)
+                rels_name = (
+                    f'ppt/slides/_rels/{slide_leaf}.rels'
+                )
+                if rels_name not in package.namelist():
+                    errors.append(
+                        f'{name}: animation sound relationships are missing'
+                    )
+                    continue
+                try:
+                    relationships = ET.fromstring(package.read(rels_name))

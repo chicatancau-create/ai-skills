@@ -1,0 +1,46 @@
+python3 scripts/svg_position_calculator.py calc grid --rows 2 --cols 3 --area "50,150,1230,670"
+```
+
+For an area chart, use the line output as the top boundary:
+
+```svg
+M first_x,first_y ... L last_x,last_y L last_x,y_max L first_x,y_max Z
+```
+
+Manually compare the calculator output with the coordinates already present in the generated SVG. If coordinates differ, update the SVG from the `calc` output, rerun `svg_quality_checker.py`, then repeat the coordinate review. The tool intentionally does not rewrite SVG files automatically.
+
+### Analyze (inspect existing SVG)
+
+```bash
+python3 scripts/svg_position_calculator.py analyze <svg_file>
+```
+
+Use this after SVG generation to inspect existing SVG geometry when manual comparison needs more context.
+
+### Verification recipes
+
+Used by the [`verify-charts`](../../workflows/stages/verify-charts.md) stage for chart objects whose geometry reduces to repeated direct calculations (`decomposable-calc` / `partial-calc`), a closed formula (`formula-verify`), or inspection only (`manual-verify`). Every recipe produces one receipt line; a page that cannot be reduced cleanly is marked `manual-verify` with the reason, never dropped.
+
+**Stacked bar** — for N stacked series on the same categories, run `calc bar` N times. Pass each segment's height as the data value and shift `--area`'s `y_max` down by the sum of all lower segments for that category; compare each segment's `(x, y, width, height)`.
+
+```bash
+# two-series stack at "Q1" with bottom=30, top=20, plot y from 100 to 500
+python3 scripts/svg_position_calculator.py calc bar --data "Q1:30,Q2:..." --area "x_min,100,x_max,500" --bar-width 80 --value-range=0,axis_max
+python3 scripts/svg_position_calculator.py calc bar --data "Q1:20,Q2:..." --area "x_min,100,x_max,<500 - bottom_height_px>" --bar-width 80 --value-range=0,axis_max
+```
+
+**Stacked area** — run `calc line` N times on cumulative y-values (series 1 raw; series 2 = s1+s2; …); each call yields one band's top boundary, and each band's path closes to the previous band's top, not `y_max`. Negative segments or percent-stacked totals other than 100 are `manual-verify`.
+
+**Dumbbell** — the two endpoints are points, not bar ends (`calc bar --horizontal` anchors at `x_min`). Number categories `0.5, 1.5, …, N-0.5` with `--y-range=0,N` (swap axes for vertical dumbbells), set `--x-range` from ticks, run `calc line` once per endpoint series with identical `--area` / ranges; each `(SVG_X, SVG_Y)` is the endpoint circle's `(cx, cy)`, and the connector is `x1=cx_left, x2=cx_right, y1=y2=cy`.
+
+```bash
+python3 scripts/svg_position_calculator.py calc line --data "42:0.5,55:1.5,37:2.5" --area "100,100,700,460" --x-range=0,100 --y-range=0,3
+python3 scripts/svg_position_calculator.py calc line --data "68:0.5,71:1.5,49:2.5" --area "100,100,700,460" --x-range=0,100 --y-range=0,3
+```
+
+**Pareto** — `calc bar` on the descending values with the bar-axis range; precompute cumulative percentages; `calc line` on `0.5:cum1,…,N-0.5:cumN` with `--x-range=0,N`, the right-side percentage axis as `--y-range` (usually `0,100`), and the same `--area` (the `n - 0.5` offset centers each point on its bar). Compare bars, line, and markers separately.
+
+**Dual-axis line** — read each Y-axis tick range independently; run `calc line` once per series with its own `--y-range` and a shared `--x-range` / area; never apply the left scale to the right series.
+
+**Bullet** — bands overlap in one y row, so run `calc bar --horizontal` once per band with a single data point: `--data "<band>:<right_edge_value>" --area "<x_min>,<band_y>,<x_max>,<band_y+band_height>" --bar-width <band_height>` (widest band's right edge = axis max). Run once more for the actual bar with its inset area; the target marker is a `<line>` at `x = x_min + target/axis_max × area_width`.
+

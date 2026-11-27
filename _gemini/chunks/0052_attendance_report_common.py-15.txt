@@ -1,0 +1,38 @@
+                continue
+            value = row[col_idx - 1]
+            if not _is_likely_url(value):
+                continue
+            url = str(value).strip()
+            embed_tasks.append((excel_row, col_idx, url))
+            row_has_image = True
+        if row_has_image:
+            ws.row_dimensions[excel_row].height = row_height
+
+    if not embed_tasks:
+        return
+
+    log(f"[image] 准备嵌入 {len(embed_tasks)} 张图片到 Excel...")
+    success_count = 0
+    failed_count = 0
+
+    for excel_row, col_idx, url in embed_tasks:
+        local_path = download_and_convert_image(url)
+        if not local_path:
+            _set_image_hyperlink(ws, excel_row, col_idx, url)
+            failed_count += 1
+            continue
+        try:
+            img = OpenpyxlImage(local_path)
+            img.width = width_px
+            img.height = height_px
+            anchor = f"{get_column_letter(col_idx)}{excel_row}"
+            # 清空原 URL 单元格内容（图片浮在格子上，但保留文本会重叠）
+            ws.cell(row=excel_row, column=col_idx, value="")
+            ws.add_image(img, anchor)
+            success_count += 1
+        except Exception as e:
+            warn(f"[image] 嵌入失败 ({excel_row},{col_idx}): {e}")
+            _set_image_hyperlink(ws, excel_row, col_idx, url)
+            failed_count += 1
+
+    log(f"[image] 嵌入完成: 成功 {success_count} 张，失败 {failed_count} 张")

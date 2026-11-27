@@ -1,0 +1,114 @@
+        )
+        label_needle = {"axis_color": "axis", "grid_color": "grid"}.get(field_name)
+        if label_needle and not inferred.get(f"{label_needle}_labeled"):
+            message += (
+                f" (no stroke carries an id or class naming '{label_needle}', so "
+                f"the marker's dominant stroke was read instead — label the "
+                f"{label_needle} lines to read their own color)"
+            )
+        warnings.append(message)
+    return warnings
+
+
+def _native_chart_point_color_warnings(
+    elem: ET.Element,
+    payload: dict[str, Any],
+    chart_data: dict[str, Any],
+) -> list[str]:
+    if chart_data.get("kind") != "category" or chart_data.get("type") not in {
+        "bar", "column",
+    }:
+        return []
+    series = chart_data.get("series")
+    if not isinstance(series, list) or not series:
+        return []
+    style = payload.get("style") if isinstance(payload.get("style"), dict) else {}
+    raw_colors = _first_present(style.get("colors"), payload.get("colors"))
+    palette = (
+        [_clean_hex(color, "#4472C4") for color in raw_colors]
+        if isinstance(raw_colors, list) and raw_colors
+        else list(_DEFAULT_CHART_COLORS)
+    )
+    series_colors = {
+        palette[idx % len(palette)]
+        for idx in range(len(series))
+    }
+    point_colors = {
+        color
+        for item in series
+        if isinstance(item, dict)
+        for color in item.get("point_colors", [])
+    }
+    deviations = sorted({
+        record.fill
+        for record in _fallback_shape_records(elem)
+        if (
+            record.tag == "rect"
+            and record.fill is not None
+            and _record_has_label(record, "bar", "column")
+            and not _record_has_label(record, "legend")
+            and record.fill not in series_colors
+            and record.fill not in point_colors
+        )
+    })
+    return [
+        "Native PPTX chart data mark fill "
+        f"#{color} deviates from its series color, but series point_colors is absent"
+        for color in deviations
+    ]
+
+
+def _fallback_data_shapes(elem: ET.Element) -> list[Any]:
+    """Painted fallback geometry that is not axis, grid, or legend chrome."""
+    return [
+        record
+        for record in _fallback_shape_records(elem)
+        if not _record_has_label(record, "axis", "grid", "legend")
+    ]
+
+
+def _series_palette(payload: dict[str, Any], series_count: int) -> set[str]:
+    style = payload.get("style") if isinstance(payload.get("style"), dict) else {}
+    raw_colors = _first_present(style.get("colors"), payload.get("colors"))
+    palette = (
+        [_clean_hex(color, "#4472C4") for color in raw_colors]
+        if isinstance(raw_colors, list) and raw_colors
+        else list(_DEFAULT_CHART_COLORS)
+    )
+    return {palette[idx % len(palette)] for idx in range(series_count)}
+
+
+def _typed_series(chart_data: dict[str, Any], chart_type: str) -> list[dict[str, Any]]:
+    """Series of one plot type from a category chart or the matching combo plots."""
+    if chart_data.get("kind") == "category" and chart_data.get("type") == chart_type:
+        return list(chart_data.get("series") or [])
+    if chart_data.get("kind") == "combo":
+        return [
+            item
+            for plot in chart_data.get("plots") or []
+            if plot.get("type") == chart_type
+            for item in plot.get("series") or []
+        ]
+    return []
+
+
+def _native_chart_line_marker_warnings(
+    elem: ET.Element,
+    payload: dict[str, Any],
+    chart_data: dict[str, Any],
+) -> list[str]:
+    line_series = _typed_series(chart_data, "line")
+    if not line_series:
+        return []
+    dots = [
+        record
+        for record in _fallback_data_shapes(elem)
+        if record.tag in {"circle", "ellipse"} and record.fill is not None
+    ]
+    if not dots:
+        return []
+    if chart_data.get("kind") == "category":
+        marker_styles = [chart_data.get("line_style")]
+    else:
+        marker_styles = [
+            plot.get("line_style")

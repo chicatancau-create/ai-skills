@@ -1,0 +1,105 @@
+    markdown = payload.get("markdown")
+    return Path(markdown) if isinstance(markdown, str) and markdown else None
+
+
+def _pdf_image_mode(args: argparse.Namespace) -> str | None:
+    image_mode = args.images
+    if args.no_images:
+        image_mode = "none"
+    if args.filter_images:
+        image_mode = "filtered"
+    return image_mode
+
+
+def _validate_image_options(args: argparse.Namespace) -> bool:
+    selected = sum(bool(value) for value in (args.images, args.no_images, args.filter_images))
+    if selected > 1:
+        print(
+            "[ERROR] --images, --no-images, and --filter-images are mutually exclusive",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
+def dispatch_single(
+    input_arg: str,
+    conversion_type: str,
+    output_arg: str | None,
+    args: argparse.Namespace,
+    unknown_args: list[str],
+    web_output_dir: str | None = None,
+) -> int:
+    """Dispatch one source to the matching existing converter."""
+    if conversion_type == "auto":
+        conversion_type = detect_source_type(input_arg)
+
+    if conversion_type == "markdown":
+        output = resolve_output(output_arg, input_arg)
+        return write_passthrough(input_arg, output, "markdown", args.json)
+    if conversion_type == "text":
+        output = resolve_output(output_arg, input_arg)
+        return write_passthrough(input_arg, output, "text", args.json)
+
+    if conversion_type == "web":
+        output = Path(output_arg) if output_arg else None
+        emit_result: Path | None = None
+        extra_args = list(unknown_args)
+        if _skips_images(args) and "--no-images" not in extra_args:
+            # web_to_md keeps remote image links instead of downloading the
+            # page's images into `<stem>_files/`.
+            extra_args.append("--no-images")
+        if output is None:
+            emit_file = tempfile.NamedTemporaryFile(
+                prefix="ppt-master-web-result-",
+                suffix=".json",
+                delete=False,
+            )
+            emit_file.close()
+            emit_result = Path(emit_file.name)
+            extra_args.extend(["--emit-result", str(emit_result)])
+            if web_output_dir:
+                extra_args.extend(["--dir", web_output_dir])
+        try:
+            route = build_conversion_command(
+                input_arg,
+                output,
+                forced_type="web",
+                extra_args=extra_args,
+            )
+        except ValueError as exc:
+            if emit_result:
+                emit_result.unlink(missing_ok=True)
+            print(f"[ERROR] {exc}", file=sys.stderr)
+            return 1
+        rc = run_backend(route.command, route.script_name)
+        if rc != 0:
+            if emit_result:
+                emit_result.unlink(missing_ok=True)
+            return rc
+        output_path = route.output_path
+        if output_path is None and emit_result is not None:
+            output_path = _read_emit_result(emit_result)
+            emit_result.unlink(missing_ok=True)
+        if output_path and output_path.is_file():
+            profile = ensure_profile(input_arg, output_path, route.script_name, "web")
+            if not args.json:
+                print_output(output_path)
+            if args.json:
+                print_json_result(input_arg, output_path, route.script_name, "web", profile)
+            return 0
+        if output is not None:
+            print(f"[ERROR] Expected Markdown output not found: {output}", file=sys.stderr)
+        else:
+            print("[ERROR] Web conversion did not report a Markdown output path", file=sys.stderr)
+        return 1
+
+    if conversion_type not in {"pdf", "doc", "excel", "pptx"}:
+        print(
+            f"[ERROR] Could not determine conversion type for {input_arg!r}. "
+            "Use -t pdf|doc|excel|pptx|web|markdown|text.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not is_url(input_arg) and not Path(input_arg).exists():

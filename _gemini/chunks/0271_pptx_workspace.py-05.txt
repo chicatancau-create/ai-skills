@@ -1,0 +1,117 @@
+                    ids.add(value)
+    return ids
+
+
+@dataclass(frozen=True)
+class PackageResource:
+    """One source package payload exposed through a semantic workspace path."""
+
+    package_part: str
+    kind: str
+    workspace_path: str
+    payload: bytes
+    relationship_types: tuple[str, ...] = ()
+    source_parts: tuple[str, ...] = ()
+    owner_parts: tuple[str, ...] = ()
+
+    @property
+    def sha256(self) -> str:
+        return _sha256(self.payload)
+
+    def manifest_row(self, *, materialized: bool = True) -> dict[str, object]:
+        """Return the compact machine-readable inventory record."""
+        return {
+            "packagePart": self.package_part,
+            "kind": self.kind,
+            "workspacePath": self.workspace_path,
+            "sha256": self.sha256,
+            "bytes": len(self.payload),
+            "relationshipTypes": list(self.relationship_types),
+            "sourceParts": list(self.source_parts),
+            "ownerParts": list(self.owner_parts),
+            "materialized": materialized,
+        }
+
+
+@dataclass(frozen=True)
+class PackageResourceInventory:
+    """Deterministic semantic projection of source package payloads."""
+
+    resources: tuple[PackageResource, ...] = ()
+
+    def path_map(self) -> dict[str, str]:
+        """Map source package part names to workspace-relative paths."""
+        return {
+            resource.package_part: resource.workspace_path
+            for resource in self.resources
+        }
+
+    def image_name_map(self) -> dict[str, str]:
+        """Map package image parts to basenames used by SVG hrefs."""
+        return {
+            resource.package_part: PurePosixPath(resource.workspace_path).name
+            for resource in self.resources
+            if resource.kind == "image"
+        }
+
+    def manifest(self, *, include_images: bool = True) -> dict[str, object]:
+        """Return the versioned resource inventory payload."""
+        return {
+            "schema": "ppt-master.workspace-resources.v1",
+            "items": [
+                resource.manifest_row(
+                    materialized=include_images or resource.kind != "image",
+                )
+                for resource in self.resources
+            ],
+        }
+
+
+@dataclass(frozen=True)
+class WorkspaceResourceSpec:
+    """One semantic resource mapped back to its source package part."""
+
+    package_part: str
+    kind: str
+    workspace_path: Path
+    materialized: bool
+    source_sha256: str
+    current_sha256: str | None
+    owner_parts: tuple[str, ...]
+
+    @property
+    def changed(self) -> bool:
+        """Return whether materialized workspace bytes differ from import."""
+        return (
+            self.materialized
+            and self.current_sha256 is not None
+            and self.current_sha256 != self.source_sha256
+        )
+
+
+def workspace_resource_specs(
+    workspace: Path,
+    manifest: dict[str, object],
+) -> tuple[WorkspaceResourceSpec, ...]:
+    """Validate and resolve the resource map used by round-trip export."""
+    resources = manifest.get("resources")
+    if not isinstance(resources, dict):
+        raise RuntimeError("Round-trip manifest resources must be an object")
+    if resources.get("schema") != "ppt-master.workspace-resources.v1":
+        raise RuntimeError(
+            "Unsupported round-trip resource schema: "
+            f"{resources.get('schema')!r}"
+        )
+    items = resources.get("items")
+    if not isinstance(items, list):
+        raise RuntimeError("Round-trip manifest resources.items must be an array")
+
+    workspace_root = workspace.resolve()
+    specs: list[WorkspaceResourceSpec] = []
+    changed_payloads: list[tuple[WorkspaceResourceSpec, bytes]] = []
+    seen_package_parts: set[str] = set()
+    for index, raw in enumerate(items):
+        context = f"round-trip resources.items[{index}]"
+        if not isinstance(raw, dict):
+            raise RuntimeError(f"{context} must be an object")
+        package_part = raw.get("packagePart")

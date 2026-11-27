@@ -1,0 +1,113 @@
+            + ", ".join(sorted(missing_authored, key=_roundtrip_shape_sort_key))
+        )
+
+    selected_by_id: dict[str, tuple[ET.Element, bool]] = {}
+    for shape_id in authored_order:
+        if shape_id in affected_top_ids:
+            selected_by_id[shape_id] = (
+                generated_by_source_id[shape_id],
+                True,
+            )
+        else:
+            selected_by_id[shape_id] = (source_shapes[shape_id], False)
+    extra_generated = [
+        generated_shapes[shape_id]
+        for shape_id in generated_order
+        if shape_id not in source_id_by_generated_top_id
+    ]
+
+    authored_iterator = iter(authored_order)
+    merged_children: list[tuple[ET.Element, bool]] = []
+    final_authored_slot = 0
+    for child in list(source_tree):
+        shape_id = (
+            source_key_by_element.get(id(child))
+            if child.tag in _TOP_LEVEL_SHAPE_TAGS
+            else None
+        )
+        if shape_id not in authored_top_ids:
+            merged_children.append((child, False))
+            continue
+        next_shape_id = next(authored_iterator, None)
+        if next_shape_id is not None:
+            merged_children.append(selected_by_id[next_shape_id])
+        final_authored_slot = len(merged_children)
+    if next(authored_iterator, None) is not None:
+        raise TemplateStructureError(
+            "Generated authored shape roster exceeds the source overlay slots"
+        )
+    if not authored_top_ids:
+        final_authored_slot = next(
+            (
+                index
+                for index, (element, _generated) in enumerate(merged_children)
+                if element.tag in _TOP_LEVEL_SHAPE_TAGS
+            ),
+            len(merged_children),
+        )
+    merged_children[final_authored_slot:final_authored_slot] = [
+        (element, True)
+        for element in extra_generated
+    ]
+
+    generated_nodes = [
+        element for element, generated in merged_children if generated
+    ]
+    retained_source_nodes = [
+        element for element, generated in merged_children if not generated
+    ]
+    required_generated_relationship_ids = {
+        relationship_id
+        for element in generated_nodes
+        for relationship_id in _relationship_ids_in_shape(element)
+    }
+    if patch.transition_changed:
+        for carrier in transition_carriers(generated_root):
+            required_generated_relationship_ids.update(
+                _relationship_ids_in_shape(carrier)
+            )
+    if patch.animation_changed:
+        motion_node = generated_root.find(f"{{{PML_NS}}}timing")
+        if motion_node is not None:
+            required_generated_relationship_ids.update(
+                _relationship_ids_in_shape(motion_node)
+            )
+    _merge_roundtrip_relationships(
+        source_rels,
+        generated_rels_path,
+        generated_root,
+        required_generated_relationship_ids,
+    )
+    _restore_roundtrip_nested_source_shapes(
+        generated_nodes,
+        all_source_shapes,
+        nested_restore_ids,
+        traced_ids,
+    )
+    if patch.transition_changed or patch.animation_changed:
+        _replace_roundtrip_motion(
+            source_root,
+            generated_root,
+            transition_changed=patch.transition_changed,
+            transition_replaced=patch.transition_replaced,
+            animation_changed=patch.animation_changed,
+            advance_changed=patch.advance_changed,
+        )
+    restored_shape_id_map = {
+        generated_top_id: source_id
+        for generated_top_id, source_id in source_id_by_generated_top_id.items()
+        if source_id not in affected_top_ids
+        and generated_top_id != source_id
+    }
+    if patch.animation_changed:
+        _rewrite_roundtrip_timing_shape_ids(
+            source_root,
+            restored_shape_id_map,
+        )
+    renumbered_shape_id_map = _renumber_roundtrip_generated_shapes(
+        generated_nodes,
+        retained_source_nodes,
+        source_root,
+        rewrite_timing=patch.animation_changed,
+    )
+

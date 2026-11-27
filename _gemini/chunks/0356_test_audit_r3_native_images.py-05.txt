@@ -1,0 +1,76 @@
+                    ({'type': 'pie', 'data': {'A': 10}, 'radius': value}, 'config.radius'),
+                    ({'type': 'line', 'data': [[1, 10], [2, value]]}, 'config.data[1][1]'),
+                    ({'type': 'custom_line', 'values': [10, value]}, 'config.values[1]'),
+                )
+                for config, location in configs:
+                    with self.subTest(config=config):
+                        config_file.write_text(json.dumps(config), encoding='utf-8')
+                        code, stdout, stderr = self._run_calculator(['from-json', str(config_file)])
+                        self.assertNotEqual(code, 0)
+                        self.assertEqual(stdout, '')
+                        self.assertIn(f'{location} must be finite', stderr)
+                expected_file.write_text(json.dumps({'bar_a': {'x': value}}), encoding='utf-8')
+                code, stdout, stderr = self._run_calculator(
+                    ['validate', str(svg_file), '--expected', str(expected_file)]
+                )
+                self.assertNotEqual(code, 0)
+                self.assertEqual(stdout, '')
+                self.assertIn('--expected.bar_a.x must be finite', stderr)
+
+    def test_interactive_nonfinite_values_exit_nonzero(self):
+        for answers, location in (
+            (['1', 'A:nan', ''], '--data point 1'),
+            (['2', 'A:10', '', 'inf'], 'radius'),
+            (['3', 'A:10,B:20,C:30', '100,-Infinity', ''], 'center[1]'),
+            (['4', 'A:10,B:nan', ''], '--data point 2'),
+            (['5', 'nan'], 'rows'),
+            (['6', '-inf'], 'base_x'),
+        ):
+            with self.subTest(answers=answers), mock.patch('builtins.input', side_effect=answers):
+                code, stdout, stderr = self._run_calculator(['interactive'])
+                self.assertNotEqual(code, 0)
+                self.assertIn(location, stderr)
+                self.assertIn('must be finite', stderr)
+
+
+class NativeTableMixedRunAuditTests(unittest.TestCase):
+    def _table_svg(self, red_text: str, *, mismatch: str = "", column: int = 0,
+                   header: bool = False, split_runs: bool = False) -> str:
+        import json
+        from xml.etree import ElementTree as ET
+
+        first_run = {"text": "AAA", "color": "#000000", "bold": False}
+        red_run = {"text": red_text, "color": "#FF0000", "bold": True}
+        if mismatch == "bold":
+            red_run["bold"] = False
+        elif mismatch == "color":
+            red_run["color"] = "#000000"
+        elif mismatch == "swapped":
+            first_run.update(color="#FF0000", bold=True)
+            red_run.update(color="#000000", bold=False)
+        runs = [first_run, red_run]
+        if split_runs:
+            runs = [{**first_run, "text": "A"}, {**first_run, "text": "AA"}, red_run]
+        cell = {
+            "color": "#000000", "bold": False, "align": "l",
+            "paragraphs": [{"runs": runs}],
+        }
+        row = [cell, {"text": "OTHER", "color": "#000000", "align": "l"}]
+        if column == 1:
+            row.reverse()
+        payload = {
+            "schema": "ppt-master.semantic-table.v2",
+            "x": 100, "y": 100, "width": 600, "height": 100,
+            "header_rows": 1 if header else 0,
+            "column_widths": [1, 1],
+            "style": {"body_text": "#000000", "font_family": "Arial", "font_size": 20},
+            "rows": [row],
+        }
+        root = ET.fromstring(
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720">'
+            '<g id="table" data-pptx-replace-with="table">'
+            '<metadata type="application/json"/>'
+            '<rect x="100" y="100" width="600" height="100" fill="none" stroke="#000000"/>'
+            '<line x1="400" y1="100" x2="400" y2="200" stroke="#000000"/>'
+            f'<text x="{115 + 300 * column}" y="150" fill="#000000" font-size="20" font-family="Arial">'
+            f'AAA<tspan fill="#FF0000" font-weight="bold">{red_text}</tspan></text>'

@@ -1,0 +1,105 @@
+                    _validate_condition(
+                        markdown_name=markdown_name,
+                        condition_id=str(condition.get("id", "conditional rule")),
+                        then=then,
+                        matched=matched,
+                    )
+                )
+
+    errors.extend(
+        _validate_references(
+            markdown_path=markdown_path,
+            markdown_name=markdown_name,
+            rules=contract.get("references"),
+            matched=matched,
+        )
+    )
+
+    slide_contract = contract.get("slides")
+    if isinstance(slide_contract, dict):
+        errors.extend(
+            _validate_slides(
+                markdown_name=markdown_name,
+                slide_contract=slide_contract,
+                matched=matched,
+            )
+        )
+    if contract.get("strict_lines") is True:
+        errors.extend(
+            _validate_strict_data_surface(markdown_name, text, sections, matched)
+        )
+    if schema.get("$id") == "ppt-master://schemas/spec-lock/v1":
+        errors.extend(_validate_spec_lock_relations(markdown_path, matched))
+    return errors
+
+
+def validate_project_artifacts(
+    project_path: Path,
+    project_info: Mapping[str, object] | None = None,
+    *,
+    include_design: bool = True,
+) -> tuple[list[str], list[str]]:
+    """Validate the lock and, when requested, the human-facing design brief."""
+    info = project_info or get_project_info_common(str(project_path))
+    errors: list[str] = []
+    warnings: list[str] = []
+    artifacts: list[tuple[Path, Path, str]] = []
+    spec_name = info.get("spec_file")
+    if include_design and isinstance(spec_name, str):
+        artifacts.append(
+            (
+                project_path / spec_name,
+                SCHEMA_DIR / "design_spec.schema.json",
+                "design",
+            )
+        )
+    lock_path = project_path / "spec_lock.md"
+    if lock_path.is_file():
+        artifacts.append((lock_path, SCHEMA_DIR / "spec_lock.schema.json", "lock"))
+    elif isinstance(spec_name, str):
+        errors.append(
+            "Communication trace: missing spec_lock.md with a "
+            "## communication section."
+        )
+
+    legacy_design = False
+    legacy_lock = False
+    versioned_lock_valid = False
+    for artifact_path, schema_path, artifact_kind in artifacts:
+        try:
+            text = artifact_path.read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeError) as exc:
+            errors.append(f"Schema validation could not read {artifact_path.name}: {exc}")
+            continue
+        marker, marker_error = _extract_schema_marker(text)
+        if marker_error is not None:
+            errors.append(f"{artifact_path.name} schema: {marker_error}")
+            continue
+        if marker is None:
+            warnings.append(
+                f"{artifact_path.name}: legacy artifact has no ppt-master-schema "
+                "marker; skipped versioned schema validation"
+            )
+            legacy_design = legacy_design or artifact_kind == "design"
+            legacy_lock = legacy_lock or artifact_kind == "lock"
+            continue
+        artifact_errors = validate_markdown_schema(artifact_path, schema_path)
+        errors.extend(artifact_errors)
+        if artifact_kind == "lock" and not artifact_errors:
+            try:
+                parse_spec_lock_artifact(
+                    artifact_path,
+                    compatibility_warnings=warnings,
+                )
+            except (OSError, UnicodeError, ValueError) as exc:
+                errors.append(f"spec_lock.md compatibility parse failed: {exc}")
+                continue
+            versioned_lock_valid = True
+    if versioned_lock_valid:
+        try:
+            from svg_to_pptx.pptx_package.template_structure import (
+                TemplateStructureError,
+                load_pptx_structure_lock,
+                template_prototype_lock_errors,
+            )
+

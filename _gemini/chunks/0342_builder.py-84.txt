@@ -1,0 +1,92 @@
+        if primary_language is not None and not roundtrip_export:
+            _apply_template_text_language(extract_dir, primary_language)
+
+        # Replace the python-pptx base-template metadata (stale "Steve Canny"
+        # author, 2013 dates, "generated using python-pptx", Slides=0) with
+        # accurate, tool-neutral document properties.
+        pres_format = _presentation_format(width_emu, height_emu)
+        effective_doc_metadata = dict(doc_metadata or {})
+        if primary_language is not None:
+            effective_doc_metadata['language'] = primary_language
+        if not roundtrip_export or doc_metadata:
+            _stamp_docprops(
+                extract_dir,
+                public_slide_count,
+                pres_format,
+                effective_doc_metadata,
+            )
+
+        # Repackage PPTX to a temporary file first. The public output path is
+        # replaced only after every slide and relationship has succeeded.
+        temp_output_path = temp_dir / 'result.pptx'
+        with zipfile.ZipFile(temp_output_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for file_path in extract_dir.rglob('*'):
+                if file_path.is_file():
+                    arcname = file_path.relative_to(extract_dir)
+                    zf.write(file_path, arcname)
+        if (
+            use_native_shapes
+            and pptx_structure == "structured"
+            and success_count == len(svg_files)
+        ):
+            if template_specs is None or public_template_specs is None:
+                raise TemplateStructureError(
+                    "Explicit Layout metadata was not parsed before validation"
+                )
+            try:
+                validate_pptx_template_package(
+                    temp_output_path,
+                    public_template_specs,
+                    layout_specs=template_specs,
+                    expected_layout_parts=template_layout_parts_by_key,
+                    expected_master_parts=template_master_parts_by_key,
+                    expected_backgrounds=template_background_expectations,
+                    expected_shape_rosters=template_shape_roster_expectations,
+                )
+            except ValueError as exc:
+                raise TemplateStructureError(
+                    f"PPTX structured package validation failed: {exc}"
+                ) from exc
+        try:
+            validate_pptx_transition_package(
+                temp_output_path,
+                require_use_timings=package_uses_timings,
+            )
+        except ValueError as exc:
+            raise RuntimeError(
+                f'PPTX transition package validation failed: {exc}'
+            ) from exc
+        try:
+            validate_pptx_morph_pairs(
+                temp_output_path,
+                morph_expectations,
+            )
+        except ValueError as exc:
+            raise RuntimeError(
+                f'PPTX Morph package validation failed: {exc}'
+            ) from exc
+        try:
+            validate_pptx_animation_package(
+                temp_output_path,
+                require_supported_effects=True,
+                skip_slide_numbers=source_motion_slides,
+            )
+        except ValueError as exc:
+            raise RuntimeError(
+                f'PPTX animation package validation failed: {exc}'
+            ) from exc
+        shutil.move(str(temp_output_path), str(output_path))
+        permission_warnings = _relax_output_permissions(output_path)
+
+        if conversion_trace_path and conversion_trace is not None:
+            conversion_trace_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                'output': str(output_path),
+                'slide_count': public_slide_count,
+                'project_contract': {
+                    'mode': (
+                        'strict-after-dangerous-normalization'
+                        if dangerous_nonconforming_export
+                        else 'strict'
+                    ),
+                },

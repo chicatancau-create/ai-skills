@@ -1,0 +1,102 @@
+        except ValueError as exc:
+            errors.append(str(exc))
+    if 'sound' in transition:
+        sound = transition['sound']
+        if sound is None:
+            return errors
+        if not isinstance(sound, str) or not sound.strip():
+            errors.append(
+                f'animations.json {label} transition sound must be a '
+                'non-empty project-relative .wav path or null'
+            )
+        elif Path(sound).is_absolute() or PureWindowsPath(sound).drive:
+            errors.append(
+                f'animations.json {label} transition sound must be '
+                f'project-relative: {sound!r}'
+            )
+        elif Path(sound).suffix.lower() != '.wav':
+            errors.append(
+                f'animations.json {label} transition sound must use .wav'
+            )
+    return errors
+
+
+def _morph_scope_errors(
+    slide_name: object,
+    slide_cfg: dict[str, Any],
+) -> list[str]:
+    """Validate one destination slide's deterministic Morph declaration."""
+    if 'morph' not in slide_cfg:
+        return []
+    label = f'slide "{slide_name}" morph'
+    morph = slide_cfg['morph']
+    if not isinstance(morph, dict):
+        return [f'animations.json {label} must be an object']
+
+    errors = _unknown_field_errors(
+        morph,
+        frozenset({'from', 'pairs'}),
+        label,
+    )
+    source_slide = morph.get('from')
+    if not isinstance(source_slide, str) or not source_slide.strip():
+        errors.append(
+            f'animations.json {label} field "from" must be a non-empty slide stem'
+        )
+
+    pairs = morph.get('pairs')
+    if not isinstance(pairs, dict) or not pairs:
+        errors.append(
+            f'animations.json {label} field "pairs" must be a non-empty object'
+        )
+    else:
+        source_groups: dict[str, str] = {}
+        destination_groups: dict[str, str] = {}
+        for key, pair in pairs.items():
+            pair_label = f'{label} pair "{key}"'
+            if (
+                not isinstance(key, str)
+                or not key.strip()
+                or key != key.strip()
+                or key.startswith('!!')
+                or any(ord(char) < 32 for char in key)
+            ):
+                errors.append(
+                    f'animations.json {pair_label} key must be a trimmed, '
+                    'non-empty name without the !! prefix or control characters'
+                )
+            if not isinstance(pair, dict):
+                errors.append(f'animations.json {pair_label} must be an object')
+                continue
+            errors.extend(
+                _unknown_field_errors(
+                    pair,
+                    frozenset({'from', 'to'}),
+                    pair_label,
+                )
+            )
+            for field in ('from', 'to'):
+                value = pair.get(field)
+                if not isinstance(value, str) or not value.strip():
+                    errors.append(
+                        f'animations.json {pair_label} field "{field}" must '
+                        'be a non-empty top-level group id'
+                    )
+            source_group = pair.get('from')
+            if isinstance(source_group, str) and source_group.strip():
+                previous = source_groups.setdefault(source_group, str(key))
+                if previous != str(key):
+                    errors.append(
+                        f'animations.json {label} source group '
+                        f'"{source_group}" is assigned to both "{previous}" '
+                        f'and "{key}"'
+                    )
+            destination_group = pair.get('to')
+            if isinstance(destination_group, str) and destination_group.strip():
+                previous = destination_groups.setdefault(
+                    destination_group,
+                    str(key),
+                )
+                if previous != str(key):
+                    errors.append(
+                        f'animations.json {label} destination group '

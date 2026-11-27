@@ -1,0 +1,112 @@
+    if not isinstance(raw_slides, list):
+        return {}
+    slide_rows = {
+        int(row["index"]): row
+        for row in raw_slides
+        if isinstance(row, dict) and isinstance(row.get("index"), int)
+    }
+    dependencies: dict[int, list[str]] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get('kind')
+        owners = _resource_owner_parts(item)
+        notes_owned = any(
+            owner.startswith("ppt/notesSlides/notesSlide")
+            for owner in owners
+        )
+        source_parts = item.get('sourceParts')
+        chart_native_payload = (
+            kind == 'native-payload'
+            and isinstance(source_parts, list)
+            and bool(source_parts)
+            and all(
+                isinstance(source_part, str)
+                and source_part.startswith('ppt/charts/')
+                for source_part in source_parts
+            )
+        )
+        if (
+            not notes_owned
+            and kind not in {'audio', 'native-payload', 'video'}
+        ) or chart_native_payload:
+            continue
+        workspace_path = item.get('workspacePath')
+        if not isinstance(workspace_path, str):
+            continue
+        for index in _resource_slide_indices(
+            item,
+            slide_rows,
+            include_structure=False,
+        ):
+            dependencies.setdefault(index, []).append(workspace_path)
+    return {
+        index: sorted(set(paths))
+        for index, paths in dependencies.items()
+    }
+
+
+def _opaque_roundtrip_dependency_owner_refs(
+    project_path: Path,
+    dependencies: dict[int, list[str]],
+) -> dict[int, dict[str, frozenset[str]]]:
+    """Map opaque resource paths to owning Slide-local source refs."""
+    manifest = load_roundtrip_manifest(project_path)
+    if manifest is None:
+        return {}
+    raw_slides = manifest.get("slides")
+    resources = manifest.get("resources")
+    items = resources.get("items") if isinstance(resources, dict) else None
+    if not isinstance(raw_slides, list) or not isinstance(items, list):
+        return {}
+    slide_rows = {
+        int(row["index"]): row
+        for row in raw_slides
+        if isinstance(row, dict) and isinstance(row.get("index"), int)
+    }
+    package_parts: dict[int, dict[str, str]] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        workspace_path = item.get("workspacePath")
+        package_part = item.get("packagePart")
+        if not isinstance(workspace_path, str) or not isinstance(
+            package_part,
+            str,
+        ):
+            continue
+        for index in _resource_slide_indices(
+            item,
+            slide_rows,
+            include_structure=False,
+        ):
+            if workspace_path in dependencies.get(index, ()):
+                package_parts.setdefault(index, {})[workspace_path] = (
+                    package_part
+                )
+
+    relationship_namespace = (
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    )
+    presentation_namespace = (
+        "http://schemas.openxmlformats.org/presentationml/2006/main"
+    )
+    shape_tags = {
+        f"{{{presentation_namespace}}}{name}"
+        for name in ("cxnSp", "graphicFrame", "grpSp", "pic", "sp")
+    }
+    owner_paths: dict[int, dict[str, set[str]]] = {}
+    source_path = source_pptx_path(project_path)
+    try:
+        with zipfile.ZipFile(source_path) as archive:
+            names = set(archive.namelist())
+            for index, paths_by_package_part in package_parts.items():
+                row = slide_rows.get(index)
+                source_part = row.get("sourcePart") if row else None
+                if not isinstance(source_part, str):
+                    continue
+                rels_part = posixpath.join(
+                    posixpath.dirname(source_part),
+                    "_rels",
+                    posixpath.basename(source_part) + ".rels",
+                )

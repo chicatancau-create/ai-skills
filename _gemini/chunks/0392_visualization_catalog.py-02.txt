@@ -1,0 +1,97 @@
+    requested = visualization_families() if families is None else tuple(families)
+    normalized: list[str] = []
+    for raw_family in requested:
+        family = str(raw_family).strip().casefold()
+        if family not in _FAMILY_SPECS:
+            allowed = ", ".join(visualization_families())
+            raise VisualizationCatalogError(
+                f"unknown visualization family {raw_family!r}; expected one of {allowed}"
+            )
+        if family not in normalized:
+            normalized.append(family)
+    if not normalized:
+        raise VisualizationCatalogError("at least one visualization family is required")
+    return tuple(normalized)
+
+
+def _load_family(family: str) -> tuple[dict[str, VisualizationEntry], dict[str, str]]:
+    directory_name, index_name, object_key = _FAMILY_SPECS[family]
+    family_dir = _TEMPLATES_DIR / directory_name
+    index_path = family_dir / index_name
+    try:
+        payload = json.loads(index_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise VisualizationCatalogError(
+            f"cannot read {family} catalog {index_path}: {exc}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise VisualizationCatalogError(f"{family} catalog root must be an object")
+    raw_entries = payload.get(object_key)
+    if not isinstance(raw_entries, dict):
+        raise VisualizationCatalogError(
+            f"{family} catalog {index_path} has no '{object_key}' object"
+        )
+
+    entries: dict[str, VisualizationEntry] = {}
+    for raw_key, raw_item in raw_entries.items():
+        if (
+            not isinstance(raw_key, str)
+            or _KEY_RE.fullmatch(raw_key) is None
+            or not isinstance(raw_item, dict)
+        ):
+            raise VisualizationCatalogError(
+                f"{family} catalog entry {raw_key!r} is malformed"
+            )
+        summary = raw_item.get("summary")
+        if not isinstance(summary, str) or not summary.strip():
+            raise VisualizationCatalogError(
+                f"{family} catalog entry {raw_key!r} has no non-empty summary"
+            )
+        entry = VisualizationEntry(
+            family=family,
+            key=raw_key,
+            summary=summary.strip(),
+            path=(family_dir / f"{raw_key}.svg").resolve(),
+        )
+        entries[entry.reference] = entry
+
+    raw_aliases = payload.get("aliases", {})
+    if not isinstance(raw_aliases, dict):
+        raise VisualizationCatalogError(f"{family} catalog aliases must be an object")
+    aliases: dict[str, str] = {}
+    for raw_alias, raw_target in raw_aliases.items():
+        if (
+            not isinstance(raw_alias, str)
+            or _KEY_RE.fullmatch(raw_alias) is None
+            or not isinstance(raw_target, str)
+            or _KEY_RE.fullmatch(raw_target) is None
+        ):
+            raise VisualizationCatalogError(
+                f"{family} catalog alias {raw_alias!r} is malformed"
+            )
+        target_reference = f"{family}/{raw_target}"
+        if raw_alias in raw_entries:
+            raise VisualizationCatalogError(
+                f"{family} alias {raw_alias!r} collides with a canonical key"
+            )
+        if target_reference not in entries:
+            raise VisualizationCatalogError(
+                f"{family} alias {raw_alias!r} targets missing key {raw_target!r}"
+            )
+        aliases[f"{family}/{raw_alias}"] = target_reference
+    return entries, aliases
+
+
+def load_visualization_catalog(
+    families: Iterable[str] | None = None,
+) -> VisualizationCatalog:
+    """Load selected live family registries."""
+    selected = _normalize_families(families)
+    entries: dict[str, VisualizationEntry] = {}
+    aliases: dict[str, str] = {}
+    for family in selected:
+        family_entries, family_aliases = _load_family(family)
+        entries.update(family_entries)
+        aliases.update(family_aliases)
+    if not entries:
+        shown = ", ".join(selected)

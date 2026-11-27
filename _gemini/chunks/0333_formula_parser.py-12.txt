@@ -1,0 +1,97 @@
+        if not _is_command_letter(following):
+            return following in SPACING_COMMANDS
+        command, _ = _read_control_word(self.source, self.position)
+        return (
+            command in SPACING_COMMANDS
+            or command in NO_OUTPUT_COMMANDS
+            or command in {"mkern", "mskip", "hspace"}
+        )
+
+    def _call_delimiter_follows(self) -> bool:
+        self._skip_whitespace()
+        if self.position >= len(self.source):
+            return False
+        if self.source[self.position] in "([|":
+            return True
+        if self.source.startswith((r"\|", r"\{"), self.position):
+            return True
+        if self.source[self.position] != "\\":
+            return False
+        if self.position + 1 >= len(self.source) or not _is_command_letter(
+            self.source[self.position + 1]
+        ):
+            return False
+        command, _ = _read_control_word(self.source, self.position)
+        return command in BARE_DELIMITER_COMMAND_PAIRS
+
+    def _owned_body_follows(self) -> bool:
+        if self.position >= len(self.source) or self._at_environment_boundary():
+            return False
+        if any(
+            self._at_control_word(command)
+            for command in {"right", "middle", "end"}
+        ):
+            return False
+        char = self.source[self.position]
+        if char in "}])&^_+-=<>/,;:!?":
+            return False
+        if char != "\\":
+            return True
+        if (
+            self.position + 1 < len(self.source)
+            and not _is_command_letter(self.source[self.position + 1])
+        ):
+            return self.source[self.position + 1] not in {"\\", ",", ";", ":", "!", " "}
+        command, _ = _read_control_word(self.source, self.position)
+        return command not in OPERATOR_BOUNDARY_COMMANDS
+
+    def _parse_delimited_expression(self, command: str = "left") -> Delimiter:
+        left = self._parse_delimiter_token(f"\\{command}")
+        segments: list[Sequence] = []
+        separator = ""
+        stop_commands = frozenset({
+            *_MIDDLE_DELIMITER_COMMANDS,
+            *_RIGHT_DELIMITER_COMMANDS,
+        })
+        while True:
+            segments.append(
+                self._parse_nested_sequence(stop_commands=stop_commands)
+            )
+            middle_command = next(
+                (
+                    candidate
+                    for candidate in _MIDDLE_DELIMITER_COMMANDS
+                    if self._at_control_word(candidate)
+                ),
+                None,
+            )
+            if middle_command is not None:
+                self._consume_control_word(middle_command)
+                current = self._parse_delimiter_token(f"\\{middle_command}")
+                if separator and separator != current:
+                    self._fail("One delimiter expression cannot mix middle characters")
+                separator = current
+                continue
+            right = ""
+            right_command = next(
+                (
+                    candidate
+                    for candidate in _RIGHT_DELIMITER_COMMANDS
+                    if self._at_control_word(candidate)
+                ),
+                None,
+            )
+            if right_command is not None:
+                self._consume_control_word(right_command)
+                right = self._parse_delimiter_token(f"\\{right_command}")
+            return Delimiter(left, right, tuple(segments), separator)
+
+    def _parse_big_symmetric_delimiter(self) -> Delimiter:
+        delimiter = self._parse_delimiter_token("explicit big symmetric delimiter")
+        body_start = self.position
+        closing = self._find_matching_big_symmetric(delimiter, body_start)
+        if closing is None:
+            return Delimiter("", "", (Sequence(()), Sequence(())), delimiter)
+        closing_start, after_closing = closing
+        body = self._parse_fragment(self.source[body_start:closing_start])
+        self.position = after_closing

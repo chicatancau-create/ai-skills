@@ -1,0 +1,113 @@
+    with Image.open(path) as img:
+        rgba = img.convert("RGBA")
+
+    alpha = rgba.getchannel("A")
+    if alpha.getextrema()[0] < 255:
+        if color:
+            pixels = rgba.load()
+            width, height = rgba.size
+            for y in range(height):
+                for x in range(width):
+                    _, _, _, a = pixels[x, y]
+                    if a:
+                        pixels[x, y] = (fg_rgb[0], fg_rgb[1], fg_rgb[2], a)
+            rgba.save(path)
+        return
+
+    fg_bg_distance = max(abs(fg_rgb[i] - bg_rgb[i]) for i in range(3))
+    pixels = rgba.load()
+    width, height = rgba.size
+    for y in range(height):
+        for x in range(width):
+            r, g, b, a = pixels[x, y]
+            if a == 0:
+                continue
+
+            bg_distance = max(
+                abs(r - bg_rgb[0]),
+                abs(g - bg_rgb[1]),
+                abs(b - bg_rgb[2]),
+            )
+            if bg_distance <= tolerance:
+                pixels[x, y] = (fg_rgb[0], fg_rgb[1], fg_rgb[2], 0)
+                continue
+
+            if fg_bg_distance > tolerance:
+                coverage = min(1.0, bg_distance / fg_bg_distance)
+                new_alpha = max(1, min(255, round(a * coverage)))
+            else:
+                new_alpha = a
+            pixels[x, y] = (fg_rgb[0], fg_rgb[1], fg_rgb[2], new_alpha)
+
+    rgba.save(path)
+
+
+def _process_item(
+    item: dict[str, Any],
+    index: int,
+    project_path: Path,
+    output_dir: Path,
+    default_dpi: int,
+    providers: list[str],
+    dry_run: bool,
+) -> dict[str, Any]:
+    """Render one manifest item and return its updated record."""
+    latex = str(item.get("latex") or "").strip()
+    if not latex:
+        raise RuntimeError(f"Formula item #{index} is missing `latex`.")
+
+    filename = _safe_filename(item, index)
+    output_path = output_dir / filename
+    dpi = int(item.get("dpi") or default_dpi)
+    color = _normalize_hex_color(item.get("color"), "color")
+    background = _normalize_hex_color(item.get("background"), "background")
+    transparent = _parse_bool(item.get("transparent"), True)
+    transparent_tolerance = _normalize_tolerance(item.get("transparent_tolerance"))
+    display = str(item.get("display") or "block").strip().lower()
+    if display not in {"inline", "block"}:
+        raise RuntimeError(f"Formula item #{index} has invalid `display`: {display}")
+    item_providers = _parse_providers(
+        item.get("providers") or item.get("provider_chain") or providers
+    )
+
+    updated = dict(item)
+    updated["filename"] = filename
+    updated["file"] = _project_relative(output_path, project_path)
+    updated["dpi"] = dpi
+    updated["display"] = display
+    updated["providers"] = item_providers
+    updated["transparent"] = transparent
+    if color:
+        updated["color"] = f"#{color}"
+    if background:
+        updated["background"] = f"#{background}"
+    if transparent:
+        updated["transparent_tolerance"] = transparent_tolerance
+
+    if dry_run:
+        updated["status"] = item.get("status") or "Pending"
+        return updated
+
+    try:
+        if not output_path.exists() or item.get("status") != "Rendered":
+            provider_used, provider_errors = _render_with_providers(
+                latex,
+                output_path,
+                dpi,
+                color,
+                background,
+                display,
+                item_providers,
+            )
+            updated["provider"] = provider_used
+            if color and provider_used not in COLOR_AWARE_PROVIDERS:
+                updated["color_warning"] = (
+                    f"Provider `{provider_used}` is an availability fallback and may "
+                    "not preserve the requested formula color."
+                )
+            if provider_errors:
+                updated["provider_errors"] = provider_errors
+        if transparent:
+            _make_png_background_transparent(
+                output_path,
+                color=color,

@@ -1,0 +1,67 @@
+- **一键换号**：`D:\agy\switch.cmd` = `taskkill /IM agy.exe /F` + `cmdkey /delete:gemini:antigravity` + `call D:\agy\ag.cmd`。
+  换号前要先在 Chrome 切到对应的**个人资料**（本机 4 个资料：Chica 及其余 3 个已脱敏账号，
+  邮箱分别是 chicatancau 及其余 3 个已脱敏用户名 @gmail.com），否则授权页会顺着默认资料又登回旧号。
+- `D:\agy\ag.cmd` 已改成**不带参数也能直接跑**（内部用 `shift` + `%1..%9`，仍不能用 `%*`）。
+  要带参数又不指定账号时写 `ag.cmd - -p "..."`。
+- **验证链接是一次性的、几分钟就废**，浏览器打开后报 `400 That's an error` 基本都是过期/已被用，重新跑一次 agy 取新链即可。
+  服务端可先自查：`curl -x http://127.0.0.1:7897 -o /dev/null -w "%{http_code}" -L "<url>"` 返 200 才算活着。
+- 本机梯子会**瞬断**：`token exchange failed: Post "https://oauth2.googleapis.com/token": EOF` 出现过一次，
+  连测 6 次又全通 → 先重试，别急着改配置。
+- **`agy models` 能列全 ≠ 这个号能用**：模型表走 `fetchAvailableModels`，权益走 `loadCodeAssist`，
+  两个端点互相独立。实测被 403 挡住的号照样能把 14 个模型全列出来。判死活只能跑一次真 `-p` 请求。
+- **OAuth 授权链接不在 CLI 日志里**（`antigravity-cli\log\cli-*.log` grep `oauth2/auth` = 0 命中，日志只记
+  `daily-cloudcode-pa.googleapis.com` 那批后端调用）。⇒ 想「从日志抓 URL → 用指定 Chrome 资料打开」这条路**不成立**，
+  只能靠先把目标资料的窗口顶到最前，赌 Chrome 把新标签开在最前窗口里。
+- 换号壳子 `D:\agy\go.cmd [1|2|3|4]`：杀 agy → `cmdkey /delete` → `chrome.exe --profile-directory="..."` 顶到前面
+  → `call ag.cmd`。资料目录对应关系（读 `Google\Chrome\User Data\Local State` 的 `profile.info_cache`）：
+  `Default`=Chica/chicatancau，`Profile 1`/`Profile 2`/`Profile 3` 为其余 3 个账号（昵称与邮箱均已脱敏）。
+- **Gemini 桌面版不是替代品**：它是网页套壳，不能读写本地文件、不能跑命令，我驱动它也榨不出可用于工作的额度；
+  换号还得在它的界面里切账号，比 CLI 更麻烦。
+- 用户 2026-10-09 明确的目标是**「把这 4 个号的额度全用完」**，并直接否掉了我做的「一键换号」方向
+  （「我并不需要一键换号」）。⇒ 别在 UX 便利性上继续加工，先解决「能不能真跑起来」。
+  当前状态：4 个号里实测 2 个（Chica 与 Profile 1 那个已脱敏账号）全卡在同一道手机扫码验证，**未证实**另外 2 个已脱敏账号是否也卡。
+
+## 2026-10-08 晚实测：agy 登录通了，真正卡点是「Google 要求验证账号」不是地区
+
+用 `D:\agy\ag.cmd -`（注好 `HTTPS_PROXY=7897`）+ computer-use 驱动终端，onboarding 一路走完
+（配色 → ToS 页的 `[x] 数据收集` 保持默认 → 信任工作区），**登录成功**：界面显示 `chicatancau@gmail.com`、
+`Gemini 3.8 Flash (High)`，说明 token 有效、代理是根因（之前裸跑 `agy` 没代理 → 直连 IPv6 `oauth2.googleapis.com` 超时）。
+
+**我先前把根因写成「出口 IP 地区判定」，那是错的，已推翻**。界面那句
+`not currently available in your location` 只是 CLI 的兜底文案（`server_oauth.go:114`）；
+日志里后端真正返回的是：
+```
+403 PERMISSION_DENIED  reason=VALIDATION_REQUIRED  "Verify your account to continue."
+validation_url=https://accounts.google.com/signin/continue?sarp=1&scc=1&continue=...&flowName=GlifWebSignIn
+```
+（`retrieveUserQuotaSummary` 与 `loadCodeAssist` 同一个后端、同一个 token，都吃这个 403。）
+把 `validation_url` 在浏览器里打开 = 中文页「**验证您的信息后才能继续**」+ **手机扫二维码**（sarp=1）。
+→ **只有用户本人用手机扫码能过，程序侧无解**；换 Clash 节点跟这件事无关。
+旁证：`agy models` 走 `fetchAvailableModels` 是成功的（模型表能列全），说明不是网络也不是地区。
+
+其它实测到的机制（2026-10-08 晚）：
+- ~~**`/login` 和 `/logout` 是真斜杠命令**~~ **错**：1.3.1 实测 `/login` 回 `Unknown command: /login`，只有 `/logout` 存在。
+  二进制原文 `Please log out (/logout) and log back in (/login).` 是误导（见上面 2026-10-09 复核段）。
+- 凭据落点已确认：Windows 凭据管理器 `target=gemini:antigravity`、`user=antigravity`，
+  blob 是**明文 JSON**（1667 B，键只有 `token.{access_token,token_type,expiry,refresh_token}`、`auth_method`、`id_token`），
+  **一次只存一个号**。`~\.gemini\` 下没有任何含邮箱的文件（只在 `antigravity-cli\log\` 的日志里出现）。
+- 核对当前登了哪几个号：新开 cmd 跑 `set AGY_ACCOUNT=zzz` 然后 `D:\agy\ag.cmd - -p hi`，
+  若多号已存会报 `AGY_ACCOUNT="zzz" matches no signed-in account; available accounts: <列表>`。
+- **mihomo 外部控制器确实没开**：`clash-verge.yaml` 里 `external-controller: ''`，只留
+  `external-controller-pipe: \\.\pipe\verge-mihomo-sidecar-<hash>`，所以 TCP 9090/9097 连不上，
+  换节点只能用户在 Clash Verge 界面点。（当前订阅「娱乐办公好帮手」组已选 `🇯🇵 JP 01`，
+  经 7897 打 ipinfo 实测出口 `23.146.72.122 / Tokyo / JP`。）
+- Chrome 里选哪个 Google 账号这步**我做不了**：computer-use 一碰 Chrome 就触发 `browser_url_policy`
+  并终止整轮控制；但 `user-browser-use`（浏览器连接器）能开页、截图、读无障碍树 —— 用它打开
+  `validation_url` 取证成功（页面已是简体中文）。
+
+## 2026-11-03 复核：两个号卡在「我们无法验证您的身份」
+
+用户问「我有 4 个 PRO 号，能不能反代 Gemini」时顺带查到的状态：
+
+- 两个号（邮箱均已脱敏）打开就是中文页
+  「我们**无法验证您的身份**」+ 三条建议（用以前登录过的设备/浏览器、用家里或单位的 Wi-Fi、
+  改辅助电话号码）。这是 **Google 账号自己的登录风控挑战页**，不是封号，也不是 Antigravity 的资格检查页
+  （后者文案是 `We couldn't verify your info` / `not eligible`，官方论坛确认那是 OAuth 过了但资格检查失败）。
+- 判据分层：① 匿名读得到 ≠ 凭据有效；② 这类挑战页意味着**当前设备+网络下所有需要重认证的操作被锁**
+  （新登录、OAuth 授权、改密码、改手机号），已登录会话能撑到 token 过期；③ 长期过不去 → 走恢复表单 →

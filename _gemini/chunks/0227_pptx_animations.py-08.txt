@@ -1,0 +1,123 @@
+    elif isinstance(value, str) and re.fullmatch(r'\d+', value):
+        milliseconds = int(value)
+    else:
+        raise ValueError(f'{field} must be a non-negative integer: {value!r}')
+    if milliseconds < 0 or milliseconds > MAX_OOXML_MILLISECONDS:
+        raise ValueError(
+            f'{field} must be between 0 and {MAX_OOXML_MILLISECONDS}: {value!r}'
+        )
+    return milliseconds
+
+
+def _optional_bool(value: object, field: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f'{field} must be a boolean: {value!r}')
+    return value
+
+
+def _optional_ratio(value: object, field: str) -> float:
+    ratio = _finite_number(value, field)
+    if ratio < 0 or ratio > 1:
+        raise ValueError(f'{field} must be between 0 and 1: {value!r}')
+    return ratio
+
+
+def _normalize_repeat_count(value: object) -> float:
+    count = _finite_number(value, 'animation repeat_count')
+    if count <= 0 or count * 1000 > MAX_OOXML_UNSIGNED_INT:
+        raise ValueError(
+            'animation repeat_count must be positive and fit the OOXML range: '
+            f'{value!r}'
+        )
+    return count
+
+
+def _normalize_after_effect(value: object) -> tuple[str, str | None]:
+    if value is None:
+        return 'none', None
+    if isinstance(value, str):
+        effect_type = value
+        color = None
+    elif isinstance(value, Mapping):
+        unknown = set(value) - {'type', 'color'}
+        if unknown:
+            raise ValueError(
+                'animation after_effect has unknown field(s): '
+                + ', '.join(sorted(unknown))
+            )
+        effect_type = value.get('type', 'none')
+        color = value.get('color')
+    else:
+        raise ValueError(
+            f'animation after_effect must be a string or object: {value!r}'
+        )
+    if effect_type not in ANIMATION_AFTER_EFFECTS:
+        raise ValueError(
+            f'animation after_effect.type must be one of '
+            f'{", ".join(ANIMATION_AFTER_EFFECTS)}: {effect_type!r}'
+        )
+    if effect_type == 'dim':
+        if color is None:
+            raise ValueError('animation dim after_effect requires color')
+        return effect_type, _normalize_animation_color(
+            color,
+            'animation after_effect.color',
+        )
+    if color is not None:
+        raise ValueError(
+            f'animation after_effect.color is valid only with type "dim": {color!r}'
+        )
+    return effect_type, None
+
+
+def _normalize_sound(value: object) -> tuple[str | None, str | None]:
+    if value is None:
+        return None, None
+    if not isinstance(value, Mapping):
+        raise ValueError(
+            'low-level animation sound must be an object with '
+            'relationship_id and name'
+        )
+    unknown = set(value) - {'relationship_id', 'name'}
+    if unknown:
+        raise ValueError(
+            'low-level animation sound has unknown field(s): '
+            + ', '.join(sorted(unknown))
+        )
+    relationship_id = value.get('relationship_id')
+    name = value.get('name')
+    if not isinstance(relationship_id, str) or not re.fullmatch(
+        r'rId[1-9]\d*',
+        relationship_id,
+    ):
+        raise ValueError(
+            'low-level animation sound relationship_id must match rIdN: '
+            f'{relationship_id!r}'
+        )
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError(
+            f'low-level animation sound name must be non-empty: {name!r}'
+        )
+    return relationship_id, name
+
+
+def _normalize_target_mapping(
+    target: Mapping[str, object],
+    default_duration_ms: int,
+    default_trigger: str,
+) -> AnimationTarget:
+    allowed = {
+        'shape_id',
+        'delay_ms',
+        'effect',
+        'duration',
+        'effect_options',
+        'trigger',
+        'trigger_shape_id',
+        *ANIMATION_TIMING_OPTION_FIELDS,
+        'after_effect',
+        'sound',
+    }
+    unknown = set(target) - allowed
+    if unknown:
+        raise ValueError(

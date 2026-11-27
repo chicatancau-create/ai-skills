@@ -1,0 +1,114 @@
+"""Convert a DrawingML <a:tbl> into SVG.
+
+Tables in PowerPoint are stored under <p:graphicFrame> with
+graphicData uri="...drawingml/2006/table" wrapping a single <a:tbl>:
+
+    <p:graphicFrame>
+      <p:xfrm>...</p:xfrm>
+      <a:graphic><a:graphicData uri="...table">
+        <a:tbl>
+          <a:tblPr/>
+          <a:tblGrid>
+            <a:gridCol w="..."/>...
+          </a:tblGrid>
+          <a:tr h="...">
+            <a:tc [gridSpan=N] [rowSpan=N] [hMerge=1] [vMerge=1]>
+              <a:txBody>...</a:txBody>
+              <a:tcPr>
+                <a:lnL/><a:lnR/><a:lnT/><a:lnB/>
+                <a:solidFill/>... or <a:gradFill/> ...
+              </a:tcPr>
+            </a:tc>
+          </a:tr>
+        </a:tbl>
+      </a:graphicData></a:graphic>
+    </p:graphicFrame>
+
+The graphicFrame's <p:xfrm> gives the table's slide-space position and total
+size; <a:tblGrid> + <a:tr> heights distribute that size across columns/rows.
+
+Cell painting order:
+1. background fill (rect at cell box)
+2. text body (re-uses convert_txbody)
+3. cell borders (lnT / lnR / lnB / lnL — stroked as separate <line>s so
+   neighbouring cells with different border styles render correctly)
+"""
+
+from __future__ import annotations
+
+import copy
+import json
+import math
+from dataclasses import dataclass
+from typing import Any
+from xml.etree import ElementTree as ET
+
+from pptx_effects import txbody_has_run_effects
+from semantic_table import compact_semantic_table_payload
+
+from .color_resolver import ColorPalette, find_color_elem, resolve_color
+from .emu_units import (
+    NS,
+    Xfrm,
+    emu_to_px,
+    fmt_num,
+    hundredths_pt_to_px,
+    ooxml_bool,
+)
+from .fill_to_svg import FillResult, resolve_fill
+from .ln_to_svg import resolve_stroke
+from .txbody_to_svg import (
+    HyperlinkResolver,
+    TextDiagnosticSink,
+    TextImportError,
+    _resolve_theme_typeface,
+    convert_txbody,
+)
+
+
+BUILTIN_MEDIUM_STYLE_2_ACCENT_1 = "{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}"
+_POWERPOINT_COORD_MIN = -(2**31)
+_POWERPOINT_COORD_MAX = 2**31 - 1
+
+_BUILTIN_MEDIUM_STYLE_2_ACCENT_1_XML = ET.fromstring(
+    f'''<a:tblStyle xmlns:a="{NS["a"]}"
+        styleId="{BUILTIN_MEDIUM_STYLE_2_ACCENT_1}">
+      <a:wholeTbl>
+        <a:tcTxStyle>
+          <a:fontRef idx="minor"><a:prstClr val="black"/></a:fontRef>
+          <a:schemeClr val="dk1"/>
+        </a:tcTxStyle>
+        <a:tcStyle>
+          <a:tcBdr>
+            <a:left><a:ln w="12700"><a:solidFill><a:schemeClr val="lt1"/></a:solidFill></a:ln></a:left>
+            <a:right><a:ln w="12700"><a:solidFill><a:schemeClr val="lt1"/></a:solidFill></a:ln></a:right>
+            <a:top><a:ln w="12700"><a:solidFill><a:schemeClr val="lt1"/></a:solidFill></a:ln></a:top>
+            <a:bottom><a:ln w="12700"><a:solidFill><a:schemeClr val="lt1"/></a:solidFill></a:ln></a:bottom>
+            <a:insideH><a:ln w="12700"><a:solidFill><a:schemeClr val="lt1"/></a:solidFill></a:ln></a:insideH>
+            <a:insideV><a:ln w="12700"><a:solidFill><a:schemeClr val="lt1"/></a:solidFill></a:ln></a:insideV>
+          </a:tcBdr>
+          <a:fill><a:solidFill><a:schemeClr val="accent1"><a:tint val="20000"/></a:schemeClr></a:solidFill></a:fill>
+        </a:tcStyle>
+      </a:wholeTbl>
+      <a:band1H>
+        <a:tcStyle><a:fill><a:solidFill><a:schemeClr val="accent1"><a:tint val="40000"/></a:schemeClr></a:solidFill></a:fill></a:tcStyle>
+      </a:band1H>
+      <a:band2H><a:tcStyle/></a:band2H>
+      <a:firstRow>
+        <a:tcTxStyle b="on">
+          <a:fontRef idx="minor"><a:prstClr val="black"/></a:fontRef>
+          <a:schemeClr val="lt1"/>
+        </a:tcTxStyle>
+        <a:tcStyle>
+          <a:tcBdr><a:bottom><a:ln w="38100"><a:solidFill><a:schemeClr val="lt1"/></a:solidFill></a:ln></a:bottom></a:tcBdr>
+          <a:fill><a:solidFill><a:schemeClr val="accent1"/></a:solidFill></a:fill>
+        </a:tcStyle>
+      </a:firstRow>
+    </a:tblStyle>'''
+)
+
+
+@dataclass
+class TableResult:
+    """Composite render output, replacement metadata, and effect diagnostics."""
+

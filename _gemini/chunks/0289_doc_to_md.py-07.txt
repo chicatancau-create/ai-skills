@@ -1,0 +1,111 @@
+        elif local == "oMath":
+            parent = parent_map.get(elem)
+            if parent is None or _local_name(parent) != "oMathPara":
+                targets.append((elem, False))
+    if not targets:
+        return None
+
+    token_base = uuid.uuid4().hex
+    replacements: dict[str, str] = {}
+    for index, (elem, display) in enumerate(targets):
+        parent = parent_map.get(elem)
+        if parent is None:
+            continue
+        latex = _omml_to_latex(elem).strip()
+        position = list(parent).index(elem)
+        parent.remove(elem)
+        if latex:
+            token = f"MATHEQ{token_base}{index:04d}"
+            delim = "$$" if display else "$"
+            replacements[token] = f"{delim}{latex}{delim}"
+            parent.insert(position, _make_text_run(token))
+    if not replacements:
+        return None
+
+    for prefix, uri in DOCX_NS.items():
+        if prefix != "rel":
+            ET.register_namespace(prefix, uri)
+    patched_xml = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".docx", delete=False)
+    tmp.close()
+    out_path = Path(tmp.name)
+    with zipfile.ZipFile(input_file) as zin, \
+            zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            data = patched_xml if item.filename == "word/document.xml" else zin.read(item.filename)
+            zout.writestr(item, data)
+    return out_path, replacements
+
+
+# ─────────────────────────────────────────────────────────────
+# DOCX tables → pipe Markdown
+# ─────────────────────────────────────────────────────────────
+
+def _docx_paragraph_text(paragraph: ET.Element) -> str:
+    """Extract readable text from one Word paragraph."""
+    parts: list[str] = []
+    for elem in paragraph.iter():
+        local = _local_name(elem)
+        if local == "t":
+            parts.append(elem.text or "")
+        elif local == "tab":
+            parts.append("\t")
+        elif local in {"br", "cr"}:
+            parts.append(" ")
+        elif local == "footnoteReference":
+            parts.append(f"[^{elem.get(f'{{{W_NS}}}id')}]")
+    return "".join(parts).strip()
+
+
+def _docx_footnote_texts(docx: zipfile.ZipFile) -> dict[str, str]:
+    """Return footnote id → plain text from ``word/footnotes.xml``."""
+    try:
+        root = ET.fromstring(docx.read("word/footnotes.xml"))
+    except (KeyError, ET.ParseError):
+        return {}
+    return {
+        note.get(f"{{{W_NS}}}id", ""): " ".join(
+            _docx_paragraph_text(paragraph)
+            for paragraph in note.findall("w:p", DOCX_NS)
+        ).strip()
+        for note in root.findall("w:footnote", DOCX_NS)
+        if note.get(f"{{{W_NS}}}type") not in {
+            "separator", "continuationSeparator", "continuationNotice",
+        }
+    }
+
+
+def _docx_table_has_media(table: ET.Element) -> bool:
+    """Return whether a table contains image-bearing nodes."""
+    return any(_local_name(elem) in {"drawing", "imagedata"} for elem in table.iter())
+
+
+def _docx_table_cell_text(cell: ET.Element) -> str:
+    """Extract table-cell text, preserving paragraph breaks as Markdown breaks."""
+    paragraphs: list[str] = []
+    for child in cell:
+        if _local_name(child) == "p":
+            text = _docx_paragraph_text(child)
+            if text:
+                paragraphs.append(text)
+    return "<br>".join(paragraphs)
+
+
+def _markdown_table_cell(text: str) -> str:
+    """Escape Markdown table delimiters in one cell."""
+    text = re.sub(r"[ \t\r\n]+", " ", text).strip()
+    return text.replace("|", r"\|")
+
+
+def _docx_table_to_markdown(table: ET.Element) -> str:
+    """Convert a Word table XML node to a pipe Markdown table."""
+    rows: list[list[str]] = []
+    for row in table.findall("w:tr", DOCX_NS):
+        cells = [
+            _markdown_table_cell(_docx_table_cell_text(cell))
+            for cell in row.findall("w:tc", DOCX_NS)
+        ]
+        if cells:
+            rows.append(cells)
+    if not rows:

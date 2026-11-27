@@ -1,0 +1,98 @@
+        for row in raw_slides
+        if isinstance(row, dict) and isinstance(row.get('index'), int)
+    }
+    if len(pages) != len(native_files):
+        raise RuntimeError(
+            "Round-trip output page roster differs from materialized SVG files"
+        )
+
+    candidates: set[int] = set()
+    if authoring_report is not None:
+        raw_documents = authoring_report.get('documents')
+        if not isinstance(raw_documents, list):
+            return set()
+        reports = {
+            str(row.get('file')): row
+            for row in raw_documents
+            if isinstance(row, dict) and isinstance(row.get('file'), str)
+        }
+        for page in pages:
+            if page.source_slide not in slide_rows:
+                raise RuntimeError(
+                    f"Round-trip manifest has no source slide {page.source_slide}"
+                )
+            report = reports.get(page.svg_name)
+            if not isinstance(report, dict):
+                continue
+            if (
+                report.get('document_unchanged') is True
+                and
+                isinstance(report.get('source_ref_count'), int)
+                and report.get('source_ref_count') == report.get('unchanged_refs')
+                and int(report.get('edited_refs') or 0) == 0
+                and int(report.get('deleted_refs') or 0) == 0
+                and int(report.get('authored_unreferenced') or 0) == 0
+                and report.get('defs_changed') is False
+            ):
+                candidates.add(page.output_index)
+    elif source_dir == 'svg':
+        files_by_name = {path.name: path for path in native_files}
+        for page in pages:
+            row = slide_rows[page.source_slide]
+            relative = row.get('layeredSvg')
+            expected = row.get('layeredSvgSha256')
+            if not isinstance(relative, str) or not isinstance(expected, str):
+                continue
+            path = files_by_name.get(Path(relative).name)
+            if path is not None and _path_sha256(path) == expected:
+                candidates.add(page.output_index)
+    else:
+        return set()
+
+    sidecars = manifest.get('sidecars')
+    animation = sidecars.get('animations') if isinstance(sidecars, dict) else None
+    if not isinstance(animation, dict):
+        return set()
+    animation_file = animation.get('file')
+    if not isinstance(animation_file, str):
+        raise RuntimeError(
+            "Round-trip manifest must declare sidecars.animations.file"
+        )
+    current_animation = project_path / animation_file
+    if not current_animation.is_file():
+        return set()
+    try:
+        current_animation_config = json.loads(
+            current_animation.read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"Cannot read round-trip animation sidecar {current_animation}: {exc}"
+        ) from exc
+    if not isinstance(current_animation_config, dict):
+        raise RuntimeError(
+            f"Round-trip animation sidecar must be a JSON object: {current_animation}"
+        )
+    expanded_animation_config = _roundtrip_animation_config_for_pages(
+        current_animation_config,
+        pages,
+    )
+    pages_by_output = {page.output_index: page for page in pages}
+    for index in tuple(candidates):
+        page = pages_by_output[index]
+        expected = slide_rows[page.source_slide].get("animationSha256")
+        if not isinstance(expected, str):
+            raise RuntimeError(
+                f"Round-trip manifest slide {page.source_slide} lacks "
+                "animationSha256"
+            )
+        actual = slide_animation_config_sha256(
+            expanded_animation_config,
+            page.svg_stem,
+        )
+        if actual != expected:
+            candidates.discard(index)
+
+    for index in tuple(candidates):
+        page = pages_by_output[index]
+        row = slide_rows[page.source_slide]

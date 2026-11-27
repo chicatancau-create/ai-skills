@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""
+考勤报表导出 — 每日统计粒度
+
+⛔ 【AI Agent 强制门禁】调用本脚本前必须先阅读：
+   dingtalk-workspace/references/products/attendance-report.md
+
+  本脚本仅是"考勤报表导出工作流"的执行末端，工作流完整定义在 attendance-report.md，
+  包含但不限于：
+    - 阶段 0：报表类型判断（默认月度汇总）
+    - 阶段 1：人员列表获取（aisearch person / contact dept list-members）
+    - 阶段 2：列选择（是否传 --column-keywords）
+    - 阶段 3：调用本脚本
+    - 阶段 4：结果回传给用户的标准格式
+    - 错误处理（403 权限、HSF_ILLEGALPARAMS、空数据等）
+
+  ❌ 严禁仅凭本脚本 docstring 或 --help 输出就直接拼命令执行，会导致：
+     - 报表数据不全 / 列错位 / 人员遗漏
+     - 错误处理缺失，把环境错误当业务错误反馈给用户
+     - 输出格式不规范，用户体验差
+
+按 (userId, workDate) 分组，每人每天一行。
+
+聚合策略：
+  - 通过启发式识别每条记录的"工作日期"：依次尝试字段名
+    workDate / work_date / date / userCheckTime / day / 工作日期
+  - 同一 (userId, workDate) 下的多条记录按字段聚合：
+    * 数值字段 → sum
+    * 非数值字段 → 取首个非空值（因为同一天同一字段通常只有一个值）
+  - 缺少 workDate 的记录会归入 "_no_date"，并 warn
+
+用法:
+  python attendance_report_daily.py \
+    --users userId1,userId2,...  \
+    --start "2026-03-01 00:00:00" \
+    --end   "2026-03-31 23:59:59" \
+    [--columns 1001,1002]
+    [--column-keywords "工作日期,出勤状态,迟到时长"]
+    [--out attendance_report_2026-03-01_2026-03-31_daily.xlsx]
+    [--inspect]
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+from collections import defaultdict
+from datetime import datetime
+from typing import Any
+
+import attendance_report_common as cmn
+
+# 默认关注字段 — 与 SKILL.md「每日统计预定义列集合」严格对齐（共 33 个）
+# 字段名必须和 `dws attendance report columns` 返回的 name 精确匹配
+DEFAULT_KEYWORDS = [
+    "班次",
+    "上班1打卡时间",
+    "上班1打卡结果",
+    "下班1打卡时间",
+    "下班1打卡结果",
+    "上班2打卡时间",
+    "上班2打卡结果",
+    "下班2打卡时间",
+    "下班2打卡结果",
+    "上班3打卡时间",
+    "上班3打卡结果",
+    "下班3打卡时间",
+    "下班3打卡结果",
+    "关联的审批单",
+    "出勤天数",
+    "休息天数",
+    "工作时长",
+    "迟到次数",
+    "迟到时长",
+    "严重迟到次数",
+    "严重迟到时长",
+    "旷工迟到次数",
+    "早退次数",
+    "早退时长",
+    "上班缺卡次数",
+    "下班缺卡次数",
+    "旷工天数",
+    "出差时长",
+    "外出时长",
+    "请假",
+    "加班-审批单统计",
+]
+
+# 工作日期字段的候选 key（按优先级试探）
+DATE_KEY_CANDIDATES = (
+    "workDate", "work_date", "userCheckDate", "checkDate",
+    "date", "day", "工作日期",
+)
+
+# 请假字段 — 触发"按假期类型展开"的字段名
+# 不参与 query-data 查询，单独走 query-leave 接口，按 4 类假期展开为多列
+# 注意：钉钉接口实际返回的字段名可能是 "请假"、"请假分类"、"请假时长" 等，
+# 凡以 "请假" 开头的都视为请假字段，统一替换为 4 列假期类型展开。
+LEAVE_FIELD_NAME = "请假"
+LEAVE_TYPES: tuple[str, ...] = ("事假", "调休", "病假", "年假")
+
+
+def _is_leave_field(name: str) -> bool:
+    """判断一个字段名是否属于"请假"系列（如 请假 / 请假分类 / 请假时长）。"""
+    return isinstance(name, str) and name.startswith(LEAVE_FIELD_NAME)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 参数解析
+# ─────────────────────────────────────────────────────────────────────────────
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description=(
+            "导出考勤报表 — 每日统计粒度。"
+            "⛔ AI Agent 必须先读 references/products/attendance-report.md 再调用本脚本，"
+            "禁止凭 --help 或脚本路径自行拼命令。"
+        ),
+    )
+    p.add_argument("--users", required=True,
+                   help="userId 列表，逗号分隔（必填）")
+    p.add_argument("--start", required=True,
+                   help='开始时间，YYYY-MM-DD 或 "YYYY-MM-DD HH:mm:ss"（必填）')
+    p.add_argument("--end", required=True,
+                   help='结束时间，YYYY-MM-DD 或 "YYYY-MM-DD HH:mm:ss"（必填）')
+    p.add_argument("--columns", default="",
+                   help="字段 ID 列表，逗号分隔；与 --column-keywords 二选一")
+    p.add_argument("--column-keywords", default="",
+                   help="字段名关键词，逗号分隔；不传则走默认字段集")
+    p.add_argument("--out", default="",
+                   help="输出 xlsx 文件名；不传则按规范自动生成")
+    p.add_argument("--inspect", action="store_true",
+                   help="首次跑时打印首条记录原始结构（用于核对真实字段）")
+    return p.parse_args()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 字段解析（与 detail / monthly 一致）
+# ─────────────────────────────────────────────────────────────────────────────
+

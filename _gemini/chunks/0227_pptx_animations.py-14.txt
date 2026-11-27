@@ -1,0 +1,109 @@
+            raise RuntimeError(
+                'emphasis_change_font preset lost its font behavior'
+            )
+        return
+    if name == 'relative':
+        motions = list(row.iter(_qn(PML_NS, 'animMotion')))
+        if len(motions) != 1:
+            raise RuntimeError('motion-path preset lost its p:animMotion node')
+        motions[0].set('pathEditMode', 'relative' if value else 'fixed')
+        return
+    if name == 'size':
+        scales = list(row.iter(_qn(PML_NS, 'animScale')))
+        if len(scales) != 1:
+            raise RuntimeError(
+                'emphasis_grow_shrink preset lost its p:animScale node'
+        )
+        amount = str(round(float(value) * 1000))
+        targets = scales[0].findall(_qn(PML_NS, 'to'))
+        if len(targets) > 1:
+            raise RuntimeError(
+                'emphasis_grow_shrink preset lost its scale value'
+            )
+        target = (
+            targets[0]
+            if targets
+            else ET.SubElement(scales[0], _qn(PML_NS, 'to'))
+        )
+        target.set('x', amount)
+        target.set('y', amount)
+        return
+    raise AssertionError(f'unhandled continuous animation option: {name}')
+
+
+def _animation_row_for_options(
+    animation: str,
+    effect_options: Mapping[str, object],
+) -> ET.Element:
+    """Return the authored variant row with continuous options applied."""
+    spec = NATIVE_ANIMATIONS[animation]
+    option_specs = spec['effectOptions']
+    row_xml = spec['rowXml']
+    for name, value in effect_options.items():
+        option_spec = option_specs[name]
+        if option_spec['type'] != 'enum':
+            continue
+        key = str(value)
+        row_xml = option_spec['values'][key]
+    row = ET.fromstring(row_xml)
+    for name, value in effect_options.items():
+        if option_specs[name]['type'] == 'enum':
+            continue
+        _set_effect_option_value(row, animation, name, value)
+    return row
+
+
+def _interpolated_behavior_nodes(row: ET.Element) -> tuple[ET.Element, ...]:
+    """Return behavior nodes that can carry PowerPoint bounce metadata."""
+    return tuple(
+        node
+        for node in row.iter()
+        if _local_name(node.tag) in _INTERPOLATED_BEHAVIOR_TAGS
+    )
+
+
+def animation_effect_supports_bounce_end(
+    effect: object,
+    effect_options: object = None,
+) -> bool:
+    """Return whether one concrete effect has an interpolated behavior."""
+    animation, options = normalize_animation_effect_request(
+        effect,
+        effect_options,
+        allow_none=False,
+        allow_modes=False,
+    )
+    if animation is None:
+        raise AssertionError('concrete animation normalization returned none')
+    row = _animation_row_for_options(animation, options)
+    return bool(_interpolated_behavior_nodes(row))
+
+
+def _apply_timing_options(row: ET.Element, target: AnimationTarget) -> None:
+    if target.repeat_count is not None:
+        row.set('repeatCount', str(round(target.repeat_count * 1000)))
+        row.attrib.pop('repeatDur', None)
+    if target.repeat_duration_ms is not None:
+        row.set('repeatDur', str(target.repeat_duration_ms))
+        row.attrib.pop('repeatCount', None)
+    if target.auto_reverse is not None:
+        if target.auto_reverse:
+            row.set('autoRev', '1')
+        else:
+            row.attrib.pop('autoRev', None)
+    if target.rewind is not None:
+        row.set('fill', 'remove' if target.rewind else 'hold')
+    if target.accelerate is not None:
+        if target.accelerate:
+            row.set('accel', str(round(target.accelerate * 100000)))
+        else:
+            row.attrib.pop('accel', None)
+    if target.decelerate is not None:
+        if target.decelerate:
+            row.set('decel', str(round(target.decelerate * 100000)))
+        else:
+            row.attrib.pop('decel', None)
+    if target.bounce_end is not None:
+        bounce_nodes = _interpolated_behavior_nodes(row)
+        if target.bounce_end and not animation_effect_supports_bounce_end(
+            target.effect,

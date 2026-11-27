@@ -1,0 +1,85 @@
+    def test_table_parity_accepts_positioned_tspan_lines_for_paragraphs(self) -> None:
+        marker = ET.fromstring("""
+            <g data-pptx-replace-with="table" data-pptx-bounds="0 0 200 80">
+              <metadata type="application/json">
+                {
+                  "schema": "ppt-master.semantic-table.v2",
+                  "x": 0, "y": 0, "width": 200, "height": 80,
+                  "header_rows": 0,
+                  "rows": [[{"paragraphs": ["First line", "Second line"]}]]
+                }
+              </metadata>
+              <text x="10" y="25">
+                <tspan x="10" y="25">First line</tspan><tspan x="10" dy="24">Second line</tspan>
+              </text>
+            </g>
+        """)
+
+        joined = "\n".join(native_object_projection_warnings(marker))
+
+        self.assertNotIn("fallback text is missing", joined)
+
+
+class NativeTablePayloadRoundTripTest(unittest.TestCase):
+    def test_marker_validation_keeps_original_table_payload(self):
+        """The converter re-expands the payload; validation must not hand back an expanded copy."""
+        import xml.etree.ElementTree as ET
+        from svg_to_pptx.native_objects import _validate_native_object_marker_payload
+        from svg_to_pptx.native_objects.table import _build_native_table  # noqa: F401
+        from semantic_table import expand_semantic_table_payload
+        fixture = FIXTURES_DIR / "27_business_models.svg"
+        root = ET.parse(fixture).getroot()
+        marker = next(
+            el for el in root.iter()
+            if el.get("data-pptx-replace-with") == "table"
+        )
+        kind, payload, rows = _validate_native_object_marker_payload(marker)
+        self.assertEqual(kind, "table")
+        self.assertEqual(payload.get("schema"), "ppt-master.semantic-table.v2")
+        expand_semantic_table_payload(payload)  # must still expand cleanly
+
+
+class NativeTableFillAndTextDefaultsTests(unittest.TestCase):
+    def test_plain_text_cell_inherits_run_defaults(self) -> None:
+        expanded = expand_semantic_table_payload({
+            "schema": "ppt-master.semantic-table.v2",
+            "x": 0, "y": 0, "width": 200, "height": 80,
+            "column_widths": [100, 100],
+            "row_heights": [40, 40],
+            "defaults": {
+                "cell": {"font_size": 20},
+                "run": {"color": "#DAD5CA", "bold": True, "font_size": 16},
+            },
+            "columns": ["A", {"text": "B", "color": "#FFFFFF"}],
+            "rows": [["a", {"text": "b", "bold": False}]],
+        })
+        header_a, header_b = expanded["columns"]
+        body_a, body_b = expanded["rows"][0]
+        self.assertEqual(header_a["color"], "#DAD5CA")
+        self.assertEqual(header_b["color"], "#FFFFFF")
+        self.assertEqual(body_a["color"], "#DAD5CA")
+        self.assertTrue(body_a["bold"])
+        self.assertFalse(body_b["bold"])
+        # defaults.cell wins over defaults.run for a shared field
+        self.assertEqual(body_a["font_size"], 20)
+
+    def test_paragraph_cells_inherit_run_defaults_like_plain_text(self) -> None:
+        expanded = expand_semantic_table_payload({
+            "schema": "ppt-master.semantic-table.v2",
+            "x": 0, "y": 0, "width": 200, "height": 80,
+            "column_widths": [100, 100],
+            "row_heights": [40, 40],
+            "defaults": {"run": {"color": "#1F2933", "bold": False}},
+            "columns": ["A", "B"],
+            "rows": [[
+                {"paragraphs": ["line one", "line two"]},
+                {"paragraphs": [{"runs": [{"text": "run"}]}], "color": "#B4342C"},
+            ]],
+        })
+        strings, runs = expanded["rows"][0]
+        self.assertEqual(strings["color"], "#1F2933")
+        self.assertFalse(strings["bold"])
+        self.assertEqual(runs["color"], "#B4342C")
+        self.assertEqual(runs["paragraphs"][0]["runs"][0]["color"], "#1F2933")
+
+    def test_body_text_color_parity_warns_when_no_layer_carries_it(self) -> None:

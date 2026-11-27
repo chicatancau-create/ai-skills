@@ -1,0 +1,123 @@
+            (cx_ - r, cy_ - r, r * 2, r * 2),
+            (x, y, w, h),
+            transform,
+        )
+    else:
+        xfrm = _shape_xfrm_from_svg_rect(
+            ctx,
+            cx_ - r,
+            cy_ - r,
+            r * 2,
+            r * 2,
+            x,
+            y,
+            w,
+            h,
+            transform,
+        )
+    xfrm_attr, off_x, off_y, ext_cx, ext_cy, bounds_emu = xfrm
+    return ShapeResult(
+        xml=_wrap_geometry_object(
+            elem,
+            ctx,
+            shape_id, f'Ellipse {shape_id}',
+            off_x, off_y, ext_cx, ext_cy,
+            geom, fill, stroke, effect, xfrm_attr=xfrm_attr,
+        ),
+        bounds_emu=bounds_emu,
+    )
+
+
+# ---------------------------------------------------------------------------
+# line
+# ---------------------------------------------------------------------------
+
+def convert_line(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
+    """Convert SVG <line> to DrawingML shape.
+
+    Lines with marker-start / marker-end are converted using the 'line' preset
+    geometry (prstGeom prst="line") so that PowerPoint renders native arrow
+    heads (headEnd / tailEnd) correctly.  Plain lines (no markers) continue to
+    use custom geometry which is sufficient and avoids flipH/flipV complexity.
+    """
+    preset_geom = _build_preset_geom_from_meta(elem)
+    transform = elem.get('transform')
+    raw_x1 = svg_length_x(elem.get('x1'), ctx)
+    raw_y1 = svg_length_y(elem.get('y1'), ctx)
+    raw_x2 = svg_length_x(elem.get('x2'), ctx)
+    raw_y2 = svg_length_y(elem.get('y2'), ctx)
+    x1, y1 = _transformed_point(
+        ctx,
+        raw_x1,
+        raw_y1,
+        transform,
+    )
+    x2, y2 = _transformed_point(
+        ctx,
+        raw_x2,
+        raw_y2,
+        transform,
+    )
+
+    min_x = min(x1, x2)
+    min_y = min(y1, y2)
+
+    stroke_op = get_stroke_opacity(elem, ctx)
+    stroke = build_stroke_xml(elem, ctx, stroke_op)
+
+    shape_id = _claim_element_shape_id(elem, ctx)
+    off_x = px_to_emu(min_x)
+    off_y = px_to_emu(min_y)
+
+    # Determine if this line carries arrow markers.
+    has_marker = bool(
+        _get_attr(elem, 'marker-start', ctx) or
+        _get_attr(elem, 'marker-end', ctx)
+    )
+
+    if preset_geom is not None:
+        # The preserved logical frame, not the rendered stroke/marker bounds,
+        # owns the native shape size. Horizontal/vertical connectors retain a
+        # one-EMU extent on the degenerate axis as required by DrawingML.
+        raw_w = abs(raw_x2 - raw_x1)
+        raw_h = abs(raw_y2 - raw_y1)
+        resolved_w = abs(x2 - x1)
+        resolved_h = abs(y2 - y1)
+        xfrm_attr, off_x, off_y, w_emu, h_emu, bounds_emu = (
+            _shape_xfrm_from_preset_frame(
+                elem,
+                ctx,
+                (min(raw_x1, raw_x2), min(raw_y1, raw_y2), raw_w, raw_h),
+                (min_x, min_y, resolved_w, resolved_h),
+                transform,
+            )
+        )
+        if not _uses_full_transform(ctx, transform):
+            flip_attrs = []
+            if x1 > x2:
+                flip_attrs.append(' flipH="1"')
+            if y1 > y2:
+                flip_attrs.append(' flipV="1"')
+            xfrm_attr += ''.join(flip_attrs)
+        xml = _wrap_geometry_object(
+            elem,
+            ctx,
+            shape_id,
+            f'Connector {shape_id}' if elem.get('data-pptx-object') == 'connector'
+            else f'Line {shape_id}',
+            off_x,
+            off_y,
+            w_emu,
+            h_emu,
+            preset_geom,
+            '<a:noFill/>',
+            stroke,
+            xfrm_attr=xfrm_attr,
+        )
+        return ShapeResult(xml=xml, bounds_emu=bounds_emu)
+
+    if has_marker:
+        # ----------------------------------------------------------------
+        # Preset geometry approach: prstGeom prst="line"
+        # PowerPoint only renders headEnd / tailEnd on lines whose geometry
+        # it can intrinsically understand as a "line" (i.e. preset or

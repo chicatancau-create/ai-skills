@@ -1,0 +1,60 @@
+                    receipt = mirror.materialize_mirror_template(imported, destination, kind=kind)
+                    self.assertEqual(receipt['spec_skeleton'], f'templates/{expected}')
+                    self.assertTrue((destination / 'templates' / expected).is_file())
+
+    def test_s2_mirror_capacity_resolves_sidecar_selectors_and_effective_fonts(self) -> None:
+        path = self._write('templates/01.svg', _page(
+            '<g id="source" data-pptx-bounds="20 40 320 100" font-size="40">'
+            '<text x="20" y="80"><tspan font-family="Microsoft YaHei">中文</tspan></text></g>'
+            '<text id="unlisted" x="500" y="80">Unlisted</text>'))
+        slots = analyze_template_text_slots(ET.parse(path).getroot())
+        self._write('templates/template_execution_manifest.json', json.dumps({
+            'replication_mode': 'mirror', 'source_geometry_unchanged': True,
+        }))
+        self._write('templates/template_execution/01.text-slots.json', json.dumps({
+            'text_slots': [slots[0].model_payload()],
+        }))
+        before = {p: p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+        rows = slot_capacity_report([path])['slots']
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['selector'], '#source>text')
+        self.assertEqual(rows[0]['source'], 'mirror-text-slot')
+        self.assertEqual(rows[0]['bounds'], (20, 40, 320, 100))
+        self.assertEqual(rows[0]['font_size'], 40)
+        self.assertEqual(rows[0]['font_family'], 'Microsoft YaHei')
+        self.assertGreater(rows[0]['cjk']['characters_per_line'], 0)
+        self.assertEqual(before, {p: p.read_bytes() for p in self.root.rglob('*') if p.is_file()})
+        empty = self._write('empty.svg', _page('<rect width="5" height="5"/>'))
+        report = slot_capacity_report([empty])
+        self.assertEqual(report['slots'], [])
+        self.assertIn('note', report)
+        sidecar = self._write('templates/template_execution/01.text-slots.json', json.dumps({
+            'text_slots': [{'selector': '#missing'}],
+        }))
+        self.assertIn('unavailable', slot_capacity_report([path])['slots'][0])
+        sidecar.write_text('[]')
+        with self.assertRaisesRegex(ValueError, 'text_slots array'):
+            slot_capacity_report([path])
+
+    def test_s3_translucent_canvas_rect_stays_a_master_shape(self) -> None:
+        self._write('design_spec.md', '---\nkind: deck\nnative_structure_mode: structured\n---\n# Spec\n')
+        for opacity in ('fill-opacity="0.8"', 'opacity="0.8"',
+                        'style="fill-opacity:0.8"', 'style="opacity:80%"'):
+            with self.subTest(opacity=opacity):
+                path = self._write('scrim.svg', _page(
+                    '<rect id="m-bg" data-pptx-layer="master" width="1280" height="720" fill="#FFFFFF"/>'
+                    f'<image id="m-field" data-pptx-layer="master" href="{PNG}" width="1280" height="720"/>'
+                    '<rect id="m-scrim" data-pptx-layer="master" width="1280" height="720" '
+                    f'fill="#FFFFFF" {opacity}/>'))
+                result = SVGQualityChecker(template_mode=True).check_file(str(path))
+                self.assertFalse(any('paint order' in issue for issue in result['errors']), result['errors'])
+                parse_template_slide(path, 1)
+        # Export an attribute-based case and inspect the native shape alpha.
+        path.write_text(path.read_text().replace('style="opacity:80%"', 'fill-opacity="0.8"'))
+        pptx = self.root / 'scrim.pptx'
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(create_pptx_with_native_svg(
+                [path], pptx, resource_root=self.root, verbose=False, use_compat_mode=False,
+                master_text_style_spec=MasterTextStyleSpec(3000, 1800)))
+        with zipfile.ZipFile(pptx) as package:
+            master = ET.fromstring(package.read('ppt/slideMasters/slideMaster1.xml'))

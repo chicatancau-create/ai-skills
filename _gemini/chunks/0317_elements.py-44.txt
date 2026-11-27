@@ -1,0 +1,134 @@
+        return None
+
+    img_w, img_h = _read_image_size(img_data)
+    if img_w is None or img_h is None or img_w <= 0 or img_h <= 0:
+        return None
+    if box_w <= 0 or box_h <= 0:
+        return None
+
+    scale = min(box_w / img_w, box_h / img_h)
+    fit_w = img_w * scale
+    fit_h = img_h * scale
+
+    if abs(fit_w - box_w) < 0.5 and abs(fit_h - box_h) < 0.5:
+        return None  # already matches — no adjustment
+
+    x_anchor, y_anchor = PROJECT_IMAGE_ASPECT_RATIO_ANCHORS[align]
+
+    dx = (box_w - fit_w) * x_anchor
+    dy = (box_h - fit_h) * y_anchor
+
+    return (dx, dy, fit_w, fit_h)
+
+
+def _build_image_blip_xml(r_id: str, opacity: float | None) -> str:
+    """Build an image blip with native DrawingML transparency when requested."""
+    if opacity is None:
+        return f'<a:blip r:embed="{r_id}"/>'
+    alpha = quantize_ooxml_alpha(opacity)
+    return (
+        f'<a:blip r:embed="{r_id}">'
+        f'<a:alphaModFix amt="{alpha}"/>'
+        '</a:blip>'
+    )
+
+
+def _register_image_media(
+    ctx: ConvertContext,
+    img_format: str,
+    img_data: bytes,
+    *,
+    reuse_text_fill: bool = False,
+) -> str:
+    """Register image bytes and return a DrawingML relationship id."""
+    cache_key: tuple[str, str] | None = None
+    if reuse_text_fill:
+        cache_key = (img_format, hashlib.sha256(img_data).hexdigest())
+        if cache_key in ctx.text_image_fill_cache:
+            return ctx.text_image_fill_cache[cache_key]
+
+    img_idx = len(ctx.media_files) + 1
+    img_filename = f's{ctx.slide_num}_img{img_idx}.{img_format}'
+    ctx.media_files[img_filename] = img_data
+    r_id = ctx.next_rel_id()
+    ctx.rel_entries.append({
+        'id': r_id,
+        'type': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/image',
+        'target': f'../media/{img_filename}',
+    })
+    if cache_key is not None:
+        ctx.text_image_fill_cache[cache_key] = r_id
+    return r_id
+
+
+def convert_image(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
+    """Convert SVG <image> to DrawingML picture element.
+
+    Supports clip-path attribute: when present, the clipPath shape is mapped
+    to DrawingML picture geometry (prstGeom or custGeom) so the image is
+    natively clipped in PowerPoint.
+    """
+    source = load_project_image_source(elem, ctx.svg_dir, ctx.resource_root)
+
+    # Raw coordinates (pre-context-transform) for clip path calculations
+    raw_x = svg_length_x(elem.get('x'), ctx)
+    raw_y = svg_length_y(elem.get('y'), ctx)
+    raw_w = svg_length_x(elem.get('width'), ctx)
+    raw_h = svg_length_y(elem.get('height'), ctx)
+
+    if ctx.use_transform_matrix:
+        x = raw_x
+        y = raw_y
+        w = raw_w
+        h = raw_h
+    else:
+        x = ctx_x(raw_x, ctx)
+        y = ctx_y(raw_y, ctx)
+        w = ctx_w(raw_w, ctx)
+        h = ctx_h(raw_h, ctx)
+
+    if w <= 0 or h <= 0:
+        raise ValueError('image width and height must be positive')
+
+    img_format = source.img_format
+    img_data = source.img_data
+
+    transform = elem.get('transform')
+    rendered_w, rendered_h = _picture_rendered_frame_size(
+        ctx,
+        raw_x,
+        raw_y,
+        raw_w,
+        raw_h,
+        x,
+        y,
+        w,
+        h,
+        transform,
+    )
+    align, mode = parse_project_image_aspect_ratio(
+        elem.get('preserveAspectRatio')
+    )
+    src_rect = _resolve_image_src_rect_values(
+        elem,
+        img_data,
+        raw_w,
+        raw_h,
+    )
+    visible_source_fraction = None
+    if align == 'none':
+        visible_source_fraction = (1.0, 1.0)
+    elif mode == 'slice':
+        if src_rect is None:
+            visible_source_fraction = (1.0, 1.0)
+        else:
+            src_l, src_t, src_r, src_b = src_rect
+            visible_source_fraction = (
+                1.0 - (src_l + src_r) / 100000.0,
+                1.0 - (src_t + src_b) / 100000.0,
+            )
+    img_data, img_format = _optimize_image_for_pptx(
+        ctx,
+        img_data,
+        img_format,
+        rendered_w,

@@ -1,0 +1,123 @@
+                f'animations.json {label} sound must use .m4a, .mp3, or .wav'
+            )
+    return errors
+
+
+def _animation_trigger_error(trigger: object, label: str) -> str | None:
+    if not isinstance(trigger, str):
+        return f'animations.json {label} animation trigger must be a string'
+    try:
+        normalize_animation_trigger(trigger)
+    except ValueError:
+        valid = ', '.join(ANIMATION_TRIGGERS)
+        return (
+            f'animations.json {label} has unknown animation trigger: {trigger}; '
+            f'valid triggers: {valid}'
+        )
+    return None
+
+
+def _unknown_field_errors(
+    value: dict[str, Any],
+    allowed: frozenset[str],
+    label: str,
+) -> list[str]:
+    return [
+        f'animations.json {label} has unknown field: {field}'
+        for field in sorted(set(value) - allowed)
+    ]
+
+
+def validate_transition_config(config: dict[str, Any]) -> list[str]:
+    """Return fatal transition-sidecar errors that must block export."""
+    errors: list[str] = []
+    defaults = config.get('defaults', {})
+    default_effect = 'fade'
+    if not isinstance(defaults, dict):
+        errors.append('animations.json field "defaults" must be an object')
+    else:
+        errors.extend(
+            _transition_scope_errors(
+                defaults,
+                'defaults',
+                inherited_effect='fade',
+            )
+        )
+        transition_defaults = defaults.get('transition', {})
+        if isinstance(transition_defaults, dict):
+            value = transition_defaults.get('effect', default_effect)
+            if isinstance(value, str) and _valid_transition_effect(value):
+                default_effect = value
+
+    slides = config.get('slides', {})
+    if not isinstance(slides, dict):
+        errors.append('animations.json field "slides" must be an object')
+        return errors
+    for slide_name, slide_cfg in slides.items():
+        if not isinstance(slide_cfg, dict):
+            errors.append(f'animations.json slide "{slide_name}" must be an object')
+            continue
+        errors.extend(
+            _transition_scope_errors(
+                slide_cfg,
+                f'slide "{slide_name}"',
+                inherited_effect=default_effect,
+            )
+        )
+        errors.extend(_morph_scope_errors(slide_name, slide_cfg))
+    return errors
+
+
+def _transition_scope_errors(
+    scope: dict[str, Any],
+    label: str,
+    *,
+    inherited_effect: str,
+) -> list[str]:
+    if 'transition' not in scope:
+        return []
+    transition = scope['transition']
+    if not isinstance(transition, dict):
+        return [f'animations.json {label} field "transition" must be an object']
+
+    errors = _unknown_field_errors(
+        transition,
+        frozenset({
+            'effect',
+            'effect_options',
+            'duration',
+            'auto_advance',
+            'sound',
+        }),
+        f'{label} transition',
+    )
+    effect = transition.get('effect', inherited_effect)
+    effect_options = transition.get('effect_options')
+    if effect_options is not None and 'effect' not in transition:
+        errors.append(
+            f'animations.json {label} transition effect_options requires '
+            'an explicit effect'
+        )
+    else:
+        try:
+            normalize_transition_effect_request(effect, effect_options)
+        except ValueError as exc:
+            errors.append(f'animations.json {label} transition: {exc}')
+    try:
+        duration_allows_zero = (
+            normalize_transition_effect(effect) is None
+        )
+    except ValueError:
+        duration_allows_zero = False
+    for field, allow_zero in (
+        ('duration', duration_allows_zero),
+        ('auto_advance', True),
+    ):
+        if field not in transition:
+            continue
+        try:
+            validate_seconds(
+                transition[field],
+                f'animations.json {label} transition {field}',
+                allow_zero=allow_zero,
+            )

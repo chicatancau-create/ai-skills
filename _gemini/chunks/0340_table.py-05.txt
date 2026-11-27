@@ -1,0 +1,91 @@
+                        f"Native PPTX table merge anchor R{row_idx}C{col_idx} overlaps "
+                        f"merge rooted at R{owner.row + 1}C{owner.col + 1}"
+                    )
+                if not _merge_covered_cell_is_blank(cell):
+                    raise RuntimeError(
+                        f"Native PPTX table merge-covered cell R{row_idx}C{col_idx} "
+                        "must be blank"
+                    )
+                continue
+
+            cell_data = _cell_payload(cell)
+            row_span = _table_span_value(
+                cell_data, "row_span", row_idx=row_idx, col_idx=col_idx,
+            )
+            col_span = _table_span_value(
+                cell_data, "col_span", row_idx=row_idx, col_idx=col_idx,
+            )
+            if row_span == 1 and col_span == 1:
+                continue
+            if (
+                row_idx - 1 + row_span > len(table_rows)
+                or col_idx - 1 + col_span > col_count
+            ):
+                raise RuntimeError(
+                    f"Native PPTX table merge rooted at R{row_idx}C{col_idx} exceeds "
+                    f"the resolved {len(table_rows)}x{col_count} grid"
+                )
+
+            region = _TableMergeRegion(
+                row=row_idx - 1,
+                col=col_idx - 1,
+                row_span=row_span,
+                col_span=col_span,
+            )
+            for covered_row in range(region.row, region.row + region.row_span):
+                for covered_col in range(region.col, region.col + region.col_span):
+                    covered_position = (covered_row, covered_col)
+                    prior = owners.get(covered_position)
+                    if prior is not None:
+                        raise RuntimeError(
+                            f"Native PPTX table merge rooted at R{row_idx}C{col_idx} "
+                            f"overlaps merge rooted at R{prior.row + 1}C{prior.col + 1}"
+                        )
+                    owners[covered_position] = region
+    return owners
+
+
+def _grid_is_strict(payload: dict[str, Any]) -> bool:
+    value = payload.get("strict_grid")
+    return _table_bool(value, "strict_grid", default=False)
+
+
+def _table_bool(value: Any, field_name: str, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    raise RuntimeError(
+        f"Native PPTX table {field_name} must be a JSON boolean"
+    )
+
+
+def _table_header_rows(payload: dict[str, Any], row_count: int) -> int:
+    default = 1 if payload.get("columns") else 0
+    value = _number(payload.get("header_rows", default), "table header_rows")
+    if not value.is_integer():
+        raise RuntimeError("Native PPTX table header_rows must be an integer")
+    header_rows = int(value)
+    if not 0 <= header_rows <= row_count:
+        raise RuntimeError(
+            "Native PPTX table header_rows must be between zero and the resolved row count"
+        )
+    return header_rows
+
+
+def _validate_table_lengths(payload: dict[str, Any], table_rows: list[list[Any]]) -> int:
+    if not table_rows:
+        raise RuntimeError("Native PPTX table requires at least one row")
+    col_count = max(len(row) for row in table_rows)
+    if col_count <= 0:
+        raise RuntimeError("Native PPTX table requires at least one column")
+    if len(table_rows) > _TABLE_MAX_ROWS or col_count > _TABLE_MAX_COLUMNS:
+        raise RuntimeError("Native PPTX table supports at most 1000 rows and columns")
+    if _grid_is_strict(payload) and any(len(row) != col_count for row in table_rows):
+        raise RuntimeError("Native PPTX table strict_grid requires every row to have the same length")
+
+    column_widths = payload.get("column_widths")
+    if column_widths is not None:
+        if not isinstance(column_widths, list) or len(column_widths) != col_count:
+            raise RuntimeError(
+                "Native PPTX table column_widths must match the resolved column count "

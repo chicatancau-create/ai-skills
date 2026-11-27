@@ -1,0 +1,102 @@
+) -> Iterator[tuple[ET.Element, str, str, str]]:
+    """Yield project geometry values as element, attribute, raw value, source."""
+    for elem in root.iter():
+        tag = elem.tag.rsplit('}', 1)[-1] if '}' in str(elem.tag) else str(elem.tag)
+        for attribute in sorted(
+            PROJECT_GEOMETRY_LENGTH_ATTRIBUTES.get(tag, frozenset())
+        ):
+            raw = elem.get(attribute)
+            if raw is not None:
+                yield elem, attribute, raw, 'attribute'
+
+        direct_stroke_width = elem.get('stroke-width')
+        if direct_stroke_width is not None:
+            yield elem, 'stroke-width', direct_stroke_width, 'attribute'
+
+        style_stroke_width = parse_inline_style(elem.get('style')).get('stroke-width')
+        if style_stroke_width is not None:
+            yield elem, 'stroke-width', style_stroke_width, 'inline style'
+
+
+def project_geometry_length_errors(root: ET.Element) -> list[str]:
+    """Return blocking project geometry errors for converter preflight."""
+    errors: list[str] = []
+    for elem, attribute, raw, source in iter_project_geometry_lengths(root):
+        tag = elem.tag.rsplit('}', 1)[-1] if '}' in str(elem.tag) else str(elem.tag)
+        elem_id = elem.get('id')
+        label = f'<{tag} id={elem_id!r}>' if elem_id else f'<{tag}>'
+        try:
+            parse_project_geometry_length(raw, attribute)
+        except ValueError as exc:
+            errors.append(
+                f'{label} {source} {attribute}={raw!r}: {exc}'
+            )
+    return errors
+
+
+def iter_project_image_aspect_ratios(
+    root: ET.Element,
+) -> Iterator[tuple[ET.Element, str]]:
+    """Yield explicit ``preserveAspectRatio`` values from image elements."""
+    for elem in root.iter():
+        if _svg_element_tag(elem) != 'image':
+            continue
+        raw = elem.get('preserveAspectRatio')
+        if raw is not None:
+            yield elem, raw
+
+
+def project_image_aspect_ratio_errors(root: ET.Element) -> list[str]:
+    """Return blocking project image aspect-ratio errors for preflight."""
+    errors: list[str] = []
+    for elem, raw in iter_project_image_aspect_ratios(root):
+        elem_id = elem.get('id')
+        label = f'<image id={elem_id!r}>' if elem_id else '<image>'
+        try:
+            parse_project_image_aspect_ratio(raw)
+        except ValueError as exc:
+            errors.append(f'{label} preserveAspectRatio={raw!r}: {exc}')
+    return errors
+
+
+def iter_project_opacities(
+    root: ET.Element,
+) -> Iterator[tuple[ET.Element, str, str, str]]:
+    """Yield project opacity values as element, property, raw value, source."""
+    for elem in root.iter():
+        for property_name in PROJECT_OPACITY_PROPERTIES:
+            raw = elem.get(property_name)
+            if raw is not None:
+                yield elem, property_name, raw, 'attribute'
+
+        for fragment in (elem.get('style') or '').split(';'):
+            fragment = fragment.strip()
+            if not fragment:
+                continue
+            if ':' in fragment:
+                name, raw = fragment.split(':', 1)
+                name = name.strip().lower()
+                raw = raw.strip()
+            else:
+                name = fragment.lower()
+                raw = ''
+            if name in PROJECT_OPACITY_PROPERTIES:
+                yield elem, name, raw, 'inline style'
+
+
+def project_opacity_errors(root: ET.Element) -> list[str]:
+    """Return blocking project opacity errors for converter preflight."""
+    errors: list[str] = []
+    for elem, property_name, raw, source in iter_project_opacities(root):
+        tag = _svg_element_tag(elem) or str(elem.tag)
+        elem_id = elem.get('id')
+        label = f'<{tag} id={elem_id!r}>' if elem_id else f'<{tag}>'
+        try:
+            parse_project_opacity(
+                raw,
+                allow_percentage=(
+                    property_name in PROJECT_PERCENTAGE_OPACITY_PROPERTIES
+                ),
+            )
+        except ValueError as exc:
+            errors.append(

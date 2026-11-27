@@ -1,0 +1,96 @@
+        rf"\bcatalog\s+read\s*:?\s*(\d+)\s+(?:{noun_pattern})\b",
+        rf"\(\s*(\d+)\s+(?:{noun_pattern})\s*\)",
+        rf"\b(?:all|every|the|total(?:\s+of)?|contains?|currently(?:\s+has)?|read(?:\s+all)?)\s+"
+        rf"(\d+)\s+(?:{noun_pattern})\b",
+    )
+    claims: list[int] = []
+    for pattern in patterns:
+        matches = re.finditer(pattern, paragraph.normalized, re.I)
+        claims.extend(int(match.group(1)) for match in matches)
+    return claims
+
+
+def audit_registries(
+    root: Path,
+    configs: list[dict[str, Any]],
+    paragraphs: list[Paragraph],
+    documents: list[Document],
+) -> tuple[list[dict[str, Any]], list[Finding]]:
+    """Compare live registry membership with documentation claims."""
+    findings: list[Finding] = []
+    reports: list[dict[str, Any]] = []
+
+    for config in configs:
+        name = config.get("name")
+        if not isinstance(name, str) or not name:
+            raise AuditError("Every registry requires a name")
+        ids, source, duplicate_ids, source_order = _registry_ids(root, config)
+        if not ids:
+            raise AuditError(f"Registry {name} has no entries")
+        for duplicate_id in duplicate_ids:
+            findings.append(
+                Finding(
+                    severity="error",
+                    code="REGISTRY_ID_DUPLICATE",
+                    message=f"{name} defines id {duplicate_id!r} more than once",
+                    path=source,
+                )
+            )
+        projection = _registry_projection_ids(root, name, config)
+        projection_source: str | None = None
+        projection_ids: set[str] | None = None
+        projection_duplicates: list[str] = []
+        if projection is not None:
+            projection_ids, projection_source, projection_duplicates = projection
+            for duplicate_id in projection_duplicates:
+                findings.append(
+                    Finding(
+                        severity="error",
+                        code="REGISTRY_PROJECTION_ID_DUPLICATE",
+                        message=(
+                            f"{name} projection repeats id {duplicate_id!r}"
+                        ),
+                        path=projection_source,
+                    )
+                )
+            canonical_ids = {str(item) for item in ids}
+            missing_ids = sorted(canonical_ids - projection_ids)
+            extra_ids = sorted(projection_ids - canonical_ids)
+            if missing_ids or extra_ids:
+                findings.append(
+                    Finding(
+                        severity="error",
+                        code="REGISTRY_PROJECTION_MISMATCH",
+                        message=(
+                            f"{name} projection differs from its registry; "
+                            f"missing={missing_ids}, extra={extra_ids}"
+                        ),
+                        path=projection_source,
+                    )
+                )
+        expected_order: list[str] | None = None
+        expected_ids: set[str] | None = None
+        if config.get("kind") == "structured_markdown":
+            expected_order = _structured_registry_expected_order(config)
+            expected_ids = set(expected_order)
+            string_ids = {str(item) for item in ids}
+            missing_ids = sorted(expected_ids - string_ids)
+            extra_ids = sorted(string_ids - expected_ids)
+            if missing_ids:
+                findings.append(
+                    Finding(
+                        severity="error",
+                        code="REGISTRY_IDS_MISSING",
+                        message=(
+                            f"{name} is missing canonical ids: "
+                            + ", ".join(missing_ids)
+                        ),
+                        path=source,
+                    )
+                )
+            if (
+                not missing_ids
+                and not extra_ids
+                and not duplicate_ids
+                and source_order != expected_order
+            ):

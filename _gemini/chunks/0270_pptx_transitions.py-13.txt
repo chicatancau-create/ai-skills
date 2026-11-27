@@ -1,0 +1,122 @@
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _bool_attribute(element: Any, name: str, default: bool) -> bool:
+    raw = element.get(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() not in {"0", "false", "off", "no"}
+
+
+def read_slide_transition(slide_root: Any) -> TransitionSummary:
+    """Read the primary transition without mistaking fallback for success."""
+    carriers = transition_carriers(slide_root)
+    if not carriers:
+        return TransitionSummary(carrier="none", logical_count=0)
+
+    carrier = carriers[0]
+    primary, fallback = _primary_and_fallback(carrier)
+    effect, effect_namespace, effect_attributes = _effect_identity(primary)
+    fallback_effect, fallback_namespace, _fallback_attributes = _effect_identity(
+        fallback
+    )
+    sound_relationship_id, sound_name = _sound_identity(primary)
+    fallback_sound_relationship_id, fallback_sound_name = _sound_identity(
+        fallback
+    )
+    canonical_effect, effect_options = _identify_native_transition(
+        effect,
+        effect_namespace,
+        effect_attributes,
+    )
+    carrier_name = (
+        "alternate-content"
+        if carrier.tag == _qn(MC_NS, "AlternateContent")
+        else "direct"
+    )
+    duration_ms = _int_attribute(
+        primary,
+        _qn(P14_NS, "dur"),
+        "dur",
+    )
+    advance_after_ms = _int_attribute(primary, "advTm")
+    return TransitionSummary(
+        carrier=carrier_name if len(carriers) == 1 else "multiple",
+        logical_count=len(carriers),
+        effect=effect,
+        effect_namespace=effect_namespace,
+        effect_attributes=effect_attributes,
+        canonical_effect=canonical_effect,
+        effect_options=effect_options,
+        fallback_effect=fallback_effect,
+        fallback_effect_namespace=fallback_namespace,
+        duration_ms=duration_ms,
+        speed=primary.get("spd") if primary is not None else None,
+        advance_on_click=(
+            _bool_attribute(primary, "advClick", True)
+            if primary is not None
+            else None
+        ),
+        advance_after_ms=advance_after_ms,
+        sound_relationship_id=sound_relationship_id,
+        sound_name=sound_name,
+        fallback_sound_relationship_id=fallback_sound_relationship_id,
+        fallback_sound_name=fallback_sound_name,
+    )
+
+
+def _captured_advance(carriers: list[Any]) -> tuple[bool | None, float | None]:
+    if not carriers:
+        return None, None
+    primary, _fallback = _primary_and_fallback(carriers[0])
+    if primary is None:
+        return None, None
+    click = (
+        _bool_attribute(primary, "advClick", True)
+        if primary.get("advClick") is not None
+        else None
+    )
+    advance_ms = _int_attribute(primary, "advTm")
+    after = advance_ms / 1000 if advance_ms is not None else None
+    return click, after
+
+
+def _resolve_advance(
+    update: AdvanceUpdate,
+    *,
+    preserved_click: bool | None,
+    preserved_after: float | None,
+) -> tuple[bool | None, float | None]:
+    valid_modes = {"preserve", "click", "after", "both", "narration"}
+    if update.mode not in valid_modes:
+        raise ValueError(
+            f"unknown slide advance mode {update.mode!r}; "
+            f"valid modes: {', '.join(sorted(valid_modes))}"
+        )
+    if update.mode == "preserve":
+        return preserved_click, preserved_after
+    if update.mode == "click":
+        return True, None
+    if update.after is None:
+        raise ValueError(f"slide advance mode {update.mode!r} requires 'after'")
+    after = validate_seconds(
+        update.after,
+        "slide advance after",
+        allow_zero=True,
+    )
+    if update.mode == "both":
+        return True, after
+    return False, after
+
+
+def _set_advance_attributes(
+    transition: Any,
+    *,
+    advance_on_click: bool | None,
+    advance_after: float | None,
+) -> None:
+    if advance_on_click is None:
+        transition.attrib.pop("advClick", None)

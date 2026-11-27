@@ -1,0 +1,123 @@
+        attrs.append(f'horzOverflow="{horizontal_overflow}"')
+    return (" " + " ".join(attrs)) if attrs else ""
+
+
+def _table_fill_opacity(cell_data: dict[str, Any]) -> float | None:
+    raw = cell_data.get("fill_opacity")
+    if raw is None:
+        return None
+    if cell_data.get("fill") is None:
+        raise RuntimeError(
+            "Native PPTX table fill_opacity requires an explicit cell fill"
+        )
+    opacity = _number(raw, "table cell fill_opacity")
+    if not 0 <= opacity <= 1:
+        raise RuntimeError(
+            "Native PPTX table fill_opacity must be between zero and one"
+        )
+    return opacity
+
+
+def _table_border_width(cell_data: dict[str, Any], style: dict[str, Any]) -> float:
+    width_raw = cell_data.get("border_width", style.get("border_width"))
+    color_raw = cell_data.get("border_color", style.get("border_color"))
+    if width_raw is None and color_raw is None:
+        return 0.0
+    return _number(1 if width_raw is None else width_raw, "table border_width")
+
+
+_TABLE_BORDER_SIDES = (
+    "left",
+    "right",
+    "top",
+    "bottom",
+    "diagonal_down",
+    "diagonal_up",
+)
+_TABLE_BORDER_TAGS = {
+    "left": "lnL",
+    "right": "lnR",
+    "top": "lnT",
+    "bottom": "lnB",
+    "diagonal_down": "lnTlToBr",
+    "diagonal_up": "lnBlToTr",
+}
+
+
+def _strict_table_border_color(value: Any, side: str) -> str:
+    raw = value if isinstance(value, str) else ""
+    if len(raw) != 7 or not raw.startswith("#"):
+        raise RuntimeError(
+            f"Native PPTX table {side} border color must be #RRGGBB"
+        )
+    try:
+        int(raw[1:], 16)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Native PPTX table {side} border color must be #RRGGBB"
+        ) from exc
+    return raw[1:].upper()
+
+
+def _table_border_override(value: Any, side: str) -> _TableBorderSpec:
+    if not isinstance(value, dict):
+        raise RuntimeError(
+            f"Native PPTX table {side} border must be an object"
+        )
+    border_style = value.get("style")
+    if border_style == "none":
+        if set(value) != {"style"}:
+            raise RuntimeError(
+                f"Native PPTX table {side} border style none accepts no other fields"
+            )
+        return _TableBorderSpec("none")
+    if border_style != "solid":
+        raise RuntimeError(
+            f"Native PPTX table {side} border style must be solid or none"
+        )
+    if set(value) != {"style", "color", "width"}:
+        raise RuntimeError(
+            f"Native PPTX table {side} solid border requires style/color/width only"
+        )
+    width = _number(value.get("width"), f"table {side} border width")
+    if width <= 0:
+        raise RuntimeError(
+            f"Native PPTX table {side} solid border width must be positive"
+        )
+    _powerpoint_line_width_emu(width, f"table {side} border width")
+    return _TableBorderSpec(
+        "solid",
+        color=_strict_table_border_color(value.get("color"), side),
+        width=width,
+    )
+
+
+def _table_border_specs(
+    cell_data: dict[str, Any],
+    style: dict[str, Any],
+) -> dict[str, _TableBorderSpec | None]:
+    raw_borders = cell_data.get("borders")
+    if raw_borders is None:
+        border_overrides: dict[str, Any] = {}
+    elif not isinstance(raw_borders, dict):
+        raise RuntimeError("Native PPTX table cell borders must be an object")
+    else:
+        unknown = sorted(set(raw_borders) - set(_TABLE_BORDER_SIDES))
+        if unknown:
+            raise RuntimeError(
+                "Native PPTX table cell borders use unsupported side(s): "
+                + ", ".join(unknown)
+            )
+        border_overrides = raw_borders
+
+    legacy_width = _table_border_width(cell_data, style)
+    legacy_spec = (
+        _TableBorderSpec(
+            "solid",
+            color=_clean_hex(
+                cell_data.get("border_color", style.get("border_color")),
+                "#D9DEE7",
+            ),
+            width=legacy_width,
+        )
+        if legacy_width > 0

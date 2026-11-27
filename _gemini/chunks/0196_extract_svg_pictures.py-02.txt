@@ -1,0 +1,97 @@
+    parser = ET.XMLParser(target=ET.TreeBuilder(insert_comments=True))
+    try:
+        tree = ET.parse(path, parser=parser)
+    except (ET.ParseError, OSError) as exc:
+        raise SvgPictureError(f"Cannot parse SVG {path}: {exc}") from exc
+    root = tree.getroot()
+    if _local(root.tag) != "svg":
+        raise SvgPictureError(f"Expected an SVG root in {path}")
+    return tree, root
+
+
+def _parent_map(root: ET.Element) -> dict[ET.Element, ET.Element]:
+    return {child: parent for parent in root.iter() for child in parent}
+
+
+def _index_ids(root: ET.Element) -> dict[str, ET.Element]:
+    by_id: dict[str, ET.Element] = {}
+    duplicates: list[str] = []
+    for elem in root.iter():
+        elem_id = (elem.get("id") or "").strip()
+        if not elem_id:
+            continue
+        if elem_id in by_id:
+            duplicates.append(elem_id)
+        by_id[elem_id] = elem
+    if duplicates:
+        raise SvgPictureError("Duplicate SVG id(s): " + ", ".join(sorted(set(duplicates))))
+    return by_id
+
+
+def _is_descendant(container: ET.Element, candidate: ET.Element) -> bool:
+    return any(elem is candidate for elem in container.iter())
+
+
+def _validate_source(root: ET.Element) -> None:
+    if root.get("transform"):
+        raise SvgPictureError("Root-level SVG transform is unsupported; normalize it before extraction")
+    if any(_local(elem.tag) == "script" for elem in root.iter()):
+        raise SvgPictureError("SVG scripts are not allowed in extracted picture assets")
+    for elem in root.iter():
+        if _local(elem.tag) == "style" and "@import" in (elem.text or "").lower():
+            raise SvgPictureError("CSS @import is not allowed in extracted picture assets")
+
+
+def _validate_resource_value(value: str, *, allow_fragment: bool) -> None:
+    raw = value.strip()
+    if not raw or raw.startswith("data:"):
+        return
+    if allow_fragment and raw.startswith("#"):
+        return
+    parsed = urlsplit(raw)
+    if parsed.scheme or parsed.netloc:
+        raise SvgPictureError(f"Remote or scheme-based SVG resource is not allowed: {raw}")
+    if parsed.fragment and parsed.path.lower().endswith(".svg"):
+        raise SvgPictureError(f"External SVG fragment references are not supported: {raw}")
+
+
+def _validate_target(selector: str, target: ET.Element) -> None:
+    if _local(target.tag) != "g":
+        raise SvgPictureError(f"Selector {selector!r} must identify one <g> element")
+    object_kind = (target.get("data-pptx-object") or "").strip()
+    if object_kind and object_kind != "group":
+        raise SvgPictureError(
+            f"Selector {selector!r} is one imported {object_kind!r} object, not a complex group"
+        )
+    if not any(_local(elem.tag) in VISUAL_TAGS for elem in target.iter()):
+        raise SvgPictureError(f"Selector {selector!r} has no visual SVG content")
+    for elem in target.iter():
+        if _local(elem.tag) in UNSAFE_PICTURE_TAGS:
+            raise SvgPictureError(
+                f"Selector {selector!r} contains unsupported <{_local(elem.tag)}> content"
+            )
+        markers = _semantic_markers(elem)
+        if markers:
+            raise SvgPictureError(
+                f"Selector {selector!r} contains {markers[0]}; preserve its existing semantic route"
+            )
+
+
+def _semantic_markers(elem: ET.Element) -> list[str]:
+    return sorted(
+        _local(name)
+        for name in elem.attrib
+        if _local(name) in SEMANTIC_MARKERS
+        or _local(name).startswith(SEMANTIC_PREFIXES)
+    )
+
+
+def _parse_bounds(raw: str, context: str) -> Bounds:
+    tokens = [token for token in _FRAME_SPLIT_RE.split(raw.strip()) if token]
+    if len(tokens) != 4:
+        raise SvgPictureError(f"{context} must contain x,y,width,height")
+    try:
+        values = [float(token) for token in tokens]
+    except ValueError as exc:
+        raise SvgPictureError(f"{context} contains a non-numeric coordinate") from exc
+    if not all(math.isfinite(value) for value in values):

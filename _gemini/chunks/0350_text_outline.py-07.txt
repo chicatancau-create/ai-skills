@@ -1,0 +1,132 @@
+                key=lambda face: (
+                    not _face_supports_style(
+                        face,
+                        target_weight,
+                        italic,
+                    ),
+                    face.italic != italic,
+                    abs(face.weight - target_weight),
+                    face.order,
+                ),
+            )
+            for face in matches:
+                key = (face.path, face.index)
+                if key not in seen:
+                    candidates.append(face)
+                    seen.add(key)
+    return candidates
+
+
+def _face_supports_style(
+    face: _FontFace,
+    requested_weight: int,
+    requested_italic: bool,
+) -> bool:
+    weight_supported = (
+        face.weight == requested_weight
+        or (
+            face.weight_range is not None
+            and face.weight_range[0]
+            <= requested_weight
+            <= face.weight_range[1]
+        )
+    )
+    italic_value = 1.0 if requested_italic else 0.0
+    italic_supported = (
+        face.italic == requested_italic
+        or (
+            face.italic_range is not None
+            and face.italic_range[0]
+            <= italic_value
+            <= face.italic_range[1]
+        )
+    )
+    return weight_supported and italic_supported
+
+
+def _axis_range(axis: Any | None) -> tuple[float, float] | None:
+    if axis is None:
+        return None
+    return (float(axis.min_value), float(axis.max_value))
+
+
+def _font_runs(
+    element: ET.Element,
+    clusters: Sequence[str],
+    candidates: Sequence[_FontFace],
+    families: Sequence[str],
+) -> list[_FontRun]:
+    selected: list[tuple[str, _FontFace]] = []
+    previous_face: _FontFace | None = None
+    for cluster in clusters:
+        required = _required_codepoints(cluster)
+        face = next(
+            (
+                candidate
+                for candidate in candidates
+                if required.issubset(candidate.coverage)
+            ),
+            None,
+        )
+        if face is None and not required and previous_face is not None:
+            face = previous_face
+        if face is None:
+            codepoints = " ".join(
+                f"U+{ord(character):04X}"
+                for character in cluster
+            )
+            raise ValueError(
+                f"{_element_label(element)} cannot resolve glyphs for "
+                f"{codepoints} from font stack {', '.join(families)!r}"
+            )
+        selected.append((cluster, face))
+        previous_face = face
+
+    runs: list[_FontRun] = []
+    run_clusters: list[str] = []
+    run_face: _FontFace | None = None
+    run_start = 0
+    for index, (cluster, face) in enumerate(selected):
+        if run_face is None or face is run_face:
+            run_clusters.append(cluster)
+            run_face = face
+            continue
+        runs.append(_FontRun(
+            face=run_face,
+            clusters=tuple(run_clusters),
+            global_cluster_start=run_start,
+        ))
+        run_clusters = [cluster]
+        run_face = face
+        run_start = index
+    if run_face is not None:
+        runs.append(_FontRun(
+            face=run_face,
+            clusters=tuple(run_clusters),
+            global_cluster_start=run_start,
+        ))
+    return runs
+
+
+def _shape_runs(
+    runs: Sequence[_FontRun],
+    font_size: float,
+    font_weight: int,
+    italic: bool,
+    letter_spacing: float,
+) -> list[_ShapedRun]:
+    hb = _load_harfbuzz()
+    font_cache: dict[tuple[Path, int], tuple[Any, int]] = {}
+    shaped: list[_ShapedRun] = []
+    for run in runs:
+        key = (run.face.path, run.face.index)
+        cached = font_cache.get(key)
+        if cached is None:
+            data = run.face.path.read_bytes()
+            face = hb.Face(data, run.face.index)
+            upem = int(face.upem)
+            if upem <= 0:
+                raise ValueError(
+                    f"Font {run.face.path} face {run.face.index} has invalid UPEM"
+                )
+            font = hb.Font(face)

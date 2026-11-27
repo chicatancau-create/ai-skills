@@ -1,0 +1,110 @@
+# Lite Recipe 完整步骤
+
+> 核心流程步骤 3 判定为 lite 后，按本文件中对应 recipe 的步骤**直接执行**。
+> 所有命令均须加 `--format json`（下文省略）。
+
+## #1 消息沟通
+
+所有消息沟通相关的命令详情、参数说明、意图路由和复合工作流，请查阅 [chat.md](../products/chat.md)。
+
+## #2 任务管理
+
+### create-todo
+
+1. 确定执行者：指定姓名 → `aisearch person --keyword "<姓名>" --dimension name` → `userId`；未指定 → `contact user get-self` → `userId`；多人 → 逐个搜索逗号拼接。
+2. 创建：`todo task create --title "<标题>" --executors <userId>[,<userId2>...]`（可选 `--due "<截止ISO>"`）→ `todoTaskId`
+
+### todo-query-ops
+
+- 查询：`todo task list [--status false|true]`（不传=全部）
+- 详情：`todo task get --task-id <id>`
+- 完成/重开：`todo task done --task-id <id> --status <true|false>`
+- 按主题筛选：list 后按标题关键词过滤
+
+## #3 会议日程
+
+### list-today-meetings
+
+**优先**：`python scripts/calendar_today_agenda.py [today|tomorrow|week]`
+备选：`dws calendar event list --start "<今日起始ISO>" --end "<今日结束ISO>"`（须加 `--format json`）
+
+### check-users-busy
+
+查询多人在某时段内的闲忙（**busy**，不是用 `event list` 扫日程）：
+
+1. 解析用户：对每个姓名执行 `aisearch person --keyword "<姓名>" --dimension name` → `userId`；多人将 `userId` 用英文逗号拼接（无空格或按 [calendar.md](../products/calendar.md) `busy search` 要求）。
+2. 确认时段：用户须给出或可收敛为明确的 `--start` / `--end`（ISO-8601）；若未给出，**先追问**起止时间，禁止用任意默认全天窗口代替用户意图。
+3. 执行：`dws calendar busy search --users <userId1,userId2,...> --start "<ISO>" --end "<ISO>" --format json`
+
+详见 [calendar.md](../products/calendar.md) 中「查询用户闲忙状态」。
+
+### start-conference
+
+> 触发：「发起会议」「开个会」「创建会议」且**没有给出具体时间** → 直接执行，无需追问。
+
+`conference start [--title "<主题>"]`
+
+- 用户给了主题 → 加 `--title`；没给 → 省略（系统用默认标题）
+- 有具体时间（如"明天3点开会"）→ 不走此 recipe，走 03-meeting.md 的 `schedule-meeting`
+
+### invite-participant
+
+1. 查人：`contact user search --query "<姓名>"` → `openDingTalkId`、`nick`
+2. 获取会议 ID：`conference get-id` → `conferenceId`
+3. 邀请：`conference member invite --conference-id <conferenceId> --nicks "<nick>" --open-dingtalk-ids "<openDingTalkId>"`
+
+### share-screen
+
+- 共享屏幕：`conference share start`
+- 停止共享：`conference share stop`
+
+## #4 文档知识
+
+### query-doc
+
+1. `doc search --query "<关键词>"` → `nodeId`
+2. `doc read --node <nodeId>`（按需；大文档只抽章节）
+
+### list-folder-docs
+
+`doc list --workspace <WS_ID>` 或 `--folder <FOLDER_ID>`
+
+## #5 工作汇报
+
+### query-report-list
+
+1. 收到的日志：先把用户时间词转成起止时间，再执行 `report inbox list --start "<YYYY-MM-DDT00:00:00+08:00>" --end "<YYYY-MM-DDT23:59:59+08:00>" --cursor 0 --size 20 --format json`。
+2. 我发过的日志：`report outbox list --cursor 0 --size 20 --format json`；如用户指定时间，补 `--start "<YYYY-MM-DDT00:00:00+08:00>" --end "<YYYY-MM-DDT23:59:59+08:00>"`。
+3. 面向用户时必须基于 `result[]` 拼 Markdown 表，表头固定为 `日期 | 标题 | 发送人 | 状态 | 钉钉链接`；每条 `result[]` 都会带这五个中文字段，不要把 `reportId` / `日志ID` 作为主列。
+4. 用户要看某条正文时，再用内部保留的 `reportId` 执行 `report entry get --report-id <reportId> --format json`。
+
+时间 flag 硬约束：只允许 `--start` / `--end`；禁止 `--start-date` / `--end-date` / `--date`。不要只传 `2026-05-04`，必须展开成 `2026-05-04T00:00:00+08:00` 这种完整 ISO。
+
+硬约束：`report inbox list` 是收到的日志（别人发给我），`report outbox list` 是我创建/发出的日志（我发给别人）。不要混淆方向；不要回答"API 不支持收到的日志"。
+
+> 旧命令兼容：`report list` / `report inbox` / `report sent` / `report created` / `report detail` / `report stats` 仍可执行，但已 deprecated，stderr 会打废弃提醒，新计划一律使用 `inbox list` / `outbox list` / `entry get` / `entry stats`。
+
+禁止：不要先查 help，不要为了格式化列表创建脚本。`report inbox` 可作为兼容入口使用，但新计划优先写规范命令 `report inbox list --start "<YYYY-MM-DDT00:00:00+08:00>" --end "<YYYY-MM-DDT23:59:59+08:00>" --cursor 0 --size 20 --format json`。
+
+### check-report-read-status
+
+`report entry stats --report-id <reportId>` → 已读/未读
+
+## #7 听记与会后
+
+> 产品命令完整参考见 [minutes.md](../products/minutes.md)。full recipe 见 [07-minutes.md](./07-minutes.md)。
+
+### minutes-query（查询与获取）
+
+**列表查询**（`list` 后**必须**跟 scope：`mine`/`shared`/`all`，默认补 `all`）：
+
+```bash
+# 我可访问的所有听记（默认）
+dws minutes list all --format json
+# 按关键词服务端搜索（严禁全量拉取后本地 grep）
+dws minutes list all --query "周会" --format json
+# 按时间范围筛选（ISO-8601 格式）
+dws minutes list mine --start "2026-05-01T00:00:00+08:00" --end "2026-05-25T23:59:59+08:00" --format json
+# 关键词 + 时间组合
+dws minutes list all --query "需求评审" --start "2026-05-25T00:00:00+08:00" --end "2026-05-25T23:59:59+08:00" --format json
+# 限制条数

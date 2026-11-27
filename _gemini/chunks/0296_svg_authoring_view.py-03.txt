@@ -1,0 +1,123 @@
+            "representation": self.representation,
+        }
+        if self.representation == "source-proxy":
+            if self.proxy_asset is None or self.proxy_asset_sha256 is None:
+                raise ValueError(
+                    f"Source proxy {self.source_ref} has no immutable asset record"
+                )
+            payload["proxy_asset"] = _portable_path(self.proxy_asset, output_dir)
+            payload["proxy_asset_sha256"] = self.proxy_asset_sha256
+        return payload
+
+
+def _semantic_text(value: str | None) -> str | None:
+    if value is None or not value.strip():
+        return None
+    return value
+
+
+def _stable_tag_name(tag: object) -> str:
+    if isinstance(tag, str):
+        return tag
+    if tag is ET.Comment:
+        return "#comment"
+    if tag is ET.ProcessingInstruction:
+        return "#processing-instruction"
+    raise ValueError(f"Unsupported XML node type in source object: {tag!r}")
+
+
+def semantic_subtree_sha256(
+    element: ET.Element,
+    *,
+    ignored_attributes: frozenset[str] = frozenset(),
+) -> str:
+    """Hash parsed SVG semantics without attribute order or indentation noise."""
+    digest = hashlib.sha256()
+
+    def visit(item: ET.Element) -> None:
+        digest.update(_stable_tag_name(item.tag).encode("utf-8"))
+        for name, value in sorted(item.attrib.items()):
+            if name in ignored_attributes:
+                continue
+            digest.update(b"\0a")
+            digest.update(name.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(value.encode("utf-8"))
+        text = _semantic_text(item.text)
+        if text is not None:
+            digest.update(b"\0t")
+            digest.update(text.encode("utf-8"))
+        for child in item:
+            digest.update(b"\0c")
+            visit(child)
+            tail = _semantic_text(child.tail)
+            if tail is not None:
+                digest.update(b"\0l")
+                digest.update(tail.encode("utf-8"))
+        digest.update(b"\0e")
+
+    visit(element)
+    return digest.hexdigest()
+
+
+def _iter_element_paths(
+    root: ET.Element,
+) -> list[tuple[tuple[int, ...], ET.Element]]:
+    indexed: list[tuple[tuple[int, ...], ET.Element]] = []
+
+    def walk(element: ET.Element, path: tuple[int, ...]) -> None:
+        indexed.append((path, element))
+        for index, child in enumerate(element):
+            walk(child, (*path, index))
+
+    walk(root, ())
+    return indexed
+
+
+def _source_reference(element: ET.Element) -> str | None:
+    if not element.get("id") or not element.get("data-pptx-object"):
+        return None
+    scope = element.get("data-pptx-shape-scope")
+    shape_id = element.get("data-pptx-shape-id")
+    if not scope or not shape_id:
+        return None
+    return f"{scope}:{shape_id}"
+
+
+def _stamp_source_references(root: ET.Element) -> list[SourceReference]:
+    existing = [
+        element
+        for _, element in _iter_element_paths(root)
+        if element.get(SOURCE_REF_ATTRIBUTE) is not None
+    ]
+    if existing:
+        raise ValueError(
+            f"Input already contains reserved {SOURCE_REF_ATTRIBUTE}; "
+            "project from the lossless import SVG instead"
+        )
+
+    references: list[SourceReference] = []
+    seen: set[str] = set()
+    for path, element in _iter_element_paths(root):
+        source_ref = _source_reference(element)
+        if source_ref is None:
+            continue
+        if source_ref in seen:
+            raise ValueError(f"Duplicate source object identity: {source_ref}")
+        seen.add(source_ref)
+        references.append(
+            SourceReference(
+                source_ref=source_ref,
+                source_path=path,
+            )
+        )
+        element.set(SOURCE_REF_ATTRIBUTE, source_ref)
+    return references
+
+
+def _index_initial_authoring_references(
+    root: ET.Element,
+    references: list[SourceReference],
+) -> None:
+    by_ref = {reference.source_ref: reference for reference in references}
+    seen: set[str] = set()

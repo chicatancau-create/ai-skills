@@ -1,0 +1,103 @@
+    selection_method: str = "metadata-ranked",
+) -> dict:
+    """Build the manifest entry.
+
+    ``width`` / ``height`` reflect the file actually saved to disk
+    (measured by Pillow after download). The upstream-claimed dimensions
+    are only kept under ``metadata_dimensions`` when they disagree with
+    reality, which is the only case where this distinction matters.
+    """
+    if actual_dimensions is not None:
+        width, height = actual_dimensions
+    else:
+        width, height = candidate.width, candidate.height
+
+    item = {
+        "filename": args.filename,
+        "slide": args.slide,
+        "purpose": args.purpose,
+        "search_query": args.query,
+        "matched_query": candidate.discovery_query or args.query,
+        "orientation": args.orientation,
+        "provider": provider_name,
+        "stage": stage,
+        "title": candidate.title,
+        "author": candidate.author,
+        "source_page_url": candidate.source_page_url,
+        "download_url": candidate.download_url,
+        "license_name": candidate.license_name,
+        "license_url": candidate.license_url,
+        "license_tier": candidate.license_tier,
+        "attribution_required": candidate.license_tier == "attribution-required",
+        "width": width,
+        "height": height,
+        "attribution_text": build_attribution_text(args.filename, candidate),
+        "selection_method": selection_method,
+        "status": "sourced",
+    }
+    required_terms = _parse_required_terms(
+        getattr(args, "required_terms", None) or getattr(args, "require_terms", None)
+    )
+    if required_terms:
+        item["required_terms"] = list(required_terms)
+    query_variants = _parse_query_variants(
+        getattr(args, "query_variants", None)
+        or getattr(args, "query_variant", None)
+    )
+    if query_variants:
+        item["query_variants"] = list(query_variants)
+
+    # Only carry upstream-claimed dimensions when they differ — this flags
+    # cases where the provider returned a preview rather than the original.
+    if (
+        actual_dimensions is not None
+        and candidate.width
+        and candidate.height
+        and (candidate.width, candidate.height) != actual_dimensions
+    ):
+        item["metadata_dimensions"] = {
+            "width": candidate.width,
+            "height": candidate.height,
+            "note": "upstream-reported size; actual downloaded file is smaller (likely a preview)",
+        }
+
+    return item
+
+
+def _read_existing_manifest(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"existing image sources manifest is unreadable: {path} ({exc}); "
+            "repair or restore it before continuing"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(
+            f"existing image sources manifest must be a JSON object: {path}"
+        )
+    items = payload.get("items")
+    if not isinstance(items, list):
+        raise RuntimeError(
+            f"existing image sources manifest must contain an 'items' array: {path}"
+        )
+    if any(not isinstance(item, dict) for item in items):
+        raise RuntimeError(
+            f"existing image sources manifest contains a non-object item: {path}"
+        )
+    seen_filenames: dict[str, str] = {}
+    for index, item in enumerate(items):
+        filename = item.get("filename")
+        if not isinstance(filename, str):
+            raise RuntimeError(
+                f"existing image sources manifest items[{index}].filename "
+                f"must be a non-empty bare filename: {path}"
+            )
+        try:
+            _validate_bare_filename(filename)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"existing image sources manifest items[{index}]: {exc}: {path}"
+            ) from exc

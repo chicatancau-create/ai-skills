@@ -1,0 +1,101 @@
+    """Clone a layout into a Cover layout that hides master shapes.
+
+    Returns the new layout target relative to slide parts.
+    """
+    base_layout_path = extract_dir / base_layout_part
+    layout_xml = base_layout_path.read_text(encoding="utf-8")
+
+    root_match = re.search(r"<p:sldLayout\b[^>]*>", layout_xml)
+    if not root_match:
+        raise RuntimeError(f"Slide layout has no p:sldLayout root: {base_layout_part}")
+    root_tag = root_match.group(0)
+    if "showMasterSp=" in root_tag:
+        new_root_tag = re.sub(r'showMasterSp="[^"]*"', 'showMasterSp="0"', root_tag)
+    else:
+        new_root_tag = root_tag[:-1] + ' showMasterSp="0">'
+    layout_xml = layout_xml.replace(root_tag, new_root_tag, 1)
+    layout_xml = re.sub(
+        r"(<p:cSld\b[^>]*?)\s+name=\"[^\"]*\"",
+        rf'\g<1> name="{COVER_LAYOUT_NAME}"',
+        layout_xml,
+        count=1,
+    )
+
+    layout_num = _next_layout_part_number(extract_dir)
+    new_layout_part = f"ppt/slideLayouts/slideLayout{layout_num}.xml"
+    new_layout_path = extract_dir / new_layout_part
+    new_layout_path.write_text(layout_xml, encoding="utf-8")
+
+    base_rels_path = _relationships_path_for_part(extract_dir, base_layout_part)
+    new_rels_path = _relationships_path_for_part(extract_dir, new_layout_part)
+    new_rels_path.parent.mkdir(exist_ok=True)
+    new_rels_path.write_text(
+        base_rels_path.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+
+    master_path = extract_dir / master_part
+    master_rels_path = _relationships_path_for_part(extract_dir, master_part)
+    layout_target = posixpath.relpath(
+        new_layout_part, posixpath.dirname(master_part)
+    )
+    rel_id = _append_relationship(master_rels_path, SLIDE_LAYOUT_REL_TYPE, layout_target)
+
+    master_xml = master_path.read_text(encoding="utf-8")
+    layout_id = _next_slide_layout_id(extract_dir)
+    entry = f'<p:sldLayoutId id="{layout_id}" r:id="{rel_id}"/>'
+    if "</p:sldLayoutIdLst>" not in master_xml:
+        raise RuntimeError(f"Slide master has no sldLayoutIdLst: {master_part}")
+    master_path.write_text(
+        master_xml.replace("</p:sldLayoutIdLst>", f"{entry}</p:sldLayoutIdLst>", 1),
+        encoding="utf-8",
+    )
+
+    content_types_path = extract_dir / "[Content_Types].xml"
+    content_types_path.write_text(
+        _add_content_type_override(
+            content_types_path.read_text(encoding="utf-8"),
+            new_layout_part,
+            "application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml",
+        ),
+        encoding="utf-8",
+    )
+    return posixpath.relpath(new_layout_part, "ppt/slides")
+
+
+def _create_custom_layout(
+    extract_dir: Path,
+    master_part: str,
+    base_layout_part: str,
+    layout_name: str,
+    *,
+    show_master_shapes: bool = True,
+) -> tuple[str, str]:
+    """Clone a clean custom layout and register it under its slide master.
+
+    Returns ``(slide_relationship_target, package_part)``.
+    """
+    base_layout_path = extract_dir / base_layout_part
+    tree = ET.parse(base_layout_path)
+    root = tree.getroot()
+    _reseed_p14_creation_id(root)
+    root.set("type", "cust")
+    root.set("preserve", "1")
+    root.set("showMasterSp", "1" if show_master_shapes else "0")
+
+    c_sld = root.find(f"{{{PML_NS}}}cSld")
+    if c_sld is None:
+        raise RuntimeError(f"Slide layout has no p:cSld: {base_layout_part}")
+    c_sld.set("name", layout_name)
+    sp_tree = c_sld.find(f"{{{PML_NS}}}spTree")
+    if sp_tree is None:
+        raise RuntimeError(f"Slide layout has no p:spTree: {base_layout_part}")
+    for child in list(sp_tree):
+        if child.tag in _TOP_LEVEL_SHAPE_TAGS:
+            sp_tree.remove(child)
+
+    layout_num = _next_layout_part_number(extract_dir)
+    new_layout_part = f"ppt/slideLayouts/slideLayout{layout_num}.xml"
+    new_layout_path = extract_dir / new_layout_part
+    _write_xml_tree(new_layout_path, tree)
+
+    base_rels_path = _relationships_path_for_part(extract_dir, base_layout_part)

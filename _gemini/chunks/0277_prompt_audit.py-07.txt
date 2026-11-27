@@ -1,0 +1,120 @@
+                Finding(
+                    severity="error",
+                    code="COVERAGE_EXEMPT_DUPLICATE",
+                    message=f"coverage.exempt glob {glob} overlaps: {details}",
+                    path=manifest_label,
+                )
+            )
+        overlap = sorted(matches & covered_paths)
+        if overlap:
+            findings.append(
+                Finding(
+                    severity="error",
+                    code="COVERAGE_EXEMPT_OVERLAP",
+                    message=(
+                        f"coverage.exempt glob {glob} matches load-set files: "
+                        + ", ".join(overlap)
+                    ),
+                    path=manifest_label,
+                )
+            )
+        for path in matches:
+            exempt_owner.setdefault(path, glob)
+        exempt_paths.update(matches)
+
+    uncovered = sorted(set(all_paths) - covered_paths - exempt_paths)
+    for path in uncovered:
+        findings.append(
+            Finding(
+                severity="error",
+                code="LOAD_COVERAGE_GAP",
+                message=(
+                    "Document is in no load set and has no coverage.exempt entry; "
+                    "add it to a load set or exempt it with a reason"
+                ),
+                path=path,
+            )
+        )
+    return (
+        {
+            "documents": len(all_paths),
+            "covered": len(set(all_paths) & covered_paths),
+            "exempt": len(exempt_paths - covered_paths),
+            "uncovered": uncovered,
+        },
+        findings,
+    )
+
+
+def audit_file_budgets(
+    budgets: dict[str, Any],
+    token_counts: dict[str, int],
+) -> list[Finding]:
+    """Check explicit per-file growth ceilings."""
+    findings: list[Finding] = []
+    for path, budget in sorted(budgets.items()):
+        if path not in token_counts:
+            raise AuditError(f"File budget references a file outside the corpus: {path}")
+        if not isinstance(budget, int) or budget < 1:
+            raise AuditError(f"File budget for {path} must be a positive integer")
+        actual = token_counts[path]
+        if actual > budget:
+            findings.append(
+                Finding(
+                    severity="error",
+                    code="BUDGET_FILE",
+                    message=f"File has {actual} tokens; budget is {budget}",
+                    path=path,
+                )
+            )
+    return findings
+
+
+def _duplicate_fingerprint(*texts: str) -> str:
+    joined = "\n\x00\n".join(sorted(texts))
+    return hashlib.sha1(joined.encode("utf-8")).hexdigest()[:12]
+
+
+def _accepted_identity(
+    kind: str,
+    fingerprint: str,
+    paths: Iterable[str],
+) -> tuple[str, str, tuple[str, ...]]:
+    return kind, fingerprint, tuple(sorted(paths))
+
+
+def _partition_accepted(
+    entries: list[dict[str, Any]],
+    kind: str,
+    accepted: list[dict[str, Any]],
+    used: set[tuple[str, str, tuple[str, ...]]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split duplicate findings into open ones and manifest-accepted ones."""
+    lookup = {
+        _accepted_identity(item["kind"], item["fingerprint"], item["paths"]): item
+        for item in accepted
+        if item["kind"] == kind
+    }
+    open_entries: list[dict[str, Any]] = []
+    accepted_entries: list[dict[str, Any]] = []
+    for entry in entries:
+        identity = _accepted_identity(kind, entry["fingerprint"], entry["paths"])
+        match = lookup.get(identity)
+        if match is not None:
+            used.add(identity)
+            accepted_entries.append({**entry, "reason": match["reason"]})
+        else:
+            open_entries.append(entry)
+    return open_entries, accepted_entries
+
+
+def _normalize_paragraph(text: str) -> str:
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"[`*_>#|]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip().lower()
+    return text
+
+
+def extract_paragraphs(
+    documents: list[Document],
+    config: dict[str, Any],

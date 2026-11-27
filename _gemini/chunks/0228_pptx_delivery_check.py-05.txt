@@ -1,0 +1,109 @@
+        canonical = _PPT_SAFE_FONT_ALIASES.get(normalized, normalized)
+        canonical = unicodedata.normalize(
+            "NFKC",
+            canonical,
+        ).strip().casefold()
+        if canonical.startswith("+") or canonical in _PPT_DELIVERY_SAFE_FONTS:
+            continue
+        unsafe.append(face)
+    return unsafe
+
+
+def _motion_and_hidden_summary(
+    path: Path,
+    errors: list[dict[str, object]],
+) -> tuple[int, list[dict[str, object]], dict[str, object]]:
+    hidden: list[dict[str, object]] = []
+    transition_carriers: list[int] = []
+    visual_transitions: list[int] = []
+    timed_advances: list[int] = []
+    transition_effects: Counter[str] = Counter()
+    timing_slides: list[int] = []
+    object_animation_slides: list[int] = []
+    audio_timing_slides: list[int] = []
+    slide_count = 0
+
+    try:
+        validate_pptx_animation_package(
+            path,
+            require_supported_effects=False,
+        )
+    except ValueError as exc:
+        errors.append(
+            _issue(
+                "invalid_animation_structure",
+                str(exc),
+            )
+        )
+
+    try:
+        with OoxmlPackage(path) as package:
+            if package.zip is None:
+                raise RuntimeError("PPTX package closed during slide audit")
+            if package.presentation is None:
+                raise RuntimeError("PPTX package has no presentation part")
+            slide_roster = package.presentation.xml.find(
+                f"{{{PRESENTATION_NS}}}sldIdLst"
+            )
+            roster_count = (
+                len(
+                    slide_roster.findall(
+                        f"{{{PRESENTATION_NS}}}sldId"
+                    )
+                )
+                if slide_roster is not None
+                else 0
+            )
+            loaded_count = package.slide_count
+            inspected_count = 0
+            slide_count = roster_count
+            for slide in package.iter_slides():
+                inspected_count += 1
+                try:
+                    visible = parse_ooxml_boolean(
+                        slide.part.xml.attrib.get("show"),
+                        default=True,
+                        context=f"{slide.part.path} show",
+                    )
+                except RuntimeError as exc:
+                    errors.append(
+                        _issue(
+                            "invalid_slide_visibility",
+                            str(exc),
+                            slide_index=slide.index,
+                            part=slide.part.path,
+                        )
+                    )
+                    visible = True
+                if not visible:
+                    hidden.append(
+                        {
+                            "index": slide.index,
+                            "part": slide.part.path,
+                        }
+                    )
+
+                slide_xml = package.zip.read(slide.part.path)
+                transition_problems = validate_slide_transition_xml(slide_xml)
+                for problem in transition_problems:
+                    errors.append(
+                        _issue(
+                            "invalid_transition_structure",
+                            f"{slide.part.path}: {problem}",
+                            slide_index=slide.index,
+                            part=slide.part.path,
+                        )
+                    )
+                try:
+                    transition = read_slide_transition_xml(slide_xml)
+                except (ET.ParseError, ValueError) as exc:
+                    if not transition_problems:
+                        errors.append(
+                            _issue(
+                                "transition_readback_failed",
+                                f"{slide.part.path}: {exc}",
+                                slide_index=slide.index,
+                                part=slide.part.path,
+                            )
+                        )
+                else:

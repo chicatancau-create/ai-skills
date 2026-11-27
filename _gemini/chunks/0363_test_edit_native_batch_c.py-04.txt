@@ -1,0 +1,36 @@
+            output = workspace / "exports/no_notes.pptx"
+            code, log = _invoke(export_cli.main, workspace, "--roundtrip", "--no-notes", "-o", output)
+            self.assertEqual(code, 0, log)
+            with zipfile.ZipFile(output) as archive:
+                self.assertFalse([name for name in archive.namelist() if name.startswith((
+                    "ppt/notesSlides/", "ppt/notesMasters/",
+                ))])
+                for name in archive.namelist():
+                    if name.endswith(".rels") or name == "[Content_Types].xml":
+                        self.assertNotIn(b"notesSlide", archive.read(name), name)
+                        self.assertNotIn(b"notesMaster", archive.read(name), name)
+            report = audit_pptx_delivery(output)
+            self.assertFalse(report["errors"], report)
+            orphan = workspace / "exports/orphan.pptx"
+            with zipfile.ZipFile(output) as source, zipfile.ZipFile(orphan, "w") as target:
+                for name in source.namelist():
+                    payload = source.read(name)
+                    if name == "[Content_Types].xml":
+                        tree = ET.fromstring(payload)
+                        ET.SubElement(tree, f"{tree.tag.removesuffix('Types')}Override", {
+                            "PartName": "/ppt/notesSlides/notesSlide1_tf1.xml",
+                            "ContentType": "application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml",
+                        })
+                        payload = ET.tostring(tree)
+                    target.writestr(name, payload)
+                target.writestr(
+                    "ppt/notesSlides/notesSlide1_tf1.xml",
+                    '<p:notes xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"/>',
+                )
+            report = audit_pptx_delivery(orphan)
+            self.assertFalse(report["errors"], report)
+            advisory = next((
+                item for item in report["advisories"] if item["code"] == "orphan_notes_parts"
+            ), None)
+            self.assertIsNotNone(advisory, report)
+            self.assertEqual(advisory["parts"], ["ppt/notesSlides/notesSlide1_tf1.xml"])

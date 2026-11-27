@@ -1,0 +1,81 @@
+        elements, style, base_size = extract_paths_from_icon(
+            icon_path,
+            target_dir=svg_path.parent,
+        )
+        color = resolve_icon_color(attrs, style)
+        if not elements:
+            raise ValueError(
+                f'{svg_path.name}: icon has no embeddable shapes: {icon_name}'
+            )
+        
+        replacement = generate_icon_group(attrs, elements, style, base_size)
+        
+        if verbose or dry_run:
+            print(f"  [*] {icon_name}: x={attrs.get('x', 0)}, y={attrs.get('y', 0)}, "
+                  f"size={attrs.get('width', base_size)}, fill={color}, style={style}")
+        
+        new_content = new_content[:match.start()] + replacement + new_content[match.end():]
+        replaced_count += 1
+    
+    if not dry_run and replaced_count > 0:
+        svg_path.write_text(new_content, encoding='utf-8')
+    
+    status = "[PREVIEW]" if dry_run else "[OK]"
+    print(f"{status} {svg_path.name} ({replaced_count} icons)")
+    
+    return replaced_count
+
+
+def main() -> int:
+    """Run the CLI entry point."""
+    parser = argparse.ArgumentParser(
+        description='Replace icon placeholders in SVG files with actual icon code',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  python3 scripts/svg_finalize/embed_icons.py svg_output/01_cover.svg
+  python3 scripts/svg_finalize/embed_icons.py svg_output/*.svg
+  python3 scripts/svg_finalize/embed_icons.py --dry-run svg_output/*.svg
+        '''
+    )
+    
+    parser.add_argument('files', nargs='+', help='SVG files to process')
+    parser.add_argument('--dry-run', action='store_true',
+                        help='Only show what would be replaced, without modifying files')
+    parser.add_argument('--verbose', '-v', action='store_true',
+                        help='Show detailed information')
+    
+    args = parser.parse_args()
+    
+    if args.dry_run:
+        print("[PREVIEW] Preview mode (no files will be modified)")
+    print()
+    
+    total_replaced = 0
+    total_files = 0
+    
+    try:
+        for file_pattern in args.files:
+            svg_path = Path(file_pattern)
+            icons_dir = icon_dir_for_svg(svg_path)
+            count = process_svg_file(
+                svg_path,
+                icons_dir,
+                args.dry_run,
+                args.verbose,
+            )
+            total_replaced += count
+            if count > 0:
+                total_files += 1
+    except (OSError, ValueError) as exc:
+        print(f'[ERROR] {exc}', file=sys.stderr)
+        return 1
+    
+    print()
+    print(f"[Summary] Total: {total_files} file(s), {total_replaced} icon(s)" +
+          (" (preview)" if args.dry_run else " replaced"))
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

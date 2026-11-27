@@ -1,0 +1,118 @@
+        child for child in authored_element if _local_name(child.tag) == "text"
+    ]
+    if len(authored_texts) != len(paragraphs):
+        return
+
+    pending: list[ET.Element] = []
+    for text, segments in zip(authored_texts, paragraphs):
+        groups = _line_groups(text)
+        if not groups:
+            if len(segments) > 1:
+                return
+            continue
+        line_texts = [
+            _normalized_text(
+                "".join(text for node in group for text in node.itertext())
+            )
+            for group in groups
+        ]
+        cursor = 0
+        for segment_index, segment in enumerate(segments):
+            target = _normalized_text(segment)
+            combined = ""
+            start = cursor
+            while cursor < len(line_texts):
+                combined = _normalized_text(" ".join((combined, line_texts[cursor])))
+                cursor += 1
+                if combined == target:
+                    break
+                if target and not target.startswith(combined):
+                    return
+            if combined != target:
+                return
+            if segment_index > 0 and start < len(groups):
+                pending.append(groups[start][0])
+        if cursor != len(groups):
+            return
+    for tspan in pending:
+        tspan.set("data-paragraph-soft-break", "0")
+
+
+def _annotate_unchanged_explicit_text_breaks(
+    root: ET.Element,
+    document: AuthoringDocument,
+    excluded_refs: set[str],
+) -> None:
+    """Recover native a:br semantics without restoring a stale txBody."""
+    if not excluded_refs:
+        return
+    source_root = _parse_svg(document.source_path)
+    for element in root.iter():
+        source_ref = element.get(SOURCE_REF_ATTRIBUTE)
+        record = document.source_refs.get(source_ref or "")
+        if source_ref not in excluded_refs or record is None:
+            continue
+        actual_hash = semantic_subtree_sha256(
+            element,
+            ignored_attributes=frozenset({SOURCE_REF_ATTRIBUTE}),
+        )
+        if actual_hash != record.initial_authoring_subtree_sha256:
+            continue
+        _mark_explicit_breaks(
+            element,
+            _source_element(source_root, record.source_path),
+        )
+
+
+def _prepared_document(
+    document: AuthoringDocument,
+    *,
+    excluded_refs: set[str],
+) -> tuple[ET.Element, RestorationStats]:
+    root = _parse_svg(document.authoring_path)
+    fresh_native_fallbacks = _fresh_native_fallbacks(root)
+    stats = _validate_authoring_tree(root, document, excluded_refs=excluded_refs)
+    _annotate_unchanged_explicit_text_breaks(
+        root,
+        document,
+        set(document.source_refs),
+    )
+    _absolutize_local_hrefs(root, document.authoring_path.parent)
+    for marker in fresh_native_fallbacks & set(root.iter()):
+        marker.set(_FRESH_NATIVE_FALLBACK_ATTR, "true")
+    return root, stats
+
+
+def _fresh_native_fallbacks(root: ET.Element) -> set[ET.Element]:
+    """Snapshot valid input guards before mirror-only normalization."""
+    fresh: set[ET.Element] = set()
+    for element in root.iter():
+        expected = element.get(NATIVE_FALLBACK_SHA256_ATTR)
+        if (
+            expected is None
+            or expected != expected.strip()
+            or _SHA256_RE.fullmatch(expected) is None
+        ):
+            continue
+        if svg_native_fallback_fingerprint(
+            element,
+            document_root=root,
+        ) == expected.lower():
+            fresh.add(element)
+    return fresh
+
+
+def _safe_prefix(value: str) -> str:
+    normalized = _SAFE_KEY_RE.sub("-", value).strip("-.")
+    return normalized or "node"
+
+
+def _namespace_ids(root: ET.Element, prefix: str) -> None:
+    mapping: dict[str, str] = {}
+    for element in root.iter():
+        element_id = element.get("id")
+        if element_id:
+            mapping[element_id] = f"{prefix}{_safe_prefix(element_id)}"
+    for element in root.iter():
+        element_id = element.get("id")
+        if element_id:

@@ -1,0 +1,83 @@
+                animation_gain_db=animation_gain_db,
+                video_duration_ms=raw_duration_ms,
+                temp_dir=Path(raw_dir),
+                ffprobe_path=ffprobe_path,
+            )
+            _render_stem(
+                cues=cues,
+                duration_ms=raw_duration_ms,
+                output_path=temporary_stem,
+                ffmpeg_path=ffmpeg_path,
+            )
+            stem_peak_db = _maximum_volume_db(temporary_stem, ffmpeg_path)
+            if stem_peak_db is None or stem_peak_db < -90:
+                raise RuntimeError("Rendered SFX stem is silent")
+            _mix_video(
+                video_path=video_path,
+                stem_path=temporary_stem,
+                duration_ms=raw_duration_ms,
+                limiter_dbfs=limiter_dbfs,
+                output_path=temporary_video,
+                ffmpeg_path=ffmpeg_path,
+            )
+
+        stem_probe = _probe_media(temporary_stem, ffprobe_path)
+        mixed_probe = _probe_media(temporary_video, ffprobe_path)
+        stem_duration_ms = _duration_ms(stem_probe, "SFX stem")
+        mixed_duration_ms = _duration_ms(mixed_probe, "mixed video")
+        mixed_video_streams = _streams(mixed_probe, "video")
+        mixed_audio_streams = _streams(mixed_probe, "audio")
+        if len(mixed_video_streams) != 1 or len(mixed_audio_streams) != 1:
+            raise RuntimeError(
+                "Mixed video must contain one copied video stream and one audio stream"
+            )
+        mixed_video_duration_ms = _stream_duration_ms(
+            mixed_video_streams[0],
+            fallback_ms=mixed_duration_ms,
+        )
+        mixed_audio_duration_ms = _stream_duration_ms(
+            mixed_audio_streams[0],
+            fallback_ms=mixed_duration_ms,
+        )
+        target_samples = _target_sample_count(raw_duration_ms)
+        stem_samples = _audio_sample_count(_streams(stem_probe, "audio")[0])
+        if stem_samples != target_samples:
+            raise RuntimeError(
+                "SFX stem sample count does not match the raw video target: "
+                f"stem={stem_samples}, target={target_samples}"
+            )
+        mixed_video_timing = _stream_timing_signature(mixed_video_streams[0])
+        if mixed_video_timing != raw_video_timing:
+            raise RuntimeError(
+                "Mixed output changed the PowerPoint video packet timeline: "
+                f"raw={raw_video_timing!r}, mixed={mixed_video_timing!r}"
+            )
+        duration_tolerance_ms = max(
+            frame_duration_ms,
+            1024 * 1000 / _OUTPUT_SAMPLE_RATE,
+        ) + 1
+        if abs(mixed_audio_duration_ms - raw_duration_ms) > duration_tolerance_ms:
+            raise RuntimeError(
+                "Mixed audio duration does not match the raw video: "
+                f"audio={mixed_audio_duration_ms}ms, raw={raw_duration_ms}ms"
+            )
+
+        raw_video_hash = _stream_hash(video_path, "0:v:0", ffmpeg_path)
+        mixed_video_hash = _stream_hash(temporary_video, "0:v:0", ffmpeg_path)
+        if raw_video_hash != mixed_video_hash:
+            raise RuntimeError("Mixed output changed the PowerPoint video stream")
+        raw_audio_hash = _stream_hash(video_path, "0:a:0", ffmpeg_path)
+        mixed_audio_hash = _stream_hash(temporary_video, "0:a:0", ffmpeg_path)
+        if raw_audio_hash == mixed_audio_hash:
+            raise RuntimeError("Mixed output audio is unchanged from the raw video")
+        mixed_peak_db = _maximum_volume_db(temporary_video, ffmpeg_path)
+        true_peak_dbfs = _true_peak_dbfs(temporary_video, ffmpeg_path)
+        if true_peak_dbfs is None or true_peak_dbfs >= 0:
+            raise RuntimeError(
+                "Mixed-video audio is silent or clips after encoding: "
+                f"true_peak={true_peak_dbfs!r} dBFS"
+            )
+        verification_correlation = _sound_mix_correlation(
+            raw_video_path=video_path,
+            mixed_video_path=temporary_video,
+            stem_path=temporary_stem,

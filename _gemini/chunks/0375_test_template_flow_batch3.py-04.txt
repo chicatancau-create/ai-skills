@@ -1,0 +1,75 @@
+    def test_a_preservation_receipt_never_exempts_edited_geometry_or_assets(self) -> None:
+        import hashlib
+
+        svg = self.root / 'slide.svg'
+        svg.write_text('<svg/>', encoding='utf-8')
+        digest = hashlib.sha256(svg.read_bytes()).hexdigest()
+        asset = self.root / 'photo.png'
+        asset.write_bytes(b'original image asset')
+        _write_json(self.root / 'template_execution_manifest.json', {
+            'schema': 'ppt-master.template-execution-manifest.v1',
+            'replication_mode': 'mirror', 'source_package_sha256': 'a' * 64,
+            'source_geometry_unchanged': True,
+            'templates': [{'prototype': 'slide.svg', 'source_svg_sha256': digest}],
+            'source_files_sha256': {
+                'slide.svg': digest, asset.name: hashlib.sha256(asset.read_bytes()).hexdigest(),
+            },
+        })
+        geometry = '<text> exceeds the root viewBox on the horizontal axis'
+        result = {'source_sha256': digest, 'errors': [geometry, 'missing image'],
+                  'warnings': [], 'info': {}}
+        checker = SVGQualityChecker(template_mode=True)
+        checker._classify_preserved_mirror_geometry(svg, result)
+        self.assertEqual(result['errors'], ['missing image'])
+        self.assertEqual(len(result['info']['inherited']), 1)
+        result.update(source_sha256='b' * 64, errors=[geometry], info={})
+        checker._classify_preserved_mirror_geometry(svg, result)
+        self.assertEqual(result['errors'], [geometry])
+        asset.write_bytes(b'changed image asset')
+        result.update(source_sha256=digest, errors=[geometry], info={})
+        checker._classify_preserved_mirror_geometry(svg, result)
+        self.assertEqual(result['errors'], [geometry])
+
+    def test_a_edited_import_cannot_receive_source_geometry_provenance(self) -> None:
+        import hashlib
+
+        source = self.root / 'source.svg'
+        source.write_text('<svg/>', encoding='utf-8')
+        doc = mirror.AuthoringDocument(
+            source.name, source, source, '', {}, hashlib.sha256(source.read_bytes()).hexdigest(),
+        )
+        self.assertTrue(mirror._source_geometry_is_unchanged({source.name: doc}))
+        source.write_text('<svg>edited</svg>', encoding='utf-8')
+        self.assertFalse(mirror._source_geometry_is_unchanged({source.name: doc}))
+
+    def test_a_spec_skeleton_is_factual_and_registration_rejects_todos(self) -> None:
+        from register_template import SpecParseError, _extract_entry
+
+        root = ET.fromstring(_structured_page('body'))
+        native = {'slideSize': {'width_px': 1280, 'height_px': 720},
+                  'source': {'sha256': 'a' * 64}, 'slides': [{'index': 1}]}
+        spec = mirror._spec_skeleton(native, [(Path('templates/001_content.svg'), root)], 'deck')
+        self.assertIn('deck_id: TODO', spec)
+        self.assertIn('page_count: 1', spec)
+        self.assertIn('canvas_format: ppt169', spec)
+        self.assertIn('### Source Preservation Map', spec)
+        templates = self.root / 'templates'
+        templates.mkdir()
+        (templates / 'design_spec.md').write_text(spec, encoding='utf-8')
+        with self.assertRaisesRegex(SpecParseError, 'incomplete Design Spec skeleton'):
+            _extract_entry('deck', self.root.name, self.root)
+
+    def test_d_pptx_new_and_existing_companions_honor_switch(self) -> None:
+        source = self.root / 'reference.pptx'
+        source.write_bytes(b'source handled by converter below')
+        manager = ProjectManager()
+
+        def convert(_source: Path, markdown: Path) -> None:
+            markdown.parent.mkdir(parents=True, exist_ok=True)
+            markdown.write_text('reference', encoding='utf-8')
+            assets = markdown.with_name(markdown.stem + '_files')
+            assets.mkdir(exist_ok=True)
+            (assets / 'photo.png').write_bytes(b'image')
+            _write_json(assets / 'image_manifest.json', [{'filename': 'photo.png'}])
+
+        for existing in (True, False):

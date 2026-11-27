@@ -1,0 +1,108 @@
+            "external hyperlinks must be absolute URIs with an explicit scheme"
+        )
+    scheme = scheme_match.group(1).lower()
+    if scheme in _FORBIDDEN_EXTERNAL_SCHEMES:
+        raise HyperlinkContractError(
+            f"external hyperlink scheme {scheme!r} is not allowed"
+        )
+    return HyperlinkTarget(raw=raw, kind="external")
+
+
+def svg_hyperlink_href(elem: ET.Element) -> str:
+    """Return the sole href value from one SVG ``<a>`` element."""
+    if _local_name(elem) != "a" or elem.tag != f"{{{SVG_NS}}}a":
+        raise HyperlinkContractError("hyperlink carrier must be an SVG <a>")
+    href = elem.get("href")
+    xlink_href = elem.get(f"{{{XLINK_NS}}}href")
+    if href is not None and xlink_href is not None:
+        raise HyperlinkContractError(
+            "SVG <a> must not declare both href and xlink:href"
+        )
+    value = href if href is not None else xlink_href
+    if value is None:
+        raise HyperlinkContractError("SVG <a> must declare href")
+    return value
+
+
+def project_hyperlink_errors(
+    root: ET.Element,
+    *,
+    slide_count: int | None = None,
+) -> list[str]:
+    """Return fail-closed diagnostics for every SVG hyperlink carrier."""
+    errors: list[str] = []
+    parent_by_id = {
+        id(child): parent
+        for parent in root.iter()
+        for child in list(parent)
+    }
+    anchors = [
+        elem for elem in root.iter()
+        if _local_name(elem) == "a"
+    ]
+    for index, anchor in enumerate(anchors, 1):
+        label = anchor.get("id") or f"anchor {index}"
+        if anchor.tag != f"{{{SVG_NS}}}a":
+            errors.append(f"{label}: hyperlink carrier must be an SVG <a>")
+            continue
+        try:
+            href = svg_hyperlink_href(anchor)
+            parse_hyperlink_target(href, slide_count=slide_count)
+        except HyperlinkContractError as exc:
+            errors.append(f"{label}: {exc}")
+
+        unsupported_attrs = sorted(
+            name
+            for name in anchor.attrib
+            if name.rsplit("}", 1)[-1].lower()
+            in _UNSUPPORTED_LINK_BEHAVIOR_ATTRIBUTES
+        )
+        if unsupported_attrs:
+            errors.append(
+                f"{label}: unsupported link behavior attribute(s): "
+                + ", ".join(unsupported_attrs)
+            )
+
+        ancestors: list[ET.Element] = []
+        current = parent_by_id.get(id(anchor))
+        while current is not None:
+            ancestors.append(current)
+            current = parent_by_id.get(id(current))
+        ancestor_tags = [_local_name(elem) for elem in ancestors]
+        if "a" in ancestor_tags:
+            errors.append(f"{label}: nested SVG <a> elements are not supported")
+        hidden_ancestor = next(
+            (tag for tag in ancestor_tags if tag in _NON_OUTPUT_ANCESTORS),
+            None,
+        )
+        if hidden_ancestor is not None:
+            errors.append(
+                f"{label}: hyperlink cannot appear inside non-output "
+                f"<{hidden_ancestor}> content"
+            )
+        replacement_ancestor = next(
+            (
+                elem
+                for elem in ancestors
+                if elem.get("data-pptx-replace-with") is not None
+                or elem.get("data-pptx-part") == "geometry-detail"
+            ),
+            None,
+        )
+        if replacement_ancestor is not None:
+            errors.append(
+                f"{label}: hyperlink cannot appear inside content replaced "
+                "or skipped during native export"
+            )
+
+        inline = any(tag in _INLINE_CONTAINER_TAGS for tag in ancestor_tags)
+        children = [
+            child for child in list(anchor)
+            if _local_name(child) not in _NON_OUTPUT_ANCESTORS
+        ]
+        if inline:
+            if any(_local_name(child) not in _INLINE_CONTENT_TAGS for child in children):
+                errors.append(
+                    f"{label}: inline hyperlink content may contain only <tspan>"
+                )
+            positioned = [

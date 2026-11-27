@@ -1,0 +1,122 @@
+        cx = _geometry_value(element, "cx", default=0.0)
+        cy = _geometry_value(element, "cy", default=0.0)
+        radius = _geometry_value(element, "r", required=True)
+        if radius <= 0:
+            raise ValueError(f"{_element_label(element)} r must be greater than 0")
+        return _ellipse_commands(cx, cy, radius, radius)
+
+    if tag == "ellipse":
+        cx = _geometry_value(element, "cx", default=0.0)
+        cy = _geometry_value(element, "cy", default=0.0)
+        radius_x = _geometry_value(element, "rx", required=True)
+        radius_y = _geometry_value(element, "ry", required=True)
+        if radius_x <= 0 or radius_y <= 0:
+            raise ValueError(
+                f"{_element_label(element)} rx and ry must be greater than 0"
+            )
+        return _ellipse_commands(cx, cy, radius_x, radius_y)
+
+    raise AssertionError(f"Unhandled Boolean source tag: {tag}")
+
+
+def _geometry_value(
+    element: ET.Element,
+    attribute: str,
+    *,
+    default: float | None = None,
+    required: bool = False,
+) -> float:
+    raw = element.get(attribute)
+    if raw is None:
+        if required:
+            raise ValueError(f"{_element_label(element)} requires {attribute}")
+        if default is None:
+            raise AssertionError("Geometry attribute requires a default")
+        return default
+    try:
+        return parse_project_geometry_length(raw, attribute)
+    except ValueError as exc:
+        raise ValueError(
+            f"{_element_label(element)} {attribute}: {exc}"
+        ) from exc
+
+
+def _rect_commands(element: ET.Element) -> list[PathCommand]:
+    x = _geometry_value(element, "x", default=0.0)
+    y = _geometry_value(element, "y", default=0.0)
+    width = _geometry_value(element, "width", required=True)
+    height = _geometry_value(element, "height", required=True)
+    if width <= 0 or height <= 0:
+        raise ValueError(
+            f"{_element_label(element)} width and height must be greater than 0"
+        )
+
+    raw_rx = element.get("rx")
+    raw_ry = element.get("ry")
+    radius_x = (
+        _geometry_value(element, "rx", required=True)
+        if raw_rx is not None else 0.0
+    )
+    radius_y = (
+        _geometry_value(element, "ry", required=True)
+        if raw_ry is not None else 0.0
+    )
+    if raw_rx is not None and raw_ry is None:
+        radius_y = radius_x
+    elif raw_ry is not None and raw_rx is None:
+        radius_x = radius_y
+    if radius_x < 0 or radius_y < 0:
+        raise ValueError(
+            f"{_element_label(element)} rx and ry must not be negative"
+        )
+
+    radius_x = min(radius_x, width / 2.0)
+    radius_y = min(radius_y, height / 2.0)
+    if radius_x <= 0 or radius_y <= 0:
+        return [
+            PathCommand("M", [x, y]),
+            PathCommand("L", [x + width, y]),
+            PathCommand("L", [x + width, y + height]),
+            PathCommand("L", [x, y + height]),
+            PathCommand("Z", []),
+        ]
+
+    kx = radius_x * _BEZIER_QUARTER_K
+    ky = radius_y * _BEZIER_QUARTER_K
+    right = x + width
+    bottom = y + height
+    return [
+        PathCommand("M", [x + radius_x, y]),
+        PathCommand("L", [right - radius_x, y]),
+        PathCommand(
+            "C",
+            [
+                right - radius_x + kx,
+                y,
+                right,
+                y + radius_y - ky,
+                right,
+                y + radius_y,
+            ],
+        ),
+        PathCommand("L", [right, bottom - radius_y]),
+        PathCommand(
+            "C",
+            [
+                right,
+                bottom - radius_y + ky,
+                right - radius_x + kx,
+                bottom,
+                right - radius_x,
+                bottom,
+            ],
+        ),
+        PathCommand("L", [x + radius_x, bottom]),
+        PathCommand(
+            "C",
+            [
+                x + radius_x - kx,
+                bottom,
+                x,
+                bottom - radius_y + ky,
+                x,

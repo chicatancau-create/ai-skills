@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""
+PPT Master - Preset Shape Registry
+
+Expose the complete preset catalog and evaluate shape geometry instances.
+
+Usage:
+    Import get_preset_registry from pptx_shapes.registry.
+
+Examples:
+    geometry = get_preset_registry().evaluate("rightArrow", 320, 160)
+
+Dependencies:
+    None (only uses standard library)
+"""
+
+from __future__ import annotations
+
+from functools import lru_cache
+from typing import Mapping
+
+from .errors import (
+    FormulaEvaluationError,
+    PresetShapeDataError,
+    UnknownPresetShapeError,
+)
+from .formula import FormulaEvaluator
+from .loader import load_preset_shape_definitions, load_shape_type_values
+from .models import (
+    AdjustHandleDefinition,
+    EvaluatedAdjustHandle,
+    EvaluatedConnectionSite,
+    EvaluatedPathCommand,
+    EvaluatedPoint,
+    EvaluatedPresetGeometry,
+    EvaluatedShapePath,
+    EvaluatedTextRectangle,
+    PointExpression,
+    PresetShapeDefinition,
+    immutable_mapping,
+)
+
+
+AdjustmentValue = str | int | float
+CONNECTOR_PRESET_TYPES = frozenset(
+    {
+        "line",
+        "lineInv",
+        "straightConnector1",
+        "bentConnector2",
+        "bentConnector3",
+        "bentConnector4",
+        "bentConnector5",
+        "curvedConnector2",
+        "curvedConnector3",
+        "curvedConnector4",
+        "curvedConnector5",
+    }
+)
+
+
+class PresetShapeRegistry:
+    """Read-only registry for all standard DrawingML preset geometries."""
+
+    def __init__(
+        self,
+        definitions: tuple[PresetShapeDefinition, ...],
+        expected_names: tuple[str, ...],
+    ) -> None:
+        self._definitions = {
+            definition.name: definition for definition in definitions
+        }
+        self._names = tuple(expected_names)
+        if len(self._definitions) != len(definitions):
+            raise PresetShapeDataError("Preset registry contains duplicate names")
+        missing = sorted(set(expected_names) - set(self._definitions))
+        extra = sorted(set(self._definitions) - set(expected_names))
+        if missing or extra:
+            raise PresetShapeDataError(
+                "Preset registry differs from ShapeTypeValues: "
+                f"missing={missing}, extra={extra}"
+            )
+
+    @classmethod
+    def bundled(cls) -> PresetShapeRegistry:
+        """Load the hash-locked catalog shipped with PPT Master."""
+
+        names = load_shape_type_values()
+        definitions = load_preset_shape_definitions(expected_names=names)
+        return cls(definitions, names)
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        """Return all names in official ``ShapeTypeValues`` order."""
+
+        return self._names
+
+    def __len__(self) -> int:
+        return len(self._definitions)
+
+    def __contains__(self, name: object) -> bool:
+        return isinstance(name, str) and name in self._definitions
+
+    def contains(self, name: str) -> bool:
+        """Return whether ``name`` is a standard preset in this catalog."""
+
+        return name in self._definitions
+
+    def get(self, name: str) -> PresetShapeDefinition:
+        """Return one immutable source definition or raise a precise error."""
+
+        try:
+            return self._definitions[name]
+        except KeyError as exc:
+            raise UnknownPresetShapeError(
+                f"Unknown DrawingML preset shape: {name!r}"
+            ) from exc
+
+    def evaluate(
+        self,
+        name: str,
+        width: float,
+        height: float,
+        *,
+        adjustments: Mapping[str, AdjustmentValue] | None = None,
+    ) -> EvaluatedPresetGeometry:
+        """Evaluate every guide, handle, connection, text rect, and path."""
+
+        definition = self.get(name)
+        evaluator = FormulaEvaluator(width, height)
+        supplied = dict(adjustments or {})
+        adjustment_names = {guide.name for guide in definition.adjustments}
+        unknown = sorted(set(supplied) - adjustment_names)
+        if unknown:
+            raise FormulaEvaluationError(

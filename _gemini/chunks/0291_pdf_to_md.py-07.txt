@@ -1,0 +1,129 @@
+        return _find_captioned_vector_figures(page, drawing_rects, background_rects, caption_rects)
+
+    for rect in drawing_rects:
+        rect = _expand_rect(rect, VECTOR_FIGURE_PADDING, page_rect)
+        rect = _clip_rect_to_page(rect, page_rect)
+
+        width = rect.width
+        height = rect.height
+        if width < MIN_VECTOR_FIGURE_WIDTH or height < MIN_VECTOR_FIGURE_HEIGHT:
+            continue
+
+        area = rect.get_area()
+        if area < MIN_VECTOR_FIGURE_AREA:
+            continue
+
+        aspect = max(width, height) / max(min(width, height), 1)
+        if aspect > MAX_VECTOR_FIGURE_ASPECT_RATIO:
+            continue
+
+        if _overlaps_table(rect, tab_rects):
+            continue
+
+        candidates.append(rect)
+
+    candidates.sort(key=lambda r: r.get_area(), reverse=True)
+
+    kept = []
+    for rect in candidates:
+        if any(_is_rect_contained(rect, existing) for existing in kept):
+            continue
+        kept.append(rect)
+
+    return sorted(kept, key=lambda r: (r.y0, r.x0))
+
+
+def clean_text(text: str) -> str:
+    """Clean extracted text."""
+    lines = text.split('\n')
+    cleaned_lines = []
+    prev_empty = False
+
+    for line in lines:
+        line = line.rstrip()
+        is_empty = len(line.strip()) == 0
+
+        if is_empty:
+            if not prev_empty:
+                cleaned_lines.append('')
+            prev_empty = True
+        else:
+            cleaned_lines.append(line)
+            prev_empty = False
+
+    return '\n'.join(cleaned_lines)
+
+
+def _extract_text_lines(page: fitz.Page) -> list[tuple[fitz.Rect, str]]:
+    """Return text lines with their page rectangles in reading order."""
+    lines = []
+    for block in page.get_text("dict")["blocks"]:
+        if block.get("type") != 0:
+            continue
+        for line in block["lines"]:
+            text = "".join(span["text"] for span in line["spans"]).strip()
+            if text:
+                lines.append((fitz.Rect(line["bbox"]), text))
+    return sorted(lines, key=lambda item: (item[0].y0, item[0].x0))
+
+
+def _is_table_caption(text: str) -> bool:
+    """Return whether a line is a real table caption, not prose citing a table."""
+    return bool(TABLE_CAPTION_RE.match(text.strip()))
+
+
+def _caption_table_start_y(
+    caption_rect: fitz.Rect,
+    lines: list[tuple[fitz.Rect, str]],
+) -> float:
+    """Start below a caption and its adjacent English translation line."""
+    start_y = caption_rect.y1 + 1
+    for rect, text in lines:
+        if rect.y0 < caption_rect.y1 - 1 or rect.y0 > caption_rect.y1 + 35:
+            continue
+        if text.startswith("Table"):
+            start_y = max(start_y, rect.y1 + 1)
+    return start_y
+
+
+def _looks_like_numeric_table_line(text: str) -> bool:
+    """Detect long data rows so they are not mistaken for prose boundaries."""
+    numbers = NUMBER_RE.findall(text)
+    if len(numbers) >= 3:
+        return True
+    tokens = [token for token in re.split(r'\s+', text.strip()) if token]
+    return len(tokens) >= 4 and len(numbers) >= 2
+
+
+def _is_table_region_boundary(
+    rect: fitz.Rect,
+    text: str,
+    page: fitz.Page,
+    start_y: float,
+) -> bool:
+    """Return whether a line likely starts prose after a text-detected table."""
+    text = text.strip()
+    if rect.y0 < start_y + 45:
+        return False
+    if text.startswith(TABLE_NOTE_PREFIX):
+        return True
+    if SECTION_HEADING_RE.match(text):
+        return True
+    if TABLE_REFERENCE_PROSE_RE.match(text):
+        return True
+    if _looks_like_numeric_table_line(text):
+        return False
+
+    width_ratio = rect.width / page.rect.width if page.rect.width > 0 else 0
+    return len(text) >= 26 and width_ratio > 0.52 and rect.x0 < page.rect.width * 0.25
+
+
+def _table_region_bottom(
+    page: fitz.Page,
+    lines: list[tuple[fitz.Rect, str]],
+    start_y: float,
+) -> float:
+    """Find a conservative bottom edge for a caption-guided text table scan."""
+    for rect, text in lines:
+        if rect.y0 <= start_y:
+            continue

@@ -1,0 +1,112 @@
+                f"color {raw_color} must declare provenance as "
+                "fact, approx, or user"
+            )
+
+    if not primary_rows:
+        errors.append("Color Scheme must declare one primary color row")
+    elif len(primary_rows) > 1:
+        errors.append("Color Scheme must declare only one primary color row")
+    elif (
+        _HEX_COLOR_RE.fullmatch(declared_primary)
+        and primary_rows[0] != declared_primary.upper()
+    ):
+        errors.append(
+            "Color Scheme primary must match frontmatter primary_color: "
+            f"{primary_rows[0]} != {declared_primary.upper()}"
+        )
+
+    root = template_root.resolve()
+    for raw_ref in sorted(set(_BRAND_ASSET_REF_RE.findall(body))):
+        asset = (template_dir / raw_ref).resolve()
+        try:
+            asset.relative_to(root)
+        except ValueError:
+            errors.append(f"asset reference escapes brand workspace: {raw_ref}")
+            continue
+        if not asset.is_file():
+            errors.append(f"referenced brand asset does not exist: {raw_ref}")
+
+    if errors:
+        details = "\n".join(f"  - {error}" for error in errors)
+        raise SpecParseError(f"invalid brand specification:\n{details}")
+
+
+def _validate_style_spec(
+    expected_template_id: str | None,
+    template_root: Path,
+    template_dir: Path,
+    frontmatter: dict,
+    body: str,
+    pages: list[str],
+) -> None:
+    """Reject Style workspaces outside the roster-free method contract."""
+    errors: list[str] = []
+
+    raw_style_id = frontmatter.get("style_id")
+    declared_id = raw_style_id.strip() if isinstance(raw_style_id, str) else ""
+    if not declared_id:
+        errors.append("frontmatter style_id must be a non-empty string")
+    else:
+        if (
+            _PORTABLE_STYLE_ID_RE.fullmatch(declared_id) is None
+            or declared_id in {".", ".."}
+            or declared_id.endswith(".")
+        ):
+            errors.append(
+                "frontmatter style_id must be a filesystem-safe portable slug"
+            )
+        if (
+            expected_template_id is not None
+            and declared_id != expected_template_id
+        ):
+            errors.append(
+                "frontmatter style_id must match directory "
+                f"{expected_template_id!r}, got {declared_id!r}"
+            )
+
+    raw_kind = frontmatter.get("kind")
+    declared_kind = raw_kind.strip() if isinstance(raw_kind, str) else ""
+    if declared_kind != "style":
+        errors.append(
+            "frontmatter kind must be 'style', "
+            f"got {declared_kind!r}"
+        )
+
+    raw_summary = frontmatter.get("summary")
+    if not isinstance(raw_summary, str) or not _style_value_is_substantive(
+        raw_summary
+    ):
+        errors.append("frontmatter summary must be a non-empty string")
+
+    non_string_fields = [key for key in frontmatter if not isinstance(key, str)]
+    if non_string_fields:
+        errors.append("style frontmatter field names must be strings")
+    unexpected_fields = sorted(
+        key
+        for key in frontmatter
+        if isinstance(key, str) and key not in _STYLE_ALLOWED_FRONTMATTER_FIELDS
+    )
+    if unexpected_fields:
+        errors.append(
+            "style frontmatter contains unsupported field(s): "
+            + ", ".join(unexpected_fields)
+        )
+
+    keywords = frontmatter.get("keywords")
+    if (
+        not isinstance(keywords, list)
+        or not 3 <= len(keywords) <= 5
+        or not all(
+            isinstance(item, str) and _style_value_is_substantive(item)
+            for item in keywords
+        )
+    ):
+        errors.append(
+            "frontmatter keywords must contain 3-5 non-empty strings"
+        )
+    elif len({item.strip().casefold() for item in keywords}) != len(keywords):
+        errors.append("frontmatter keywords must be unique")
+
+    if pages and not _has_qualified_roster_spec(template_dir):
+        errors.append(
+            "style workspaces must not contain page SVGs without a sibling "

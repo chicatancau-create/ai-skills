@@ -1,0 +1,104 @@
+用户说"重命名/rename/改名/改文档名/修改文档名称/修改文档标题/把这个文档叫做...":
+
+- 重命名 → `doc rename`（需文档 ID 或 URL + 新名称）
+- 只要意图是修改文档在列表和链接中展示的名称，统一路由到 `dws doc rename --node <DOC_ID_OR_URL> --name "新名称"`；不要走 `drive`、`doc update` 或重新 `doc create`。
+- 只有用户明确说"正文里的标题/章节标题/段落标题/H1 标题"时，才走 `block update`。
+
+用户说"删除文档/删掉这个文件/移到回收站/丢掉这篇文档":
+
+- 删除节点 → `delete`（危险操作，需确认；需文档 ID 或 URL）
+
+用户说"插入附件/上传附件到文档/往文档里加文件/加附件":
+
+- 插入附件 → `media insert`（需文档 ID 或 URL + 本地文件路径）
+
+用户说"插入图片/加图片/放张图/嵌入图片/往文档里插图":
+
+- 插入图片 → `media insert`（需文档 ID 或 URL + 本地图片文件路径）
+- 注意：图片也是通过 `media insert` 作为附件块插入文档，不是通过 `block insert`
+
+用户说"下载附件/获取附件/取出文档里的附件":
+
+- 下载附件 → `media download`（需文档 ID 或 URL + 资源 ID）
+
+用户说"编辑块/改段落/插入标题/删除块":
+
+- 查看结构 → `block list`
+- 插入 → `block insert`
+- 修改 → `block update`
+- 删除 → `block delete`
+
+用户说"给某人开权限/分享给某人/授权某文档/把这篇文档给 xxx 看":
+
+- 新增权限 → `permission add`（需 `--node` + `--user` + `--role`）
+- 修改权限 → `permission update`
+- 查看谁有权限 → `permission list`
+
+> **关键区分**：
+>
+> - "把**某篇文档**授权给某人" → `doc permission add`（节点级，包括「我的文档」下的文档都支持）
+> - "把**某个知识库**整体授权给某人" → `wiki member add`（容器级，但**「我的文档」个人空间不支持**）
+
+> 补充：如果用户直接粘贴的是原始 `alidocs` URL，先按 [链接规范](../url-patterns.md#alidocs-url-类型探测流程) probe；只有 probe 确认是 `adoc` / `file` / `folder` 后，才继续按下列意图执行。
+
+**用户直接粘贴文档 URL（无其他指令）**:
+
+- 默认 → `read`（读取文档内容）
+- 如 URL 明显是文件夹 → `list`（列出文件夹内容）
+
+**用户粘贴 URL + 附加指令**:
+
+- "帮我看看这个文档" → `read`
+- "这个文档的信息" → `info`
+- "往这个文档追加内容" → `update --mode append`
+- "把这个文档标题改成 X" / "这个文档改名为 X" → `rename`
+- "把正文里的一级标题/章节标题改成 X" → `block update`
+
+关键区分: doc(文档编辑/阅读) vs aitable(数据表格操作) vs drive(钉盘文件管理)
+
+## 核心工作流
+
+> 步骤性指引。"读哪些文件"组合参见上方 §场景索引；命令详细参数参见对应子文件。
+
+```bash
+# ── 工作流 1: 浏览并阅读文档 ──
+dws doc list --format json                                    # 1. 浏览根目录
+dws doc list --folder <DOC_FOLDER_NODE_ID> --format json      # 2. 进入子目录
+dws doc info --node <DOC_ID> --format json                    # 3. 元信息（含 contentType）
+dws doc read --node <DOC_ID> --format json                    # 4. 读 markdown 正文
+
+# ── 工作流 2: 创建文档（含分片自动写入）──
+dws doc folder create --name "项目资料" --format json          # 1. (可选) 文件夹
+dws doc create --name "项目周报" --content-file /tmp/x.md \
+  --folder <DOC_FOLDER_NODE_ID> --format json                 # 2. 创建 + 写入
+dws doc read --node <DOC_ID> --format json                    # 3. 回读校验（必须）
+
+# ── 工作流 3: 局部改写（保真，首选 JSONML）──
+dws doc block list --node <DOC_ID> --content-format jsonml             # 1. 取 uuid
+dws doc block list --node <DOC_ID> --content-format jsonml --block-id <UUID>   # 2. 读子树
+dws doc block update --node <DOC_ID> --block-id <UUID> \
+  --content-format jsonml --element '[...]'                            # 3. 写回（uuid 必须 == --block-id）
+dws doc read --node <DOC_ID> --content-format jsonml                   # 4. 回读
+
+# ── 工作流 4: 整篇 overwrite（仅在新骨架重写时）──
+dws doc read --node <DOC_ID> --content-format jsonml --output /tmp/doc.json   # 1. 读出当前 JSONML
+# 修改 /tmp/doc.json 中的 jsonml 数组
+dws doc update --node <DOC_ID> --content-file /tmp/doc.json \
+  --content-format jsonml --mode overwrite                             # 2. 写回（默认不做并发检查）
+dws doc read --node <DOC_ID> --content-format jsonml                   # 3. 回读
+# 担心被并发覆盖时，可加 --revision <N> 触发并发检查（详见 doc-update.md）
+
+# ── 工作流 5: 上传 vs 插入附件 ──
+dws doc upload --file ./report.pdf --folder <ID>               # 上传作为独立文件
+dws doc media insert --node <DOC_ID> --file ./report.pdf       # 上传并作为附件块插入正文
+
+# ── 工作流 6: 下载 vs 导出（先 info 判 contentType）──
+dws doc info --node <NODE_ID> --format json                    # 必须先查 contentType
+dws doc export --node <NODE_ID> --output ~/downloads/          # contentType=ALIDOC 走 export
+dws doc download --node <NODE_ID> --output ~/downloads/        # contentType≠ALIDOC 走 download
+
+# ── 工作流 7: 评论 + 划词（@人 需 userId）──
+dws contact user search --query "张三" --format json            # 取 userId
+dws doc comment create --node <DOC_ID> --content "请确认" --mention <uid> --format json
+dws doc block list --node <DOC_ID> --format json                # 划词需先取 blockId / paragraph.text
+dws doc comment create-inline --node <DOC_ID> --block-id <BLOCK_ID> \

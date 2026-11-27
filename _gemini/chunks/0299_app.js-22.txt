@@ -1,0 +1,73 @@
+        "svg", "g", "defs", "symbol", "use", "path", "rect", "circle", "ellipse",
+        "line", "polyline", "polygon", "text", "tspan", "textpath", "image",
+        "clippath", "mask", "pattern", "marker", "lineargradient", "radialgradient",
+        "stop", "filter", "feblend", "fecolormatrix", "fecomponenttransfer",
+        "fecomposite", "feconvolvematrix", "fediffuselighting", "fedisplacementmap",
+        "fedistantlight", "fedropshadow", "feflood", "fefunca", "fefuncb", "fefuncg",
+        "fefuncr", "fegaussianblur", "feimage", "femerge", "femergenode",
+        "femorphology", "feoffset", "fepointlight", "fespecularlighting",
+        "fespotlight", "fetile", "feturbulence", "style", "title", "desc", "metadata",
+        "a", "switch", "view", "animate", "animatecolor", "animatetransform",
+        "animatemotion", "set", "mpath"
+    ]);
+
+    function sanitizeSvg(svgString) {
+        var doc = new DOMParser().parseFromString(svgString, "image/svg+xml");
+        if (doc.getElementsByTagName("parsererror").length ||
+            !doc.documentElement || doc.documentElement.localName.toLowerCase() !== "svg" ||
+            doc.documentElement.namespaceURI !== SVG_NS) {
+            throw new Error(t("err_empty_svg"));
+        }
+        doc.querySelectorAll("*").forEach(function (el) {
+            // XML preserves case; the innerHTML sink normalizes HTML/SVG names.
+            var tag = el.localName.toLowerCase();
+            if (!SVG_ALLOWED_ELEMENTS.has(tag) || el.namespaceURI !== SVG_NS) {
+                el.remove();
+                return;
+            }
+            Array.from(el.attributes).forEach(function (attr) {
+                var name = attr.name.toLowerCase();
+                var local = attr.localName.toLowerCase();
+                if (local.indexOf("on") === 0 || name.indexOf("on") === 0) {
+                    el.removeAttributeNode(attr);
+                    return;
+                }
+                // Strip dangerous URI protocols from href/xlink:href
+                var value = attr.value.replace(/[\t\r\n]/g, "").replace(/^[\x00-\x20]+/, "");
+                if (local === "href" &&
+                    (/^\s*javascript\s*:/i.test(value) ||
+                     /^\s*vbscript\s*:/i.test(value) ||
+                     /^\s*data\s*:/i.test(value))) {
+                    el.removeAttributeNode(attr);
+                }
+            });
+        });
+        return new XMLSerializer().serializeToString(doc.documentElement);
+    }
+
+    function showError(msg) {
+        var banner = document.createElement("div");
+        banner.style.cssText = "position:fixed;top:0;left:0;right:0;padding:10px 16px;background:#ef4444;color:#fff;font-size:13px;text-align:center;z-index:999;cursor:pointer;";
+        banner.textContent = msg;
+        banner.onclick = function () { banner.remove(); };
+        document.body.appendChild(banner);
+        setTimeout(function () { banner.remove(); }, 5000);
+    }
+
+    function showWarning(msg) {
+        // Amber, non-fatal counterpart to showError. Stacks below an existing
+        // error banner because z-index is identical and DOM order wins.
+        var banner = document.createElement("div");
+        banner.style.cssText = "position:fixed;top:38px;left:0;right:0;padding:8px 16px;background:#f59e0b;color:#1f1300;font-size:12px;text-align:center;z-index:998;cursor:pointer;";
+        banner.textContent = msg;
+        banner.onclick = function () { banner.remove(); };
+        document.body.appendChild(banner);
+        setTimeout(function () { banner.remove(); }, 6000);
+    }
+
+    function showReloadBanner(name) {
+        // Singleton: replace any prior banner so we never stack reloads.
+        hideReloadBanner();
+        var banner = document.createElement("div");
+        banner.id = "reload-banner";
+        banner.style.cssText = "position:fixed;top:0;left:0;right:0;padding:10px 16px;background:#2563eb;color:#fff;font-size:13px;text-align:center;z-index:1000;cursor:pointer;";

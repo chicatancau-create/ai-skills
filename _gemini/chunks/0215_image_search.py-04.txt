@@ -1,0 +1,103 @@
+        return None, f"{name}: {exc}"
+    except (requests.RequestException, OSError, ValueError) as exc:
+        print(f"  [{name}] error: {exc}", file=sys.stderr)
+        return None, f"{name}: {exc}"
+    except ImportError as exc:
+        print(f"  [{name}] error: {exc}", file=sys.stderr)
+        return None, f"{name}: provider import failed: {exc}"
+
+
+# ---------------------------------------------------------------------------
+# Post-download quality validation
+# ---------------------------------------------------------------------------
+
+_MIN_DOWNLOAD_PIXELS = 800 * 600  # absolute floor for automated originals
+
+
+def _validate_downloaded_quality(
+    path: Path,
+    *,
+    min_width: int = 0,
+    min_height: int = 0,
+    enforce_thumbnail_floor: bool = True,
+) -> bool:
+    """Reject unreadable images and actual EXIF-oriented dimensions below contract.
+
+    Upstream metadata can be inaccurate (e.g. Openverse aggregates rawpixel
+    which only exposes a preview). This function checks what was actually
+    written to disk. Automated paths also reject thumbnails/previews; explicit
+    manual paths may disable that absolute floor while retaining their own
+    requested dimensions.
+    """
+    try:
+        from PIL import Image, ImageOps  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError(
+            "Pillow is required to validate downloaded image dimensions. "
+            "Install it with: pip install Pillow"
+        ) from exc
+    try:
+        with Image.open(path) as im:
+            oriented = ImageOps.exif_transpose(im)
+            oriented.load()
+            w, h = oriented.size
+            if oriented is not im:
+                oriented.close()
+            if w < min_width or h < min_height:
+                print(
+                    f"    rejected: downloaded image dimensions {w}x{h} are below "
+                    f"the requested minimum {min_width}x{min_height}",
+                    file=sys.stderr,
+                )
+                return False
+            if enforce_thumbnail_floor and w * h < _MIN_DOWNLOAD_PIXELS:
+                print(
+                    f"    rejected: downloaded image too small "
+                    f"({w}x{h} = {w*h:,} px < {_MIN_DOWNLOAD_PIXELS:,} px minimum)",
+                    file=sys.stderr,
+                )
+                return False
+            return True
+    except Exception as exc:
+        if not _is_recoverable_image_error(exc):
+            raise
+        print(
+            f"    rejected: downloaded file is not a readable image ({exc})",
+            file=sys.stderr,
+        )
+        return False
+
+
+def _normalize_multi_frame_jpeg(path: Path) -> bool:
+    """Rewrite a camera MPO (multi-picture JPEG) as its primary frame in place.
+
+    Photo hosts serve stereo/multi-frame camera originals under a ``.jpg``
+    extension. ``image_treat.py``, the quality checker, and the PPTX exporter
+    all expect a single-frame JPEG, so the primary frame is re-encoded at high
+    quality with its EXIF and ICC data and the sibling frames are dropped.
+    Returns ``True`` when the file was rewritten.
+    """
+    if path.suffix.lower() not in {".jpg", ".jpeg"}:
+        return False
+    try:
+        from PIL import Image, ImageOps  # type: ignore
+    except ImportError:
+        return False
+    try:
+        with Image.open(path) as source:
+            multi_frame = (
+                (source.format or "").upper() == "MPO"
+                or int(getattr(source, "n_frames", 1)) != 1
+            )
+            if not multi_frame:
+                return False
+            source.seek(0)
+            frame = ImageOps.exif_transpose(source).convert("RGB")
+            save_kwargs: dict[str, object] = {"quality": 95}
+            for key in ("exif", "icc_profile"):
+                value = frame.info.get(key)
+                if value:
+                    save_kwargs[key] = value
+    except (OSError, ValueError, SyntaxError):
+        return False
+    fd, temp_name = tempfile.mkstemp(

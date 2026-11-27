@@ -1,0 +1,107 @@
+            planned_padding,
+            planned_start_floor,
+            loaded_plan,
+        ) = _load_timing_plan(plan_path)
+        if not math.isclose(
+            narration_padding,
+            planned_padding,
+            rel_tol=0,
+            abs_tol=1e-9,
+        ):
+            raise ValueError(
+                "Narration padding differs from the timing plan: "
+                f"plan={planned_padding}, command={narration_padding}"
+            )
+        if planned_start_floor is not None and not math.isclose(
+            narration_start_floor,
+            planned_start_floor,
+            rel_tol=0,
+            abs_tol=1e-9,
+        ):
+            raise ValueError(
+                "Narration start floor differs from the timing plan: "
+                f"plan={planned_start_floor}, command={narration_start_floor}"
+            )
+        current_srt_sha256 = _subtitle_fingerprint(slide_names, subtitle_dir)
+        if current_srt_sha256 != expected_srt_sha256:
+            raise ValueError(
+                "Narration timing plan was authored for a different SRT set: "
+                f"plan={expected_srt_sha256}, current={current_srt_sha256}"
+            )
+        if set(loaded_plan) != set(slide_names):
+            raise ValueError(
+                "Narration timing plan slides do not match animations.json"
+            )
+        timing_plan = loaded_plan
+
+    derived = copy.deepcopy(canonical)
+    canonical_slides = canonical.get("slides", {})
+    derived_slides = derived.setdefault("slides", {})
+    if not isinstance(canonical_slides, dict) or not isinstance(
+        derived_slides,
+        dict,
+    ):
+        raise ValueError('Canonical animations.json field "slides" must be an object')
+
+    anchored_count = 0
+    fallback_count = 0
+    ignored_cue_count = 0
+    svg_fallback_slide_count = 0
+    drift_warnings: list[str] = []
+    positional_slides: list[tuple[str, int, int]] = []
+    audio_paths: list[Path] = []
+
+    for slide_name in slide_names:
+        cues = _parse_srt(subtitle_dir / f"{slide_name}.srt")
+        audio_path = _find_audio(audio_dir, slide_name)
+        audio_paths.append(audio_path)
+        audio_duration = probe_audio_duration(audio_path)
+        if audio_duration is None:
+            raise RuntimeError(
+                f"Unable to read narration duration with ffprobe: {audio_path}"
+            )
+
+        canonical_slide = canonical_slides.get(slide_name, {})
+        if not isinstance(canonical_slide, dict):
+            raise ValueError(
+                f'Canonical animations.json slide "{slide_name}" must be an object'
+            )
+        derived_slide = derived_slides.setdefault(
+            slide_name,
+            copy.deepcopy(canonical_slide),
+        )
+        if not isinstance(derived_slide, dict):
+            raise ValueError(
+                f'Derived animation slide "{slide_name}" must be an object'
+            )
+        settings = _effective_slide_animation(canonical, canonical_slide)
+        transition_duration_ms = _effective_transition_duration_ms(
+            canonical,
+            canonical_slide,
+        )
+        narration_lead_in_ms = round(
+            narration_lead_in_seconds(
+                transition_duration_ms / 1000,
+                start_floor=narration_start_floor,
+            )
+            * 1000
+        )
+        plan_entries = timing_plan.get(slide_name) if timing_plan else None
+        states, used_svg = _resolve_animation_groups(
+            project_path,
+            slide_name,
+            canonical_slide,
+            settings,
+            plan_entries,
+        )
+        if used_svg:
+            svg_fallback_slide_count += 1
+        if timing_plan is None and states:
+            positional_slides.append((
+                slide_name,
+                len({state.group_id for state in states}),
+                len(cues),
+            ))
+
+        state_ids = {state.group_id for state in states}
+        cue_by_group: dict[str, int | None] = {}

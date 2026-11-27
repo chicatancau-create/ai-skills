@@ -1,0 +1,96 @@
+        raise RuntimeError(f"Native PPTX chart {field_name} is invalid base64") from exc
+    if hashlib.sha256(payload).hexdigest() != expected_sha.lower():
+        raise RuntimeError(f"Native PPTX chart {field_name} checksum mismatch")
+    return payload
+
+
+def _source_part_owner(rels_name: str) -> str:
+    marker = "/_rels/"
+    if marker not in rels_name or not rels_name.endswith(".rels"):
+        raise RuntimeError("Native PPTX chart source relationship part name is invalid")
+    parent, filename = rels_name.split(marker, 1)
+    return f"{parent}/{filename[:-5]}"
+
+
+def _decode_source_chart_package(
+    payload: dict[str, Any],
+) -> tuple[str, ET.Element, dict[str, bytes], dict[str, str]] | None:
+    source = payload.get("source_package")
+    if source is None:
+        return None
+    if not isinstance(source, dict):
+        raise RuntimeError("Native PPTX chart source_package must be an object")
+    chart_part = source.get("chart_part")
+    raw_parts = source.get("parts")
+    if (
+        not isinstance(chart_part, str)
+        or not chart_part.startswith("ppt/charts/")
+        or not isinstance(raw_parts, list)
+        or not raw_parts
+        or len(raw_parts) > 32
+    ):
+        raise RuntimeError("Native PPTX chart source_package inventory is invalid")
+
+    parts: dict[str, bytes] = {}
+    content_types: dict[str, str] = {}
+    total_size = 0
+    for index, item in enumerate(raw_parts):
+        if not isinstance(item, dict):
+            raise RuntimeError("Native PPTX chart source_package part must be an object")
+        name = item.get("name")
+        if (
+            not isinstance(name, str)
+            or "\\" in name
+            or name.startswith("/")
+            or posixpath.normpath(name) != name
+            or not name.startswith(
+                ("ppt/charts/", "ppt/embeddings/", "ppt/theme/")
+            )
+            or name in parts
+        ):
+            raise RuntimeError("Native PPTX chart source_package part name is invalid")
+        part_payload = _decode_source_chart_blob(
+            item,
+            f"source_package.parts[{index}]",
+        )
+        total_size += len(part_payload)
+        if total_size > 20_000_000:
+            raise RuntimeError("Native PPTX chart source_package is too large")
+        parts[name] = part_payload
+        content_type = item.get("content_type")
+        if content_type is not None and not isinstance(content_type, str):
+            raise RuntimeError(
+                "Native PPTX chart source_package content_type must be a string"
+            )
+        if content_type:
+            content_types[name] = content_type
+
+    chart_xml = parts.get(chart_part)
+    if chart_xml is None:
+        raise RuntimeError("Native PPTX chart source_package omits its chart part")
+    try:
+        chart_root = ET.fromstring(chart_xml)
+    except ET.ParseError as exc:
+        raise RuntimeError("Native PPTX chart source package chart XML is malformed") from exc
+    if chart_root.tag != f"{{{CHART_URI}}}chartSpace":
+        raise RuntimeError("Native PPTX chart source package root must be c:chartSpace")
+
+    package_rel_ns = "http://schemas.openxmlformats.org/package/2006/relationships"
+    for name, part_payload in parts.items():
+        if not name.endswith(".rels"):
+            continue
+        try:
+            rels_root = ET.fromstring(part_payload)
+        except ET.ParseError as exc:
+            raise RuntimeError(
+                "Native PPTX chart source relationship XML is malformed"
+            ) from exc
+        owner = _source_part_owner(name)
+        for rel in rels_root.findall(f"{{{package_rel_ns}}}Relationship"):
+            if rel.attrib.get("TargetMode") == "External":
+                raise RuntimeError(
+                    "Native PPTX chart source_package cannot contain external relationships"
+                )
+            target = rel.attrib.get("Target")
+            if not target:
+                raise RuntimeError(

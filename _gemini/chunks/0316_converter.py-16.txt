@@ -1,0 +1,100 @@
+            next_fresh += 1
+        used.add(output_id)
+        mapping[key] = output_id
+    return mapping
+
+
+def _geometry_trace_metadata(elem: ET.Element, result: ShapeResult) -> dict[str, Any]:
+    """Describe the native geometry decision for conversion diagnostics."""
+    xml = result.xml.lstrip()
+    if xml.startswith('<p:grpSp>'):
+        if native_replacement_kind(elem) == 'chart' and '<p:graphicFrame>' in xml:
+            return {'output_geometry': 'native-object', 'fidelity': 'native-normalized'}
+        return {'output_geometry': 'group', 'fidelity': 'visual-only'}
+    if xml.startswith('<p:pic>'):
+        return {'output_geometry': 'picture', 'fidelity': 'native-normalized'}
+    if xml.startswith('<p:graphicFrame>'):
+        return {'output_geometry': 'native-object', 'fidelity': 'native-normalized'}
+    if xml.startswith('<mc:AlternateContent'):
+        if elem.tag.replace(f'{{{SVG_NS}}}', '') == 'text':
+            inline_formula_count = sum(
+                1 for child in elem.iter()
+                if child.get(INLINE_FORMULA_ATTR) is not None
+            )
+            return {
+                'output_geometry': 'text',
+                'inline_formula_count': inline_formula_count,
+                'fidelity': 'native-normalized',
+            }
+        return {'output_geometry': 'native-formula', 'fidelity': 'exact'}
+
+    preset_match = re.search(r'<a:prstGeom prst="([^"]+)"', xml)
+    if preset_match is not None:
+        preset = preset_match.group(1)
+        source_preset = elem.get('data-pptx-prst')
+        is_connector = xml.startswith('<p:cxnSp>')
+        fidelity = (
+            'exact'
+            if source_preset == preset
+            and elem.get('data-pptx-frame') is not None
+            and not is_connector
+            else 'native-normalized'
+        )
+        return {
+            'output_geometry': 'preset',
+            'preset': preset,
+            'fidelity': fidelity,
+        }
+    if re.search(r'<a:custGeom(?:\s|>)', xml):
+        carrier = next(
+            (
+                candidate
+                for candidate in elem.iter()
+                if candidate.get('data-pptx-part') == 'geometry'
+            ),
+            elem,
+        )
+        source_custom = (
+            (
+                carrier.get('data-pptx-geometry-kind')
+                or elem.get('data-pptx-geometry-kind')
+            ) == 'custom'
+            and (
+                carrier.get('data-pptx-frame')
+                or elem.get('data-pptx-frame')
+            ) is not None
+        )
+        expected_hash = carrier.get('data-pptx-geometry-sha256')
+        actual_hash = hashlib.sha256(
+            (carrier.get('d') or '').strip().encode('utf-8')
+        ).hexdigest()
+        unchanged = source_custom and expected_hash == actual_hash
+        if unchanged:
+            fidelity = 'exact'
+            geometry_source = 'preserved-metadata'
+        elif source_custom:
+            fidelity = 'native-normalized'
+            geometry_source = 'svg-recompiled'
+        else:
+            fidelity = 'visual-only'
+            geometry_source = 'svg-authored'
+        return {
+            'output_geometry': 'custom',
+            'fidelity': fidelity,
+            'geometry_source': geometry_source,
+        }
+    return {'output_geometry': 'unknown', 'fidelity': 'visual-only'}
+
+
+def collect_hidden_visuals(root: ET.Element) -> list[tuple[ET.Element, str]]:
+    """List suppressed visual objects while preserving native transport carriers."""
+    parents = {id(child): parent for parent in root.iter() for child in parent}
+    definitions, _duplicates = project_definition_index(root)
+    hidden: list[tuple[ET.Element, str]] = []
+
+    def visit(element: ET.Element) -> bool:
+        tag = _local_tag(element)
+        if tag in _NON_VISUAL_TAGS:
+            return False
+        reason = svg_hidden_reason(element, parents, preserve_native_carriers=True)
+        clip_reason = empty_clip_path_reason(element, definitions, parents)

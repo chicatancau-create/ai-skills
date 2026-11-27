@@ -1,0 +1,105 @@
+            if marker == "_":
+                subscript = value
+            else:
+                superscript = value
+        if self.position >= len(self.source) or not self.source[self.position].isupper():
+            raise FormulaCompileError("Chemical pre-script requires an element base")
+        base = self._parse_element()
+        return Prescript(base, subscript=subscript, superscript=superscript)
+
+    def _parse_explicit_scripts(self, base: Node) -> Script:
+        subscript: Sequence | None = None
+        superscript: Sequence | None = None
+        while self.position < len(self.source) and self.source[self.position] in "^_":
+            marker = self.source[self.position]
+            self.position += 1
+            raw = self._read_chem_script()
+            if (
+                marker == "^"
+                and self.position < len(self.source)
+                and self.source[self.position] in "+-"
+            ):
+                raw += self._read_charge()
+            value = self._chem_script_sequence(raw)
+            if marker == "_":
+                subscript = value
+            else:
+                superscript = value
+        return self._merge_script(
+            base,
+            subscript=subscript,
+            superscript=superscript,
+        )
+
+    def _read_chem_script(self) -> str:
+        if self.position >= len(self.source):
+            raise FormulaCompileError("Chemical script is missing an argument")
+        if self.source[self.position] == "{":
+            raw, self.position = _read_raw_group(self.source, self.position)
+            return raw
+        char = self.source[self.position]
+        self.position += 1
+        return char
+
+    def _attach_charge(self, children: list[Node]) -> None:
+        charge = self._read_charge()
+        base = children.pop()
+        children.append(self._merge_script(
+            base,
+            superscript=Sequence((Text(charge, _ROMAN_STYLE),)),
+        ))
+
+    def _merge_script(
+        self,
+        base: Node,
+        *,
+        subscript: Sequence | None = None,
+        superscript: Sequence | None = None,
+    ) -> Script:
+        if isinstance(base, Script):
+            return Script(
+                base.base,
+                subscript or base.subscript,
+                superscript or base.superscript,
+            )
+        return Script(base, subscript=subscript, superscript=superscript)
+
+    def _chem_script_sequence(self, raw: str) -> Sequence:
+        if "\\" in raw:
+            return _LatexParser(raw, display=self.display).parse()
+        normalized = raw.replace("-", "−")
+        style = None if len(normalized) == 1 and normalized.islower() else _ROMAN_STYLE
+        return Sequence((Text(normalized, style),))
+
+    def _has_right_script_base(self, children: list[Node]) -> bool:
+        if not children or self.position == 0:
+            return False
+        previous = self.source[self.position - 1]
+        if previous.isspace() or previous in "+-=<>*/([{,;:":
+            return False
+        return not isinstance(children[-1], Limit)
+
+    def _is_coefficient_position(self, start: int) -> bool:
+        cursor = start - 1
+        while cursor >= 0 and self.source[cursor].isspace():
+            cursor -= 1
+        return cursor < 0 or self.source[cursor] in "+<>=-"
+
+    def _is_bond_dash(self) -> bool:
+        return (
+            self.position < len(self.source)
+            and self.source[self.position] == "-"
+            and self.position + 1 < len(self.source)
+            and self.source[self.position + 1].isupper()
+        )
+
+    def _read_charge(self) -> str:
+        start = self.position
+        while self.position < len(self.source) and self.source[self.position] in "+-":
+            self.position += 1
+        return self.source[start:self.position].replace("-", "−")
+
+    def _read_digits(self) -> str:
+        start = self.position
+        while self.position < len(self.source) and self.source[self.position].isdigit():
+            self.position += 1

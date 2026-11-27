@@ -1,0 +1,102 @@
+        str(name).lower()
+        for name in attr_names
+        if str(name).lower() in supported
+    }
+    if not edited:
+        return
+
+    retained = []
+    changed = False
+    for raw_declaration in style.split(';'):
+        declaration = raw_declaration.strip()
+        if not declaration:
+            continue
+        if ':' not in declaration:
+            retained.append(declaration)
+            continue
+        raw_name, _raw_value = declaration.split(':', 1)
+        if raw_name.strip().lower() in edited:
+            changed = True
+            continue
+        retained.append(declaration)
+
+    if not changed:
+        return
+    if retained:
+        elem.set('style', '; '.join(retained))
+    else:
+        elem.attrib.pop('style', None)
+
+
+# ---------------------------------------------------------------------------
+# Staged-edit value validation (POST /api/slide/<name>/edit).
+# The browser may expose raw element attributes, so validation protects only
+# invariants and dangerous value forms rather than a tiny style whitelist.
+# ---------------------------------------------------------------------------
+
+# Reject CSS-injection vectors in color-like values; mirrors frontend checks.
+_UNSAFE_COLOR_RE = re.compile(r'[;:@\\]|url\s*\(', re.IGNORECASE)
+# Generic SVG attribute names: namespaces, hyphenated attrs, and data-* attrs.
+_SAFE_ATTR_NAME_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_.:-]*$')
+_MAX_ATTR_VALUE_LEN = 256
+_MAX_EDIT_TEXT_LEN = 5000
+_ADDABLE_BATCH_ATTRS = frozenset({
+    'fill', 'stroke', 'opacity',
+    'font-size', 'font-family', 'font-weight', 'text-anchor',
+    'x', 'y',
+})
+
+
+def _is_safe_color(value: str) -> bool:
+    return len(value) < _MAX_ATTR_VALUE_LEN and not _UNSAFE_COLOR_RE.search(value)
+
+
+def _validate_edit_attrs(attrs: dict, existing_attrs: set[str]) -> Optional[str]:
+    """Return an error string if any attr/value is disallowed, else None."""
+    for key, value in attrs.items():
+        if not isinstance(key, str) or not _SAFE_ATTR_NAME_RE.match(key):
+            return f'invalid attribute name: {key}'
+        if not is_editable_attr(key):
+            return f'attribute not editable: {key}'
+        if key not in existing_attrs and key != 'transform' and key not in _ADDABLE_BATCH_ATTRS:
+            return f'attribute does not exist on element: {key}'
+        if value is None:
+            if key not in existing_attrs:
+                return f'attribute does not exist on element: {key}'
+            continue
+        if not isinstance(value, str):
+            return f'value must be a string: {key}'
+        if len(value) > _MAX_ATTR_VALUE_LEN:
+            return f'value too long: {key}'
+        if key in ('fill', 'stroke', 'color', 'stop-color', 'flood-color', 'lighting-color'):
+            if not _is_safe_color(value):
+                return f'unsafe color value: {key}'
+        if key == 'transform' and re.search(r'nan|inf', value, re.IGNORECASE):
+            return f'invalid transform value: {key}'
+        if any(c in value for c in '<>"'):
+            return f'invalid value: {key}'
+        if re.search(r'javascript\s*:|data\s*:|url\s*\(', value, re.IGNORECASE):
+            return f'unsafe value: {key}'
+    return None
+
+
+EDIT_LOG_NAME = 'edits.jsonl'
+ANNOTATION_LOG_NAME = 'annotations.jsonl'
+
+
+def _append_live_preview_log(project_path: Path, filename: str, record: dict) -> None:
+    """Append one live-preview history record under ``live_preview/``."""
+    try:
+        log_dir = _runtime_dir(project_path)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        with open(log_dir / filename, 'a', encoding='utf-8') as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + '\n')
+    except OSError as exc:
+        logger.warning('live preview log append failed: %s', exc)
+
+
+def _append_edit_log(project_path: Path, record: dict) -> None:
+    """Append one applied direct-edit record to the preview history."""
+    _append_live_preview_log(project_path, EDIT_LOG_NAME, record)
+
+

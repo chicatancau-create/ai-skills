@@ -1,0 +1,75 @@
+            _effect_filename(filename, digest, save_format),
+            out.getvalue(),
+            (),
+        )
+    except (KeyError, OSError, ValueError) as exc:
+        return filename, img_bytes, (
+            _effect_diagnostic(f"a:lum could not be rendered: {exc}"),
+        )
+
+
+def _pil_format_from_filename(filename: str) -> str | None:
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if ext in {"jpg", "jpeg"}:
+        return "JPEG"
+    if ext == "png":
+        return "PNG"
+    if ext == "gif":
+        return "GIF"
+    if ext == "webp":
+        return "WEBP"
+    return None
+
+
+def _effect_filename(filename: str, digest: str, image_format: str) -> str:
+    stem, sep, ext = filename.rpartition(".")
+    if not sep:
+        ext = (image_format or "png").lower()
+        stem = filename
+    if ext.lower() == "jpg":
+        ext = "jpeg"
+    return f"{stem}_fx_{digest}.{ext}"
+
+
+def _pct_attr(elem: ET.Element, name: str) -> float:
+    val = elem.attrib.get(name)
+    if val is None:
+        return 0.0
+    try:
+        return float(val) / 100000.0
+    except ValueError:
+        return 0.0
+
+
+def _build_href(filename: str, img_bytes: bytes, subdir: str, embed: bool) -> str:
+    """Build an <image href=...> value (relative path or data URI).
+
+    The path is relative to the SVG file's location. The slide assembler writes
+    SVGs to <output>/svg/, so media files in <output>/<subdir>/ resolve via
+    a leading "../".
+    """
+    if embed:
+        mime = (
+            mimetypes.guess_type(filename)[0]
+            or _sniff_mime(img_bytes)
+            or "application/octet-stream"
+        )
+        encoded = base64.b64encode(img_bytes).decode("ascii")
+        return f"data:{mime};base64,{encoded}"
+    rel = f"../{subdir}/{filename}" if subdir else f"../{filename}"
+    return rel
+
+
+def _sniff_mime(data: bytes) -> str | None:
+    """Best-effort MIME sniffing for embedded images."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
+        return "image/gif"
+    if data.startswith(b"<svg") or data.startswith(b"<?xml"):
+        return "image/svg+xml"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None

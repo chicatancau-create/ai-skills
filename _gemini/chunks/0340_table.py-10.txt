@@ -1,0 +1,108 @@
+        if (_cell_payload(table_rows[row_idx][col_idx]).get("align") or "ctr")
+        != _fallback_table_alignment(record.anchor)
+    })
+    if unmatched_anchors:
+        missing.append(
+            "columns[].align "
+            + "/".join(f'"{value}"' for value in unmatched_anchors)
+            + " (header cells export centred unless align is set)"
+        )
+    if not missing:
+        return []
+    return [
+        "Native PPTX table header style not projected from fallback: "
+        + ", ".join(missing)
+    ]
+
+
+def _native_table_fill_warnings(
+    table_rows: list[list[Any]],
+    header_rows: int,
+    column_edges: list[float],
+    row_edges: list[float],
+    shape_records: list[Any],
+) -> list[str]:
+    warnings: list[str] = []
+    col_count = len(column_edges) - 1
+    row_count = len(row_edges) - 1
+
+    def edge_index(value: float, edges: list[float]) -> int | None:
+        return next(
+            (idx for idx, edge in enumerate(edges) if abs(edge - value) <= 3),
+            None,
+        )
+
+    seen: set[tuple[str, int, int, str]] = set()
+    for record in shape_records:
+        if record.tag != "rect" or record.fill in {None, "FFFFFF"}:
+            continue
+        x1, y1, x2, y2 = record.bounds
+        start_col = edge_index(x1, column_edges)
+        end_col = edge_index(x2, column_edges)
+        start_row = edge_index(y1, row_edges)
+        end_row = edge_index(y2, row_edges)
+        if None in {start_col, end_col, start_row, end_row}:
+            continue
+        assert start_col is not None and end_col is not None
+        assert start_row is not None and end_row is not None
+        if end_col <= start_col or end_row <= start_row:
+            continue
+
+        label: tuple[str, int, int, str] | None = None
+        targets: list[tuple[int, int]] = []
+        if start_col == 0 and end_col == col_count and start_row >= header_rows:
+            label = ("row", start_row, end_row, record.fill)
+            targets = [
+                (row_idx, col_idx)
+                for row_idx in range(start_row, end_row)
+                for col_idx in range(col_count)
+            ]
+        elif (
+            start_row <= header_rows
+            and end_row == row_count
+            and end_col - start_col < col_count
+        ):
+            body_start = max(start_row, header_rows)
+            label = ("column", start_col, end_col, record.fill)
+            targets = [
+                (row_idx, col_idx)
+                for row_idx in range(body_start, end_row)
+                for col_idx in range(start_col, end_col)
+            ]
+        if label is None or label in seen or not targets:
+            continue
+        seen.add(label)
+        if all(
+            _hex_or_none(_cell_payload(table_rows[row_idx][col_idx]).get("fill"))
+            == record.fill
+            for row_idx, col_idx in targets
+        ):
+            continue
+        axis, start, end, color = label
+        human_start = start + 1
+        human_end = end
+        span = str(human_start) if human_start == human_end else f"{human_start}-{human_end}"
+        hint = (
+            f" (one fallback rect spanning several {axis}s reads as one whole-{axis} fill;"
+            " draw one rect per column or row when their payload fills differ)"
+            if human_start != human_end
+            else ""
+        )
+        warnings.append(
+            f"Native PPTX table whole {axis} {span} fill #{color} is not projected to cell fill{hint}"
+        )
+    return warnings
+
+
+def _native_table_body_text_warnings(
+    payload: dict[str, Any],
+    table_rows: list[list[Any]],
+    header_rows: int,
+    text_cells: list[tuple[Any, int, int]],
+) -> list[str]:
+    """Report fallback body text colours the payload would not carry."""
+    style = payload.get("style") if isinstance(payload.get("style"), dict) else {}
+    style_body_text = _hex_or_none(style.get("body_text"))
+    body_records = [item for item in text_cells if item[1] >= header_rows]
+    if not body_records:
+        return []

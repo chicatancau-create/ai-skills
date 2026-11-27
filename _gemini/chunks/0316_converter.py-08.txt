@@ -1,0 +1,111 @@
+            'Semantic shape geometry carrier produced no native shape'
+        )
+    text_body = _semantic_shape_text_body(shape, ctx)
+    return _append_shape_text(geometry, text_body) if text_body else geometry
+
+
+def _restore_placeholder_sp_pr(
+    shape: ShapeResult,
+    group: ET.Element,
+) -> ShapeResult:
+    """Restore an unchanged imported placeholder's local p:spPr container."""
+    metadata = _placeholder_sp_pr_metadata(group)
+    if metadata is None:
+        return shape
+    if metadata.get('data-pptx-encoding') != 'base64':
+        raise SvgNativeConversionError(
+            'placeholder spPr metadata requires base64 encoding'
+        )
+    expected_hash = metadata.get('data-pptx-ooxml-sha256')
+    if not expected_hash or not re.fullmatch(r'[0-9a-f]{64}', expected_hash):
+        raise SvgNativeConversionError(
+            'placeholder spPr metadata requires a lowercase SHA-256 digest'
+        )
+    try:
+        raw = base64.b64decode((metadata.text or '').strip(), validate=True)
+        sp_pr = ET.fromstring(raw)
+        decoded = raw.decode('utf-8')
+    except (ValueError, binascii.Error, UnicodeDecodeError, ET.ParseError) as exc:
+        raise SvgNativeConversionError(
+            f'Invalid placeholder spPr metadata: {exc}'
+        ) from exc
+    if hashlib.sha256(raw).hexdigest() != expected_hash:
+        raise SvgNativeConversionError(
+            'placeholder spPr metadata hash does not match its payload'
+        )
+    if sp_pr.tag != (
+        '{http://schemas.openxmlformats.org/presentationml/2006/main}spPr'
+    ):
+        raise SvgNativeConversionError(
+            'placeholder spPr metadata payload must be p:spPr'
+        )
+    if has_relationship_attributes(sp_pr):
+        raise SvgNativeConversionError(
+            'placeholder spPr metadata cannot contain relationships'
+        )
+    pattern = re.compile(r'<p:spPr>.*?</p:spPr>', re.DOTALL)
+    if pattern.search(shape.xml) is None:
+        raise SvgNativeConversionError(
+            'placeholder spPr metadata can only attach to p:sp'
+        )
+    decoded = _complete_placeholder_preset_adjustments(decoded, sp_pr)
+    return ShapeResult(
+        xml=pattern.sub(lambda _match: decoded, shape.xml, count=1),
+        bounds_emu=shape.bounds_emu,
+    )
+
+
+def _complete_placeholder_preset_adjustments(
+    decoded: str,
+    sp_pr: ET.Element,
+) -> str:
+    """Rewrite only a partially authored preset avLst in validated spPr XML."""
+    prst_geom = sp_pr.find(f'{{{DRAWINGML_NS}}}prstGeom')
+    if prst_geom is None:
+        return decoded
+    av_lst = prst_geom.find(f'{{{DRAWINGML_NS}}}avLst')
+    prst = prst_geom.get('prst')
+    if av_lst is None or not prst:
+        return decoded
+
+    authored: list[tuple[str, str]] = []
+    for guide in av_lst:
+        name = guide.get('name')
+        formula = guide.get('fmla')
+        if (
+            guide.tag != f'{{{DRAWINGML_NS}}}gd'
+            or name is None
+            or formula is None
+        ):
+            return decoded
+        authored.append((name, formula))
+
+    try:
+        completed = complete_preset_adjustments(prst, authored)
+    except UnknownPresetShapeError:
+        return decoded
+    authored_names = [name for name, _formula in authored]
+    defined_names = {name for name, _formula in completed}
+    if (
+        not 0 < len(authored) < len(completed)
+        or len(set(authored_names)) != len(authored_names)
+        or not set(authored_names).issubset(defined_names)
+    ):
+        return decoded
+
+    av_lst_pattern = re.compile(
+        r'(?P<open><(?P<qname>(?:[A-Za-z_][\w.-]*:)?avLst)\s*>)'
+        r'.*?'
+        r'(?P<close></(?P=qname)\s*>)',
+        re.DOTALL,
+    )
+    matches = list(av_lst_pattern.finditer(decoded))
+    if len(matches) != 1:
+        return decoded
+    match = matches[0]
+    prefix = match.group('qname')[:-len('avLst')]
+    guide_xml = ''.join(
+        f'<{prefix}gd name="{_xml_escape(name)}" '
+        f'fmla="{_xml_escape(formula)}"/>'
+        for name, formula in completed
+    )

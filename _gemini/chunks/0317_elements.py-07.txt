@@ -1,0 +1,101 @@
+    matrix = _context_transform_matrix(ctx)
+    if transform:
+        matrix = matrix_multiply(matrix, parse_transform_matrix(transform))
+    return matrix
+
+
+def _uses_full_transform(ctx: ConvertContext, transform: str | None) -> bool:
+    return ctx.use_transform_matrix or bool(transform)
+
+
+def _transformed_point(
+    ctx: ConvertContext,
+    x: float,
+    y: float,
+    transform: str | None,
+) -> tuple[float, float]:
+    if _uses_full_transform(ctx, transform):
+        return transform_point(_combined_transform_matrix(ctx, transform), x, y)
+    return ctx_x(x, ctx), ctx_y(y, ctx)
+
+
+def _shape_xfrm_from_svg_rect(
+    ctx: ConvertContext,
+    raw_x: float,
+    raw_y: float,
+    raw_w: float,
+    raw_h: float,
+    resolved_x: float,
+    resolved_y: float,
+    resolved_w: float,
+    resolved_h: float,
+    transform: str | None,
+    *,
+    preserve_degenerate_axes: bool = False,
+) -> tuple[str, int, int, int, int, tuple[int, int, int, int]]:
+    """Build DrawingML xfrm data for an SVG rectangle-like element."""
+    if _uses_full_transform(ctx, transform):
+        return rect_to_dml_xfrm(
+            raw_x, raw_y, raw_w, raw_h,
+            _combined_transform_matrix(ctx, transform),
+            preserve_degenerate_axes=preserve_degenerate_axes,
+        )
+
+    off_x = px_to_emu(resolved_x)
+    off_y = px_to_emu(resolved_y)
+    ext_cx = px_to_emu(resolved_w)
+    ext_cy = px_to_emu(resolved_h)
+    validate_ooxml_xfrm(off_x, off_y, ext_cx, ext_cy)
+    return '', off_x, off_y, ext_cx, ext_cy, (off_x, off_y, off_x + ext_cx, off_y + ext_cy)
+
+
+# ---------------------------------------------------------------------------
+# rect
+# ---------------------------------------------------------------------------
+
+# Cubic-Bézier control distance for approximating a quarter circle / ellipse.
+# Distance from corner to control point along the tangent, expressed as a
+# fraction of the radius. Standard "magic number" for a 90° arc (max error
+# ~0.027% of the radius).
+_BEZIER_QUARTER_K = 0.5522847498
+
+
+# The hash-locked shared catalog is the single source of truth for the 187
+# ECMA-376 ``ST_ShapeType`` values. Loading it here makes exporter validation
+# fail closed if the catalog is missing, corrupt, or incomplete.
+PPTX_PRESET_SHAPE_TYPES = frozenset(load_shape_type_values())
+
+_PPTX_AV_PREFIX = 'data-pptx-av-'
+_PPTX_GUIDE_NAME_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_.-]{0,63}')
+_PPTX_VAL_FORMULA_RE = re.compile(r'val[\t ]+([+-]?\d+)')
+def _parse_preset_geometry_metadata(
+    elem: ET.Element,
+) -> tuple[str | None, list[tuple[str, str]], tuple[float, float, float, float] | None]:
+    """Parse and validate rendering-neutral preset geometry metadata."""
+    status = (elem.get('data-pptx-geometry-status') or '').strip()
+    authoring = elem.get(AUTHORING_ATTR)
+    if authoring not in {None, AUTHORING_VALUE}:
+        raise ValueError(f'Unsupported {AUTHORING_ATTR} value {authoring!r}')
+    if authoring == AUTHORING_VALUE:
+        object_kind = elem.get('data-pptx-object')
+        if object_kind not in {'shape', 'connector'}:
+            raise ValueError(
+                'Authored preset metadata requires data-pptx-object='
+                '"shape" or "connector"'
+            )
+        preset = elem.get('data-pptx-prst')
+        if preset is None:
+            raise ValueError('Authored preset metadata requires data-pptx-prst')
+        if preset in CONNECTOR_PRESET_TYPES and object_kind != 'connector':
+            raise ValueError(
+                f'Connector preset {preset!r} requires '
+                'data-pptx-object="connector"'
+            )
+        if object_kind == 'connector' and preset not in CONNECTOR_PRESET_TYPES:
+            raise ValueError(
+                f'Authored connector requires a connector preset, got {preset!r}'
+            )
+        if elem.get('data-pptx-frame') is None:
+            raise ValueError('Authored preset metadata requires data-pptx-frame')
+    if status not in {'', 'exact', 'unsupported'}:
+        raise ValueError(

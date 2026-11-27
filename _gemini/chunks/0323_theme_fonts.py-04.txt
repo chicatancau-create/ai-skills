@@ -1,0 +1,96 @@
+        if supplemental.get("script") in _CJK_THEME_SCRIPTS:
+            supplemental.set("typeface", face.ea)
+        elif supplemental.get("script") in cs_scripts:
+            supplemental.set("typeface", face.cs)
+
+
+def apply_theme_font_spec(extract_dir: Path, spec: ThemeFontSpec) -> None:
+    """Install locked major/minor fonts into every existing PPTX theme part."""
+    theme_dir = extract_dir / "ppt" / "theme"
+    theme_paths = sorted(theme_dir.glob("theme*.xml"))
+    if not theme_paths:
+        raise ThemeFontError(f"PPTX package has no theme part under {theme_dir}")
+
+    ET.register_namespace("a", DML_NS)
+    for theme_path in theme_paths:
+        try:
+            tree = ET.parse(theme_path)
+        except (OSError, ET.ParseError) as exc:
+            raise ThemeFontError(f"Cannot parse {theme_path}: {exc}") from exc
+        font_scheme = tree.getroot().find(f".//{{{DML_NS}}}fontScheme")
+        if font_scheme is None:
+            raise ThemeFontError(f"Theme has no fontScheme: {theme_path}")
+        major = font_scheme.find(f"{{{DML_NS}}}majorFont")
+        minor = font_scheme.find(f"{{{DML_NS}}}minorFont")
+        if major is None or minor is None:
+            raise ThemeFontError(f"Theme has no major/minor font collection: {theme_path}")
+        font_scheme.set("name", "PPT Master")
+        _patch_font_collection(major, spec.major, spec.cs_scripts)
+        _patch_font_collection(minor, spec.minor, spec.cs_scripts)
+        tree.write(theme_path, encoding="utf-8", xml_declaration=True)
+
+
+def _style_run_properties(style: ET.Element, label: str) -> list[ET.Element]:
+    run_properties = list(style.iter(f"{{{DML_NS}}}defRPr"))
+    if not run_properties:
+        raise ThemeFontError(f"slide master {label} has no a:defRPr entries")
+    return run_properties
+
+
+def _style_level_run_properties(
+    style: ET.Element,
+    label: str,
+) -> tuple[ET.Element, ...]:
+    """Return direct level 1-9 defaults from one Master text style."""
+    levels: list[ET.Element] = []
+    for level in range(1, 10):
+        run_properties = style.find(
+            f"{{{DML_NS}}}lvl{level}pPr/{{{DML_NS}}}defRPr"
+        )
+        if run_properties is None:
+            raise ThemeFontError(
+                f"slide master {label} has no level-{level} a:defRPr"
+            )
+        levels.append(run_properties)
+    return tuple(levels)
+
+
+def apply_master_text_style_spec(
+    extract_dir: Path,
+    spec: MasterTextStyleSpec,
+) -> int:
+    """Install declared title/body anchors into generated slide-master txStyles."""
+    master_dir = extract_dir / "ppt" / "slideMasters"
+    master_paths = sorted(master_dir.glob("slideMaster*.xml"))
+    if not master_paths:
+        raise ThemeFontError(f"PPTX package has no slide master under {master_dir}")
+
+    ET.register_namespace("a", DML_NS)
+    ET.register_namespace("p", PML_NS)
+    for master_path in master_paths:
+        try:
+            tree = ET.parse(master_path)
+        except (OSError, ET.ParseError) as exc:
+            raise ThemeFontError(f"Cannot parse {master_path}: {exc}") from exc
+        text_styles = tree.getroot().find(f"{{{PML_NS}}}txStyles")
+        if text_styles is None:
+            raise ThemeFontError(f"Slide master has no p:txStyles: {master_path}")
+
+        title_style = text_styles.find(f"{{{PML_NS}}}titleStyle")
+        if title_style is None:
+            raise ThemeFontError(
+                f"Slide master has no p:titleStyle: {master_path}"
+            )
+        for run_properties in _style_run_properties(
+            title_style,
+            "p:titleStyle",
+        ):
+            run_properties.set("sz", str(spec.title_hpt))
+
+        body_levels = spec.body_levels_hpt
+        for style_name in ("bodyStyle", "otherStyle"):
+            style = text_styles.find(f"{{{PML_NS}}}{style_name}")
+            if style is None:
+                raise ThemeFontError(
+                    f"Slide master has no p:{style_name}: {master_path}"
+                )

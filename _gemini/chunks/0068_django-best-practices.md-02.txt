@@ -1,0 +1,139 @@
+### Service Layer Pattern
+
+```python
+# apps/orders/services.py
+from django.db import transaction
+
+class OrderService:
+    @staticmethod
+    @transaction.atomic
+    def create_order(user, items_data: list[dict]) -> Order:
+        total = sum(item['price'] * item['quantity'] for item in items_data)
+        order = Order.objects.create(user=user, total=total)
+        OrderItem.objects.bulk_create([
+            OrderItem(order=order, **item) for item in items_data
+        ])
+        return order
+
+    @staticmethod
+    def cancel_order(order_id: str, user) -> Order:
+        order = Order.objects.select_for_update().get(id=order_id, user=user)
+        order.cancel()
+        return order
+```
+
+### Serializers
+
+```python
+class OrderSerializer(serializers.ModelSerializer):
+    items = OrderItemSerializer(many=True, read_only=True)
+    class Meta:
+        model = Order
+        fields = ['id', 'status', 'total', 'items', 'created_at']
+        read_only_fields = ['id', 'total', 'created_at']
+
+class CreateOrderSerializer(serializers.Serializer):
+    """Input-only serializer — separate from output."""
+    items = serializers.ListField(
+        child=serializers.DictField(), min_length=1, max_length=50,
+    )
+    def validate_items(self, items):
+        for item in items:
+            if item.get('quantity', 0) < 1:
+                raise serializers.ValidationError("Quantity must be at least 1")
+        return items
+```
+
+### Views (Thin!)
+
+```python
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def create_order(request):
+    serializer = CreateOrderSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    order = OrderService.create_order(request.user, serializer.validated_data['items'])
+    return Response({'data': OrderSerializer(order).data}, status=status.HTTP_201_CREATED)
+```
+
+### Rules
+
+```
+✅ Separate input serializers from output serializers
+✅ Views only: validate → call service → serialize → respond
+✅ Use @transaction.atomic for multi-model writes
+
+❌ Never put business logic in views or serializers
+❌ Never use ModelSerializer for write operations (too implicit)
+```
+
+---
+
+## 4. Authentication (HIGH)
+
+| Method | When | Frontend |
+|--------|------|----------|
+| Session | Same-domain, SSR, Django templates | Django templates / htmx |
+| JWT | Different domain, SPA, mobile | React, Vue, mobile apps |
+| OAuth2 | Third-party login, API consumers | Any |
+
+### JWT Config (djangorestframework-simplejwt)
+
+```python
+SIMPLE_JWT = {
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=15),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+    'ROTATE_REFRESH_TOKENS': True,
+    'BLACKLIST_AFTER_ROTATION': True,
+}
+```
+
+---
+
+## 5. Performance Optimization (HIGH)
+
+### N+1 Query Prevention
+
+```python
+# ❌ N+1: 1 query for orders + N queries for users
+orders = Order.objects.all()
+for o in orders:
+    print(o.user.email)     # hits DB each iteration
+
+# ✅ select_related (FK/OneToOne — JOIN)
+orders = Order.objects.select_related('user').all()
+
+# ✅ prefetch_related (ManyToMany/reverse FK — 2 queries)
+orders = Order.objects.prefetch_related('items').all()
+
+# ✅ Combined
+orders = Order.objects.select_related('user').prefetch_related('items').all()
+```
+
+### Query Optimization Toolkit
+
+```python
+# Only fetch needed columns
+User.objects.values('id', 'email')
+User.objects.values_list('email', flat=True)
+
+# Annotate instead of Python loops
+from django.db.models import Count, Sum
+Order.objects.annotate(item_count=Count('items'), revenue=Sum('items__price'))
+
+# Bulk operations
+OrderItem.objects.bulk_create([...])
+Order.objects.filter(status='pending').update(status='cancelled')
+
+# Database indexes
+class Meta:
+    indexes = [
+        models.Index(fields=['user', 'status']),
+        models.Index(fields=['-created_at']),
+        models.Index(fields=['email'], condition=Q(is_active=True)),
+    ]
+
+# Pagination
+from rest_framework.pagination import CursorPagination
+class OrderPagination(CursorPagination):
+    page_size = 20

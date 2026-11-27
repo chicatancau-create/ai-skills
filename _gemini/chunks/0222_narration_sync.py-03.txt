@@ -1,0 +1,124 @@
+        raise ValueError(f"No subtitle cues found: {path}")
+    return cues
+
+
+def _format_srt(cues: list[SubtitleCue]) -> str:
+    blocks = []
+    for index, cue in enumerate(cues, 1):
+        blocks.append(
+            f"{index}\n"
+            f"{_ms_to_timestamp(cue.start_ms)} --> "
+            f"{_ms_to_timestamp(cue.end_ms)}\n"
+            f"{cue.text}"
+        )
+    return "\n\n".join(blocks) + "\n"
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        stream = os.fdopen(descriptor, "w", encoding="utf-8", newline="\n")
+        descriptor = -1
+        with stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary_path.unlink(missing_ok=True)
+
+
+def _project_path(project_path: Path, value: str | None, default: Path) -> Path:
+    path = Path(value) if value else default
+    return path if path.is_absolute() else project_path / path
+
+
+def _project_input_path(project_path: Path, value: str) -> Path:
+    """Resolve an input path: absolute, or existing as given, else project-relative."""
+    path = Path(value)
+    if path.is_absolute() or path.exists():
+        return path
+    return project_path / path
+
+
+def _require_replaceable(path: Path, force: bool) -> None:
+    if path.exists() and not force:
+        raise FileExistsError(f"Output already exists: {path}; pass --force to replace it")
+
+
+def _reject_output_alias(
+    output_path: Path,
+    input_paths: list[Path],
+    *,
+    label: str,
+) -> None:
+    output_resolved = output_path.resolve()
+    for input_path in input_paths:
+        if output_resolved == input_path.resolve():
+            raise ValueError(
+                f"{label} output must not overwrite an input file: {output_path}"
+            )
+
+
+def _subtitle_fingerprint(slide_names: list[str], subtitle_dir: Path) -> str:
+    digest = hashlib.sha256()
+    for slide_name in slide_names:
+        path = subtitle_dir / f"{slide_name}.srt"
+        digest.update(slide_name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _finite_non_negative_seconds(value: object, field: str) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or value < 0
+    ):
+        raise ValueError(f'{field} must be a finite non-negative number')
+    return float(value)
+
+
+def _load_timing_plan(
+    path: Path,
+) -> tuple[str, float, float | None, dict[str, list[TimingPlanEntry]]]:
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError(f"Narration timing plan must be a JSON object: {path}")
+    unknown_top = set(raw) - {
+        "version",
+        "srt_sha256",
+        "narration_padding",
+        "narration_start_floor",
+        "slides",
+    }
+    if unknown_top:
+        raise ValueError(
+            f"Narration timing plan has unknown top-level field(s): "
+            f"{', '.join(sorted(unknown_top))}"
+        )
+    if raw.get("version") != 1:
+        raise ValueError(
+            f"Unsupported narration timing plan version: {raw.get('version')!r}"
+        )
+    srt_sha256 = raw.get("srt_sha256")
+    if (
+        not isinstance(srt_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", srt_sha256) is None
+    ):
+        raise ValueError(
+            'Narration timing plan field "srt_sha256" must be a lowercase '
+            "SHA-256 digest of the ordered page-local SRT files"
+        )
+    narration_padding = _finite_non_negative_seconds(

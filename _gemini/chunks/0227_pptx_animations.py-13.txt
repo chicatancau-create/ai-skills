@@ -1,0 +1,108 @@
+    actual_duration = _row_effective_duration_ms(row)
+    if actual_duration is not None and actual_duration < 100:
+        # Millisecond quantization necessarily collapses multi-step ratios at
+        # sub-100ms speeds; structure and total duration remain authoritative.
+        return True
+    actual_profile = _row_timing_profile(row)
+    template_profile = _row_timing_profile(template)
+    if len(actual_profile) != len(template_profile):
+        return False
+    for actual, expected in zip(actual_profile, template_profile):
+        if actual[0] != expected[0]:
+            return False
+        if abs(actual[1] - expected[1]) > 0.01:
+            return False
+        if abs(actual[2] - expected[2]) > 0.01:
+            return False
+    return True
+
+
+def _format_decimal(value: float) -> str:
+    """Format one finite decimal without exponent notation or negative zero."""
+    rendered = f'{value:.9f}'.rstrip('0').rstrip('.')
+    return '0' if rendered in {'', '-0'} else rendered
+
+
+def _color_element(value: str) -> ET.Element:
+    if value.startswith('#'):
+        return ET.Element(_qn(_DML_NS, 'srgbClr'), {'val': value[1:]})
+    return ET.Element(_qn(_DML_NS, 'schemeClr'), {'val': value.split(':', 1)[1]})
+
+
+def _replace_animation_colors(row: ET.Element, value: str) -> None:
+    parent_map = {
+        child: parent
+        for parent in row.iter()
+        for child in list(parent)
+    }
+    color_tags = {
+        _qn(_DML_NS, 'srgbClr'),
+        _qn(_DML_NS, 'schemeClr'),
+        _qn(_DML_NS, 'hslClr'),
+        _qn(_DML_NS, 'scrgbClr'),
+        _qn(_DML_NS, 'sysClr'),
+        _qn(_DML_NS, 'prstClr'),
+    }
+    colors = [element for element in row.iter() if element.tag in color_tags]
+    if not colors:
+        raise RuntimeError('color-capable animation preset lost its color node')
+    for color in colors:
+        parent = parent_map[color]
+        index = list(parent).index(color)
+        parent.remove(color)
+        parent.insert(index, _color_element(value))
+
+
+def _set_effect_option_value(
+    row: ET.Element,
+    animation: str,
+    name: str,
+    value: object,
+) -> None:
+    if name == 'amount' and animation == 'emphasis_spin':
+        rotations = list(row.iter(_qn(PML_NS, 'animRot')))
+        if len(rotations) != 1:
+            raise RuntimeError('emphasis_spin preset lost its p:animRot node')
+        rotations[0].set('by', str(round(float(value) * 60000)))
+        return
+    if name == 'amount' and animation == 'emphasis_transparency':
+        matched = False
+        for node in row.iter(_qn(PML_NS, 'set')):
+            attributes = {
+                (attribute.text or '').strip()
+                for attribute in node.iter(_qn(PML_NS, 'attrName'))
+            }
+            if 'style.opacity' not in attributes:
+                continue
+            values = list(node.iter(_qn(PML_NS, 'strVal')))
+            if len(values) != 1:
+                raise RuntimeError(
+                    'emphasis_transparency preset lost its opacity value'
+                )
+            values[0].set('val', _format_decimal(1 - float(value)))
+            matched = True
+        if not matched:
+            raise RuntimeError(
+                'emphasis_transparency preset lost its opacity behavior'
+            )
+        return
+    if name == 'color':
+        _replace_animation_colors(row, str(value))
+        return
+    if name == 'font_name':
+        matched = False
+        for node in row.iter(_qn(PML_NS, 'set')):
+            attributes = {
+                (attribute.text or '').strip()
+                for attribute in node.iter(_qn(PML_NS, 'attrName'))
+            }
+            if 'style.fontFamily' not in attributes:
+                continue
+            values = list(node.iter(_qn(PML_NS, 'strVal')))
+            if len(values) != 1:
+                raise RuntimeError(
+                    'emphasis_change_font preset lost its font value'
+                )
+            values[0].set('val', str(value))
+            matched = True
+        if not matched:

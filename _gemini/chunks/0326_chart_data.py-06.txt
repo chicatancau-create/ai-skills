@@ -1,0 +1,99 @@
+    return plot_area
+
+
+def _chart_plot_area_layout(
+    chart_data: dict[str, Any],
+    chart_bounds: tuple[int, int, int, int],
+) -> tuple[float, float, float, float] | None:
+    """Resolve an absolute plot-area box to chart-relative manual-layout factors."""
+    plot_area = chart_data.get("plot_area")
+    if plot_area is None:
+        return None
+
+    chart_x, chart_y, chart_width, chart_height = chart_bounds
+    plot_x = _powerpoint_emu(plot_area["x"], "chart plot_area.x")
+    plot_y = _powerpoint_emu(plot_area["y"], "chart plot_area.y")
+    plot_width = _powerpoint_emu(
+        plot_area["width"],
+        "chart plot_area.width",
+        positive=True,
+    )
+    plot_height = _powerpoint_emu(
+        plot_area["height"],
+        "chart plot_area.height",
+        positive=True,
+    )
+    if (
+        plot_x < chart_x
+        or plot_y < chart_y
+        or plot_x + plot_width > chart_x + chart_width
+        or plot_y + plot_height > chart_y + chart_height
+    ):
+        raise RuntimeError(
+            "Native PPTX chart plot_area must be fully contained within the chart frame"
+        )
+    return (
+        (plot_x - chart_x) / chart_width,
+        (plot_y - chart_y) / chart_height,
+        plot_width / chart_width,
+        plot_height / chart_height,
+    )
+
+
+def _doughnut_hole_size(payload: dict[str, Any], chart_type: str) -> int | None:
+    """Normalize the closed doughnut-hole percentage contract."""
+    raw = payload.get("hole_size")
+    if chart_type != "doughnut":
+        if raw is not None:
+            raise RuntimeError(
+                "Native PPTX chart hole_size is supported for doughnut charts only"
+            )
+        return None
+    if raw is None:
+        return 75
+    if not isinstance(raw, (int, float)) or isinstance(raw, bool):
+        raise RuntimeError("Native PPTX doughnut hole_size must be a numeric integer")
+    value = _chart_number(raw)
+    if not float(value).is_integer():
+        raise RuntimeError("Native PPTX doughnut hole_size must be an integer")
+    hole_size = int(value)
+    if not 10 <= hole_size <= 90:
+        raise RuntimeError(
+            "Native PPTX doughnut hole_size must be between 10 and 90"
+        )
+    return hole_size
+
+
+def _chart_kind(payload: dict[str, Any]) -> tuple[str, str | None, str | None]:
+    raw_type = payload.get("type") or payload.get("chart_type") or "column"
+    key = _compact_key(raw_type)
+    aliases: dict[str, tuple[str, str | None, str | None]] = {
+        "area": ("area", "standard", None),
+        "areastacked": ("area", "stacked", None),
+        "areastacked100": ("area", "percentStacked", None),
+        "area100": ("area", "percentStacked", None),
+        "bar": ("bar", "clustered", None),
+        "barofpie": ("of_pie", None, "bar"),
+        "barclustered": ("bar", "clustered", None),
+        "barstacked": ("bar", "stacked", None),
+        "barstacked100": ("bar", "percentStacked", None),
+        "boxandwhisker": ("box_whisker", None, None),
+        "boxplot": ("box_whisker", None, None),
+        "boxwhisker": ("box_whisker", None, None),
+        "bubble": ("bubble", None, None),
+        "bullet": ("bullet", None, None),
+        "bulletchart": ("bullet", None, None),
+        "combo": ("combo", None, None),
+        "combochart": ("combo", None, None),
+        "choropleth": ("map", None, None),
+        "conebarclustered": ("bar3d", "clustered", "cone"),
+        "conebarstacked": ("bar3d", "stacked", "cone"),
+        "conebarstacked100": ("bar3d", "percentStacked", "cone"),
+        "conecol": ("column3d", "clustered", "cone"),
+        "conecolclustered": ("column3d", "clustered", "cone"),
+        "conecolstacked": ("column3d", "stacked", "cone"),
+        "conecolstacked100": ("column3d", "percentStacked", "cone"),
+        "col": ("column", "clustered", None),
+        "column": ("column", "clustered", None),
+        "columnclustered": ("column", "clustered", None),
+        "columnstacked": ("column", "stacked", None),

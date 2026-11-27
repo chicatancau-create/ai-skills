@@ -1,0 +1,92 @@
+            if delimiters is not None:
+                return Delimiter(delimiters[0], delimiters[1], (Sequence((matrix,)),))
+            return matrix
+
+        eq_rows: list[Sequence] = []
+        for row in rows:
+            children: list[Node] = []
+            for index, cell in enumerate(row):
+                if index:
+                    children.append(AlignmentPoint())
+                children.extend(cell.children)
+            eq_rows.append(Sequence(tuple(children)))
+        equation_array = EquationArray(tuple(eq_rows))
+        if environment == "cases":
+            return Delimiter("{", "", (Sequence((equation_array,)),))
+        if environment == "rcases":
+            return Delimiter("", "}", (Sequence((equation_array,)),))
+        return equation_array
+
+    def _parse_cd_environment(self) -> Matrix:
+        ending = r"\end{CD}"
+        closing = self.source.find(ending, self.position)
+        if closing < 0:
+            self._fail("Unclosed formula environment 'CD'")
+        raw = self.source[self.position:closing]
+        self.position = closing + len(ending)
+        raw_rows = re.split(r"\\\\|\\cr(?![A-Za-z])", raw)
+        if raw_rows and not raw_rows[-1].strip():
+            raw_rows.pop()
+        rows: list[tuple[Sequence, ...]] = []
+        for raw_row in raw_rows:
+            row = raw_row.strip()
+            if not row:
+                self._fail("Environment 'CD' cannot contain an empty row")
+            horizontal_parts = re.split(r"@(>>>|<<<)", row)
+            if len(horizontal_parts) > 1:
+                cells: list[Sequence] = []
+                for index, part in enumerate(horizontal_parts):
+                    if index % 2:
+                        cells.append(Sequence((Text(
+                            "→" if part == ">>>" else "←",
+                            _ROMAN_STYLE,
+                        ),)))
+                    else:
+                        if "@" in part:
+                            self._fail(
+                                "Environment 'CD' supports only @>>>, @<<<, @VVV, and @AAA"
+                            )
+                        cells.append(self._parse_fragment(part.strip()))
+                rows.append(tuple(cells))
+                continue
+            vertical_tokens = re.findall(r"@(VVV|AAA)", row)
+            vertical_remainder = re.sub(r"@(VVV|AAA)|[&\s]", "", row)
+            if vertical_tokens and not vertical_remainder:
+                cells: list[Sequence] = []
+                for index, token in enumerate(vertical_tokens):
+                    if index:
+                        cells.append(Sequence(()))
+                    cells.append(Sequence((Text(
+                        "↓" if token == "VVV" else "↑",
+                        _ROMAN_STYLE,
+                    ),)))
+                rows.append(tuple(cells))
+                continue
+            if "@" in row:
+                self._fail("Environment 'CD' supports only @>>>, @<<<, @VVV, and @AAA")
+            rows.append(tuple(self._parse_fragment(cell.strip()) for cell in row.split("&")))
+        if not rows:
+            self._fail("Environment 'CD' cannot be empty")
+        column_count = max(len(row) for row in rows)
+        padded_rows = tuple(
+            (*row, *(Sequence(()) for _ in range(column_count - len(row))))
+            for row in rows
+        )
+        return Matrix(
+            "CD",
+            padded_rows,
+            tuple("center" for _ in range(column_count)),
+        )
+
+    def _parse_environment_rows(
+        self,
+        environment: str,
+    ) -> tuple[tuple[Sequence, ...], ...]:
+        rows: list[tuple[Sequence, ...]] = []
+        row: list[Sequence] = []
+        while True:
+            cell = self._parse_nested_sequence(stop_at_environment_boundary=True)
+            row.append(cell)
+            if self.position < len(self.source) and self.source[self.position] == "&":
+                self.position += 1
+                continue

@@ -1,0 +1,88 @@
+        from project_utils import find_all_projects
+
+        projects = find_all_projects(base_dir)
+
+        for project in projects:
+            print(f"\n{'=' * 80}")
+            print(f"Checking project: {project.name}")
+            print("=" * 80)
+            checker.check_directory(str(project))
+    else:
+        checker.partial_roster = stage in {"early", "page", "first-page"}
+        if roundtrip:
+            checker.check_roundtrip_workspace(target)
+        elif stage == "early":
+            early_files = _early_targets(target)
+            if not early_files:
+                print("[ERROR] --stage early found no authored SVG pages")
+                sys.exit(1)
+            print(
+                f"\n[SCAN] Checking {len(early_files)} authored SVG page(s) "
+                "for the early gate...\n"
+            )
+            checker.scan_banner = False
+            for svg_file in early_files:
+                checker.check_directory(str(svg_file), expected_format)
+            checker.scan_banner = True
+        else:
+            if stage == "first-page":
+                check_target = _first_page_target(target)
+            elif stage == "page":
+                try:
+                    check_target = _page_target(target, page or "")
+                except ValueError as exc:
+                    print(f"[ERROR] {exc}")
+                    sys.exit(1)
+            else:
+                check_target = target
+            checker.check_directory(check_target, expected_format)
+
+    if not roundtrip and stage == "final" and Path(target).is_dir():
+        if checker._structured_native_slots:
+            print(
+                "[TIP] Structured "
+                + "/".join(checker._structured_native_slots)
+                + " placeholder slot(s) are filled by native objects: this deck "
+                "exports only with --native-charts-and-tables and the standard "
+                "export fails, and the object inside the slot is no top-level animation "
+                "anchor; for both forms author it as a Slide-local marker group "
+                "beside the slots instead."
+            )
+        if checker._has_incomplete_page_roster:
+            print(
+                "[TIP] This final-stage run found an incomplete page roster. "
+                "During serial authoring, use --stage early for the mid-roster "
+                "gate; keep --stage final for the complete deck."
+            )
+
+    checker.print_summary()
+
+    if "--export" in sys.argv:
+        output_file = "svg_quality_report.txt"
+        if "--output" in sys.argv:
+            idx = sys.argv.index("--output")
+            if idx + 1 < len(sys.argv):
+                output_file = sys.argv[idx + 1]
+        checker.export_report(output_file)
+
+    if "--json" in sys.argv or "--json-output" in sys.argv:
+        if "--json-output" in sys.argv:
+            idx = sys.argv.index("--json-output")
+            if idx + 1 >= len(sys.argv):
+                print("[ERROR] --json-output requires a path")
+                sys.exit(1)
+            json_output = Path(sys.argv[idx + 1])
+        else:
+            json_output = _default_json_report_path(
+                checker, target, stage, roundtrip=roundtrip,
+            )
+        checker.export_json_report(
+            str(json_output),
+            target=target,
+            stage=stage,
+        )
+
+    if checker.summary["errors"] > 0:
+        sys.exit(1)
+    else:
+        sys.exit(0)

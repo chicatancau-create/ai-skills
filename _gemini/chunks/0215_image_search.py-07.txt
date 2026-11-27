@@ -1,0 +1,120 @@
+                review_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return None
+
+
+def _write_candidate_review_sheet(
+    cand_dir: Path,
+    pool: list[dict],
+) -> Optional[Path]:
+    """Build a contact sheet from only the current candidate pool reviews."""
+    review_paths: list[Path] = []
+    for entry in pool:
+        review = entry.get("review")
+        if not isinstance(review, str):
+            continue
+        review_path = cand_dir / review
+        if review_path.is_file():
+            review_paths.append(review_path)
+    if not review_paths:
+        return None
+
+    try:
+        from rotate_images import ImageRotator
+    except ImportError:
+        return None
+
+    output_path = cand_dir / "review_sheet.jpg"
+    with tempfile.TemporaryDirectory(
+        prefix=".candidate-review-",
+        dir=str(cand_dir),
+    ) as temporary_dir:
+        staging_dir = Path(temporary_dir)
+        for review_path in review_paths:
+            shutil.copy2(review_path, staging_dir / review_path.name)
+        staged_sheet = staging_dir / output_path.name
+        ImageRotator().generate_contact_sheet(staging_dir, staged_sheet)
+        os.replace(staged_sheet, output_path)
+    return output_path
+
+
+def _candidate_dedupe_key(
+    provider_name: str,
+    candidate: AssetCandidate,
+) -> str:
+    """Return a stable-enough key for one search window's cross-provider pool."""
+    original_url = candidate.download_url.split("?", 1)[0].rstrip("/").casefold()
+    if original_url:
+        return original_url
+    return f"{provider_name}:{candidate.asset_id or candidate.source_page_url}"
+
+
+def _dedupe_ranked_candidates(
+    ranked: list[tuple[float, str, AssetCandidate]],
+) -> list[tuple[float, str, AssetCandidate]]:
+    """Keep the highest-scoring occurrence of each cross-query asset."""
+    deduped: list[tuple[float, str, AssetCandidate]] = []
+    seen: set[str] = set()
+    for item in sorted(ranked, key=lambda entry: entry[0], reverse=True):
+        _score, provider_name, candidate = item
+        key = _candidate_dedupe_key(provider_name, candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
+def _retained_pool_candidates(
+    meta_path: Path,
+    review_dir: Path,
+    request: ImageSearchRequest,
+    *,
+    current_ranks: set[int],
+) -> tuple[list[dict], list[int]]:
+    """Keep earlier pages of the same pool so any saved thumbnail stays promotable.
+
+    A pool belongs together while the target filename and query are unchanged;
+    a new query replaces it. Entries whose review file disappeared are dropped.
+    """
+    if not meta_path.is_file():
+        return [], []
+    try:
+        existing = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return [], []
+    if not isinstance(existing, dict):
+        return [], []
+    prior_request = existing.get("request")
+    if (
+        existing.get("target_filename") != request.filename
+        or not isinstance(prior_request, dict)
+        or str(prior_request.get("query") or "") != request.query
+    ):
+        return [], []
+    retained: list[dict] = []
+    for entry in existing.get("candidates") or []:
+        if not isinstance(entry, dict):
+            continue
+        rank = entry.get("rank")
+        review = entry.get("review")
+        if (
+            not isinstance(rank, int)
+            or isinstance(rank, bool)
+            or rank in current_ranks
+            or not isinstance(review, str)
+            or not (review_dir / Path(review).name).is_file()
+        ):
+            continue
+        retained.append(entry)
+    saved_pages = [
+        page
+        for page in existing.get("saved_pages") or [existing.get("candidate_page")]
+        if isinstance(page, int) and not isinstance(page, bool) and page > 0
+    ]
+    return retained, saved_pages
+
+
+def _save_candidate_thumbnails(
+    ranked: list[tuple[float, str, AssetCandidate]],

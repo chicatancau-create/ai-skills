@@ -1,0 +1,99 @@
+    function submitStage(payload, nextStage) {
+        var btn = document.getElementById("btn-confirm");
+        btn.disabled = true;
+        fetch("/api/confirm", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        }).then(function (r) {
+            if (!r.ok) throw new Error("stage submit failed");
+            showDeriving();
+            pollForStage(nextStage);
+        }).catch(function () {
+            btn.disabled = false;
+            document.getElementById("confirm-status").textContent = t("error_retry");
+        });
+    }
+
+    function imageUsageValid(value) {
+        var ids = selectedImageUsageIds(value);
+        if (!ids.length) {
+            document.getElementById("confirm-status").textContent = t("image_usage_required");
+            return false;
+        }
+        if (ids.indexOf("none") >= 0 && ids.length > 1) {
+            document.getElementById("confirm-status").textContent = t("image_usage_none_exclusive");
+            return false;
+        }
+        return true;
+    }
+
+    function templateSelectionValid() {
+        var valid = TEMPLATE_MODE === "free_design" ||
+            (TEMPLATE_MODE === "templates" && TEMPLATE_SELECTED_KEYS.length > 0);
+        if (!valid) {
+            document.getElementById("confirm-status").textContent =
+                t("template_selection_required");
+            return false;
+        }
+        if (TEMPLATE_MODE === "templates") {
+            var seenKinds = Object.create(null);
+            for (var i = 0; i < TEMPLATE_SELECTED_KEYS.length; i += 1) {
+                var candidate = templateCandidateByKey(TEMPLATE_SELECTED_KEYS[i]);
+                if (!candidate) continue;
+                if (seenKinds[candidate.kind]) {
+                    document.getElementById("confirm-status").textContent =
+                        t("template_selection_conflict");
+                    return false;
+                }
+                seenKinds[candidate.kind] = true;
+            }
+        }
+        return true;
+    }
+
+    function submitStage1() {
+        if (!templateSelectionValid()) return;
+        submitStage(stage1Payload(), 2);
+    }
+
+    function submitStage2() {
+        confirm();
+    }
+
+    function showDeriving() {
+        document.getElementById("sections").style.display = "none";
+        document.getElementById("actionbar").style.display = "none";
+        var l = document.getElementById("loading");
+        l.textContent = t("deriving");
+        l.style.display = "block";
+    }
+
+    // Poll session state first. It is derived from recommendation stage files
+    // and result.json, so a recovered server can tell the existing page exactly when
+    // the next stage is ready.
+    function pollForStage(nextStage) {
+        fetchJson("/api/session", "session")
+            .then(function (session) {
+                var readyStage = Number(session && session.recommendation_stage_number || 0);
+                if (readyStage < nextStage) {
+                    setTimeout(function () { pollForStage(nextStage); }, 1200);
+                    return null;
+                }
+                return fetchJson("/api/recommendations", "recommendations").then(function (data) {
+                    var serverStage = stageNumber(data);
+                    if (data && typeof serverStage === "number" && serverStage >= nextStage) {
+                        enterStage(data, serverStage);
+                    }
+                    else { setTimeout(function () { pollForStage(nextStage); }, 1200); }
+                    return null;
+                });
+            }).catch(function (err) {
+                var l = document.getElementById("loading");
+                if (l) l.textContent = t("connection_lost") + " " + (err && err.message ? err.message : "");
+                setTimeout(function () { pollForStage(nextStage); }, 1500);
+            });
+    }
+
+    function enterStage(data, stage) {
+        REC = data;

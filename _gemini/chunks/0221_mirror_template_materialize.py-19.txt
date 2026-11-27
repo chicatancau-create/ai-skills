@@ -1,0 +1,127 @@
+    """Copy direct visual children that decorate one text placeholder."""
+    if source is None:
+        return []
+    decorations = [
+        copy.deepcopy(child)
+        for child in source
+        if _visible_placeholder_decoration(child)
+    ]
+    for decoration in decorations:
+        _merge_group_inheritance(source, decoration)
+    _copy_placeholder_native_attributes(source, decorations)
+    return decorations
+
+
+def _copy_placeholder_native_attributes(
+    source: ET.Element,
+    geometries: list[ET.Element],
+) -> None:
+    """Carry one logical placeholder geometry's native identity to its leaf."""
+    if len(geometries) == 1:
+        decoration = geometries[0]
+        native_attributes = {
+            "data-pptx-frame",
+            "data-pptx-geometry-kind",
+            "data-pptx-geometry-reason",
+            "data-pptx-geometry-sha256",
+            "data-pptx-geometry-status",
+            "data-pptx-object",
+            "data-pptx-prst",
+        }
+        for name, value in source.attrib.items():
+            if name in native_attributes or name.startswith("data-pptx-av-"):
+                if decoration.get(name) is None:
+                    decoration.set(name, value)
+
+
+def _placeholder_geometry(source: ET.Element | None) -> list[ET.Element]:
+    """Copy direct source geometry even when it has no visible local paint."""
+    if source is None:
+        return []
+    geometry_tags = {
+        "circle",
+        "ellipse",
+        "line",
+        "path",
+        "polygon",
+        "polyline",
+        "rect",
+    }
+    geometries = [
+        copy.deepcopy(child)
+        for child in source
+        if _local_name(child.tag) in geometry_tags and not _hidden(child)
+    ]
+    for geometry in geometries:
+        _merge_group_inheritance(source, geometry)
+    _copy_placeholder_native_attributes(source, geometries)
+    return geometries
+
+
+def _apply_placeholder_paint(source: ET.Element, target: ET.Element) -> None:
+    """Apply inherited paint without replacing Slide-owned geometry."""
+    paint_attributes = {
+        "color",
+        "fill",
+        "fill-opacity",
+        "fill-rule",
+        "filter",
+        "mix-blend-mode",
+        "opacity",
+        "paint-order",
+        "shape-rendering",
+        "stroke",
+        "stroke-dasharray",
+        "stroke-dashoffset",
+        "stroke-linecap",
+        "stroke-linejoin",
+        "stroke-miterlimit",
+        "stroke-opacity",
+        "stroke-width",
+        "vector-effect",
+    }
+    source_style = _parse_style(source.get("style"))
+    target_style = _parse_style(target.get("style"))
+    for name in paint_attributes:
+        value = source.get(name)
+        if value is None:
+            value = source_style.get(name)
+        if value is None:
+            continue
+        target.set(name, value)
+        target_style.pop(name, None)
+    if target_style:
+        target.set("style", _style_text(target_style))
+    else:
+        target.attrib.pop("style", None)
+
+
+def _remap_placeholder_decorations(
+    decorations: list[ET.Element],
+    from_frame: tuple[float, float, float, float] | None,
+    to_frame: tuple[float, float, float, float] | None,
+) -> None:
+    """Map inherited decoration geometry onto the effective Slide frame."""
+    if from_frame is None or to_frame is None:
+        return
+    if all(
+        math.isclose(source, target, rel_tol=1e-9, abs_tol=1e-9)
+        for source, target in zip(from_frame, to_frame)
+    ):
+        return
+    from_x, from_y, from_width, from_height = from_frame
+    to_x, to_y, to_width, to_height = to_frame
+    scale_x = to_width / from_width
+    scale_y = to_height / from_height
+    translate_x = to_x - from_x * scale_x
+    translate_y = to_y - from_y * scale_y
+    frame_transform = "matrix({})".format(
+        " ".join((
+            _format_number(scale_x),
+            "0",
+            "0",
+            _format_number(scale_y),
+            format_coordinate(translate_x),
+            format_coordinate(translate_y),
+        ))
+    )

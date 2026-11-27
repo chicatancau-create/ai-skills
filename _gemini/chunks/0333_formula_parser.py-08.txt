@@ -1,0 +1,77 @@
+            return Bar("bot", self._parse_required_argument("underline body"))
+        if command in _OVER_UNDER_COMMANDS:
+            character, position, vertical = _OVER_UNDER_COMMANDS[command]
+            body = self._parse_required_argument(f"\\{command} body")
+            return GroupChar(character, position, vertical, body)
+        if command in _OVER_ARROW_COMMANDS:
+            body = self._parse_required_argument(f"\\{command} body")
+            return GroupChar(_OVER_ARROW_COMMANDS[command], "top", "bot", body)
+        if command in {"xrightarrow", "xleftarrow"}:
+            lower = self._parse_optional_argument("arrow lower label", allow_empty=True)
+            upper = self._parse_required_argument("arrow upper label", allow_empty=True)
+            arrow = GroupChar(
+                "→" if command == "xrightarrow" else "←",
+                "bot",
+                "top",
+                upper,
+            )
+            return Limit(arrow, lower=lower) if lower is not None else arrow
+        if command in {"overset", "stackrel"}:
+            upper = self._parse_required_argument("upper limit")
+            base = self._single_node(self._parse_required_argument("limit base"))
+            return Limit(base=base, upper=upper)
+        if command == "underset":
+            lower = self._parse_required_argument("lower limit")
+            base = self._single_node(self._parse_required_argument("limit base"))
+            return Limit(base=base, lower=lower)
+        if command == "buildrel":
+            upper = self._parse_nested_sequence(stop_commands=frozenset({"over"}))
+            if not self._at_control_word("over"):
+                self._fail("\\buildrel requires \\over")
+            if is_empty(upper):
+                self._fail("\\buildrel requires an upper value")
+            self._consume_control_word("over")
+            base = self._single_node(self._parse_required_argument("buildrel base"))
+            return Limit(base=base, upper=upper)
+        if command == "substack":
+            raw = self._parse_raw_required_group("substack body")
+            return self._parse_synthetic_environment("aligned", raw)
+        if command == "bmod":
+            return Function(name=self._roman_name("mod"))
+        if command in {"pmod", "mod"}:
+            body = self._parse_required_argument(f"\\{command} body")
+            content = Sequence((
+                Text("mod", _ROMAN_STYLE),
+                Text(" ", _SPACING_STYLE),
+                *body.children,
+            ))
+            if command == "pmod":
+                return Delimiter("(", ")", (content,))
+            return content
+        if command in _STYLE_COLOR_COMMANDS:
+            color = self._parse_color()
+            body = self._parse_required_argument(f"\\{command} body")
+            return Styled(body, RunStyle(color=color))
+        if command in {"boxed", "fbox", "framebox", "cancel", "bcancel", "xcancel"}:
+            body = self._parse_required_argument(
+                f"\\{command} body",
+                text_mode=command in {"fbox", "framebox"},
+            )
+            return BorderBox(body=body, kind=command)
+        if command in {"phantom", "hphantom", "vphantom"}:
+            return Phantom(
+                body=self._parse_required_argument(f"\\{command} body"),
+                kind=command,
+            )
+        if command == "not":
+            target = self._parse_required_argument("negated relation")
+            node = self._single_node(target)
+            if isinstance(node, Text) and len(node.value) == 1:
+                negated = NEGATED_SYMBOLS.get(node.value)
+                if negated is not None:
+                    return self._styled_text(negated, _ROMAN_STYLE)
+            return Accent("̸", target)
+        if command == "eqalign":
+            raw = self._parse_raw_required_group("eqalign body")
+            return self._parse_synthetic_environment("aligned", raw.replace("\\cr", "\\\\"))
+        if command == "ce":

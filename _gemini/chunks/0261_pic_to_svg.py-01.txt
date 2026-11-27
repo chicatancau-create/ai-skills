@@ -1,0 +1,119 @@
+"""DrawingML <p:pic> -> SVG <image> conversion.
+
+Reverse of svg_to_pptx convert_image.
+
+DrawingML structure:
+    <p:pic>
+        <p:blipFill>
+            <a:blip r:embed="rIdRaster">
+                <a:extLst>...<asvg:svgBlip r:embed="rIdSvg"/>...</a:extLst>
+            </a:blip>
+            <a:srcRect l/t/r/b="1/100000"/>      (optional crop)
+            <a:stretch><a:fillRect/></a:stretch> (default: fill the shape)
+        </p:blipFill>
+        <p:spPr>
+            <a:xfrm/>
+            <a:prstGeom prst="rect"/>            (usually rect; can be other)
+        </p:spPr>
+    </p:pic>
+
+Strategy:
+- Prefer the editable SVG relationship in asvg:svgBlip when Office also stores
+  a raster compatibility preview on a:blip; retain the raster as fallback.
+- Default (no srcRect, plain stretch) -> a single <image> filling the box,
+  preserveAspectRatio="none".
+- With srcRect, or with a single oversized tile that covers the frame -> wrap
+  the <image> in a nested <svg viewBox> in the unit rectangle [0,1] x [0,1],
+  with overflow hidden so cropping is expressed identically in browsers and
+  PowerPoint.
+- Repeating tile fills still use the legacy plain-image fallback; a repeated
+  pattern cannot be represented by the project's native picture-crop subset.
+- Image bytes are written through the result; the slide assembler decides
+  the href format (external file vs base64).
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import io
+import math
+import mimetypes
+import shutil
+import subprocess
+import tempfile
+from dataclasses import dataclass, field
+from pathlib import Path
+from xml.etree import ElementTree as ET
+
+try:
+    from PIL import Image, ImageEnhance
+except ImportError:  # pragma: no cover - optional visual enhancement dependency
+    Image = None
+    ImageEnhance = None
+
+from .emu_units import NS, Xfrm, emu_to_px, fmt_num, format_ooxml_alpha
+from .ooxml_loader import OoxmlPackage, PartRef, blip_embed_relationship_ids
+
+
+@dataclass(frozen=True)
+class PictureDiagnostic:
+    """Recoverable loss while converting one DrawingML picture."""
+
+    code: str
+    message: str
+    fallback: str
+
+
+@dataclass
+class PictureResult:
+    """Resolved picture: SVG element string + extracted media bytes."""
+
+    svg: str = ""
+    # Map of {filename: bytes} that the assembler should emit alongside
+    # the SVG. Filename is the basename inside the package's media dir.
+    media: dict[str, bytes] = field(default_factory=dict)
+    diagnostics: tuple[PictureDiagnostic, ...] = ()
+    external_linked: bool = False
+
+
+class MediaResolutionError(RuntimeError):
+    """Raised when a PPTX media relationship cannot be reproduced as SVG."""
+
+
+class LinkedImageResolutionError(MediaResolutionError):
+    """Raised when an external linked image has no embedded preview."""
+
+
+def convert_blip_fill(
+    blip_fill_elem: ET.Element,
+    xfrm: Xfrm,
+    slide_part: PartRef,
+    pkg: OoxmlPackage,
+    *,
+    media_subdir: str = "images",
+    embed_inline: bool = False,
+    asset_name_map: dict[str, str] | None = None,
+    strict: bool = False,
+) -> PictureResult:
+    """Convert an <a:blipFill> element to SVG <image>.
+
+    Handles image fill for both:
+    - <p:pic><p:blipFill> (standard picture elements)
+    - <p:sp><p:spPr><a:blipFill> (shape with image fill, e.g. Canva exports)
+    """
+    blip = blip_fill_elem.find("a:blip", NS)
+    if blip is None:
+        return PictureResult()
+
+    relationship_ids = blip_embed_relationship_ids(blip)
+    linked_rid = blip.attrib.get(f"{{{NS['r']}}}link")
+    linked_relationship = slide_part.rels.get(linked_rid or "", {})
+    external_linked = linked_relationship.get("external") == "1"
+    if not relationship_ids:
+        if external_linked:
+            raise LinkedImageResolutionError(
+                "Linked image relationships are not supported; embed the image in PowerPoint first"
+            )
+        if linked_rid:
+            raise MediaResolutionError(

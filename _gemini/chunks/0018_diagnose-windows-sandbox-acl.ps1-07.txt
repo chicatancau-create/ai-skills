@@ -1,0 +1,74 @@
+  try {
+    $facts.AclLines = @(icacls $FullPath 2>&1 | ForEach-Object { [string]$_ })
+    if ($LASTEXITCODE -ne 0) { throw "icacls exit ${LASTEXITCODE}: $($facts.AclLines -join "`n")" }
+    $text = $facts.AclLines -join "`n"
+    # An unrecognized localized label is unknown, not evidence of a Low label.
+    if ($text -match $LOW_LABEL_SID -or $text -match 'Mandatory Label\\Low Mandatory Level') { $facts.LowLabel = $true }
+  } catch {
+    $facts.Errors += @{ operation = 'icacls'; error = (Get-HResultChain $_.Exception) }
+  }
+  Write-Report observation inspect_acl $FullPath $(if ($facts.Errors.Count) { 'partial' } else { 'read' }) 'Read the ACL and check effective WRITE_DAC and WRITE_OWNER; observed ACEs alone do not identify which rule caused a denial.' @{
+    owner = $facts.Owner; writeDac = $facts.HasWriteDac; writeOwner = $facts.HasWriteOwner
+    # A re-read after a change repeats an ACL this run already recorded: keep the
+    # full ACE list in memory, but do not print it twice.
+    aces = $(if ($CompactRecord) { @() } else { $facts.Aces }); acesOmitted = [bool]$CompactRecord
+    lowLabel = $facts.LowLabel; errors = $facts.Errors
+  }
+  return $facts
+}
+
+function Get-Ancestors {
+  param([string]$FullPath)
+  $list = @()
+  $current = Get-NormalizedPath $FullPath
+  while ($true) {
+    $list += $current
+    $parent = [System.IO.Path]::GetDirectoryName($current)
+    if ([string]::IsNullOrEmpty($parent) -or $parent -eq $current) { break }
+    $current = $parent
+  }
+  return $list
+}
+
+# --- main ---------------------------------------------------------------
+
+$operations = [System.Collections.Generic.List[object]]::new()
+$recoveries = [System.Collections.Generic.List[object]]::new()
+$reports = [System.Collections.Generic.List[object]]::new()
+$reportPath = $null
+$reportWriter = $null
+$requestedPaths = @()
+$rollbackStatus = 'not-needed'
+$fixed = 0
+$granted = 0
+$refused = 0
+$restored = 0
+$exitCode = 0
+$observationFailures = 0
+$scanTruncated = $false
+$currentPath = ''
+$mode = if ($Restore) { 'restore' } else { 'repair' }
+
+try {
+  $requestedPaths = @($Path | ForEach-Object { [System.IO.Path]::GetFullPath($_) })
+  Write-Report invocation $mode '' started 'Inspect the requested paths, then repair the ACL problems this run can prove, before anything else is attempted.' @{
+    paths = $Path; allowRoot = $AllowRoot; outputDirectory = $Out; recoveryRecord = $Restore
+  }
+  if (-not $AllowRoot) { throw [System.ArgumentException]::new('Every modification requires -AllowRoot') }
+  if (-not $Restore -and -not $Out) { throw [System.ArgumentException]::new('A repair requires -Out for its recovery artifacts') }
+  if ($Restore -and $Path.Count -ne 1) { throw [System.ArgumentException]::new('-Restore requires exactly one -Path') }
+  if ($Out) {
+    Invoke-ReportedOperation prepare_report $Out 'Create the recovery directory and a new JSONL report that keeps every record, because tool output is truncated to its tail.' files {
+      $directory = [System.IO.Path]::GetFullPath($Out)
+      [System.IO.Directory]::CreateDirectory($directory) | Out-Null
+      $script:reportPath = Join-Path $directory ('acl-report-{0}.jsonl' -f [guid]::NewGuid().ToString('N'))
+      $stream = [System.IO.File]::Open($script:reportPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write)
+      $script:reportWriter = [System.IO.StreamWriter]::new($stream, [System.Text.UTF8Encoding]::new($false))
+      foreach ($record in $script:reports) { $script:reportWriter.WriteLine(($record | ConvertTo-Json -Depth 12 -Compress)) }
+    }
+  }
+  $identity = Get-CurrentIdentity
+  $meSid = $identity.User.Value
+  Invoke-ReportedOperation initialize '' 'Load read-only access checks and DACL-only writes before inspecting permissions.' none { Initialize-NativeApi }
+  $integrity = Get-IntegritySid
+  Write-Line ('CALLER SID={0} INTEGRITY={1}' -f $meSid, $integrity)

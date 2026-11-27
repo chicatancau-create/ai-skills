@@ -1,0 +1,108 @@
+        }
+        self._undeclared_size_occurrences: Counter[str] = Counter()
+        self._undeclared_size_counts_ready = False
+        self._lock_seen = False  # True once we locate at least one spec_lock.md
+        self._source_manifest_cache: Dict[
+            Path,
+            Tuple[Dict, str | None],
+        ] = {}
+        self._source_manifest_errors_reported: set[Path] = set()
+        # Template-mode aggregation (populated by check_directory when
+        # template_mode=True). Each entry is (severity, kind, message) where
+        # severity is 'error' or 'warning'. Printed in print_summary.
+        self._template_issues: List[Tuple[str, str, str]] = []
+        self._spec_only_template_kind: str | None = None
+        self._template_roster_pages = 0
+        self._animation_issues: List[Tuple[str, str]] = []
+        self._illustration_issues: List[Tuple[str, str, str]] = []
+        self._communication_trace_issues: List[Tuple[str, str]] = []
+        self._communication_traced_projects: set[Path] = set()
+        self._pptx_structure_issues: List[Tuple[str, str]] = []
+        self._has_incomplete_page_roster = False
+        self._structured_native_slots: list[str] = []
+        self._active_slide_count: int | None = None
+        # Early/page stages see part of the roster, so a slide jump's upper
+        # bound waits for the final gate.
+        self.partial_roster = False
+        self._prototype_by_output: Dict[Path, Path] = {}
+        self._active_prototype_path: Path | None = None
+        self._active_template_reuse_scope: str | None = None
+        self._prototype_root_cache: Dict[Path, ET.Element | None] = {}
+        self._source_import_summary: Dict[str, object] = {
+            'warning_count': 0,
+            'by_code': {},
+        }
+        self._aggregate_counts_applied = False
+
+    @staticmethod
+    def _append_inherited_info(
+        result: Dict,
+        kind: str,
+        message: str,
+    ) -> None:
+        """Record prototype-owned diagnostics outside the warning channel."""
+        result['info'].setdefault('inherited', []).append({
+            'kind': kind,
+            'message': message,
+        })
+
+    def _active_prototype_root(self) -> ET.Element | None:
+        """Parse the selected mirror prototype once for inherited checks."""
+        if (
+            self._active_template_reuse_scope != 'mirror'
+            or self._active_prototype_path is None
+        ):
+            return None
+        path = self._active_prototype_path.resolve()
+        if path in self._prototype_root_cache:
+            return self._prototype_root_cache[path]
+        try:
+            root = ET.parse(path).getroot()
+            hydrate_native_payload_refs(root, path)
+        except (OSError, ET.ParseError, NativePayloadError):
+            root = None
+        self._prototype_root_cache[path] = root
+        return root
+
+    def check_file(
+        self,
+        svg_file: str,
+        expected_format: str = None,
+        *,
+        expected_viewbox: str | None = None,
+        expected_viewbox_label: str = "expected canvas",
+    ) -> Dict:
+        """
+        Check a single SVG file
+
+        Args:
+            svg_file: SVG file path
+            expected_format: Expected canvas format (e.g., 'ppt169')
+
+        Returns:
+            Check result dictionary
+        """
+        svg_path = Path(svg_file)
+
+        if not svg_path.exists():
+            return {
+                'file': str(svg_file),
+                'exists': False,
+                'errors': ['File does not exist'],
+                'warnings': [],
+                'passed': False
+            }
+
+        result = {
+            'file': svg_path.name,
+            'path': str(svg_path),
+            'exists': True,
+            'errors': [],
+            'warnings': [],
+            'info': {},
+            'passed': True
+        }
+
+        try:
+            source_bytes = svg_path.read_bytes()
+            result['source_sha256'] = hashlib.sha256(source_bytes).hexdigest()

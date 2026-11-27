@@ -1,0 +1,116 @@
+    if source_span is None:
+        if serialized_span is not None:
+            raise TemplateStructureError(
+                "Round-trip serialization introduced a transition carrier"
+            )
+        return serialized_slide
+    if serialized_span is None:
+        raise TemplateStructureError(
+            "Round-trip serialization removed the preserved transition carrier"
+        )
+    return (
+        serialized_slide[:serialized_span[0]]
+        + source_slide[source_span[0]:source_span[1]]
+        + serialized_slide[serialized_span[1]:]
+    )
+
+
+def _raw_timing_span(xml_data: bytes) -> tuple[int, int] | None:
+    """Locate one raw logical object-animation timing carrier in slide XML."""
+    alternate_spans = [
+        match.span()
+        for match in _RAW_ALTERNATE_CONTENT_RE.finditer(xml_data)
+    ]
+    timings = [
+        span
+        for span in alternate_spans
+        if _RAW_TIMING_RE.search(xml_data[span[0]:span[1]])
+    ]
+    for match in _RAW_TIMING_RE.finditer(xml_data):
+        if any(start <= match.start() < end for start, end in alternate_spans):
+            continue
+        timings.append(match.span())
+    if len(timings) > 1:
+        raise TemplateStructureError(
+            "Round-trip slide has multiple raw object-animation timing carriers"
+        )
+    return timings[0] if timings else None
+
+
+def _preserve_roundtrip_timing_markup(
+    serialized_slide: bytes,
+    source_slide: bytes,
+) -> bytes:
+    """Restore unchanged source object-animation timing byte-for-byte."""
+    source_span = _raw_timing_span(source_slide)
+    serialized_span = _raw_timing_span(serialized_slide)
+    if source_span is None:
+        if serialized_span is not None:
+            raise TemplateStructureError(
+                "Round-trip serialization introduced object-animation timing"
+            )
+        return serialized_slide
+    if serialized_span is None:
+        raise TemplateStructureError(
+            "Round-trip serialization removed preserved object-animation timing"
+        )
+    return (
+        serialized_slide[:serialized_span[0]]
+        + source_slide[source_span[0]:source_span[1]]
+        + serialized_slide[serialized_span[1]:]
+    )
+
+
+def _apply_roundtrip_transition_overlay(
+    slide_path: Path,
+    *,
+    effect: str | None,
+    effect_options: dict[str, object],
+    duration: float,
+    auto_advance: float | None,
+    replace_transition: bool,
+    advance_changed: bool = True,
+) -> bool:
+    """Patch only transition/advance state while preserving source timing."""
+    source_bytes = slide_path.read_bytes()
+    source_xml = source_bytes.decode("utf-8")
+    source_animation = object_animation_fingerprint(source_xml)
+    if not replace_transition:
+        enter = EnterUpdate(policy="preserve", duration=duration)
+    elif effect is None:
+        enter = EnterUpdate(
+            policy="none",
+            effect=None,
+            duration=(duration or DEFAULT_TRANSITION_DURATION),
+        )
+    else:
+        enter = EnterUpdate(
+            policy="replace",
+            effect=effect,
+            duration=duration,
+            effect_options=effect_options,
+        )
+    advance = (
+        AdvanceUpdate(mode="preserve")
+        if not advance_changed else (
+            AdvanceUpdate(mode="click")
+            if auto_advance is None
+            else AdvanceUpdate(mode="both", after=auto_advance)
+        )
+    )
+    updated_xml, uses_timings = apply_slide_motion_xml(
+        source_xml,
+        enter=enter,
+        advance=advance,
+    )
+    if object_animation_fingerprint(updated_xml) != source_animation:
+        raise RuntimeError(
+            "Round-trip transition overlay changed source object animations"
+        )
+    if replace_transition:
+        original = read_slide_transition_xml(source_xml)
+        validate_generated_transition_xml(
+            updated_xml,
+            effect=effect,
+            effect_options=effect_options,
+            duration=duration,

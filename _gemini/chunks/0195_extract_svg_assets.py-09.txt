@@ -1,0 +1,94 @@
+            reused_asset = str(reusable["asset"])
+            placeholder = ET.Element(f"{{{SVG_NS}}}use")
+            placeholder.set("data-icon", reused_icon)
+            placeholder.set(ASSET_ROLE_ATTRIBUTE, DECORATION_ASSET_ROLE)
+            for node in nodes:
+                if node in parent:
+                    parent.remove(node)
+            parent.insert(pos, placeholder)
+            entries.append({
+                "svg": svg_path.name,
+                "id": reused_icon,
+                "icon": reused_icon,
+                "asset": reused_asset,
+                "source": "reused-inventory",
+                "role": DECORATION_ASSET_ROLE,
+                "source_sha256": source_sha256,
+                "asset_sha256": reusable["asset_sha256"],
+                "reused_from_svg": reusable.get("svg"),
+                "drawable_count": _drawable_count(group),
+                "byte_count": _xml_size(group),
+                "source_refs": source_refs,
+                "dependencies": dependency_source_ids,
+                "elements": _tag_histogram(group),
+            })
+            continue
+
+        id_mapping = _collect_id_mapping(asset_id, group, dependencies)
+        _rewrite_references(group, id_mapping)
+        for dependency in dependencies:
+            _rewrite_references(dependency, id_mapping)
+
+        # Asset keeps the group in original page coordinates and carries its defs.
+        asset_path = icons_dir / asset
+        external_hrefs_rewritten = _rebase_external_hrefs(
+            group,
+            svg_path.parent,
+            asset_path.parent,
+        )
+        for dependency in dependencies:
+            external_hrefs_rewritten += _rebase_external_hrefs(
+                dependency,
+                svg_path.parent,
+                asset_path.parent,
+            )
+        asset_bytes = _asset_svg(group, dependencies, view_box, width, height)
+        asset_path.write_bytes(asset_bytes)
+
+        placeholder = ET.Element(f"{{{SVG_NS}}}use")
+        placeholder.set("data-icon", icon_reference)
+        placeholder.set(ASSET_ROLE_ATTRIBUTE, DECORATION_ASSET_ROLE)
+        for node in nodes:
+            if node in parent:
+                parent.remove(node)
+        parent.insert(pos, placeholder)
+
+        entries.append({
+            "svg": svg_path.name,
+            "id": icon_reference,
+            "icon": icon_reference,
+            "asset": asset,
+            "source": "extracted",
+            "role": DECORATION_ASSET_ROLE,
+            "source_sha256": source_sha256,
+            "asset_sha256": hashlib.sha256(asset_bytes).hexdigest(),
+            "drawable_count": _drawable_count(group),
+            "byte_count": _xml_size(group),
+            "source_refs": source_refs,
+            "dependencies": [id_mapping.get(elem_id, elem_id) for elem_id in dependency_source_ids],
+            "external_hrefs_rewritten": external_hrefs_rewritten,
+            "elements": _tag_histogram(group),
+        })
+
+    _optimize_definitions(root)
+    _normalize_authoring_tree(root, fresh_native_markers)
+    rewritten = _rewritten_path(svg_path, rewritten_dir, inplace)
+    rewritten.parent.mkdir(parents=True, exist_ok=True)
+    ET.register_namespace("", SVG_NS)
+    ET.register_namespace("xlink", XLINK_NS)
+    tree.write(rewritten, encoding="utf-8", xml_declaration=True)
+    return entries
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Factor large non-semantic SVG decorations into reusable assets."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("svg_dir", help="Directory of working SVGs (e.g. import_ws/svg or project/svg_output)")
+    parser.add_argument("-o", "--output", dest="icons_dir", help="Project icon dir (default: <svg_dir>/../icons)")
+    parser.add_argument("--icons-dir", dest="icons_dir", help="Project icon dir (default: <svg_dir>/../icons)")
+    parser.add_argument(
+        "--icon-namespace",

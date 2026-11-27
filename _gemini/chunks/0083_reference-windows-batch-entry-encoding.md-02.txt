@@ -1,0 +1,58 @@
+`if errorlevel N` 是「≥N」不是「=N」，所以取消分支要写成最先的那条（`if errorlevel 3 goto :cancelled` 在前，
+`if errorlevel 2 ...` 在后）。凡是「默认=不动作」的脚本，先单独跑一份只 echo `%errorlevel%` 的 choice 探针，
+再决定 /C 的字符顺序 —— 排错一次就是把真重启命令放进了默认路径。
+
+**坑 11 — 无权限时读不到的判据，不能写成否定结论**：`bcdedit /enum {fwbootmgr}`（UEFI 判据）非管理员返回「拒绝访问」，
+照 `if errorlevel 1 → 本机不是 UEFI` 写就把「判不了」报成了「不是」。体检/只读模式必须分三态输出：
+有权限且是 / 有权限且不是 / 无权限所以判不了。取真值靠提权后跑（`Start-Process -Verb RunAs` + 把输出重定向到 TEMP 文件再读，
+本机可用且无弹窗阻碍）。
+
+**坑 12 — `call :label a=b` 被 cmd 当成变量赋值吃掉，参数整体前移且零报错**（2026-11-06 实测）：
+`call :dns_srv %%A %%B %%C ...` 里 `%%A` 展开成 `ip=192.168.55.131` 时，cmd 把这段当成「给变量 ip 赋值」，
+从参数表里剥掉，于是子过程收到的是 `%1`=ip、`%2`=192.168.55.131、`%3`=if、`%4`=19 …——**整体前移一位**，
+`%~1` 拿到的是键名不是键值。表现是输出串成 `网卡.168.55.131  应答 pms` 这种**没有报错的乱码**，
+排查者极易去怀疑解析逻辑本身。解法只有一条：**实参一律加引号** `call :sub "%%A" "%%B"`，
+子过程继续用 `%~1` 取。写「把结构化输出喂给 bat 子过程」的代码时，先单独跑一个只 echo `%1..%6` 的最小用例。
+
+**坑 13 — 从 Python 直接 `subprocess.run(["npm", ...])` 会 `FileNotFoundError: [WinError 2]`**（2026-11-08 实测）：
+本机 `npm`/`npx` 是 `.cmd` 垫片，`CreateProcess` 只认可执行映像，不执行批处理；在 Git Bash 里手动敲能跑，
+所以很容易误判成路径或 venv 问题。修法：非 `.exe` 的命令统一前置 `["cmd", "/c", *argv]`，
+或 `shutil.which()` 找到 `.cmd` 后再包一层。写「一键跑门禁」的脚本时，逐条门禁都要覆盖这条。
+
+**坑 14 — Git Bash 会把 `schtasks /Create` 的 `/Create` 当路径改写**（2026-11-08 实测）：
+在 bash 里直接 `schtasks /Create ...`，MSYS 把 `/Create` 转成 `C:/Users/.../git/Create`，
+报「无效参数/选项 - 'C:/.../Create'」；`/Run`、`/Delete`、`/F` 同理。修法：`export MSYS_NO_PATHCONV=1`
+后再调 schtasks（或走 `cmd //c`）。这与 `tasklist //FI`、`taskkill //F //PID` 是同一类 MSYS 路径转换问题。
+计划任务做交互式探针时用 `/SC ONCE /ST 23:59 /IT /RL LIMITED`，跑完立刻 `/Delete /F`；
+判断任务是否真的启动要看 `Get-CimInstance Win32_Process` 里目标进程的 CommandLine 与 SessionId，
+`schtasks /Run` 的「成功」只表示尝试启动。
+
+**坑 15 — Git Bash 里 `cmd /c` 的 `/c` 也会被 MSYS 当路径改写**（2026-11-08 实测）：`cmd /c npm test`
+在 Git Bash 里只打印 cmd 横幅和提示符，命令没执行；要写 **`cmd //c npm test`**（与 `schtasks /Create`、
+`tasklist //FI` 同类）。Python 脚本里拼 `["cmd","/c",...]` 不受影响，只有 shell 里手敲会中招。
+
+**How to apply**：用 `python`（不是 python3，本机是坏存根）二进制写入；纯 ASCII 入口用
+`body.replace('\n','\r\n').encode('ascii')`，中文入口用 `.encode('gbk')`——两者都会在
+非法字符上直接抛异常，等于自带校验。改完必跑三个静态审计（都是这次真抓到 bug 的）：
+① 正则收集所有 `goto :X` / `call :X` 的目标，与 `:X` 定义求差集 → 漏写标签会**当场中断整个脚本**；
+② 扫 `!\w+%,` 这种"延迟展开少了个 `!`"的打字错；③ python 数 `CRLF` / `LF-only` / 非法字节。
+再动态验证：**提权跑一遍**（不跑提权就看不见坑 4），并加一个只读模式（本机 `check` 参数）
+做零副作用复验；动态验证顺序 ① 变量非空 ② 只读模式 ③ 真改动。
+仓库根加 `.gitattributes`：`*.cmd text eol=crlf`（`core.autocrlf=true` 下 LF 文件在
+`git status` 里是**干净的**，所以这个 bug 能无声穿过提交，必须显式钉住）。
+中文提示可以留在脚本里（按上面 GBK 规矩），但面向用户的长说明仍放 README。
+
+**取原生错误框文字**（Electron/Win32 的 `#32770` 框 `WM_GETTEXT` 取不到正文）：
+先 `ctypes.windll.user32.SetProcessDPIAware()`（否则 125% 缩放下 `GetWindowRect` 与截图坐标系错位，
+只会拍到一条黑边），再 `EnumWindows` 拿 rect → `PIL.ImageGrab.grab(bbox=...)` → Read 那张 PNG 直接读字。
+`ELECTRON_ENABLE_LOGGING=1` 对主进程未捕获异常**没用**，控制台仍然空的。
+
+本机状态(2026-10-05 更新)：那个 System32 里 0 字节的 [echo] 文件已按用户授权删除；删后原失败用例（cwd=System32 加 echo.）复跑立刻恢复正常，因果闭环。同一次事故还留下 6 个 0 字节碎片文件躺在 System32：[18]、[Canvas]]、[或更高版本：]、[提供，必须先安装]、[未检测到]、[本应用的登录]，全部落在 2026-09-12 23:42:18-23:42:42 这 24 秒内。判垃圾的依据：links=1 且无数字签名，而合法 System32 文件是 links=2 + owner=NT SERVICE\TrustedInstaller —— 即某次在 System32 里跑的提权脚本把中文文本和重定向符拆错了。**这 6 个未删，等用户点头。**另记一条 bash 侧的坑：在 python -c 的双引号字符串里写反引号，会被 bash 当命令替换执行（这次就把写进记忆的一段啃空了）；带反引号/特殊字符的文本一律落成 .py 文件再跑，heredoc 用单引号定界符（<<'PY'）彻底关掉替换。
+
+**坑 16 — `core.autocrlf=true` 会把 `.sh` 检出成 CRLF，bash/Docker 直接跑不起来**（2026-11-09 实测）：
+仓库开了 autocrlf 时，`.gitattributes` 若只钉了 `*.cmd text eol=crlf`，**shell 脚本在没有对应 `eol=lf`
+的情况下新克隆会得到 CRLF**（行尾的 `\r` 会进 shebang 和每条命令）。修法：在 `.gitattributes` 里对
+`*.sh  *.mjs  *.js  *.ts  *.tsx  *.yml  *.yaml  *.conf  Dockerfile` 全部显式 `text eol=lf`，
+Windows 入口（`*.cmd *.bat *.ps1`）保持 `eol=crlf`。判现状用 `git ls-files --eol <file>` 看 `i/lf w/lf`。
+
+Related: [[feedback-windows-config-json-encoding]], [[reference-windows-python-encoding]], [[reference-computer-use-blocked]]

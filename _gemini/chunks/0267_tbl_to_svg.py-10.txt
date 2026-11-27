@@ -1,0 +1,113 @@
+            if p_pr_tags.count("defRPr") > 1 or p_pr_tags.count("buNone") > 1:
+                return True
+            bullet_tags = [tag for tag in p_pr_tags if tag.startswith("bu")]
+            if bullet_tags and "buNone" not in bullet_tags:
+                return True
+
+        for run in paragraph.findall("a:r", NS):
+            if run.attrib:
+                return True
+            r_pr_tag = f"{{{NS['a']}}}rPr"
+            text_tag = f"{{{NS['a']}}}t"
+            run_tags = [child.tag for child in run]
+            if run_tags not in ([text_tag], [r_pr_tag, text_tag]):
+                return True
+            text_node = run.find("a:t", NS)
+            if text_node is None or list(text_node):
+                return True
+            allowed_text_attrs = {"{http://www.w3.org/XML/1998/namespace}space"}
+            if any(name not in allowed_text_attrs for name in text_node.attrib):
+                return True
+            r_pr = run.find("a:rPr", NS)
+            if _table_run_props_have_unsupported_formatting(r_pr):
+                return True
+        end_r_pr = paragraph.find("a:endParaRPr", NS)
+        if _table_run_props_have_unsupported_formatting(end_r_pr):
+            return True
+    return False
+
+
+def _table_run_props_have_unsupported_formatting(
+    run_props: ET.Element | None,
+) -> bool:
+    """Return whether one run uses semantics outside the normalized schema."""
+    if run_props is None:
+        return False
+    allowed_children = {
+        "effectLst", "latin", "ea", "cs", "sym", "ln", "solidFill",
+    }
+    for child in run_props:
+        name = child.tag.rsplit("}", 1)[-1]
+        if name not in allowed_children:
+            return True
+        if name == "effectLst" and (child.attrib or list(child)):
+            return True
+    return False
+
+
+def _native_run_outline_payload(
+    line: ET.Element | None,
+    palette: ColorPalette | None,
+) -> dict[str, Any] | None:
+    """Normalize one visible text outline into the shared line schema."""
+    if line is None:
+        return None
+    if line.find("a:noFill", NS) is not None:
+        return None
+    raw_width = line.get("w")
+    if raw_width is None:
+        return None
+    if not raw_width.isdigit() or int(raw_width) == 0:
+        return None
+    return _direct_border_payload(line, palette)
+
+
+def _table_text_has_unsupported_outline(
+    tx_body: ET.Element | None,
+    palette: ColorPalette | None,
+) -> bool:
+    if tx_body is None:
+        return False
+    for run_props in tx_body.findall(".//a:rPr", NS):
+        line = run_props.find("a:ln", NS)
+        if line is None:
+            continue
+        try:
+            _native_run_outline_payload(line, palette)
+        except ValueError:
+            return True
+    return False
+
+
+def _legacy_text_body_has_unsupported_formatting(
+    tx_body: ET.Element | None,
+) -> bool:
+    """Return the pre-P2-T4 gate so active plain payloads stay unchanged."""
+    if tx_body is None:
+        return False
+    body_pr = tx_body.find("a:bodyPr", NS)
+    if body_pr is not None and (body_pr.attrib or list(body_pr)):
+        return True
+    list_style = tx_body.find("a:lstStyle", NS)
+    if list_style is not None and (list_style.attrib or list(list_style)):
+        return True
+    if (
+        tx_body.find(".//a:br", NS) is not None
+        or tx_body.find(".//a:fld", NS) is not None
+        or tx_body.find(".//a:tab", NS) is not None
+    ):
+        return True
+
+    run_signatures: set[tuple[str | None, str | None, bytes | None]] = set()
+    for paragraph in tx_body.findall("a:p", NS):
+        p_pr = paragraph.find("a:pPr", NS)
+        alignment = p_pr.get("algn") if p_pr is not None else None
+        if alignment not in {None, "l", "ctr", "r"}:
+            return True
+        if p_pr is not None:
+            if any(name != "algn" for name in p_pr.attrib):
+                return True
+            if any(
+                child.tag.rsplit("}", 1)[-1] not in {"defRPr", "buNone"}
+                for child in p_pr
+            ):

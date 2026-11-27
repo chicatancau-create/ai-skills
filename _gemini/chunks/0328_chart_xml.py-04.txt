@@ -1,0 +1,121 @@
+        if show_unlisted:
+            position_xml = f'<c:dLblPos val="{position}"/>' if position else ""
+            series_label_xml = f"{num_fmt_xml}{tx_pr_xml}{position_xml}{flags_xml}"
+        return f"<c:dLbls>{point_label_xml}{series_label_xml}{leader_lines_xml}</c:dLbls>"
+
+    label_colors = [
+        _clean_hex(item, "#404040")
+        for item in _chart_list(
+            _first_present(config.get("colors"), config.get("label_colors"), config.get("labelColors")),
+            "data_labels.colors",
+        )
+    ]
+    if label_colors and len(label_colors) != point_count:
+        raise RuntimeError("Native PPTX chart data_labels.colors must match point count")
+    point_label_xml = ""
+    for idx, label_color in enumerate(label_colors):
+        position_xml = f'<c:dLblPos val="{position}"/>' if position else ""
+        point_label_xml += (
+            f'<c:dLbl><c:idx val="{idx}"/>'
+            f"{num_fmt_xml}"
+            f"{_chart_tx_pr_xml(label_font_size, label_color, bold=bold, font_face=font_face, language=language)}"
+            f"{position_xml}"
+            f"{flags_xml}"
+            "</c:dLbl>"
+        )
+    position_xml = f'<c:dLblPos val="{position}"/>' if position else ""
+    return (
+        "<c:dLbls>"
+        f"{point_label_xml}"
+        f"{num_fmt_xml}{tx_pr_xml}"
+        f"{position_xml}"
+        f"{flags_xml}"
+        f'{leader_lines_xml}'
+        "</c:dLbls>"
+    )
+
+
+def _series_scoped_data_labels(config: dict[str, Any] | None) -> bool:
+    """Return whether point-level overrides require a series ``c:dLbls``."""
+    if config is None:
+        return False
+    return any(
+        bool(config.get(key))
+        for key in ("points", "colors", "label_colors", "labelColors")
+    )
+
+
+def _chart_color(colors: list[str], index: int) -> str:
+    if index < len(colors):
+        return colors[index]
+    return _DEFAULT_CHART_COLORS[index % len(_DEFAULT_CHART_COLORS)]
+
+
+def _data_point_colors_xml(
+    count: int,
+    colors: list[str],
+    *,
+    disable_negative_invert: bool = False,
+) -> str:
+    invert_xml = '<c:invertIfNegative val="0"/>' if disable_negative_invert else ""
+    return "".join(
+        f'<c:dPt><c:idx val="{idx}"/>{invert_xml}'
+        f'{_series_color_xml(_chart_color(colors, idx))}</c:dPt>'
+        for idx in range(count)
+    )
+
+
+def _marker_xml(
+    symbol: str | None,
+    *,
+    size_pt: int | None = None,
+    color: str | None = None,
+) -> str:
+    if not symbol:
+        return ""
+    if symbol == "none":
+        return '<c:marker><c:symbol val="none"/></c:marker>'
+    size_xml = f'<c:size val="{size_pt}"/>' if size_pt is not None else ""
+    sp_pr_xml = ""
+    if color:
+        clean = _clean_hex(color, "#4472C4")
+        sp_pr_xml = (
+            f'<c:spPr><a:solidFill><a:srgbClr val="{clean}"/></a:solidFill>'
+            f'<a:ln><a:solidFill><a:srgbClr val="{clean}"/></a:solidFill></a:ln></c:spPr>'
+        )
+    return f'<c:marker><c:symbol val="{_xml_escape(symbol)}"/>{size_xml}{sp_pr_xml}</c:marker>'
+
+
+def _marker_size_pt(size_px: Any) -> int | None:
+    if size_px is None:
+        return None
+    return max(2, min(72, int(round(float(size_px) * 0.75))))
+
+
+def _line_point_markers_xml(
+    point_colors: list[str | None],
+    *,
+    size_pt: int | None,
+) -> str:
+    """Per-point line markers: a colour marks the point, ``None`` leaves it bare."""
+    return "".join(
+        f'<c:dPt><c:idx val="{idx}"/>'
+        f'{_marker_xml("none" if color is None else "circle", size_pt=size_pt, color=color)}'
+        "</c:dPt>"
+        for idx, color in enumerate(point_colors)
+    )
+
+
+def _series_xml(
+    categories: list[Any],
+    series: list[dict[str, Any]],
+    *,
+    chart_type: str,
+    grouping: str | None = None,
+    line_style: str = "line",
+    marker_size: Any = None,
+    radar_marker_style: str | None = None,
+    radar_style: str = "marker",
+    colors: list[str],
+    category_is_numeric: bool = False,
+    category_number_format: str | None = None,

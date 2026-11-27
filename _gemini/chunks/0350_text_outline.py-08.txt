@@ -1,0 +1,113 @@
+            font.scale = (upem, upem)
+            _apply_font_style(
+                run.face,
+                face,
+                font,
+                font_weight,
+                italic,
+            )
+            cached = (font, upem)
+            font_cache[key] = cached
+        font, upem = cached
+        buffer = hb.Buffer()
+        buffer.add_str(run.text)
+        buffer.guess_segment_properties()
+        if str(buffer.direction) != "ltr":
+            raise ValueError(
+                f"Text run {run.text!r} resolves to {buffer.direction} "
+                "direction; only horizontal left-to-right text is supported"
+            )
+        if letter_spacing:
+            hb.shape(font, buffer, {"liga": False, "clig": False})
+        else:
+            hb.shape(font, buffer)
+        infos = tuple(buffer.glyph_infos)
+        positions = tuple(buffer.glyph_positions)
+        if not infos or len(infos) != len(positions):
+            raise ValueError(f"Font shaping produced no glyphs for {run.text!r}")
+        scale = font_size / upem
+        advance_x = sum(position.x_advance for position in positions) * scale
+        shaped.append(_ShapedRun(
+            run=run,
+            font=font,
+            infos=infos,
+            positions=positions,
+            scale=scale,
+            advance_x=advance_x,
+        ))
+    return shaped
+
+
+def _apply_font_style(
+    record: _FontFace,
+    face: Any,
+    font: Any,
+    requested_weight: int,
+    requested_italic: bool,
+) -> None:
+    axes = {
+        axis.tag: axis
+        for axis in face.axis_infos
+    }
+    variations: dict[str, float] = {}
+    weight_axis = axes.get("wght")
+    if weight_axis is not None:
+        if not weight_axis.min_value <= requested_weight <= weight_axis.max_value:
+            raise ValueError(
+                f"Font {record.path.name} cannot provide requested weight "
+                f"{requested_weight}; its wght axis is "
+                f"{weight_axis.min_value:g}..{weight_axis.max_value:g}"
+            )
+        variations["wght"] = float(requested_weight)
+    elif record.weight != requested_weight:
+        raise ValueError(
+            f"Font {record.path.name} resolves weight {record.weight}, not "
+            f"requested {requested_weight}; install the exact face, choose a "
+            "matching family, or adjust the text operand"
+        )
+
+    italic_axis = axes.get("ital")
+    italic_value = 1.0 if requested_italic else 0.0
+    if italic_axis is not None:
+        if not italic_axis.min_value <= italic_value <= italic_axis.max_value:
+            style = "italic" if requested_italic else "normal"
+            raise ValueError(
+                f"Font {record.path.name} cannot provide requested {style} "
+                "style through its ital axis"
+            )
+        variations["ital"] = italic_value
+    elif record.italic != requested_italic:
+        requested = "italic" if requested_italic else "normal"
+        resolved = "italic" if record.italic else "normal"
+        raise ValueError(
+            f"Font {record.path.name} resolves {resolved}, not requested "
+            f"{requested}; install the exact face, choose a matching family, "
+            "or adjust the text operand"
+        )
+
+    if variations:
+        font.set_variations(variations)
+
+
+def _draw_functions(hb: Any) -> Any:
+    functions = hb.DrawFuncs()
+
+    def move_to(x: float, y: float, state: _DrawState) -> None:
+        point = state.point(x, y)
+        state.commands.append(PathCommand("M", [*point]))
+
+    def line_to(x: float, y: float, state: _DrawState) -> None:
+        point = state.point(x, y)
+        state.commands.append(PathCommand("L", [*point]))
+        state.segment_count += 1
+
+    def quadratic_to(
+        control_x: float,
+        control_y: float,
+        x: float,
+        y: float,
+        state: _DrawState,
+    ) -> None:
+        control = state.point(control_x, control_y)
+        point = state.point(x, y)
+        state.commands.append(PathCommand(

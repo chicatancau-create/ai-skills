@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""
+PPT Master - Illustration Sheet Slicer
+
+Slice one AI-generated "illustration sheet" (a single image whose prompt laid
+out several illustration elements in a grid) into N individual element files in
+the project's `images/` folder. This is the cheap-and-consistent path for spot
+illustrations: generate one multi-element sheet with `image_gen.py` (one call,
+one coherent style/palette), then cut the cells out here so each element is a
+normal image the Executor places like any other.
+
+Two optional cleanups address the realities of cropping a raster sheet:
+  --trim   tight-crop each cell to its content bounding box, so imprecise AI
+           placement inside a cell does not leave lopsided margins.
+  --alpha  knock the (flat) sheet background out to transparency, so an element
+           can sit on a differently-colored slide without a visible box.
+Both need a background color; it is auto-sampled from the dominant flat field
+unless you pass --bg. Keying only works on a genuinely flat ground, so each
+element is checked before writing. --strict-alpha turns an incomplete key into
+an error with no output files. An explicit pure red, green, or blue key also
+recovers clean RGB and partial alpha for antialiasing, shadows, and glows. See
+references/image-generator.md section 4.3 for the sheet contract.
+
+Usage:
+    python3 scripts/slice_images.py <sheet_image> --grid RxC [options]
+
+Examples:
+    python3 scripts/slice_images.py projects/demo/images/illus_sheet.png --grid 2x3
+    python3 scripts/slice_images.py projects/demo/images/illus_sheet.png --grid 2x3 \
+        --names team,product,customer,growth,risk,vision --trim --alpha \
+        --bg "#00FF00" --strict-alpha
+    python3 scripts/slice_images.py projects/demo/images/illus_sheet.png --grid 1x4 \
+        --prefix spot_ --bg "#F8F9FA" --alpha
+
+Dependencies:
+    Pillow
+"""
+
+import argparse
+import re
+import sys
+from collections import Counter
+from pathlib import Path
+from statistics import median
+from typing import Optional
+
+from console_encoding import configure_utf8_stdio
+
+configure_utf8_stdio()
+
+from PIL import (
+    Image,
+    ImageChops,
+    ImageFilter,
+    ImageMath,
+    ImageOps,
+)
+
+_GRID_RE = re.compile(r"^\s*(\d+)\s*[xX×]\s*(\d+)\s*$")
+_BG_BUCKET_SIZE = 16
+_BG_SAMPLE_BORDER = 2
+_BG_SAMPLE_MAX_SIDE = 256
+_DEFAULT_FEATHER = 4
+_BOUNDARY_OPAQUE_ALPHA = 32
+_SHEET_DIAGNOSTIC_BORDER_RATIO = 0.01
+_SHEET_DIAGNOSTIC_BUCKET_SIZE = 4
+# Isolated pixels this close to the key are compression or ringing artifacts a
+# larger tolerance absorbs; farther pixels are content crossing the gutter.
+_KEY_DRIFT_MAX_TOLERANCE = 48
+_KEY_DRIFT_MARGIN = 4
+# A key-dominant pixel whose strongest non-key channel reaches this fraction of
+# the key channel is opaque foreground of a key-like hue (malachite green on a
+# green key), not a semi-transparent blend with the key; color-to-alpha recovery
+# and despill skip it so the element keeps its own color.
+_KEY_PURITY_OPAQUE_RATIO = 0.6
+# At most this many trim pixels on a touched edge count as isolated drift.
+_EDGE_DRIFT_MAX_PIXELS = 8
+# Semi-transparent coverage nominates a haze candidate; only a failed key-only
+# margin can distinguish off-key ground from legitimate shadows and glows.
+_HAZE_ALPHA_LOW = 20
+_HAZE_ALPHA_HIGH = 150
+_HAZE_MAX_SHARE = 0.15
+# Corner sample inset (px) and minimum cell fill for the backing-panel notice.
+_PANEL_CORNER_INSET = 2
+_PANEL_MIN_FILL = 0.75
+
+
+def _log(msg: str) -> None:
+    """Print progress to stderr (stdout carries the created file paths)."""
+    print(msg, file=sys.stderr)
+
+
+def parse_grid(spec: str) -> tuple[int, int]:
+    """Parse a 'RxC' grid spec into (rows, cols)."""
+    m = _GRID_RE.match(spec)
+    if not m:
+        raise ValueError(f"--grid must look like '2x3' (rows x cols), got {spec!r}")
+    rows, cols = int(m.group(1)), int(m.group(2))
+    if rows < 1 or cols < 1:
+        raise ValueError(f"--grid rows and cols must be >= 1, got {rows}x{cols}")
+    return rows, cols
+
+

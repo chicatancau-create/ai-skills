@@ -1,0 +1,103 @@
+                _GeometryToken('number', token.raw[0], token.offset)
+            )
+            remainder = token.raw[1:]
+            if remainder:
+                next_position = (position + 1) % _ARG_COUNTS[command_token.raw]
+                if (
+                    next_position in {3, 4}
+                    and remainder[0] not in {'0', '1'}
+                ) or (
+                    next_position not in {3, 4}
+                    and re.fullmatch(_PATH_NUMBER_PATTERN, remainder) is None
+                ):
+                    raise ValueError(
+                        f'path arc flag at offset {token.offset} must be '
+                        f'exactly 0 or 1; got {token.raw!r}'
+                    )
+                pending.appendleft(
+                    _GeometryToken('number', remainder, token.offset + 1)
+                )
+        else:
+            expanded.append(token)
+        argument_index += 1
+
+    return expanded
+
+
+def _tokenize_points(points: str) -> list[_GeometryToken]:
+    """Tokenize one complete polygon/polyline points value."""
+    if not points or not points.strip():
+        raise ValueError('points must not be empty')
+
+    tokens: list[_GeometryToken] = []
+    cursor = 0
+    for match in _POINT_TOKEN_RE.finditer(points):
+        gap = points[cursor:match.start()]
+        if _TOKEN_SEPARATOR_RE.fullmatch(gap) is None:
+            raise ValueError(
+                f'points contains unsupported syntax at offset {cursor}: {gap!r}'
+            )
+        if not tokens and ',' in gap:
+            raise ValueError('points cannot start with a comma')
+        tokens.append(_GeometryToken('number', match.group(), match.start()))
+        cursor = match.end()
+
+    trailing = points[cursor:]
+    if _TRAILING_WHITESPACE_RE.fullmatch(trailing) is None:
+        raise ValueError(
+            f'points contains unsupported trailing syntax at offset '
+            f'{cursor}: {trailing!r}'
+        )
+    if not tokens:
+        raise ValueError('points must contain coordinate pairs')
+    return tokens
+
+
+def _parse_svg_path_tokens(
+    d: str,
+) -> tuple[list[PathCommand], list[_GeometryToken]]:
+    """Parse path data and retain its semantic numeric tokens."""
+    tokens = _tokenize_path_data(d)
+    if tokens[0].kind != 'command' or tokens[0].raw not in {'M', 'm'}:
+        raise ValueError('path d must begin with M or m')
+
+    commands: list[PathCommand] = []
+    number_tokens: list[_GeometryToken] = []
+    token_index = 0
+    while token_index < len(tokens):
+        command_token = tokens[token_index]
+        if command_token.kind != 'command':
+            raise ValueError(
+                f'path d requires a command at offset {command_token.offset}'
+            )
+        command = command_token.raw
+        token_index += 1
+        if command in {'Z', 'z'}:
+            commands.append(PathCommand(command, []))
+            continue
+
+        argument_tokens: list[_GeometryToken] = []
+        while token_index < len(tokens) and tokens[token_index].kind == 'number':
+            argument_tokens.append(tokens[token_index])
+            token_index += 1
+
+        argument_count = _ARG_COUNTS[command]
+        if command in {'A', 'a'}:
+            argument_tokens = _expand_arc_argument_tokens(
+                argument_tokens,
+                command_token,
+            )
+        if not argument_tokens:
+            raise ValueError(
+                f'path command {command!r} at offset {command_token.offset} '
+                f'requires {argument_count} argument(s)'
+            )
+        if len(argument_tokens) % argument_count:
+            raise ValueError(
+                f'path command {command!r} at offset {command_token.offset} '
+                f'has {len(argument_tokens)} argument(s); expected a multiple '
+                f'of {argument_count}'
+            )
+
+        for group_index in range(0, len(argument_tokens), argument_count):
+            group = argument_tokens[group_index:group_index + argument_count]

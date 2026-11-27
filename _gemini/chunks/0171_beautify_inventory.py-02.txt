@@ -1,0 +1,93 @@
+                "cells": _table_cells(t),  # 2D text grid — convenient for diff
+                "rows": t.get("rows", []),  # raw row/col cells — preserves merged / multi-header fidelity
+            }
+            for t in slide.get("tables", [])
+        ]
+        charts = [
+            {
+                "chart_id": c.get("chart_id"),
+                "chart_type": c.get("chart_type"),
+                "category_count": c.get("category_count"),
+                "series_count": c.get("series_count"),
+                "categories": c.get("categories", []),  # frozen data
+                "series": c.get("series", []),           # frozen data (name + values)
+            }
+            for c in slide.get("charts", [])
+        ]
+        diagrams = [
+            {
+                "diagram_id": diagram.get("diagram_id"),
+                "shape_name": diagram.get("shape_name"),
+                "geometry": diagram.get("geometry"),
+                "layout": diagram.get("layout", {}),
+                "root_ids": diagram.get("root_ids", []),
+                "nodes": diagram.get("nodes", []),
+                "connections": diagram.get("connections", []),
+                "status": diagram.get("status"),
+                "warnings": diagram.get("warnings", []),
+            }
+            for diagram in slide.get("diagrams", [])
+        ]
+        slides_out.append({
+            "slide_index": idx,
+            "page_type": slide.get("page_type"),
+            "text_blocks": text_blocks,
+            "tables": tables,
+            "charts": charts,
+            "diagrams": diagrams,
+            "images": images_by_slide.get(idx, []),
+            "ignored": [],            # agent fills: hidden shapes, master-only text, image crop/rotation
+            "needs_confirmation": [],  # agent fills: combo/dual-axis charts, merged-cell tables, overcrowded pages
+        })
+
+    return {
+        "schema": "beautify_inventory.v1",
+        "source": slide_library.get("source_pptx"),
+        "slide_count": slide_library.get("slide_count", len(slides_out)),
+        "canvas_px": slide_library.get("canvas_px"),
+        "slides": slides_out,
+    }
+
+
+def _view_payload(inventory: dict, view: str, slides: list[dict]) -> dict:
+    """Wrap projected slides with the canonical deck-level facts."""
+    return {
+        "schema": "beautify_inventory.view.v1",
+        "inventory_schema": inventory.get("schema", "beautify_inventory.v1"),
+        "view": view,
+        "source": inventory.get("source"),
+        "slide_count": inventory.get("slide_count", len(inventory.get("slides", []))),
+        "canvas_px": inventory.get("canvas_px"),
+        "slides": slides,
+    }
+
+
+def _summary_view(inventory: dict) -> dict:
+    """Project the whole roster into compact per-slide counts and review flags."""
+    slides = []
+    for slide in inventory.get("slides", []):
+        slides.append({
+            "slide_index": slide.get("slide_index"),
+            "page_type": slide.get("page_type"),
+            "text_block_count": len(slide.get("text_blocks", [])),
+            # Blocks include empty and decorative frames; the non-space
+            # character count is the density signal.
+            "text_char_count": sum(
+                len("".join(str(block.get("text") or "").split()))
+                for block in slide.get("text_blocks", [])
+            ),
+            "table_count": len(slide.get("tables", [])),
+            "chart_count": len(slide.get("charts", [])),
+            "diagram_count": len(slide.get("diagrams", [])),
+            "image_count": len(slide.get("images", [])),
+            "ignored": slide.get("ignored", []),
+            "needs_confirmation": slide.get("needs_confirmation", []),
+        })
+    return _view_payload(inventory, "summary", slides)
+
+
+def _without_geometry(value: Any) -> Any:
+    """Remove explicit source-layout geometry while preserving content and data."""
+    if isinstance(value, dict):
+        return {
+            key: _without_geometry(item)

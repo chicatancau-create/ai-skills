@@ -1,0 +1,50 @@
+def build_group_listing(project_path: Path) -> tuple[list[str], list[str]]:
+    """Return one compact line per slide: ``<slide>: id1, id2, id3``.
+
+    Chrome groups are excluded — matches ``build_scaffold``'s policy so the
+    listing reflects exactly what an editor can override. Returns
+    ``(lines, anonymous_warnings)``.
+    """
+    targets_by_slide, anonymous = scan_project_targets(project_path, include_hidden=True)
+    lines: list[str] = []
+    for slide_name, targets in targets_by_slide.items():
+        _require_unique_target_ids(slide_name, targets)
+        ids = [t.group_id for t in targets if not t.chrome and not t.hidden_reason]
+        chrome_ids = [t.group_id for t in targets if t.chrome and not t.hidden_reason]
+        hidden_ids = [t.group_id for t in targets if t.hidden_reason]
+        if not ids:
+            line = f'{slide_name}: (no animatable groups)'
+        else:
+            line = f'{slide_name}: {", ".join(ids)}'
+        if chrome_ids:
+            # Name what was dropped so an id like ``takeaway-rule`` is seen
+            # as chrome-by-token rather than silently missing.
+            line += f'  [chrome, animates only when named: {", ".join(chrome_ids)}]'
+        if hidden_ids:
+            line += f'  [hidden, not exported: {", ".join(hidden_ids)}]'
+        lines.append(line)
+    return lines, anonymous
+
+
+def write_scaffold(
+    project_path: Path,
+    output_path: str | None = None,
+    *,
+    force: bool = False,
+) -> Path:
+    """Write ``animations.json`` scaffold and return its path."""
+    if output_path:
+        path = Path(output_path)
+    else:
+        path = default_config_path(project_path)
+    if output_path and not path.is_absolute():
+        path = project_path / path
+    if path.exists() and not force:
+        raise FileExistsError(f'Animation config already exists: {path}')
+
+    scaffold = build_scaffold(project_path)
+    path.write_text(
+        json.dumps(scaffold, ensure_ascii=False, indent=2) + '\n',
+        encoding='utf-8',
+    )
+    return path

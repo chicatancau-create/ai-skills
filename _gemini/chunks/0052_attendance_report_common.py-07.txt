@@ -1,0 +1,113 @@
+    # 水蓝(AQUA)：旷工迟到（须在"旷工""迟到"之前匹配）— POI index 49 (51,204,204)
+    (_re.compile(r".*(旷工迟到)[\s\S]*"), "33CCCC"),
+    # 玫红(ROSE)：旷工 — POI index 45 (255,153,204)
+    (_re.compile(r".*(旷工)[\s\S]*"), "FF99CC"),
+    # 淡蓝(PALE_BLUE)：严重迟到（须在普通"迟到"之前匹配）— POI index 44 (153,204,255)
+    (_re.compile(r".*(严重迟到)[\s\S]*"), "99CCFF"),
+    # 浅绿(LIGHT_GREEN)：迟到 — POI index 42 (204,255,204)
+    (_re.compile(r".*(迟到)[\s\S]*"), "CCFFCC"),
+    # 柠檬黄(LEMON_CHIFFON)：早退 — POI index 26 (255,255,153)
+    (_re.compile(r".*(早退)[\s\S]*"), "FFFF99"),
+    # 珊瑚粉(CORAL)：缺卡 — POI index 29 (255,128,128)
+    (_re.compile(r".*(缺卡)[\s\S]*"), "FF8080"),
+    # 无色：未排班/休息/正常 — 不填充
+    (_re.compile(r".*(未排班|休息|正常)[\s\S]*"), None),
+]
+
+
+def _match_attend_result_color(text: str) -> str | None:
+    """
+    根据考勤结果文本匹配颜色（6 位 hex，不含 #），无匹配或匹配到"无色"规则时返回 None。
+    """
+    if not text:
+        return None
+    for pattern, color in _ATTEND_RESULT_STYLE_RULES:
+        if pattern.fullmatch(text):
+            return color
+    return None
+
+# 行高
+_TITLE_ROW_HEIGHT = 30             # 主标题行高
+_SUBTITLE_ROW_HEIGHT = 22          # 副标题行高
+_HEADER_ROW_HEIGHT = 32            # 表头行高（更高，配合浅黄底色）
+_DATA_ROW_HEIGHT = 22              # 数据行高
+
+# 列宽估算：中文字符权重，宽度上下限
+_CJK_CHAR_WEIGHT = 2.0
+_ASCII_CHAR_WEIGHT = 1.1
+_MIN_COL_WIDTH = 10
+_MAX_COL_WIDTH = 40
+
+
+def _is_cjk(ch: str) -> bool:
+    """判断一个字符是否为中日韩字符（用于估算 Excel 列宽）。"""
+    if not ch:
+        return False
+    code = ord(ch)
+    return (
+        0x4E00 <= code <= 0x9FFF       # CJK 统一汉字
+        or 0x3000 <= code <= 0x303F    # CJK 符号和标点
+        or 0xFF00 <= code <= 0xFFEF    # 全角字符
+    )
+
+
+def _estimate_text_width(text: str) -> float:
+    """估算字符串在 Excel 中显示所占的列宽（中文 ≈ 2，ASCII ≈ 1）。"""
+    if not text:
+        return 0.0
+    width = 0.0
+    for ch in text:
+        width += _CJK_CHAR_WEIGHT if _is_cjk(ch) else _ASCII_CHAR_WEIGHT
+    return width
+
+
+def _is_numeric_value(value: Any) -> bool:
+    """判断一个值是否为可对齐到右侧的数字（或纯数字字符串）。"""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return True
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return False
+        try:
+            float(s)
+            return True
+        except ValueError:
+            return False
+    return False
+
+
+def _build_styles():
+    """构建 Excel 样式对象集合，避免每个单元格重复创建。"""
+    from openpyxl.styles import (
+        Alignment, Border, Font, PatternFill, Side,
+    )
+
+    thin_side = Side(border_style="thin", color=_BORDER_COLOR)
+    border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
+
+    return {
+        # 主标题（"月度汇总展示  统计日期：xxx 至 xxx"）
+        "title_font": Font(name=_FONT_NAME, bold=True, color=_TITLE_FONT_COLOR, size=14),
+        "title_fill": PatternFill(fill_type="solid", fgColor=_TITLE_FILL_COLOR),
+        "title_align": Alignment(horizontal="left", vertical="center", indent=1),
+        # 副标题（"报表生成时间：xxx"）
+        "subtitle_font": Font(name=_FONT_NAME, color=_SUBTITLE_FONT_COLOR, size=10),
+        "subtitle_fill": PatternFill(fill_type="solid", fgColor=_SUBTITLE_FILL_COLOR),
+        "subtitle_align": Alignment(horizontal="left", vertical="center", indent=1),
+        # 表头
+        "header_font": Font(name=_FONT_NAME, bold=True, color=_HEADER_FONT_COLOR, size=11),
+        "header_fill": PatternFill(fill_type="solid", fgColor=_HEADER_FILL_COLOR),
+        "header_align": Alignment(horizontal="center", vertical="center", wrap_text=True),
+        # 数据
+        "data_font": Font(name=_FONT_NAME, color=_DATA_FONT_COLOR, size=10),
+        "align_left": Alignment(horizontal="left", vertical="center", wrap_text=True),
+        "align_right": Alignment(horizontal="right", vertical="center", wrap_text=False),
+        "align_center": Alignment(horizontal="center", vertical="center", wrap_text=True),
+        "border": border,
+        # 日历表人员交替配色（按 merge_groups 块交替）
+        "band_fills": tuple(
+            PatternFill(fill_type="solid", fgColor=c)
+            for c in _CALENDAR_BAND_COLORS

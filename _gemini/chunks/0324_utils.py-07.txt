@@ -1,0 +1,109 @@
+_TRANSFORM_SEPARATOR_RE = re.compile(_TRANSFORM_SEPARATOR_PATTERN)
+_TRANSFORM_ARGUMENTS_RE = re.compile(
+    rf'[ \t\r\n]*{_TRANSFORM_NUMBER_PATTERN}'
+    rf'(?:{_TRANSFORM_SEPARATOR_PATTERN}{_TRANSFORM_NUMBER_PATTERN})*'
+    r'[ \t\r\n]*'
+)
+_TRANSFORM_ARITIES = {
+    'matrix': frozenset({6}),
+    'translate': frozenset({1, 2}),
+    'scale': frozenset({1, 2}),
+    'rotate': frozenset({1, 3}),
+}
+_FULL_TRANSFORM_TAGS = frozenset({
+    'rect', 'circle', 'ellipse', 'line', 'path', 'polygon', 'polyline',
+    'image',
+})
+_TRANSFORM_CONTAINER_TAGS = frozenset({'g', 'use'})
+_TRANSFORM_DEFINITION_BOUNDARIES = frozenset({'clipPath', 'marker', 'pattern'})
+_NON_VISUAL_TRANSFORM_CHILD_TAGS = frozenset({
+    'defs', 'title', 'desc', 'metadata', 'style',
+})
+
+
+def matrix_multiply(left: AffineMatrix, right: AffineMatrix) -> AffineMatrix:
+    """Compose two SVG affine matrices, applying ``right`` before ``left``."""
+    a1, b1, c1, d1, e1, f1 = left
+    a2, b2, c2, d2, e2, f2 = right
+    return (
+        a1 * a2 + c1 * b2,
+        b1 * a2 + d1 * b2,
+        a1 * c2 + c1 * d2,
+        b1 * c2 + d1 * d2,
+        a1 * e2 + c1 * f2 + e1,
+        b1 * e2 + d1 * f2 + f1,
+    )
+
+
+def _translate_matrix(tx: float, ty: float = 0.0) -> AffineMatrix:
+    return (1.0, 0.0, 0.0, 1.0, tx, ty)
+
+
+def _scale_matrix(sx: float, sy: float | None = None) -> AffineMatrix:
+    return (sx, 0.0, 0.0, sx if sy is None else sy, 0.0, 0.0)
+
+
+def _rotate_matrix(angle_deg: float, cx: float | None = None, cy: float | None = None) -> AffineMatrix:
+    rad = math.radians(angle_deg)
+    cos_a = math.cos(rad)
+    sin_a = math.sin(rad)
+    rot = (cos_a, sin_a, -sin_a, cos_a, 0.0, 0.0)
+    if cx is None or cy is None:
+        return rot
+    return matrix_multiply(
+        matrix_multiply(_translate_matrix(cx, cy), rot),
+        _translate_matrix(-cx, -cy),
+    )
+
+
+def _parse_transform_operations(
+    transform_str: str,
+) -> tuple[
+    tuple[tuple[str, tuple[float, ...]], ...],
+    tuple[str, ...],
+]:
+    """Parse a complete project transform list and retain numeric tokens."""
+    if not transform_str:
+        return (), ()
+
+    operations: list[tuple[str, tuple[float, ...]]] = []
+    number_tokens: list[str] = []
+    cursor = 0
+    matches = list(_TRANSFORM_OPERATION_RE.finditer(transform_str))
+    if not matches:
+        if _TRANSFORM_WHITESPACE_RE.fullmatch(transform_str):
+            raise ValueError('SVG transform must not be empty')
+        raise ValueError(f'Invalid SVG transform syntax {transform_str!r}')
+
+    for index, match in enumerate(matches):
+        gap = transform_str[cursor:match.start()]
+        gap_pattern = (
+            _TRANSFORM_WHITESPACE_RE
+            if index == 0 else _TRANSFORM_SEPARATOR_RE
+        )
+        if gap_pattern.fullmatch(gap) is None:
+            if index > 0 and not gap:
+                raise ValueError(
+                    f'SVG transform operations require a separator at '
+                    f'offset {cursor}'
+                )
+            raise ValueError(
+                f'Invalid SVG transform syntax at offset {cursor}: '
+                f'{gap!r}'
+            )
+        name, raw_args = match.groups()
+        if name not in _TRANSFORM_ARITIES:
+            raise ValueError(
+                f'Unsupported SVG transform operation {name!r}; use lowercase '
+                'matrix, translate, scale, or rotate'
+            )
+        if raw_args.strip() and _TRANSFORM_ARGUMENTS_RE.fullmatch(raw_args) is None:
+            raise ValueError(
+                f'Invalid arguments for SVG transform {name!r}: {raw_args!r}'
+            )
+        tokens = tuple(_TRANSFORM_NUMBER_RE.findall(raw_args))
+        values = tuple(float(token) for token in tokens)
+        if not all(math.isfinite(value) for value in values):
+            raise ValueError(f'Non-finite arguments for SVG transform {name!r}')
+        if len(values) not in _TRANSFORM_ARITIES[name]:
+            expected = '/'.join(str(value) for value in sorted(_TRANSFORM_ARITIES[name]))

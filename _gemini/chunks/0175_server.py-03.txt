@@ -1,0 +1,96 @@
+        if _TEMPLATE_SPEC_NAME_RE.fullmatch(path.name)
+    ) if templates_dir.is_dir() else []
+    if current.is_file() and multi:
+        raise ValueError(
+            'template workspace mixes design_spec.md with kind-qualified specs '
+            f'({", ".join(path.name for path in multi)}): {workspace_root}; '
+            'rename the bare spec to design_spec.<kind>.<id>.md'
+        )
+    if current.is_file():
+        return [current]
+    if multi:
+        return multi
+    raise ValueError(
+        'template workspace is missing templates/design_spec.md, '
+        'or templates/design_spec.<kind>.<id>.md: '
+        f'{workspace_root}'
+    )
+
+
+def _template_kind_from_spec(spec_path: Path) -> str:
+    """Read one supported top-level ``kind`` from Design Spec frontmatter.
+
+    Frontmatter stays the single truth. When the filename also carries a kind,
+    both its kind and id must agree; a mismatch is a corrupt workspace rather
+    than a precedence question.
+    """
+    name_match = _TEMPLATE_SPEC_NAME_RE.fullmatch(spec_path.name)
+    if name_match is not None:
+        try:
+            from register_template import (
+                SpecParseError,
+                validate_qualified_spec_identity,
+            )
+            declared_kind, _filename_id, _frontmatter, _body = (
+                validate_qualified_spec_identity(spec_path)
+            )
+        except ImportError as exc:
+            raise ValueError(
+                f'Qualified Design Spec validator could not be imported: {exc}'
+            ) from exc
+        except (OSError, SpecParseError) as exc:
+            raise ValueError(str(exc)) from exc
+        return declared_kind
+
+    try:
+        lines = spec_path.read_text(encoding='utf-8-sig').splitlines()
+    except OSError as exc:
+        raise ValueError(f'cannot read template Design Spec {spec_path}: {exc}') from exc
+    if not lines or lines[0] != '---':
+        raise ValueError(f'{spec_path} must start with YAML frontmatter')
+    try:
+        frontmatter_end = lines.index('---', 1)
+    except ValueError as exc:
+        raise ValueError(f'{spec_path} has unterminated YAML frontmatter') from exc
+
+    declared_kind = None
+    for line_number, line in enumerate(lines[1:frontmatter_end], start=2):
+        if re.match(r'^\s*kind\s*:', line) is None:
+            continue
+        if line != line.lstrip():
+            raise ValueError(
+                f'{spec_path}:{line_number} kind must be a top-level frontmatter field'
+            )
+        match = _TEMPLATE_KIND_LINE_RE.fullmatch(line)
+        if match is None:
+            raise ValueError(
+                f'{spec_path}:{line_number} has an invalid kind declaration'
+            )
+        if declared_kind is not None:
+            raise ValueError(f'{spec_path} frontmatter declares kind more than once')
+        declared_kind = next(value for value in match.groups() if value is not None)
+
+    if declared_kind is None:
+        raise ValueError(f'{spec_path} frontmatter must declare kind')
+    if declared_kind not in _TEMPLATE_LIBRARY_CONFIG:
+        supported = ', '.join(_TEMPLATE_LIBRARY_CONFIG)
+        raise ValueError(
+            f'{spec_path} frontmatter kind must be one of {supported}; '
+            f'got {declared_kind!r}'
+        )
+    return declared_kind
+
+
+def _read_template_options_input(
+    confirm_dir: Path, recommendation: dict | None = None,
+) -> tuple[dict, list[Path]]:
+    """Read and validate the agent-authored Step-3 template input."""
+    if recommendation is None:
+        recommendation = _read_json_object(confirm_dir / RECOMMENDATION_STAGE_NAMES[1])
+    data = recommendation.get('template_options')
+    if not isinstance(data, dict):
+        raise ValueError(f'{TEMPLATE_OPTIONS_LABEL} must be an object')
+    if type(data.get('schema_version')) is not int or data['schema_version'] != TEMPLATE_SCHEMA_VERSION:
+        raise ValueError(
+            f'{TEMPLATE_OPTIONS_LABEL} schema_version must be {TEMPLATE_SCHEMA_VERSION}'
+        )

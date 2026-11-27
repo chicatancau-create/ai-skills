@@ -1,0 +1,130 @@
+    tag = _svg_element_tag(elem) or str(elem.tag)
+    elem_id = elem.get('id')
+    return f'<{tag} id={elem_id!r}>' if elem_id else f'<{tag}>'
+
+
+def _visual_transform_children(elem: ET.Element) -> list[ET.Element]:
+    return [
+        child
+        for child in elem
+        if _svg_element_tag(child) not in _NON_VISUAL_TRANSFORM_CHILD_TAGS
+    ]
+
+
+def _iter_visual_transform_tree(elem: ET.Element) -> Iterator[ET.Element]:
+    """Yield one rendered subtree while excluding definition/metadata branches."""
+    yield elem
+    for child in _visual_transform_children(elem):
+        yield from _iter_visual_transform_tree(child)
+
+
+_TRANSFORM_ARC_STYLE_ATTRS = (
+    'fill',
+    'stroke',
+    'stroke-width',
+    'stroke-dasharray',
+)
+
+
+def _transform_arc_styles(
+    elem: ET.Element,
+    inherited: dict[str, str] | None = None,
+) -> dict[str, str]:
+    values = dict(inherited or {})
+    inline_style = parse_inline_style(elem.get('style'))
+    for name in _TRANSFORM_ARC_STYLE_ATTRS:
+        direct = elem.get(name)
+        if direct is not None:
+            values[name] = direct
+        if name in inline_style:
+            values[name] = inline_style[name]
+    return values
+
+
+def _is_project_thick_circle(
+    elem: ET.Element,
+    arc_styles: dict[str, str],
+) -> bool:
+    if _svg_element_tag(elem) != 'circle':
+        return False
+    try:
+        radius = parse_project_geometry_length(elem.get('r') or '0', 'r')
+        stroke_width = parse_project_geometry_length(
+            arc_styles.get('stroke-width', '0'),
+            'stroke-width',
+        )
+    except ValueError:
+        # Geometry preflight owns malformed length diagnostics.
+        return False
+    return is_thick_circle_shorthand(
+        arc_styles.get('stroke-dasharray'),
+        arc_styles.get('stroke'),
+        arc_styles.get('fill'),
+        stroke_width,
+        radius,
+    )
+
+
+def supports_full_project_transform(
+    elem: ET.Element,
+    inherited_arc_styles: dict[str, str] | None = None,
+) -> bool:
+    """Return whether one subtree can consume an affine matrix without text loss."""
+    tag = _svg_element_tag(elem)
+    arc_styles = _transform_arc_styles(elem, inherited_arc_styles)
+    if _is_project_thick_circle(elem, arc_styles):
+        # Thick-circle arcs consume scalar context plus one local rotation;
+        # treating an ancestor as a full matrix would silently drop it.
+        return False
+    if tag in _FULL_TRANSFORM_TAGS:
+        return True
+    if tag == 'use':
+        # Local/data-icon use references are validated again after expansion.
+        return True
+    if tag == 'svg':
+        children = _visual_transform_children(elem)
+        return len(children) == 1 and _svg_element_tag(children[0]) == 'image'
+    if tag == 'g':
+        children = _visual_transform_children(elem)
+        return bool(children) and all(
+            supports_full_project_transform(child, arc_styles)
+            for child in children
+        )
+    return False
+
+
+def iter_project_transforms(
+    root: ET.Element,
+) -> Iterator[tuple[ET.Element, str]]:
+    """Yield explicit SVG transform attributes from the project surface."""
+    for elem in root.iter():
+        if _svg_element_tag(elem) is None:
+            continue
+        raw = elem.get('transform')
+        if raw is not None:
+            yield elem, raw
+
+
+def _has_positive_rounding(elem: ET.Element) -> bool:
+    for attr in ('rx', 'ry'):
+        raw = elem.get(attr)
+        if raw is None:
+            continue
+        try:
+            if parse_project_geometry_length(raw, attr) > 0:
+                return True
+        except ValueError:
+            # Geometry preflight owns the malformed length diagnostic.
+            continue
+    return False
+
+
+def _contains_rounded_rect(elem: ET.Element) -> bool:
+    return any(
+        _svg_element_tag(descendant) == 'rect'
+        and _has_positive_rounding(descendant)
+        for descendant in _iter_visual_transform_tree(elem)
+    )
+
+
+def _contains_native_marker(elem: ET.Element) -> bool:

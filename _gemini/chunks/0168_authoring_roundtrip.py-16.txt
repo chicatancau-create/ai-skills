@@ -1,0 +1,107 @@
+    """Keep one natively restored source shape ordered without converting it."""
+    shape_key = source_ref.split(":", 1)[1]
+    placeholder = ET.Element(
+        f"{{{SVG_NS}}}g",
+        {
+            "id": f"shape-{shape_key}",
+            "data-pptx-object": "group",
+        },
+    )
+    if shape_key.isdigit():
+        placeholder.set("data-pptx-shape-id", shape_key)
+        placeholder.set("data-pptx-shape-scope", "slide")
+    for name in (
+        "data-pptx-layer",
+        "data-pptx-role",
+        "data-pptx-placeholder",
+    ):
+        value = source.get(name)
+        if value is not None:
+            placeholder.set(name, value)
+    transform = source.get("transform")
+    if transform:
+        placeholder.set("transform", transform)
+    frame = (source.get("data-pptx-frame") or "").split()
+    try:
+        x, y, width, height = (float(value) for value in frame)
+    except (TypeError, ValueError):
+        x, y, width, height = 0.0, 0.0, 1.0, 1.0
+    ET.SubElement(
+        placeholder,
+        f"{{{SVG_NS}}}rect",
+        {
+            "x": f"{x:.15g}",
+            "y": f"{y:.15g}",
+            "width": f"{max(width, 0.001):.15g}",
+            "height": f"{max(height, 0.001):.15g}",
+            "fill": "#000000",
+        },
+    )
+    return placeholder
+
+
+def _materialize_document(
+    project_path: Path,
+    document: AuthoringDocument,
+    baseline_path: Path,
+    output_path: Path,
+    current_assets: dict[str, VectorAssetRecord],
+    baseline_assets: dict[str, VectorAssetRecord],
+    *,
+    page: RoundtripPage | None = None,
+    pages: tuple[RoundtripPage, ...] = (),
+) -> dict[str, Any]:
+    current_root = _parse_svg(document.authoring_path)
+    baseline_root = _parse_svg(baseline_path)
+    layered_root = _parse_svg(document.layered_source_path)
+    inherited_links = _source_jump_links(current_root, baseline_root)
+
+    def remap_link(clone: ET.Element, original: ET.Element) -> None:
+        inherited = inherited_links.get(original)
+        source_href = original.get(SOURCE_HREF_ATTR)
+        if source_href and re.fullmatch(r"#slide-[1-9]\d*", source_href):
+            for name in (SHAPE_HYPERLINK_ATTR, "href", f"{{{XLINK_NS}}}href"):
+                if original.get(name) == source_href:
+                    inherited = (name, source_href)
+                    break
+        clone.attrib.pop(SOURCE_HREF_ATTR, None)
+        clone.attrib.pop(ADOPTED_SOURCE_LINK_ATTR, None)
+        if inherited is None or page is None:
+            return
+        name, href = inherited
+        target = int(href.removeprefix("#slide-"))
+        targets = [candidate.output_index for candidate in pages if candidate.source_slide == target]
+        if original.get(ADOPTED_SOURCE_LINK_ATTR) != "true" and target == page.source_slide:
+            targets = [page.output_index]
+        if len(targets) != 1:
+            reason = "omitted" if not targets else "repeated"
+            raise AuthoringRoundtripError(
+                f"{document.name} inherited link {href!r} targets {reason} source slide {target}; "
+                "include the target exactly once or remove/change the link"
+            )
+        clone.set(name, f"#slide-{targets[0]}")
+    document_unchanged = (
+        normalized_authoring_subtree_sha256(current_root, current_assets)
+        == normalized_authoring_subtree_sha256(
+            baseline_root,
+            baseline_assets,
+        )
+    )
+    layered_index = _layered_ref_index(layered_root)
+    current_referenced_assets = _referenced_assets(
+        current_root,
+        current_assets,
+        document_name=document.name,
+        origin_document=document.source_name,
+    )
+    baseline_referenced_assets = _referenced_assets(
+        baseline_root,
+        baseline_assets,
+        document_name=document.name,
+        origin_document=document.source_name,
+    )
+    current_occurrences = _ref_occurrences(
+        current_root,
+        current_referenced_assets,
+    )
+    baseline_occurrences = _ref_occurrences(

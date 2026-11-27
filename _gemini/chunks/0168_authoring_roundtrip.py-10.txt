@@ -1,0 +1,99 @@
+            isinstance(value, int) and not isinstance(value, bool) and value >= 0
+            for value in (min_drawables, min_bytes, min_decoration_bytes)
+        ):
+            raise AuthoringRoundtripError(
+                "Flat vector inventory extraction thresholds are invalid"
+            )
+        icon_namespace = inventory.get("icon_namespace")
+        if icon_namespace != IMPORTED_ICON_NAMESPACE:
+            raise AuthoringRoundtripError(
+                "Flat vector inventory must use icon_namespace='imported'"
+            )
+        if inventory.get("asset_role") != DECORATION_ASSET_ROLE:
+            raise AuthoringRoundtripError(
+                "Flat vector inventory must use asset_role='decoration'"
+            )
+        baseline_icons = baseline_root / "_baseline_icons"
+        entries: list[dict[str, Any]] = []
+        for document in sorted(documents.values(), key=lambda item: item.name):
+            entries.extend(
+                extract_file(
+                    baseline_root / document.name,
+                    baseline_icons,
+                    IMPORTED_ICON_NAMESPACE,
+                    int(min_drawables),
+                    int(min_bytes),
+                    int(min_decoration_bytes),
+                    True,
+                    "baseline",
+                    None,
+                    None,
+                )
+            )
+        return temporary, baseline_root, _baseline_assets(entries, baseline_icons)
+    except Exception:
+        temporary.cleanup()
+        raise
+
+
+def _collapse_hash_only_groups(root: ET.Element) -> None:
+    """Canonicalize attribute-free one-child wrappers for edit comparison."""
+    for parent in list(root.iter()):
+        changed = True
+        while changed:
+            changed = False
+            for index, child in enumerate(list(parent)):
+                if (
+                    _local_name(child.tag) != "g"
+                    or child.attrib
+                    or len(child) != 1
+                    or (child.text and child.text.strip())
+                ):
+                    continue
+                replacement = child[0]
+                replacement.tail = child.tail
+                parent.remove(child)
+                parent.insert(index, replacement)
+                changed = True
+                break
+
+
+def normalized_authoring_subtree_sha256(
+    element: ET.Element,
+    assets: dict[str, VectorAssetRecord],
+    *,
+    asset: VectorAssetRecord | None = None,
+) -> str:
+    normalized = copy.deepcopy(element)
+    if asset is not None and not asset.unchanged:
+        normalized.set(
+            "data-pptx-edited-vector-asset-sha256",
+            asset.actual_asset_sha256,
+        )
+    prefix = f"{asset.element_prefix}_" if asset is not None else None
+
+    def rewrite_url(match: re.Match[str]) -> str:
+        quote, ref_id = match.group(1), match.group(2)
+        if prefix and ref_id.startswith(prefix):
+            ref_id = ref_id[len(prefix):]
+        return f"url({quote}#{ref_id}{quote})"
+
+    for item in normalized.iter():
+        if prefix:
+            item_id = item.get("id")
+            if item_id and item_id.startswith(prefix):
+                item.set("id", item_id[len(prefix):])
+            for name, value in list(item.attrib.items()):
+                rewritten = _URL_ID_RE.sub(rewrite_url, value)
+                if _local_name(name) == "href" and rewritten.startswith(f"#{prefix}"):
+                    rewritten = "#" + rewritten[len(prefix) + 1:]
+                if rewritten != value:
+                    item.set(name, rewritten)
+        if asset is not None:
+            for name, value in list(item.attrib.items()):
+                if _local_name(name) != "href" or value.startswith(("#", "data:")):
+                    continue
+                parsed = urlsplit(value)
+                if parsed.scheme or parsed.netloc or not parsed.path:
+                    continue
+                resolved = (

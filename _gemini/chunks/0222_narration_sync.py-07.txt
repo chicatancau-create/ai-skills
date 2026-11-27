@@ -1,0 +1,131 @@
+            group_cfg,
+            slide_effect,
+        )
+    )
+
+
+def _active_group_order_requires_svg(
+    slide_name: str,
+    groups_cfg: dict[str, Any],
+    group_ids: list[str],
+    slide_effect: str | None,
+) -> bool:
+    """Return whether SVG group order is needed to break sequence ambiguity."""
+    if len(group_ids) <= 1:
+        return False
+    order_owners: dict[int, str] = {}
+    for group_id in group_ids:
+        for _effect_index, _effect_path, effect_cfg in _active_group_effect_entries(
+            slide_name,
+            group_id,
+            groups_cfg[group_id],
+            slide_effect,
+        ):
+            order = effect_cfg.get("order")
+            if order is None:
+                return True
+            previous_group = order_owners.setdefault(order, group_id)
+            if previous_group != group_id:
+                return True
+    return False
+
+
+def _needs_svg_group_resolution(
+    slide_name: str,
+    settings: SlideAnimationSettings,
+    groups_cfg: dict[str, Any],
+    plan_entries: list[TimingPlanEntry] | None,
+) -> bool:
+    """Return whether JSON alone cannot prove the effective group sequence."""
+    active_explicit = [
+        group_id
+        for group_id, group_cfg in groups_cfg.items()
+        if isinstance(group_cfg, dict)
+        and _group_is_animated(
+            slide_name,
+            group_id,
+            group_cfg,
+            settings.effect,
+        )
+    ]
+    if plan_entries is None:
+        if settings.effect is not None:
+            return True
+        return _active_group_order_requires_svg(
+            slide_name,
+            groups_cfg,
+            active_explicit,
+            settings.effect,
+        )
+
+    candidate_ids = list(
+        dict.fromkeys(
+            [
+                *(entry.group_id for entry in plan_entries),
+                *active_explicit,
+            ]
+        )
+    )
+    active_candidates = [
+        group_id
+        for group_id in candidate_ids
+        if group_id in groups_cfg
+        and isinstance(groups_cfg[group_id], dict)
+        and _group_is_animated(
+            slide_name,
+            group_id,
+            groups_cfg[group_id],
+            settings.effect,
+        )
+    ]
+    return _active_group_order_requires_svg(
+        slide_name,
+        groups_cfg,
+        active_candidates,
+        settings.effect,
+    )
+
+
+def _resolve_animation_groups(
+    project_path: Path,
+    slide_name: str,
+    slide_cfg: dict[str, Any],
+    settings: SlideAnimationSettings,
+    plan_entries: list[TimingPlanEntry] | None,
+) -> tuple[list[AnimationGroupState], bool]:
+    """Resolve one effective sequence, parsing only an ambiguous page SVG."""
+    groups_value = slide_cfg.get("groups", {})
+    if not isinstance(groups_value, dict):
+        raise ValueError(
+            f'Canonical animations.json slide "{slide_name}" groups must be an object'
+        )
+    groups_cfg: dict[str, dict[str, Any]] = {}
+    for group_id, group_cfg in groups_value.items():
+        if not isinstance(group_cfg, dict):
+            raise ValueError(
+                f'Canonical animations.json group "{slide_name}/{group_id}" '
+                "must be an object"
+            )
+        groups_cfg[group_id] = group_cfg
+    use_svg = _needs_svg_group_resolution(
+        slide_name,
+        settings,
+        groups_cfg,
+        plan_entries,
+    )
+    candidate_ids: list[str]
+    if use_svg:
+        svg_path = project_path / "svg_output" / f"{slide_name}.svg"
+        if not svg_path.is_file():
+            raise FileNotFoundError(
+                f"Animation group mapping is ambiguous and requires the page SVG: "
+                f"{svg_path}"
+            )
+        targets, anonymous_groups = scan_svg_targets(svg_path)
+        duplicate_ids = sorted(
+            group_id
+            for group_id in {target.group_id for target in targets}
+            if sum(target.group_id == group_id for target in targets) > 1
+        )
+        if duplicate_ids:
+            raise ValueError(

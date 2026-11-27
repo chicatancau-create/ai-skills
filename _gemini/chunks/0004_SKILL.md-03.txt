@@ -1,0 +1,42 @@
+node tmp-m6-visual/compare-matrix-builds.mjs <oldReport.json> <newReport.json>
+node tmp-m6-visual/compare-batches.mjs <oldStates.json> <newStates.json>
+```
+
+`compare-matrix-builds.mjs` aligns the 60 `summary` rows by `cell` and compares **16 judgment columns + 3 info columns**:
+
+```js
+// NaN is not equal to NaN: a bare Number() comparison fabricated 60 fake diffs.
+const n = (v, dflt = 0) => (typeof v === 'number' && Number.isFinite(v) ? v
+  : typeof v === 'string' && v !== '' ? v : dflt)
+const JUDGE = {
+  溢出: (c) => n(c.overflowPx),                小目标: (c) => n(c.smallTargets),
+  不达标: (c) => n(c.contrastFailingCount),    对比未判定: (c) => n(c.contrastUndetermined),
+  像素判不过: (c) => (c.pixelFailing ?? []).length,  像素未判定: (c) => (c.pixelUndetermined ?? []).length,
+  取样条数: (c) => n(c.sampleCoverage?.count), 取样截断: (c) => n(c.sampleCoverage?.truncated ? 1 : 0),
+  正文最差: (c) => n(c.contrastWorstBody?.ratio, '—'),
+  规范CLS: (c) => n(c.cls?.subject),           原始CLS: (c) => n(c.cls?.raw),
+  正文字号: (c) => n(c.bodyFontPx, '—'),       段落字号: (c) => n(c.para?.size, '—'),
+  落点核对: (c) => n(c.how, '—'),              报错: (c) => n(c.error, '无'),
+  console: (c) => n(c.consoleMsgs),
+}
+const INFO = { 文档高度: (c) => n(c.docScrollHeight), LCP元素: (c) => n(c.lcpElement, '—'), LCP毫秒: (c) => n(c.lcpMs) }
+```
+
+`compare-batches.mjs` covers the states line: 21 key readings (loading unblock ms + placeholder text/paint, tab four-page stop counts + zoom200 + no-ring total, views eight cells' overflow / small targets / worst contrast / pixel-failing, escwalk 17 closed flags, chdetail three region sizes, editorfont three computed sizes, empty four cells, longtext 16 overflows, writeback 11 step judgments + `realVaultTouched` + four bound-with-data readings + four tab walks, axtree `namelessTotal` + `h1MismatchPages`, build CSS fingerprint). Its console labels are hardcoded `81:` / `82:` regardless of which two files you pass — read them as "old" and "new".
+
+Verified reference outcomes (reproduce these before trusting a re-created script):
+
+- `report-matrix-terminal84.json` vs `tmp-m6-visual-audit85/report.json` → 4 diffs, all in 原始CLS (`workspace`/`modal-help` at 1440x900 and 768x1024); LCP moved in 49/60 cells within −52…+20 ms with elements identical; doc height 6039→6038 in two `@320` cells.
+- `report-states-final82.json` vs `report-states-audit86.json`, and `audit86` vs `terminal96` → 21 readings, exactly 1 different: the build CSS fingerprint.
+
+## Step 6 — Read the numbers by the fixed standards
+
+- **LCP is never quoted per millisecond.** Compare magnitude and whether it crosses 2.5 s, plus whether the element changed. Same build, same ruler: 52 of 60 cells differed 4—12 ms across two batches.
+- **The judgment columns are the ones that repeat bit-for-bit**; 原始 CLS is timing jitter over "which shifts landed in the 500 ms window after input". 规范 CLS is the gate.
+- `lcpLoadMs` (after landing, before the screenshot) and `lcpMs` (after the screenshot) are different readings of different moments — the doc's "max 224 / 228 / 316 ms" is the former. `lcpElementLate` / `lcpSizeLate` / `lcpLateDeltaMs` exist **only under `cells[].metrics`**; `summary` has none of them (verified against `report-matrix` files). Any late-LCP question (#79) must go back to `cells`.
+- **A modal row's CLS is not the dialog's.** `modal-settings` / `modal-help` share the same-document accumulation as the same-viewport `workspace` row down to 17 decimals — those two rows measure the shell startup segment, never "how much offset this dialog caused".
+- `errors: []` is not a verdict. Read the per-section `sectionJudge`, and remember three findings are deliberately outside it (nameless `<main>`, the two 「全部」 dropdowns, two `h1` on three pages — parked as #77 for the user).
+- INP sample counts are a side effect of the 40 ms gate; a one-order-of-magnitude count difference does not mean one build is faster.
+
+## Step 7 — Batch acceptance checklist (all of it, or it is a process artifact)
+

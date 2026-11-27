@@ -1,0 +1,114 @@
+        for timing_id in timing_set
+    ]
+    next_timing_id = max(timing_ids, default=0) + 1
+    if next_timing_id > MAX_OOXML_UNSIGNED_INT:
+        raise ValueError("narration source has no available timing node identifiers")
+
+    if not timing_branches and next_timing_id + 1 > MAX_OOXML_UNSIGNED_INT:
+        raise ValueError(
+            "narration source has no identifiers available for a new timing root"
+        )
+
+    audio_picture = _create_audio_pic_element(
+        shape_id,
+        shape_name,
+        audio_rid,
+        media_rid,
+        poster_rid,
+    )
+    shape_tree.append(audio_picture)
+
+    if timing_branches:
+        if timing_anchor is None:
+            raise AssertionError("timing branches lost their root anchor")
+        _validate_root_timing_position(root, timing_anchor)
+        for timing in timing_branches:
+            timing_root = _existing_timing_root(timing)
+            if timing_root.find(_qn(PML_NS, "childTnLst")) is None:
+                ET.SubElement(timing_root, _qn(PML_NS, "childTnLst"))
+            child_nodes = _direct_child(
+                timing_root,
+                _qn(PML_NS, "childTnLst"),
+                "tmRoot/p:childTnLst",
+            )
+            child_nodes.append(
+                _create_audio_timing_element(
+                    shape_id,
+                    next_timing_id,
+                    start_delay_ms,
+                )
+            )
+    else:
+        audio_timing = _create_audio_timing_element(
+            shape_id,
+            next_timing_id + 1,
+            start_delay_ms,
+        )
+        _insert_root_timing(root, _new_timing(audio_timing, next_timing_id))
+
+    return serialize_source_xml(root, slide_xml).decode("utf-8")
+
+
+def read_narration_start_delay_xml(slide_xml: str) -> int:
+    """Return the latest embedded narration picture's autoplay delay in ms."""
+    root = parse_source_xml(slide_xml)
+    if root.tag != _qn(PML_NS, "sld"):
+        raise ValueError("narration source XML root must be p:sld")
+
+    audio_shape_properties: list[ET.Element] = []
+    for picture in root.iter(_qn(PML_NS, "pic")):
+        if not any(
+            element.tag == _qn(DRAWINGML_NS, "audioFile")
+            for element in picture.iter()
+        ):
+            continue
+        properties = list(picture.iter(_qn(PML_NS, "cNvPr")))
+        if len(properties) != 1:
+            raise ValueError(
+                "narration audio picture must contain exactly one p:cNvPr"
+            )
+        audio_shape_properties.extend(properties)
+    if not audio_shape_properties:
+        raise ValueError("narration source has no embedded audio picture")
+
+    narration_shape_id = max(
+        _numeric_ids(
+            audio_shape_properties,
+            "narration audio shape",
+            minimum=1,
+        )
+    )
+    delays: list[int] = []
+    for audio in root.iter(_qn(PML_NS, "audio")):
+        media_node = audio.find(_qn(PML_NS, "cMediaNode"))
+        if media_node is None:
+            continue
+        target = media_node.find(
+            f"{_qn(PML_NS, 'tgtEl')}/{_qn(PML_NS, 'spTgt')}"
+        )
+        if target is None or target.get("spid") != str(narration_shape_id):
+            continue
+        time_node = _direct_child(
+            media_node,
+            _qn(PML_NS, "cTn"),
+            "p:audio/p:cMediaNode/p:cTn",
+        )
+        start_conditions = _direct_child(
+            time_node,
+            _qn(PML_NS, "stCondLst"),
+            "p:cTn/p:stCondLst",
+        )
+        condition = _direct_child(
+            start_conditions,
+            _qn(PML_NS, "cond"),
+            "p:stCondLst/p:cond",
+        )
+        raw_delay = condition.get("delay")
+        try:
+            delay = int(raw_delay)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"narration timing has invalid start delay: {raw_delay!r}"
+            ) from exc
+        if delay < 0 or delay > MAX_OOXML_UNSIGNED_INT:
+            raise ValueError(

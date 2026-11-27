@@ -1,0 +1,68 @@
+  dws attendance vacation save-balance --target user001 \
+    --leave-code a1b2c3d4-e5f6-7890-abcd-ef1234567890 --num 8 --reason "年度发放" \
+    --start 2024-01-01 --end 2024-12-31
+Flags:
+      --target string     目标员工工号（必填）
+      --leave-code string 假期编码（必填）
+      --num string        余额数量，如8天传8，7.5天传7.5（必填）
+      --reason string     变更原因，最长100字符（必填）
+      --start string      有效期开始日期 YYYY-MM-DD（可选）
+      --end string        有效期结束日期 YYYY-MM-DD（可选）
+      --user-say-yes      用户已确认，跳过交互式确认提示
+                          Agent 调用时传 true 前必须完成用户二次确认
+```
+
+**重要：这是设置（SET）接口，传入的值会替换当前余额，而非增加（ADD）。**余额数量在传递给 MCP 时会自动乘以 100（如 8 天传 800）。执行前会展示待写入数据，需用户确认后提交。
+
+### 查询指定员工的签到记录
+```
+Usage:
+  dws attendance checkin records [flags]
+Example:
+  dws attendance checkin records \
+    --operator-staff-id op001 --staff-ids user001,user002 --start "2026-04-01 00:00:00" --end "2026-04-07 00:00:00"
+Flags:
+      --end string                结束时间, 格式 yyyy-MM-dd HH:mm:ss（必填）
+      --operator-corp-id string   操作者企业 ID（必填）
+      --operator-staff-id string  操作者员userID（必填）
+      --staff-ids string          目标员工userID 列表, 逗号分隔（必填），员工数最多100个人
+      --start string              开始时间, 格式 yyyy-MM-dd HH:mm:ss（必填），开始到结束时间限制在7天
+```
+
+调用 MCP 工具 get_checkin_record 查询指定员工在一段时间内的签到记录。权限说明：Boss/超级管理员可查看全公司员工，子管理员可查看管理范围内员工，部门主管可查看所管理部门员工，普通员工只能查询自己。接口单次最多返回100条签到记录。
+
+## 意图判断
+
+用户说"打卡记录/出勤/考勤" → `check record`
+用户说"指定用户打卡结果/考勤结果/迟到早退/缺卡异常" → `check result`
+用户说"指定用户打卡流水/打卡详情/打卡时间地点/打卡记录详情" → `check record`
+用户说"审批单/请假记录/加班记录/出差记录/补卡记录" → `approve list`
+用户说"查询排班记录/获取排班详情/查看排班/排班表/导出排班/导出排班表/排班导出/XX考勤组的排班" → **必须先 `read_file` 读取 [attendance-schedule.md](./attendance-schedule.md) 后按其中的「排班查询导出工作流」执行**。
+  - **优先级**：只要用户句中含"排班"二字且意图是查看/导出，就走本条，不要走 `attendance-report.md`。"导出排班表" ≠ "导出考勤报表"
+  - **严禁**绕过 `attendance-schedule.md` 直接调用 `dws attendance schedule get` 命令
+  - 脚本自动处理：分批查询（超 20 人自动分批）、userId→姓名转换、classId→班次名称转换、排班表格式 Excel 输出
+用户说"排班/导入排班/安排排班/设置排班/安排班次/调班/换班/排休" → **必须先 `read_file` 读取 [attendance-schedule.md](./attendance-schedule.md) 后按其中的「排班导入工作流」执行**。
+  - **严禁**绕过 `attendance-schedule.md` 直接调用 `dws attendance schedule import` 命令
+  - **严禁**仅凭命令 `--help` 或本文件中的命令参考自行组装排班命令
+  - 该文档定义了：考勤组类型校验（必须为 TURN）、班次校验（必须属于该考勤组）、排班回显确认、错误处理等约束，缺一不可
+  - 违反约束的后果：排错班次、排错人员、排班数据覆盖无法回退
+用户说"班次定义/班次列表/有哪些班次/我负责的班次" → `class search`（返回结果已包含全量属性，无需再调 get）
+用户说"班次详情/某个班次的具体信息" → `class search --name "..."`（search 直出，直接返回详情）。`class get` 仅在需要按已知 classId 精确查询时使用
+用户说"更新班次/修改班次/班次改名/修改上下班时间" → `class update`
+用户说"补卡规则/补卡设置" → `adjustment search`（返回结果已包含全量属性，无需再调 get）
+用户说"补卡规则详情/某条补卡规则的具体信息" → `adjustment search --name "..."`（search 直出）。`adjustment get` 仅在需要按已知 adjustmentId 精确查询时使用
+用户说"加班规则/加班设置/加班计算" → `overtime search`（返回结果已包含全量属性，无需再调 get）
+用户说"加班规则详情/某条加班规则的具体信息" → `overtime search --name "..."`（search 直出）。如需查已删除/被覆盖的历史记录 → `overtime get`
+用户说"考勤组列表/有哪些考勤组" → `group search`
+用户说"考勤组详情/全量考勤组信息" → `group get`,若返回结果中含成员 userId 列表，则对每个 userId 调用 `dws contact user get --user-ids <userId>`（或等价通讯录查询），在最终输出中展示员工姓名而非裸 userId
+用户说"考勤组成员/打卡地址/打卡wifi/打卡蓝牙" → `group filtered-get`（按需查询，节省成本）,若返回结果中含成员 userId 列表，则对每个 userId 调用 `dws contact user get --user-ids <userId>`（或等价通讯录查询），在最终输出中展示员工姓名而非裸 userId
+用户说"更新考勤组成员/添加考勤人员/删除考勤人员/添加考勤部门/删除考勤部门/加入考勤组/移出考勤组/设置无需考勤/取消无需考勤" → `group update-members`
+用户说"修改考勤组/更新考勤组配置/考勤组改名/改变考勤组绑定的班次/修改打卡范围/设置考勤组负责人" → `group update`
+用户说"创建考勤组/新建考勤组/添加考勤组" → `group create`
+用户说"考勤汇总/统计" → `summary`
+用户说"考勤组/考勤规则/打卡规则" → `rules`
+用户说"查询个人规则设置/查看打卡提醒/查看极速打卡/查看缺卡提醒/查看打卡结果通知/查看个人考勤统计通知/查看团队考勤统计通知" → `selfsetting get`
+用户说"更新个人规则设置/保存打卡提醒/修改极速打卡/关闭缺卡提醒/开启打卡结果通知/设置个人考勤统计通知/设置团队考勤统计通知" → `selfsetting save`
+用户说"考勤字段/考勤列" → `report columns`
+用户说"考勤数据/查询考勤报表数据" → `report query-data`（单次查询场景，非导出）
+  **导出考勤/导出报表/生成考勤报表/出勤汇总导出/考勤明细导出/迟到早退统计导出/全员考勤数据导出/月度考勤报表/考勤表格/考勤 Excel** → **必须先 `read_file` 读取 [attendance-report.md](./attendance-report.md) 后按其中的工作流执行**。

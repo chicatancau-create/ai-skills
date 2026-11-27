@@ -1,0 +1,90 @@
+            and self._row_acquire(row)
+            in {'ai', 'web', 'user', 'formula', 'placeholder', 'slice'}
+        ]
+        rows_by_filename = {
+            self._row_filename(row): row
+            for row in placed_rows
+            if self._row_filename(row)
+        }
+        referenced_paths: Dict[str, set[Path]] = defaultdict(set)
+        for references in svg_references.values():
+            for filename, paths in references.items():
+                referenced_paths[filename].update(paths)
+        referenced = set(referenced_paths)
+
+        for filename, row in rows_by_filename.items():
+            if filename not in lock_entries:
+                self._illustration_issues.append((
+                    'error',
+                    'planned_image_missing_lock',
+                    f"{filename} is a placed Design Spec image row but is "
+                    "absent from spec_lock.md images.",
+                ))
+                continue
+            if current_image_contract and any(
+                entry.get('legacy') != 'false'
+                for entry in lock_entries[filename]
+            ):
+                self._illustration_issues.append((
+                    'error',
+                    'planned_image_legacy_lock_projection',
+                    f"{filename} uses the current Design Spec image contract "
+                    "but its spec_lock.md row does not provide complete "
+                    "source=... and crop=... metadata.",
+                ))
+
+        for filename in sorted(referenced - set(rows_by_filename)):
+            lock_note = (
+                ""
+                if filename in lock_entries
+                else " and is absent from spec_lock.md images"
+            )
+            self._illustration_issues.append((
+                'error',
+                'svg_image_missing_spec',
+                f"svg_output references {filename}, but it has no placed "
+                f"Design Spec §VIII row{lock_note}.",
+            ))
+
+        for filename, entries in lock_entries.items():
+            row = rows_by_filename.get(filename)
+            if row is None:
+                self._illustration_issues.append((
+                    'error',
+                    'locked_image_missing_spec',
+                    f"{filename} is listed in spec_lock.md images but has no "
+                    "placed row in Design Spec §VIII.",
+                ))
+                continue
+
+            acquire = self._row_acquire(row)
+            status = self._row_status(row)
+            layout_pattern = self._row_layout(row)
+            crop_policy = self._row_crop(row)
+            if len(entries) > 1:
+                keys = ', '.join(repr(entry.get('key', '')) for entry in entries)
+                self._illustration_issues.append((
+                    'error',
+                    'locked_image_duplicate_entries',
+                    f"{filename} appears in multiple spec_lock.md image rows "
+                    f"({keys}); one resource must have one authoritative row.",
+                ))
+            for entry in entries:
+                if entry.get('legacy') != 'false':
+                    continue
+                if entry.get('source') != acquire:
+                    self._illustration_issues.append((
+                        'error',
+                        'locked_image_source_mismatch',
+                        f"{filename} spec_lock source={entry.get('source')!r} "
+                        f"does not match Design Spec §VIII Acquire Via "
+                        f"{acquire!r}.",
+                    ))
+                if entry.get('crop') != crop_policy:
+                    self._illustration_issues.append((
+                        'error',
+                        'locked_image_crop_mismatch',
+                        f"{filename} spec_lock crop={entry.get('crop')!r} "
+                        f"does not match Design Spec §VIII Crop Policy "
+                        f"{crop_policy!r}.",
+                    ))

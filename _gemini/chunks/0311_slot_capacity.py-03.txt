@@ -1,0 +1,49 @@
+                    line_height_source = 'tspan baselines'
+            row.update({
+                'font_family': family, 'font_size': size, 'font_weight': weight,
+                'font_family_source': 'declared' if value('font-family') else 'assumed Calibri',
+                'font_size_source': 'declared' if value('font-size') else 'assumed 16px',
+                'letter_spacing': spacing, 'line_height': line_height,
+                'line_height_source': line_height_source,
+                'latin': _capacity(bounds[2], bounds[3], size, family, weight,
+                                   spacing, line_height, 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz '),
+                'cjk': _capacity(bounds[2], bounds[3], size, family, weight,
+                                 spacing, line_height, '汉'),
+            })
+            ascent, descent = SVGQualityChecker._text_line_vertical_extent([], size)
+            row['baseline_allowed'] = [bounds[1] + ascent, bounds[1] + bounds[3] - descent]
+            lines = SVGQualityChecker._resolved_text_lines(carrier, parents, font_sizes, spacings)
+            row['baseline'] = lines[0][2] if lines else None
+            if not lines:
+                # Source paragraph models may have a known first baseline even
+                # when the estimator cannot resolve every subsequent line.
+                try:
+                    baseline = float((value('y') or '0').removesuffix('px'))
+                except ValueError:
+                    baseline = math.nan
+                if math.isfinite(baseline):
+                    row['baseline'] = baseline
+            if lines and len(lines) > 1:
+                row['baselines'] = [line[2] for line in lines]
+            variants = sorted({
+                (_effective_presentation_value(run, 'font-family', parents) or family,
+                 font_sizes[id(run)])
+                for run in runs
+            })
+            if len(variants) > 1:
+                row['typography_variants'] = [
+                    {'font_family': face, 'font_size': pixels} for face, pixels in variants
+                ]
+                row['estimate_scope'] = 'first visible run; measure mixed content separately'
+            slots.append(row)
+    report = {
+        'schema': 'ppt-master.slot-capacity.v1', 'advisory': True,
+        'assumptions': 'Uniform carrier typography; Latin sample distribution and CJK full-width glyphs. '
+                       'Line count uses declared/baseline pitch or an explicit 1.2em estimate. '
+                       'Measure actual content before locking typography; these are not limits.',
+        'slots': slots,
+    }
+    if not slots:
+        report['note'] = ('No text placeholder carriers or mirror text-slot targets were found. '
+                          'Mirror targets are listed in template_execution/*.text-slots.json.')
+    return report

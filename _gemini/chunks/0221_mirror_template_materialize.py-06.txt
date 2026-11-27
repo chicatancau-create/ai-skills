@@ -1,0 +1,100 @@
+        root = ET.fromstring(path.read_bytes(), parser=parser)
+    except (OSError, ET.ParseError) as exc:
+        raise MirrorMaterializationError(f"Cannot parse SVG {path}: {exc}") from exc
+    if _local_name(root.tag) != "svg":
+        raise MirrorMaterializationError(f"SVG root is not <svg>: {path}")
+    return root
+
+
+def _source_element(root: ET.Element, path: tuple[int, ...]) -> ET.Element:
+    element = root
+    try:
+        for index in path:
+            element = list(element)[index]
+    except (IndexError, TypeError) as exc:
+        raise MirrorMaterializationError(
+            f"Source-ref path no longer resolves: {list(path)}"
+        ) from exc
+    return element
+
+
+def _source_identity(element: ET.Element) -> str | None:
+    scope = element.get("data-pptx-shape-scope")
+    shape_id = element.get("data-pptx-shape-id")
+    if not scope or not shape_id:
+        return None
+    return f"{scope}:{shape_id}"
+
+
+def _load_authoring_documents(
+    workspace: Path,
+    required_names: set[str],
+) -> tuple[Path, dict[str, AuthoringDocument]]:
+    authoring_root = workspace / "authoring-svg"
+    manifest_path = authoring_root / AUTHORING_MANIFEST_NAME
+    manifest = _load_json(manifest_path, context="authoring manifest")
+    if manifest.get("schema") != AUTHORING_SCHEMA:
+        raise MirrorMaterializationError(
+            f"Unsupported authoring manifest schema: {manifest.get('schema')!r}"
+        )
+    if manifest.get("projection_kind") != "layered":
+        raise MirrorMaterializationError(
+            "mirror publishes only pptx_template_import.py workspaces; "
+            "an SVG workspace is consumed as an exact root by apply_template.py "
+            "(projection_kind must be layered)"
+        )
+    if manifest.get("authoring_root") != ".":
+        raise MirrorMaterializationError("authoring_manifest.json authoring_root must be '.'")
+    if manifest.get("source_ref_attribute") != SOURCE_REF_ATTRIBUTE:
+        raise MirrorMaterializationError(
+            "authoring_manifest.json uses an unsupported source-ref attribute"
+        )
+
+    source_root_raw = _require_string(
+        manifest.get("source_root"),
+        context="authoring_manifest.json source_root",
+    )
+    source_root = (authoring_root / source_root_raw).resolve()
+    expected_source_root = (workspace / "svg").resolve()
+    if source_root != expected_source_root:
+        raise MirrorMaterializationError(
+            "Type A mirror authoring manifest must resolve source_root to "
+            f"{expected_source_root}, found {source_root}"
+        )
+
+    documents_raw = _require_list(
+        manifest.get("documents"),
+        context="authoring_manifest.json documents",
+    )
+    documents: dict[str, AuthoringDocument] = {}
+    manifest_names: set[str] = set()
+    for index, raw in enumerate(documents_raw):
+        if not isinstance(raw, dict):
+            raise MirrorMaterializationError(f"documents[{index}] must be an object")
+        authoring_name = _require_string(
+            raw.get("authoring"),
+            context=f"documents[{index}].authoring",
+        )
+        if authoring_name in manifest_names:
+            raise MirrorMaterializationError(
+                f"Duplicate authoring manifest document: {authoring_name}"
+            )
+        manifest_names.add(authoring_name)
+        if authoring_name not in required_names:
+            continue
+        source_name = _require_string(
+            raw.get("source"),
+            context=f"documents[{index}].source",
+        )
+        authoring_path = _resolve_inside(
+            authoring_root,
+            authoring_name,
+            context=f"documents[{index}].authoring",
+        )
+        source_path = _resolve_inside(
+            source_root,
+            source_name,
+            context=f"documents[{index}].source",
+        )
+        if not authoring_path.is_file() or authoring_path.suffix.lower() != ".svg":
+            raise MirrorMaterializationError(

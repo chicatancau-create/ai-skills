@@ -1,0 +1,121 @@
+        {"id": "Zoom"},
+        {"id": "content"},
+        {"id": "article"},
+        {"class_": "content"},
+        {"name": "article"},  # tag name
+        {"name": "main"},    # tag name
+    ]
+}
+
+
+def fetch_response(url: str):
+    """Fetch a URL with explicit headers and return the raw HTTP response."""
+    headers = {
+        "User-Agent": CONFIG["user_agent"],
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
+    }
+
+    try:
+        response = _http_get(url, headers=headers,
+                             timeout=CONFIG["timeout"], verify=not CONFIG["insecure"])
+        response.raise_for_status()
+        return response
+    except Exception as e:
+        raise Exception(f"Failed to fetch {url}: {str(e)}")
+
+
+def fetch_url(url: str) -> tuple[str, str]:
+    """Fetch a web page as decoded text plus the final URL after redirects."""
+    response = fetch_response(url)
+    return _decode_response_text(response), response.url
+
+
+def clean_title(title: str) -> str:
+    """Remove common site suffixes from a title."""
+    if not title:
+        return ""
+    # Remove site name suffixes often found in Chinese titles
+    clean = re.sub(r"[-_|].*?(政府|门户|网站|委员会).*$", "", title)
+    return clean.strip()
+
+
+_FILENAME_TRANSLITERATIONS = str.maketrans({
+    'đ': 'd', 'Đ': 'D', 'ø': 'o', 'Ø': 'O', 'ł': 'l', 'Ł': 'L',
+    'ß': 'ss', 'æ': 'ae', 'Æ': 'AE', 'œ': 'oe', 'Œ': 'OE', 'ı': 'i',
+})
+
+
+def sanitize_filename(name: str) -> str:
+    """Sanitize a string for filesystem-safe filenames.
+
+    Accented Latin letters fold to their base letter (``Khát vọng`` ->
+    ``Khat_vong``) instead of vanishing; letters of any script and digits
+    stay, everything else is dropped.
+    """
+    folded = unicodedata.normalize('NFKD', name.translate(_FILENAME_TRANSLITERATIONS))
+    folded = ''.join(ch for ch in folded if not unicodedata.combining(ch))
+    # Replace whitespace with underscore first
+    clean = re.sub(r'\s+', '_', folded)
+    # Keep letters and digits of any script, underscore, hyphen
+    clean = ''.join(ch for ch in clean if ch.isalnum() or ch in '_-')
+    # Collapse repeating underscores
+    clean = re.sub(r'_+', '_', clean)
+    return clean[:80]  # Truncate
+
+
+def derive_base_name(title: str, url: str) -> str:
+    """Derive a safe, non-empty basename from a title or URL."""
+    base = sanitize_filename(title or "")
+    if base:
+        return base
+
+    parsed = urlparse(url)
+    path = parsed.path.strip('/')
+    if path:
+        candidate = f"{parsed.netloc}_{path}"
+    else:
+        candidate = parsed.netloc or "untitled"
+    base = sanitize_filename(candidate)
+    if base:
+        return base
+
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"untitled_{ts}"
+
+
+def build_image_filename(abs_url: str, seq: int, content_type: str | None = None) -> str:
+    """Build a safe image filename from URL metadata."""
+    parsed = urlparse(abs_url)
+    basename = os.path.basename(parsed.path).split('?')[0]
+    stem, ext = os.path.splitext(basename)
+    if not ext or len(ext) > 5 or '/' in ext:
+        ext = ""
+    if not ext and content_type:
+        ctype = content_type.split(';')[0].lower()
+        ext_map = {
+            "image/jpeg": ".jpg",
+            "image/jpg": ".jpg",
+            "image/png": ".png",
+            "image/gif": ".gif",
+            "image/webp": ".webp",
+        }
+        ext = ext_map.get(ctype, "")
+    if not ext:
+        ext = ".jpg"
+    stem = sanitize_filename(stem) if stem else f"image_{seq}"
+    return f"{stem}{ext}"
+
+
+def resolve_content_image_url(img: Tag, page_url: str) -> str | None:
+    """Resolve one content image, preferring real lazy-load URLs."""
+    candidates = [
+        img.get("data-src"),
+        img.get("data-original"),
+        img.get("data-lazy-src"),
+        img.get("data-actualsrc"),
+        img.get("src"),
+    ]
+    for value in candidates:
+        if not isinstance(value, str):
+            continue

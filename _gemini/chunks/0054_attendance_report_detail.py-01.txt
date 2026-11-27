@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""
+考勤报表导出 — 明细粒度（打卡记录）
+
+通过 `dws attendance check result` + `dws attendance check record`
+查询打卡数据，每条打卡记录输出一行，不做聚合。
+
+
+
+[AI Agent 强制门禁] 调用本脚本前必须先阅读：
+   dingtalk-workspace/references/products/attendance-report.md
+
+  本脚本仅是"考勤报表导出工作流"的执行末端，工作流完整定义在 attendance-report.md，
+  包含但不限于：
+    - 阶段 0：报表类型判断（默认月度汇总，明细需用户明确说"明细/原始记录/每条打卡"）
+    - 阶段 1：人员列表获取（aisearch person / contact dept list-members）
+    - 阶段 2：列选择（明细报表列固定，不支持 --column-keywords）
+    - 阶段 3：调用本脚本
+    - 阶段 4：结果回传给用户的标准格式
+    - 错误处理（403 权限、HSF_ILLEGALPARAMS、空数据等）
+
+  [严禁] 仅凭本脚本 docstring 或 --help 输出就直接拼命令执行，会导致：
+     - 用户本来要"汇总"被给成"明细"（粒度错误）
+     - 报表数据不全 / 人员遗漏
+     - 错误处理缺失，把环境错误当业务错误反馈给用户
+
+与月度汇总/每日统计不同，明细报表：
+  - 不使用 report columns / report query-data
+  - 列固定（基础信息 + 打卡字段），不支持自定义列选择
+  - 分批限制：≤100 人/次（check result），时间跨度 ≤1 个月
+
+用法:
+  python attendance_report_detail.py \
+    --users userId1,userId2,...  \
+    --start "2026-03-01" \
+    --end   "2026-03-31" \
+    [--out attendance_report_2026-03-01_2026-03-31_detail.xlsx]
+    [--inspect]                # 首次跑时打印首条记录原始结构
+
+约束:
+  - 仅管理员可用，否则 dws 接口返回 403
+  - --users 超过 100 人 → 自动按每批 100 人分批
+  - --start 到 --end 超过 31 天 → 自动按月切片
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+from datetime import datetime
+from typing import Any
+
+import attendance_report_common as cmn
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 接口限制（check result / check record）
+# ─────────────────────────────────────────────────────────────────────────────
+
+CHECK_MAX_USERS_PER_BATCH = 100     # check result: --users 最多 100 人
+CHECK_MAX_DAYS_PER_SLICE = 31       # check result/record: 跨度 ≤ 1 个月
+CHECK_RESULT_PAGE_SIZE = 1000       # check result: --limit 最大值
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 固定表头（与 SKILL.md 明细预定义列集合对齐）
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 基础信息列
+BASE_HEADERS = ["姓名", "考勤组", "部门"]
+
+# 打卡字段列（以打卡流水为主，关联 check result 的考勤时间和打卡结果）
+# 对应 Diamond 配置中 termId 8-20 的列定义
+CHECK_HEADERS = [
+    "考勤日期", "考勤时间", "打卡时间", "打卡结果",
+    "打卡地址", "打卡备注", "异常打卡原因",
+    "打卡图片1", "打卡图片2", "打卡设备", "管理员修改备注",
+    "管理员修改备注图片1", "管理员修改备注图片2", "管理员修改备注图片3",
+]
+
+ALL_HEADERS = BASE_HEADERS + CHECK_HEADERS
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 参数解析
+# ─────────────────────────────────────────────────────────────────────────────
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description=(
+            "导出考勤报表 — 明细粒度（打卡记录）。"
+            "[强制] AI Agent 必须先读 references/products/attendance-report.md 再调用本脚本，"
+            "禁止凭 --help 或脚本路径自行拼命令。"
+        ),
+    )
+    p.add_argument("--users", required=True,
+                   help="userId 列表，逗号分隔（必填）")
+    p.add_argument("--start", required=True,
+                   help='开始时间，YYYY-MM-DD 或 "YYYY-MM-DD HH:mm:ss"（必填）')
+    p.add_argument("--end", required=True,
+                   help='结束时间，YYYY-MM-DD 或 "YYYY-MM-DD HH:mm:ss"（必填）')
+    p.add_argument("--out", default="",
+                   help="输出 xlsx 文件名；不传则按规范自动生成")
+    p.add_argument("--inspect", action="store_true",
+                   help="首次跑时打印首条记录原始结构（用于核对真实字段）")
+    p.add_argument("--no-images", action="store_true",
+                   help="不在 Excel 中嵌入打卡图片（默认会下载 URL 并嵌入为缩略图，"
+                        "图片多时较慢；加此参数仅保留 URL 文本）")
+    p.add_argument("--image-size", default="80x120",
+                   help="嵌入图片像素尺寸 WxH，默认 80x120")
+    return p.parse_args()
+
+
+# 含图片 URL 的列名（与 CHECK_HEADERS 中的中文名严格一致）
+IMAGE_COLUMN_NAMES = [
+    "打卡图片1", "打卡图片2",
+    "管理员修改备注图片1", "管理员修改备注图片2", "管理员修改备注图片3",
+]
+
+
+def _parse_image_size(spec: str) -> tuple[int, int]:
+    """解析 --image-size 参数，格式 WxH。失败时回退到默认 (80, 120)。"""
+    try:

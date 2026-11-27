@@ -1,0 +1,85 @@
+                }), 409
+            try:
+                template_options, _ = _build_template_options(confirm_dir, recommendation=data)
+            except (OSError, json.JSONDecodeError, ValueError) as exc:
+                return jsonify({
+                    'error': f'invalid template options: {exc}',
+                }), 409
+            data['template_options'] = template_options
+            template_required = False
+        else:
+            stage2_error = _stage2_ready_error(
+                project_path,
+                confirm_dir,
+                rec_file,
+            )
+            if stage2_error:
+                return jsonify({
+                    'error': f'Stage 2 is waiting for the confirmed installation: {stage2_error}',
+                }), 409
+            try:
+                template_required = _template_confirmation_required(project_path)
+            except (OSError, json.JSONDecodeError, ValueError) as exc:
+                return jsonify({
+                    'error': f'cannot determine active template mode: {exc}',
+                }), 409
+        # Later stages render only downstream sections, so fold earlier confirmed
+        # choices from result.json back in. An in-run refresh then re-inits from
+        # the user's choices instead of catalog defaults.
+        if rec_stage_number >= 2 and result_file.exists():
+            _merge_confirmed_choices(data, result_file)
+        language_error = _canonicalize_primary_language(
+            data,
+            required=True,
+        )
+        if language_error:
+            return jsonify({'error': language_error}), 409
+        if not template_required:
+            data.pop('template_application', None)
+        if rec_stage_number == 2:
+            recommendation_error = _template_stage2_error(
+                data,
+                template_required=template_required,
+            )
+            if recommendation_error:
+                return jsonify({'error': recommendation_error}), 409
+            recommendation_error = _stage2_custom_candidates_error(data)
+            if recommendation_error:
+                return jsonify({'error': recommendation_error}), 409
+            recommendation_error = _stage2_design_directions_error(data)
+            if recommendation_error:
+                return jsonify({'error': recommendation_error}), 409
+        if rec_stage_number == 2:
+            proactive_values, proactive_error = (
+                _resolve_proactive_execution_values(data)
+            )
+            if proactive_error:
+                return jsonify({'error': proactive_error}), 409
+            for key, value in proactive_values.items():
+                data[key] = {'value': value}
+        # Template application is authored by Strategist from the installed
+        # workspace and current content. Never expose legacy mode fields as
+        # user-facing confirmation controls.
+        recommend = data.get('recommend')
+        if isinstance(recommend, dict):
+            recommend.pop('template_reuse_scope', None)
+            recommend.pop('template_adherence', None)
+        data.pop('template_reuse_scope', None)
+        data.pop('template_adherence', None)
+        # The page polls this endpoint after each confirmation until the AI
+        # creates the next stage file, so it must never be cached.
+        resp = jsonify(data)
+        resp.headers['Cache-Control'] = 'no-store'
+        return resp
+
+    @app.route('/api/confirm', methods=['POST'])
+    def confirm():
+        """Persist the user's final choices to result.json for the AI to read."""
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({'error': 'invalid payload'}), 400
+        confirm_dir.mkdir(parents=True, exist_ok=True)
+        result = dict(payload)
+        template_selection_payload = result.pop('template_selection', None)
+        result_file = confirm_dir / RESULT_NAME
+        raw_stage = result.get('stage')

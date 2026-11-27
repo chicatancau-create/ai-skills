@@ -1,0 +1,119 @@
+                'positive seconds; legacy group effect or effects[] row'
+            ),
+            'delay': (
+                'non-negative seconds; legacy group effect or effects[] row'
+            ),
+            'stagger': 'non-negative seconds; animation scope only',
+            'trigger': list(ANIMATION_TRIGGERS),
+            'trigger_scope': (
+                'animation default for a legacy group effect; each effects[] '
+                'row may override it'
+            ),
+            'trigger_shape': (
+                'other top-level SVG group id; legacy group effect or '
+                'effects[] row; maps to PowerPoint "On Click of" and requires '
+                'trigger on-click'
+            ),
+            'repeat_count': 'positive number; mutually exclusive with repeat_duration',
+            'repeat_duration': 'positive seconds; mutually exclusive with repeat_count',
+            'auto_reverse': 'boolean',
+            'rewind': 'boolean',
+            'accelerate': 'number from 0 to 1',
+            'decelerate': 'number from 0 to 1',
+            'bounce_end': (
+                'number from 0 to 1; requires an interpolated behavior and '
+                'is mutually exclusive with decelerate'
+            ),
+            'restart': list(ANIMATION_RESTARTS),
+        },
+        'after_effect': list(ANIMATION_AFTER_EFFECTS),
+        'sound': 'project-relative or absolute .m4a, .mp3, or .wav path',
+        'derived_not_configured': {
+            'speed': 'derived from duration',
+            'smooth_start': 'derived from accelerate',
+            'smooth_end': 'derived from decelerate',
+        },
+    }
+
+
+def effective_animation_effect_options(
+    effect: object,
+    effect_options: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Return the effective option values encoded by one registry request."""
+    canonical, normalized_options = normalize_animation_effect_request(
+        effect,
+        effect_options,
+        allow_none=False,
+        allow_modes=False,
+    )
+    assert canonical is not None
+    row = _animation_row_for_options(canonical, normalized_options)
+    errors: list[str] = []
+    filter_name = _row_filter(
+        row,
+        str(NATIVE_ANIMATIONS[canonical]['presetClass']),
+        errors,
+    )
+    effective = _read_effect_options(
+        row,
+        canonical,
+        filter_name,
+        errors,
+    )
+    if errors:
+        raise RuntimeError(
+            f'animation effect {canonical!r} option model failed: '
+            + '; '.join(errors)
+        )
+    return effective
+
+
+def main() -> None:
+    """Run the CLI entry point."""
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--demo",
+        action="store_true",
+        help="print sample XML for a fade transition and entrance_fade animation",
+    )
+    parser.add_argument(
+        '--list',
+        action='store_true',
+        help='list available transitions and object animations',
+    )
+    parser.add_argument(
+        '--describe',
+        metavar='EFFECT',
+        help='print the complete parameter contract for one object animation',
+    )
+    parser.add_argument(
+        '--describe-transition',
+        metavar='EFFECT',
+        help='print the PowerPoint Effect Options for one page transition',
+    )
+    args = parser.parse_args()
+
+    if args.describe:
+        try:
+            print(
+                json.dumps(
+                    describe_animation_effect(args.describe),
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        return
+
+    if args.describe_transition:
+        try:
+            print(
+                json.dumps(
+                    describe_transition_effect(args.describe_transition),
+                    ensure_ascii=False,
+                    indent=2,

@@ -1,0 +1,71 @@
+            with self.assertRaises((OSError, apply_template.ApplyTemplateError)):
+                self._apply()
+        self.assertEqual(_files(self.project), before)
+        self.assertEqual(sorted(p.name for p in self.project.iterdir()), ['icons', 'images', 'templates'])
+
+    def test_n1_each_publication_failure_restores_all_directories(self) -> None:
+        (self.project / 'template_install.json').write_bytes(b'previous receipt')
+        before = _files(self.project)
+        replace = os.replace
+        for name in ('templates', 'images', 'icons', 'template_install.json'):
+            with self.subTest(destination=name):
+                failed = False
+
+                def fail_publish(src, dst):
+                    nonlocal failed
+                    if Path(dst) == self.project / name and not failed:
+                        failed = True
+                        raise OSError('injected publication failure')
+                    return replace(src, dst)
+
+                with patch('os.replace', side_effect=fail_publish):
+                    with self.assertRaises((OSError, apply_template.ApplyTemplateError)):
+                        self._apply()
+                self.assertTrue(failed)
+                self.assertEqual(_files(self.project), before)
+
+    def test_n5_disjoint_explicit_roots_can_be_confirmed(self) -> None:
+        brand = _workspace(self.tmp / 'brand', 'brand', 'identity')
+        selection = _confirm(self.project, [brand, self.layout])
+        self.assertEqual({item['kind'] for item in selection['selections']}, {'brand', 'layout'})
+
+    def test_n5_conflicting_roots_are_rejected_in_both_orders(self) -> None:
+        other = _workspace(self.tmp / 'other', 'layout', 'other')
+        for roots in ([other, self.layout], [self.layout, other]):
+            with self.subTest(roots=roots), self.assertRaisesRegex(ValueError, 'one workspace for kind'):
+                _confirm(self.project, roots)
+
+    def test_n5_multikind_root_cannot_be_partially_selected(self) -> None:
+        (self.project / 'templates' / 'design_spec.brand.identity.md').write_text(
+            '---\nkind: brand\nbrand_id: identity\n---\n# Identity\n', encoding='utf-8',
+        )
+        _confirm(self.project, [self.project])
+        options, candidates = server._build_template_options(self.project / 'confirm_ui')
+        keys = [key for key, item in candidates.items()
+                if item['workspace_root'] == str(self.project) and item['kind'] == 'deck']
+        with self.assertRaisesRegex(ValueError, 'every kind'):
+            server._resolve_template_confirmation(
+                {'mode': 'templates', 'selection_keys': keys}, candidates, options['options_sha256'],
+                self.project,
+            )
+
+    def test_n6_authorized_in_place_install_keeps_confirmation_valid(self) -> None:
+        _confirm(self.project, [self.project, TEMPLATES / 'layouts' / 'report_core'])
+        apply_template.apply_templates(
+            self.project, [str(self.project), str(TEMPLATES / 'layouts' / 'report_core')],
+            validate=False,
+        )
+        self.assertIsNone(server._stage2_ready_error(self.project, self.project / 'confirm_ui'))
+        handoff = server._read_template_installation(self.project)
+        self.assertEqual(handoff['status'], 'confirmed')
+
+    def test_n6_external_spec_drift_is_rejected_before_install(self) -> None:
+        _confirm(self.project, [self.layout])
+        spec = self.layout / 'templates' / 'design_spec.layout.new.md'
+        spec.write_text(spec.read_text(encoding='utf-8') + '\nChanged\n', encoding='utf-8')
+        with self.assertRaises((ValueError, apply_template.ApplyTemplateError)):
+            apply_template.apply_templates(self.project, [str(self.layout)], validate=False)
+
+    def test_n6_unreceipted_in_place_change_is_rejected(self) -> None:
+        _confirm(self.project, [self.project])
+        (self.project / 'templates' / 'deck.svg').write_text('<svg>changed</svg>', encoding='utf-8')

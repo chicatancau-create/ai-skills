@@ -1,0 +1,118 @@
+        # 方式1: classIds / shiftIds 数组（最常见）
+        for key in ("classIds", "shiftIds", "classIdList"):
+            ids_list = obj.get(key)
+            if isinstance(ids_list, list):
+                for item in ids_list:
+                    try:
+                        ids.add(int(item))
+                    except (ValueError, TypeError):
+                        pass
+
+        # 方式2: classes / selectedClass 对象数组
+        for key in ("classes", "selectedClass"):
+            classes = obj.get(key)
+            if isinstance(classes, list):
+                for item in classes:
+                    if isinstance(item, dict):
+                        class_id = item.get("id") or item.get("classId")
+                        if class_id is not None:
+                            ids.add(int(class_id))
+                    elif isinstance(item, (int, str)):
+                        try:
+                            ids.add(int(item))
+                        except (ValueError, TypeError):
+                            pass
+
+        # 方式3: shiftVOList — 排班制考勤组特有字段
+        shift_vo_list = obj.get("shiftVOList")
+        if isinstance(shift_vo_list, list):
+            for shift_vo in shift_vo_list:
+                if not isinstance(shift_vo, dict):
+                    continue
+                # shiftSetting.shiftId
+                shift_setting = shift_vo.get("shiftSetting")
+                if isinstance(shift_setting, dict):
+                    shift_id = shift_setting.get("shiftId") or shift_setting.get("classId")
+                    if shift_id is not None:
+                        ids.add(int(shift_id))
+                # 直接在 shiftVO 层级的 id/shiftId/classId
+                for id_key in ("id", "shiftId", "classId"):
+                    val = shift_vo.get(id_key)
+                    if val is not None:
+                        try:
+                            ids.add(int(val))
+                        except (ValueError, TypeError):
+                            pass
+
+        # 方式4: classNameIdMap {name: id}
+        class_map = obj.get("classNameIdMap")
+        if isinstance(class_map, dict):
+            for _, class_id in class_map.items():
+                try:
+                    ids.add(int(class_id))
+                except (ValueError, TypeError):
+                    pass
+
+        return ids
+
+    # 优先从 groupVO 提取（group get 返回结构），兼容顶层扁平结构
+    bound_ids: set[int] = set()
+
+    group_vo = group_info.get("groupVO")
+    if isinstance(group_vo, dict):
+        bound_ids.update(_extract_from_obj(group_vo))
+
+    # 同时从顶层提取（兼容 filtered-get 或已解包的结构）
+    bound_ids.update(_extract_from_obj(group_info))
+
+    return bound_ids
+
+
+def fetch_all_classes() -> dict[int, str]:
+    """获取全局所有班次，返回 {classId: className}，用于 ID→名称映射。"""
+    log("🔍 获取班次名称映射 ...")
+    all_classes: dict[int, str] = {}
+    page_index = 1
+    page_size = 200
+
+    while True:
+        try:
+            result = run_dws([
+                "attendance", "class", "search",
+                "--page-index", str(page_index),
+                "--page-size", str(page_size),
+            ])
+        except DwsCallError as exc:
+            error(f"查询班次列表失败: {exc}")
+            raise SystemExit(1) from exc
+
+        records = extract_records(result) if result else []
+        if not records:
+            break
+
+        for record in records:
+            class_id = record.get("id") or record.get("classId")
+            class_name = record.get("name") or record.get("className") or str(class_id)
+            if class_id is not None:
+                all_classes[int(class_id)] = class_name
+
+        if len(records) < page_size:
+            break
+        page_index += 1
+
+    log(f"✅ 获取到 {len(all_classes)} 个班次名称")
+    return all_classes
+
+
+def validate_class_ids(
+    schedules: list[dict],
+    group_bound_class_ids: set[int],
+    all_classes: dict[int, str],
+    group_name: str,
+) -> None:
+    """校验排班记录中的 classId 都在该考勤组绑定的班次中。
+
+    如果考勤组未提取到绑定班次列表（可能是接口字段差异），
+    则降级为全局班次校验并输出警告。
+    """
+    # 如果两个来源都无法获取到班次信息，跳过校验（排班导入接口本身有服务端校验）

@@ -1,0 +1,79 @@
+        function syncCustomInputs() {
+            var typography = STATE.typography || {};
+            customLegacyNote.textContent = String(typography.custom || "").trim();
+            customLegacyNote.style.display = customLegacyNote.textContent ? "block" : "none";
+            customStatus.style.display = typography.name === "custom" ? "inline-flex" : "none";
+            typographyChoiceConfigs().forEach(function (config) {
+                var role = config[0], field = config[1];
+                var control = customInputs[role + "_" + field];
+                if (!control) return;
+                var value = String((typography[role] || {})[field] || "");
+                var matchingFont = control.options.filter(function (font) {
+                    return String(font.id).toLowerCase() === value.toLowerCase();
+                })[0];
+                control.select.value = matchingFont ? matchingFont.id : "__other__";
+                control.other.value = matchingFont ? "" : value;
+                control.other.style.display = matchingFont ? "none" : "block";
+            });
+        }
+
+        function markCustomTypography() {
+            if (!STATE.typography) {
+                STATE.typography = { name: "custom", heading: {}, body: {} };
+            }
+            STATE.typography.name = "custom";
+            grid.querySelectorAll(".font-card").forEach(function (card) {
+                card.classList.remove("selected");
+            });
+            customCard.classList.add("selected");
+            customStatus.style.display = "inline-flex";
+        }
+
+        function updateRoleCss(role) {
+            if (!STATE.typography[role]) STATE.typography[role] = {};
+            STATE.typography[role].css = derivedFontCss(STATE.typography[role]);
+        }
+
+        function selectFont(idx) {
+            var c = normTypography(cands[idx] || {});
+            var prev = STATE.typography || {};
+            STATE.typography = {
+                name: localized(c, "name") || c.name || "",
+                heading: c.heading || {},
+                body: c.body || {},
+                // Font cards choose family and character. Reading mode and
+                // explicit size inputs own the sizing state.
+                body_size: prev.body_size ||
+                    defaultBodySizeForCanvas(STATE.canvas, STATE.delivery_purpose),
+                sizes: Object.assign({}, prev.sizes || {})
+            };
+            if (sizeInput) sizeInput.value = STATE.typography.body_size || "";
+            grid.querySelectorAll(".font-card").forEach(function (card, i) { card.classList.toggle("selected", i === idx); });
+            syncCustomInputs();
+            refreshSizeInputs();   // fill any role with no value yet; never overwrites existing values
+            refreshStylePreview();
+        }
+
+        function selectCustomTypography() {
+            var prev = STATE.typography || {};
+            STATE.typography = normTypography(prev);
+            STATE.typography.name = "custom";
+            STATE.typography.body_size = prev.body_size || "";
+            // Switching font family must not drop any explicit size.
+            STATE.typography.sizes = Object.assign({}, prev.sizes || {});
+            markCustomTypography();
+            syncCustomInputs();
+            var firstControl = customInputs.heading_primary;
+            if (firstControl) firstControl.select.focus();
+            refreshSizeInputs();
+            refreshStylePreview();
+        }
+
+        cands.forEach(function (c, idx) {
+            c = normTypography(c);
+            var head = c.heading || {}, body = c.body || {};
+            var card = el("div", "font-card");
+            var top = el("div", "font-card-head");
+            top.appendChild(el("span", "font-card-name", localized(c, "name") || (t("option_prefix") + " " + (idx + 1))));
+            var metaFields = isEnglishProject() ? ["primary"] : ["primary", "english"];
+            var meta = ["heading", "body"].map(function (role) {

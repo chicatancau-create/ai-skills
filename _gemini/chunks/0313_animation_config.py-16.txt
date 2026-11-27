@@ -1,0 +1,92 @@
+                    f'animations.json {path} references a group that is '
+                    f'hidden, not exported ({target.hidden_reason})'
+                )
+                continue
+            if not isinstance(group_cfg, dict):
+                continue
+            try:
+                effect_entries = animation_group_effect_entries(
+                    group_cfg,
+                    path=path,
+                )
+            except ValueError:
+                continue
+            if (
+                target.structurally_static
+                and any(
+                    normalize_animation_effect(
+                        effect_cfg.get(
+                            'effect',
+                            slide_animation.get('effect', 'none'),
+                        ),
+                        allow_none=True,
+                        allow_modes=True,
+                    )
+                    is not None
+                    for _effect_path, effect_cfg in effect_entries
+                )
+            ):
+                warnings.append(
+                    f'animations.json {path} references a non-animatable '
+                    'structural group'
+                )
+            for effect_path, effect_cfg in effect_entries:
+                trigger_shape = effect_cfg.get('trigger_shape')
+                if (
+                    not isinstance(trigger_shape, str)
+                    or not trigger_shape.strip()
+                ):
+                    continue
+                if trigger_shape in ambiguous_ids:
+                    warnings.append(
+                        f'animations.json {effect_path}.trigger_shape '
+                        f'references ambiguous group {trigger_shape!r}'
+                    )
+                    continue
+                trigger_target = known_groups.get(trigger_shape)
+                if trigger_target is None:
+                    warnings.append(
+                        f'animations.json {effect_path}.trigger_shape '
+                        f'references missing group {trigger_shape!r}'
+                    )
+                elif trigger_target.hidden_reason:
+                    warnings.append(
+                        f'animations.json {effect_path}.trigger_shape '
+                        f'references group {trigger_shape!r} that is hidden, '
+                        f'not exported ({trigger_target.hidden_reason})'
+                    )
+                elif trigger_target.structurally_static:
+                    warnings.append(
+                        f'animations.json {effect_path}.trigger_shape '
+                        f'references non-triggerable structural group '
+                        f'{trigger_shape!r}'
+                    )
+                elif trigger_target.has_hyperlink:
+                    warnings.append(
+                        f'animations.json {effect_path}.trigger_shape '
+                        f'references hyperlink-bearing group {trigger_shape!r}; '
+                        'use an ordinary animation or a separate trigger'
+                    )
+
+    morph_pairs, morph_errors = _resolve_morph_pairs(
+        list(targets_by_slide),
+        config,
+    )
+    warnings.extend(morph_errors)
+    root_primitives_by_slide: dict[str, dict[str, str]] = {}
+    if morph_pairs:
+        scan_files = svg_files
+        if scan_files is None:
+            scan_files, _error = resolve_slide_svg_files(project_path)
+        for svg_path in scan_files:
+            root_primitives_by_slide[svg_path.stem] = scan_root_primitives(svg_path)
+    for pair in morph_pairs:
+        for slide_name, group_id in (
+            (pair.source_slide, pair.source_group_id),
+            (pair.destination_slide, pair.destination_group_id),
+        ):
+            target = known_groups_by_slide.get(slide_name, {}).get(group_id)
+            if target is None:
+                primitive = root_primitives_by_slide.get(slide_name, {}).get(group_id)
+                if primitive is not None:
+                    warnings.append(

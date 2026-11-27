@@ -1,0 +1,104 @@
+    app.config['ANNOTATIONS'] = {}
+
+    # Per-file staged direct edits. They affect the browser preview immediately,
+    # but are written to svg_output/ only by /api/save-all.
+    app.config['PENDING_EDITS'] = {}
+
+    # Idle timeout: auto-shutdown if no one connects within idle_timeout seconds
+    app.config['LAST_REQUEST_TIME'] = time.time()
+
+    @app.before_request
+    def _update_activity():
+        allowed_hosts = {PUBLIC_HOST, 'localhost', '::1', '[::1]'}
+        host = request.headers.get('Host', '').lower()
+        if host.startswith('[') or host.count(':') == 1:
+            host = re.sub(r':\d+$', '', host)
+        if host not in allowed_hosts:
+            return jsonify({'error': 'Forbidden Host header'}), 403
+        origin = request.headers.get('Origin')
+        if origin is not None:
+            try:
+                origin_host = urllib.parse.urlsplit(origin).hostname
+            except ValueError:
+                origin_host = None
+            if origin_host not in allowed_hosts:
+                return jsonify({'error': 'Forbidden Origin header'}), 403
+        app.config['LAST_REQUEST_TIME'] = time.time()
+
+    def _exit_with_lock_release(code: int = 0) -> None:
+        lf = app.config.get('LOCK_FILE')
+        if lf is not None:
+            _release_lock(lf)
+        # os._exit: atexit handlers do not run; we just released the lock
+        # manually above so a clean restart still finds the slot free.
+        os._exit(code)
+
+    def _idle_watchdog():
+        if idle_timeout <= 0:
+            return
+        while True:
+            time.sleep(10)
+            elapsed = time.time() - app.config['LAST_REQUEST_TIME']
+            if elapsed > idle_timeout:
+                logger.info('idle for %ds, shutting down', idle_timeout)
+                # Flask dev server has no clean shutdown; data is safe
+                # because idle timeout only fires when no requests are in flight.
+                _exit_with_lock_release(0)
+
+    watchdog = threading.Thread(target=_idle_watchdog, daemon=True)
+    watchdog.start()
+
+    @app.route('/api/shutdown', methods=['POST'])
+    def shutdown():
+        data = request.get_json(silent=True) or {}
+        reason = data.get('reason') or 'shutdown'
+
+        def _stop():
+            time.sleep(0.5)  # Let HTTP response flush before killing the process
+            logger.info('shutting down (%s)', reason)
+            # os._exit: save-all already wrote to disk; 0.5s delay ensures response is sent.
+            _exit_with_lock_release(0)
+        threading.Thread(target=_stop, daemon=True).start()
+        return jsonify({'status': 'ok'})
+
+    @app.route('/')
+    def index():
+        return send_from_directory(app.static_folder, 'index.html')
+
+    @app.route('/api/config')
+    def get_config():
+        return jsonify({
+            'live': app.config['LIVE_MODE'],
+        })
+
+    @app.route('/api/health')
+    def health():
+        """Expose a cheap readiness probe for the daemon launcher."""
+        try:
+            slide_count = len(list(svg_dir.glob('*.svg'))) if svg_dir.exists() else 0
+        except OSError:
+            slide_count = 0
+        resp = jsonify({
+            'status': 'ok',
+            'service': 'live_preview',
+            'pid': os.getpid(),
+            'project': str(project_path),
+            'live': app.config['LIVE_MODE'],
+            'svg_output': str(svg_dir),
+            'slides': slide_count,
+        })
+        resp.headers['Cache-Control'] = 'no-store'
+        return resp
+
+    @app.route('/images/<path:filename>')
+    def serve_image(filename: str):
+        """Serve images referenced by SVGs as `../images/*.png`.
+
+        Resolution against an absolute images_dir + relative_to() check is the
+        authoritative path-traversal guard.
+        """
+        if not images_dir.exists():
+            return jsonify({'error': 'images directory not found'}), 404
+        target = (images_dir / filename).resolve()
+        try:
+            target.relative_to(images_dir.resolve())

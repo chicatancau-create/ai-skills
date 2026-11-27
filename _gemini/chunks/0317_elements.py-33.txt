@@ -1,0 +1,103 @@
+                    else font_size
+                ),
+                body_xml=f'{effective_line_spacing}{spc_bef_xml}',
+                bullet=bullet,
+                ctx=ctx,
+                rtl=text_uses_rtl(
+                    ''.join(str(run.get('text', '')) for run in line),
+                    ctx.primary_language,
+                ),
+            )
+            paragraph_xml_chunks.append(
+                f'<a:p>\n{p_pr_xml}\n{runs_inner}\n</a:p>'
+            )
+        paragraphs_xml = '\n'.join(paragraph_xml_chunks)
+    else:
+        runs_xml = '\n'.join(_build_run_xml(r, fonts, ctx, text_effect_xml) for r in runs)
+        p_pr_xml = _paragraph_pr_xml(
+            algn=algn,
+            font_size=float(runs[0].get('font_size', font_size)) if runs else font_size,
+            bullet=single_bullet,
+            ctx=ctx,
+            rtl=text_uses_rtl(full_text, ctx.primary_language),
+        )
+        paragraphs_xml = f'<a:p>\n{p_pr_xml}\n{runs_xml}\n</a:p>'
+
+    off_x = px_to_emu(box_x)
+    off_y = px_to_emu(box_y)
+    ext_cx = (
+        px_to_emu(box_w)
+        if exact_text_frame is not None
+        else drawingml_text_frame_width_emu(text_width, font_size)
+    )
+    ext_cy = px_to_emu(box_h)
+    if ext_cx < 1 or ext_cy < 1:
+        raise ValueError(
+            'negative letter-spacing produces a non-positive DrawingML '
+            f'text-frame extent (cx={ext_cx}, cy={ext_cy})'
+        )
+    validate_ooxml_xfrm(off_x, off_y, ext_cx, ext_cy)
+    validate_text_run_advances(runs)
+
+    # Imported text carriers with data-pptx-frame retain the source shape frame
+    # instead of shrinking to glyph bounds. Reconstruct insets from the SVG
+    # anchor/baseline so the visible text stays at its imported position while
+    # remaining ordinary editable DrawingML text.
+    if exact_text_frame is not None:
+        if exact_text_insets is None:
+            raise ValueError('data-pptx-frame text insets were not resolved')
+        left_inset, top_inset, right_inset = exact_text_insets
+        exact_frame_wrap = (
+            'none' if ctx.text_flow == TEXT_FLOW_PRESERVE else 'square'
+        )
+        body_pr_xml = (
+            f'<a:bodyPr wrap="{exact_frame_wrap}" '
+            f'lIns="{px_to_emu(left_inset)}" '
+            f'tIns="{px_to_emu(top_inset)}" '
+            f'rIns="{px_to_emu(right_inset)}" bIns="0" '
+            'anchor="t" anchorCtr="0">\n<a:noAutofit/>\n</a:bodyPr>'
+        )
+    # Preserve mode keeps authored <a:br/> boundaries and lets an ordinary
+    # generated text box follow later manual edits, such as deleting a break.
+    # Reflow mode keeps the source width fixed as its wrapping constraint.
+    # Exact imported frames above and structured placeholder carriers remain
+    # fixed regardless of text-flow mode.
+    elif paragraph_runs is not None:
+        paragraph_wrap = (
+            'none' if ctx.text_flow == TEXT_FLOW_PRESERVE else 'square'
+        )
+        paragraph_autofit = (
+            '<a:spAutoFit/>'
+            if (
+                ctx.text_flow == TEXT_FLOW_PRESERVE
+                and not is_placeholder_carrier
+            )
+            else '<a:noAutofit/>'
+        )
+        body_pr_xml = (
+            f'<a:bodyPr wrap="{paragraph_wrap}" '
+            'lIns="0" tIns="0" rIns="0" bIns="0" '
+            f'anchor="t" anchorCtr="0">\n{paragraph_autofit}\n</a:bodyPr>'
+        )
+    else:
+        body_pr_xml = (
+            '<a:bodyPr wrap="none" lIns="0" tIns="0" rIns="0" bIns="0" '
+            'anchor="t" anchorCtr="0">\n<a:spAutoFit/>\n</a:bodyPr>'
+        )
+
+    shape_xml = f'''<p:sp>
+<p:nvSpPr>
+<p:cNvPr id="{shape_id}" name="{_xml_escape(shape_display_name(elem, f'TextBox {shape_id}'))}"/>
+<p:cNvSpPr txBox="1"/><p:nvPr/>
+</p:nvSpPr>
+<p:spPr>
+<a:xfrm{rot_attr}><a:off x="{off_x}" y="{off_y}"/>
+<a:ext cx="{ext_cx}" cy="{ext_cy}"/></a:xfrm>
+<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+<a:noFill/>
+<a:ln><a:noFill/></a:ln>
+{shape_effect_xml}
+</p:spPr>
+<p:txBody>
+{body_pr_xml}
+<a:lstStyle/>

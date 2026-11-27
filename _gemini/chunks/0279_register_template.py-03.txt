@@ -1,0 +1,126 @@
+    try:
+        data = yaml.safe_load(fm_block) or {}
+    except yaml.YAMLError as exc:
+        raise SpecParseError(f"invalid YAML frontmatter: {exc}") from exc
+    if not isinstance(data, dict):
+        raise SpecParseError("YAML frontmatter must be a mapping")
+    return data, body
+
+
+def _extract_section_field(body: str, section_title: str, labels: list[str]) -> str | None:
+    section_re = re.compile(
+        rf"^##\s+{re.escape(section_title)}\b.*?(?=^##\s+|\Z)",
+        re.MULTILINE | re.DOTALL,
+    )
+    section_match = section_re.search(body)
+    if section_match is None:
+        return None
+    section = section_match.group(0)
+
+    for label in labels:
+        row = re.search(
+            rf"^\|\s*\*?\*?{re.escape(label)}\*?\*?\s*\|\s*(.+?)\s*\|",
+            section, re.MULTILINE | re.IGNORECASE,
+        )
+        if row:
+            return _clean_field_value(row.group(1))
+
+        bullet = re.search(
+            rf"^[-*]\s*\*?\*?{re.escape(label)}\*?\*?\s*[:：]\s*(.+?)\s*$",
+            section, re.MULTILINE | re.IGNORECASE,
+        )
+        if bullet:
+            return _clean_field_value(bullet.group(1))
+    return None
+
+
+def _clean_field_value(value: str) -> str:
+    value = value.strip()
+    value = re.sub(r"^[`*_]+", "", value)
+    value = re.sub(r"[`*_]+$", "", value)
+    return value.strip()
+
+
+def _find_first_color(section: str) -> str | None:
+    match = re.search(r"`(#[0-9A-Fa-f]{3,8})`", section)
+    return match.group(1).upper() if match else None
+
+
+def _extract_primary_color(body: str) -> str | None:
+    section_match = re.search(
+        r"^##\s+[IVX]+\.\s+Color Scheme\b.*?(?=^##\s+|\Z)",
+        body, re.MULTILINE | re.DOTALL,
+    )
+    if section_match is None:
+        return None
+    return _find_first_color(section_match.group(0))
+
+
+def _summary_from_use_cases(use_cases: str | None) -> str | None:
+    if not use_cases:
+        return None
+    cleaned = use_cases.strip().rstrip(".")
+    if not cleaned:
+        return None
+    return f"{cleaned}."
+
+
+_SPEC_NAME_RE = re.compile(
+    r"design_spec\.(?P<kind>brand|style|layout|deck)\.(?P<id>[^/\\]+)\.md"
+)
+
+
+def _has_kind_qualified_spec(directory: Path) -> bool:
+    """Report whether a directory holds any ``design_spec.<kind>.<id>.md``."""
+    if not directory.is_dir():
+        return False
+    return any(
+        _SPEC_NAME_RE.fullmatch(path.name)
+        for path in directory.glob("design_spec.*.md")
+    )
+
+
+def _qualified_template_specs(directory: Path) -> list[tuple[Path, str]]:
+    """Return kind-qualified specs and their filename-declared kinds."""
+    if not directory.is_dir():
+        return []
+    specs = []
+    for path in sorted(directory.glob("design_spec.*.md")):
+        match = _SPEC_NAME_RE.fullmatch(path.name)
+        if match is not None:
+            specs.append((path, match.group("kind")))
+    return specs
+
+
+def validate_qualified_spec_identity(
+    spec_path: str | Path,
+) -> tuple[str, str, dict, str]:
+    """Match one qualified filename's kind and id to its frontmatter."""
+    path = Path(spec_path)
+    match = _SPEC_NAME_RE.fullmatch(path.name)
+    if match is None:
+        raise SpecParseError(
+            "qualified Design Spec must be named "
+            "design_spec.<kind>.<id>.md: "
+            f"{path.name}"
+        )
+
+    filename_kind = match.group("kind")
+    filename_id = match.group("id")
+    frontmatter, body = _read_spec(path)
+    fm = frontmatter or {}
+    declared_kind = str(fm.get("kind") or "").strip()
+    id_key = KIND_CONFIG[filename_kind]["id_key"]
+    declared_id = str(fm.get(id_key) or "").strip()
+    errors: list[str] = []
+    if declared_kind != filename_kind:
+        errors.append(
+            f"filename kind {filename_kind!r} must match frontmatter kind "
+            f"{declared_kind!r}"
+        )
+    if declared_id != filename_id:
+        errors.append(
+            f"filename id {filename_id!r} must match frontmatter {id_key} "
+            f"{declared_id!r}"
+        )
+    if errors:

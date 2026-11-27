@@ -1,0 +1,98 @@
+        baseline_root,
+        baseline_referenced_assets,
+    )
+    expected_refs = set(document.source_refs)
+    baseline_refs = set(baseline_occurrences)
+    if baseline_refs != expected_refs:
+        raise AuthoringRoundtripError(
+            f"{document.name} regenerated baseline source-ref closure differs; "
+            f"missing={sorted(expected_refs - baseline_refs)}, "
+            f"extra={sorted(baseline_refs - expected_refs)}"
+        )
+    baseline_duplicates = sorted(
+        ref for ref, items in baseline_occurrences.items() if len(items) != 1
+    )
+    if baseline_duplicates:
+        raise AuthoringRoundtripError(
+            f"{document.name} regenerated baseline has duplicate source refs: "
+            + ", ".join(baseline_duplicates)
+        )
+    manifest_proxy_refs = {
+        source_ref
+        for source_ref, record in document.source_refs.items()
+        if record.representation == "source-proxy"
+    }
+    baseline_proxy_refs = {
+        source_ref
+        for source_ref, occurrences in baseline_occurrences.items()
+        if occurrences[0].element.get(SOURCE_PROXY_ATTRIBUTE) == SOURCE_PROXY_KIND
+    }
+    if baseline_proxy_refs != manifest_proxy_refs:
+        raise AuthoringRoundtripError(
+            f"{document.name} regenerated source-proxy roster differs; "
+            f"missing={sorted(manifest_proxy_refs - baseline_proxy_refs)}, "
+            f"extra={sorted(baseline_proxy_refs - manifest_proxy_refs)}"
+        )
+    current_unknown = sorted(set(current_occurrences) - expected_refs)
+    if current_unknown:
+        raise AuthoringRoundtripError(
+            f"{document.name} contains unknown source refs: "
+            + ", ".join(current_unknown)
+        )
+    current_duplicates = sorted(
+        ref for ref, items in current_occurrences.items() if len(items) != 1
+    )
+    if current_duplicates:
+        raise AuthoringRoundtripError(
+            f"{document.name} contains duplicate source refs: "
+            + ", ".join(current_duplicates)
+        )
+
+    defs_changed, changed_definition_ids = _definition_changes(
+        current_root,
+        baseline_root,
+        current_assets,
+        baseline_assets,
+    )
+    unchanged_refs: set[str] = set()
+    edited_refs: set[str] = set()
+    for source_ref, occurrences in current_occurrences.items():
+        current = occurrences[0]
+        baseline = baseline_occurrences[source_ref][0]
+        if authoring_source_ref_is_unchanged(
+            current.element,
+            baseline.element,
+            current_assets,
+            baseline_assets,
+            changed_definition_ids=changed_definition_ids,
+            current_asset=current.asset,
+            baseline_asset=baseline.asset,
+            current_root=current.root,
+            baseline_root=baseline.root,
+        ):
+            unchanged_refs.add(source_ref)
+        else:
+            edited_refs.add(source_ref)
+    deleted_refs = expected_refs - set(current_occurrences)
+    changed_inherited_refs = sorted(
+        source_ref for source_ref in edited_refs | deleted_refs
+        if source_ref.startswith(("master:", "layout:"))
+    )
+    if changed_inherited_refs:
+        raise AuthoringRoundtripError(
+            f"{document.name} edits or deletes inherited object(s): "
+            + ", ".join(changed_inherited_refs)
+            + "; Master/Layout objects must remain unchanged because a flat "
+            "slide cannot edit shared structure; edit Slide-local objects instead"
+        )
+    edited_proxy_refs = sorted(edited_refs & manifest_proxy_refs)
+    if edited_proxy_refs:
+        raise AuthoringRoundtripError(
+            f"{document.name} edits source-backed proxy object(s): "
+            + ", ".join(edited_proxy_refs)
+            + "; keep each proxy unchanged to restore its native PowerPoint "
+            "object; only a complete Slide-local proxy may be removed to "
+            "delete that object"
+        )
+    deleted_external_linked_image_refs = sorted(
+        source_ref

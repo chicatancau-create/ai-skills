@@ -1,0 +1,136 @@
+        "-v",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        f"anullsrc=r={_OUTPUT_SAMPLE_RATE}:cl=stereo",
+    ]
+    for cue in cues:
+        command.extend(["-i", str(cue.media_path)])
+
+    filters = [
+        (
+            f"[0:a:0]aformat=sample_fmts=fltp:sample_rates={_OUTPUT_SAMPLE_RATE}:"
+            "channel_layouts=stereo,"
+            f"atrim=end_sample={target_samples},asetpts=N/SR/TB[base]"
+        )
+    ]
+    labels = ["[base]"]
+    for input_index, cue in enumerate(cues, 1):
+        label = f"cue{input_index}"
+        delay_samples = int(
+            round(cue.video_time_ms * _OUTPUT_SAMPLE_RATE / 1000)
+        )
+        filters.append(
+            f"[{input_index}:a:0]aresample={_OUTPUT_SAMPLE_RATE},"
+            "aformat=sample_fmts=fltp:"
+            f"sample_rates={_OUTPUT_SAMPLE_RATE}:channel_layouts=stereo,"
+            f"asetpts=N/SR/TB,volume={cue.gain_db:.3f}dB,"
+            f"adelay={delay_samples}S:all=1,"
+            f"apad=whole_len={target_samples},"
+            f"atrim=end_sample={target_samples}[{label}]"
+        )
+        labels.append(f"[{label}]")
+    filters.append(
+        "".join(labels)
+        + f"amix=inputs={len(labels)}:duration=first:"
+        "dropout_transition=0:normalize=0,"
+        f"atrim=end_sample={target_samples},asetpts=N/SR/TB[stem]"
+    )
+    command.extend(
+        [
+            "-filter_complex",
+            ";".join(filters),
+            "-map",
+            "[stem]",
+            "-c:a",
+            "pcm_f32le",
+            "-ar",
+            str(_OUTPUT_SAMPLE_RATE),
+            "-ac",
+            "2",
+            "-y",
+            str(output_path),
+        ]
+    )
+    _run_command(command, "SFX stem render")
+
+
+def _mix_video(
+    *,
+    video_path: Path,
+    stem_path: Path,
+    duration_ms: int,
+    limiter_dbfs: float,
+    output_path: Path,
+    ffmpeg_path: str,
+) -> None:
+    target_samples = _target_sample_count(duration_ms)
+    limiter_ratio = 10 ** (limiter_dbfs / 20)
+    filter_graph = (
+        f"[0:a:0]aresample={_OUTPUT_SAMPLE_RATE}:first_pts=0,"
+        "aformat=sample_fmts=fltp:channel_layouts=stereo,"
+        f"asetpts=N/SR/TB,apad=whole_len={target_samples},"
+        f"atrim=end_sample={target_samples}[narration];"
+        f"[1:a:0]aresample={_OUTPUT_SAMPLE_RATE}:first_pts=0,"
+        "aformat=sample_fmts=fltp:channel_layouts=stereo,"
+        f"asetpts=N/SR/TB,apad=whole_len={target_samples},"
+        f"atrim=end_sample={target_samples}[sfx];"
+        "[narration][sfx]amix=inputs=2:duration=first:"
+        "dropout_transition=0:normalize=0,"
+        f"alimiter=limit={limiter_ratio:.9f}:attack=5:release=50:"
+        "level=false:latency=true,"
+        f"apad=whole_len={target_samples},"
+        f"atrim=end_sample={target_samples},asetpts=N/SR/TB[mixed]"
+    )
+    _run_command(
+        [
+            ffmpeg_path,
+            "-nostdin",
+            "-hide_banner",
+            "-v",
+            "error",
+            "-i",
+            str(video_path),
+            "-i",
+            str(stem_path),
+            "-filter_complex",
+            filter_graph,
+            "-map",
+            "0:v:0",
+            "-map",
+            "[mixed]",
+            "-map_metadata",
+            "0",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            _OUTPUT_AUDIO_BITRATE,
+            "-ar",
+            str(_OUTPUT_SAMPLE_RATE),
+            "-ac",
+            "2",
+            "-movflags",
+            "+faststart",
+            "-y",
+            str(output_path),
+        ],
+        "Narration and SFX mix",
+    )
+
+
+def _temporary_output(path: Path, suffix: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, raw_path = tempfile.mkstemp(
+        prefix=f".{path.stem}.",
+        suffix=suffix,
+        dir=path.parent,
+    )
+    os.close(descriptor)
+    temporary = Path(raw_path)
+    temporary.unlink()
+    return temporary
+
+

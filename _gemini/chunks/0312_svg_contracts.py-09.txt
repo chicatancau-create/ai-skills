@@ -1,0 +1,100 @@
+                )
+                noncanonical = _noncanonical_stroke_dash_numbers(raw)
+            except ValueError:
+                continue
+            if parsed is None:
+                if raw != 'none':
+                    normalized = 'none'
+                    reason = 'remove surrounding whitespace'
+            else:
+                preset, values = parsed
+                longer_custom = preset is None and len(values) > 2
+                if noncanonical or longer_custom or raw != raw.strip():
+                    kept_values = values[:2] if longer_custom else values
+                    normalized = ' '.join(
+                        _format_project_geometry_length(value)
+                        for value in kept_values
+                    )
+                    reasons = []
+                    if noncanonical:
+                        reasons.append('use ordinary decimal numbers')
+                    if longer_custom:
+                        reasons.append(
+                            'make the first-pair export normalization explicit'
+                        )
+                    if raw != raw.strip():
+                        reasons.append('remove surrounding whitespace')
+                    reason = '; '.join(reasons)
+        elif attribute == 'stroke-dashoffset':
+            try:
+                value = _parse_project_geometry_length(raw, attribute)
+            except ValueError:
+                continue
+            if not _is_canonical_project_geometry_length(raw):
+                normalized = _format_project_geometry_length(value)
+                reason = 'use the unitless px spelling'
+        else:
+            try:
+                value = _parse_project_stroke_enum(attribute, raw)
+            except ValueError:
+                continue
+            if raw != value:
+                normalized = value
+                reason = 'remove surrounding whitespace'
+
+        if normalized is None:
+            continue
+        key = (attribute, raw, normalized, reason)
+        recommendations[key] += 1
+        if label not in examples[key] and len(examples[key]) < 3:
+            examples[key].append(label)
+
+    for (attribute, raw, normalized, reason), count in sorted(
+        recommendations.items()
+    ):
+        shown_examples = ', '.join(
+            examples[(attribute, raw, normalized, reason)]
+        )
+        result['warnings'].append(
+            f"Recommendation: line style {attribute}={raw!r} is "
+            f"converter-compatible in {count} location(s) "
+            f"({shown_examples}); generated SVG should prefer "
+            f'{attribute}="{normalized}" to {reason}. No change is '
+            "required for export."
+        )
+
+
+def check_image_aspect_ratio_values(
+    root: ET.Element,
+    result: Dict,
+) -> None:
+    """Reject ambiguous image fit/crop values and advise canonical forms."""
+    helpers = (
+        _format_project_image_aspect_ratio,
+        _iter_project_image_aspect_ratios,
+        _parse_project_image_aspect_ratio,
+        _project_image_aspect_ratio_errors,
+    )
+    if any(helper is None for helper in helpers):
+        result['warnings'].append(
+            "Unable to import svg_to_pptx image aspect-ratio validators; "
+            "native export will still validate image fit/crop syntax."
+        )
+        return
+
+    result['errors'].extend(_project_image_aspect_ratio_errors(root))
+    recommendations: Counter[tuple[str, str]] = Counter()
+    examples: Dict[tuple[str, str], List[str]] = defaultdict(list)
+
+    for elem, raw in _iter_project_image_aspect_ratios(root):
+        try:
+            align, mode = _parse_project_image_aspect_ratio(raw)
+        except ValueError:
+            continue
+        normalized = _format_project_image_aspect_ratio(align, mode)
+        if raw == normalized:
+            continue
+        key = (raw, normalized)
+        recommendations[key] += 1
+        label = _element_label(elem)
+        if label not in examples[key] and len(examples[key]) < 3:

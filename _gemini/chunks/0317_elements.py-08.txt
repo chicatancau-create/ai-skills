@@ -1,0 +1,96 @@
+            f'Unsupported data-pptx-geometry-status {status!r}; '
+            'expected exact or unsupported'
+        )
+    raw_reason = elem.get('data-pptx-geometry-reason')
+    if raw_reason is not None and status != 'unsupported':
+        raise ValueError(
+            'data-pptx-geometry-reason requires '
+            'data-pptx-geometry-status="unsupported"'
+        )
+    if status == 'unsupported':
+        reason = (raw_reason or 'unspecified').strip()
+        raise ValueError(f'Unsupported source PPTX geometry: {reason}')
+
+    prst = elem.get('data-pptx-prst')
+    allowed_guide_names: frozenset[str] = frozenset()
+    if prst is not None:
+        if prst != prst.strip() or prst not in PPTX_PRESET_SHAPE_TYPES:
+            raise ValueError(f'Unknown or invalid data-pptx-prst {prst!r}')
+        allowed_guide_names = frozenset(
+            guide.name
+            for guide in get_preset_registry().get(prst).adjustments
+        )
+
+    guide_formulas: dict[str, str] = {}
+    for attr_name, raw_fmla in elem.attrib.items():
+        if not attr_name.startswith(_PPTX_AV_PREFIX):
+            continue
+        if prst is None:
+            raise ValueError(f'{attr_name} requires data-pptx-prst')
+        guide_name = attr_name[len(_PPTX_AV_PREFIX):]
+        if not _PPTX_GUIDE_NAME_RE.fullmatch(guide_name):
+            raise ValueError(f'Invalid preset adjustment guide name {guide_name!r}')
+        if guide_name not in allowed_guide_names:
+            raise ValueError(
+                f'Preset {prst!r} has no adjustment guide named {guide_name!r}'
+            )
+        formula = raw_fmla.strip()
+        if not formula:
+            raise ValueError(f'{attr_name} must not be empty')
+        match = _PPTX_VAL_FORMULA_RE.fullmatch(formula)
+        if match is not None:
+            value = int(match.group(1))
+            if not OOXML_COORDINATE_MIN <= value <= OOXML_COORDINATE_MAX:
+                raise ValueError(
+                    f'{attr_name} value {value} is outside OOXML coordinate range'
+                )
+        guide_formulas[guide_name] = formula
+
+    # Compatibility for SVGs emitted before the generic ``data-pptx-av-*``
+    # contract. New imports always use the canonical full-formula attributes.
+    if prst == 'round2SameRect':
+        guide_names = set(guide_formulas)
+        for guide_name, default in (('adj1', 16667), ('adj2', 0)):
+            legacy_name = f'data-pptx-{guide_name}'
+            if guide_name in guide_names or elem.get(legacy_name) is None:
+                continue
+            raw_value = elem.get(legacy_name, str(default))
+            try:
+                value = int(float(raw_value))
+            except ValueError as exc:
+                raise ValueError(f'{legacy_name} must be numeric, got {raw_value!r}') from exc
+            value = max(0, min(100000, value))
+            guide_formulas[guide_name] = f'val {value}'
+
+    guides: list[tuple[str, str]] = []
+    if prst is not None and guide_formulas:
+        registry = get_preset_registry()
+        try:
+            evaluated = registry.evaluate(
+                prst,
+                100000,
+                100000,
+                adjustments=guide_formulas,
+            )
+        except ValueError as exc:
+            raise ValueError(
+                f'Invalid adjustment formula for preset {prst!r}: {exc}'
+            ) from exc
+        for name, value in evaluated.adjustments.items():
+            if (
+                name in guide_formulas
+                and not OOXML_COORDINATE_MIN
+                <= value
+                <= OOXML_COORDINATE_MAX
+            ):
+                raise ValueError(
+                    f'data-pptx-av-{name} evaluates outside OOXML coordinate range'
+                )
+        guides = [
+            (guide.name, guide_formulas[guide.name])
+            for guide in registry.get(prst).adjustments
+            if guide.name in guide_formulas
+        ]
+
+    frame = None
+    raw_frame = elem.get('data-pptx-frame')

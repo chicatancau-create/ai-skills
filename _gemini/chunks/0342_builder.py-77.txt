@@ -1,0 +1,78 @@
+                    slide_xml = create_slide_xml_with_svg(
+                        slide_num,
+                        png_rid=png_rid, svg_rid=svg_rid,
+                        width_emu=width_emu, height_emu=height_emu,
+                        transition=slide_transition,
+                        transition_effect_options=slide_transition_effect_options,
+                        transition_duration=slide_transition_duration,
+                        auto_advance=slide_auto_advance,
+                        use_compat_mode=(use_compat_mode and slide_has_png),
+                    )
+                    with open(slide_xml_path, 'w', encoding='utf-8') as f:
+                        f.write(slide_xml)
+
+                    rels_dir = extract_dir / 'ppt' / 'slides' / '_rels'
+                    rels_dir.mkdir(exist_ok=True)
+                    rels_path = rels_dir / f'slide{slide_num}.xml.rels'
+                    rels_xml = create_slide_rels_xml(
+                        png_rid=png_rid, png_filename=png_filename,
+                        svg_rid=svg_rid, svg_filename=svg_filename,
+                        use_compat_mode=(use_compat_mode and slide_has_png),
+                        slide_layout_target=structure.slide_layout_target(slide_num),
+                    )
+                    with open(rels_path, 'w', encoding='utf-8') as f:
+                        f.write(rels_xml)
+
+                if slide_patch is not None:
+                    if source_slide_bytes is None or source_rels_bytes is None:
+                        raise TemplateStructureError(
+                            f"Round-trip slide {slide_num} source snapshot is missing"
+                        )
+                    trace_sink = (
+                        conversion_trace
+                        if conversion_trace is not None
+                        else structure_trace
+                    )
+                    slide_conversion_trace = next(
+                        (
+                            entry
+                            for entry in reversed(trace_sink or [])
+                            if entry.get("slide_num") == slide_num
+                        ),
+                        None,
+                    )
+                    overlay_shape_id_map = _apply_roundtrip_slide_overlay(
+                        source_slide_bytes,
+                        source_rels_bytes,
+                        slide_xml_path,
+                        rels_path,
+                        slide_patch,
+                        slide_conversion_trace,
+                    )
+                    for target in expected_animation_targets:
+                        for field in ("shape_id", "trigger_shape_id"):
+                            shape_id = target.get(field)
+                            if (
+                                isinstance(shape_id, int)
+                                and not isinstance(shape_id, bool)
+                                and shape_id in overlay_shape_id_map
+                            ):
+                                target[field] = overlay_shape_id_map[shape_id]
+                    for morph_key, shape_id in tuple(
+                        morph_shape_ids.items()
+                    ):
+                        if (
+                            morph_key[0] == svg_path.stem
+                            and shape_id in overlay_shape_id_map
+                        ):
+                            morph_shape_ids[morph_key] = (
+                                overlay_shape_id_map[shape_id]
+                            )
+
+                resolved_advance_after = slide_auto_advance
+                resolved_advance_on_click = True
+                if slide_patch is not None and not slide_patch.advance_changed:
+                    source_motion = read_slide_transition_xml(source_slide_bytes)
+                    resolved_advance_on_click = source_motion.advance_on_click
+                    resolved_advance_after = (
+                        source_motion.advance_after_ms / 1000

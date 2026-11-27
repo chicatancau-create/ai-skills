@@ -1,0 +1,96 @@
+    assert isinstance(contract, dict)
+    marker, marker_error = _extract_schema_marker(text)
+    if marker_error is not None:
+        return [f"{markdown_path.name} schema: {marker_error}"]
+    expected_marker = contract.get("marker")
+    if isinstance(expected_marker, str):
+        if marker is None:
+            return [
+                f"{markdown_path.name} schema: missing ppt-master-schema marker "
+                f"'{expected_marker}'"
+            ]
+        if marker != expected_marker.casefold():
+            return [
+                f"{markdown_path.name} schema: marker '{marker}' does not match "
+                f"'{expected_marker}'"
+            ]
+    sections, parse_errors = _parse_markdown_sections(
+        text,
+        report_duplicate_fields=contract.get("parser") == "heading-data-lines-v1",
+    )
+    definitions = contract.get("sections", [])
+    if not isinstance(definitions, list):
+        return [f"Schema validation could not read {schema_path.name}: sections must be a list"]
+
+    markdown_name = markdown_path.name
+    errors = [f"{markdown_name} schema: {message}" for message in parse_errors]
+    unresolved_patterns = contract.get("unresolved_patterns", [])
+    if isinstance(unresolved_patterns, list):
+        for pattern in unresolved_patterns:
+            if not isinstance(pattern, str):
+                continue
+            matches = list(re.finditer(pattern, text))
+            if matches:
+                errors.append(
+                    f"{markdown_name} schema: contains {len(matches)} unresolved "
+                    f"placeholder(s) matching '{pattern}'"
+                )
+
+    matched: dict[str, dict[str, object] | None] = {}
+    for definition in definitions:
+        if not isinstance(definition, dict):
+            continue
+        section_id = str(definition.get("id", ""))
+        pattern = str(definition.get("pattern", ""))
+        if not section_id or not pattern:
+            continue
+        candidates = [
+            section
+            for section in sections
+            if re.fullmatch(pattern, str(section["heading"]))
+        ]
+        if len(candidates) > 1:
+            errors.append(
+                f"{markdown_name} schema: section '{section_id}' appears more than once"
+            )
+        section = candidates[0] if candidates else None
+        matched[section_id] = section
+        if definition.get("required") is True and section is None:
+            errors.append(f"{markdown_name} schema: missing section '{section_id}'")
+            continue
+        if section is not None:
+            errors.extend(
+                _validate_section(
+                    markdown_name=markdown_name,
+                    section_id=section_id,
+                    section=section,
+                    definition=definition,
+                    schema_path=schema_path,
+                )
+            )
+
+    section_order = contract.get("section_order", [])
+    if isinstance(section_order, list):
+        ordered_sections = [
+            (str(section_id), matched.get(str(section_id)))
+            for section_id in section_order
+            if matched.get(str(section_id)) is not None
+        ]
+        offsets = [int(section["offset"]) for _, section in ordered_sections if section]
+        if offsets != sorted(offsets):
+            expected = " -> ".join(str(section_id) for section_id in section_order)
+            errors.append(
+                f"{markdown_name} schema: sections are out of order; expected {expected}"
+            )
+
+    conditions = contract.get("conditions", [])
+    if isinstance(conditions, list):
+        for condition in conditions:
+            if not isinstance(condition, dict):
+                continue
+            when = condition.get("when", {})
+            then = condition.get("then", {})
+            if not isinstance(when, dict) or not isinstance(then, dict):
+                continue
+            if _condition_applies(when, matched):
+                errors.extend(

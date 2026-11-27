@@ -1,0 +1,48 @@
+        balance_records = query_balance_records(user_ids, leave_types, args.inspect)
+    except cmn.DwsCallError as error:
+        if error.is_permission_error:
+            cmn.error("权限错误：当前账号无权查询目标员工假期余额，请确认管理员或管理范围权限。")
+            return 2
+        cmn.error(f"查询假期余额失败：{error}")
+        return 1
+
+    leave_columns = build_leave_columns(leave_types, balance_records, keywords)
+    if not leave_columns:
+        cmn.error("未匹配到任何假期规则列，请检查假期规则或 --leave-keywords 参数。")
+        return 1
+
+    user_info_map = cmn.resolve_user_info(user_ids)
+    balance_index = build_balance_index(user_ids, balance_records)
+    user_extra_index = build_user_extra_index(user_ids, balance_records)
+    headers = build_headers(leave_columns)
+    rows = build_rows(user_ids, leave_columns, balance_index, user_extra_index, user_info_map)
+
+    out_name = args.out or f"attendance_vacation_balance_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    title = "假期余额列表"
+    subtitle = f"报表生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}；员工数：{len(user_ids)}；假期规则数：{len(leave_columns)}"
+
+    try:
+        cmn.write_excel(
+            out_name,
+            headers,
+            rows,
+            sheet_name="假期余额",
+            title=title,
+            subtitle=subtitle,
+        )
+    except RuntimeError as error:
+        cmn.error(str(error))
+        return 1
+
+    print("✅ 假期余额 Excel 导出完成")
+    print(f"- 输出文件：{os.path.abspath(out_name)}")
+    print(f"- 员工数量：{len(user_ids)}")
+    print(f"- 假期规则列数：{len(leave_columns)}")
+    if keywords:
+        print(f"- 假期筛选关键词：{','.join(keywords)}")
+    print("- 说明：每名员工一行，假期规则横向展开；未设置假期余额显示“不限制余额”，hideQuota=true 显示“不适用”，余额为 0 时显示 0。")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

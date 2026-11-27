@@ -1,0 +1,98 @@
+        "dLblPos", "delete", "extLst", "idx", "numFmt", "showBubbleSize",
+        "showCatName", "showLegendKey", "showPercent", "showSerName",
+        "showVal", "spPr", "tx", "txPr",
+    }
+    if any(_local_name(child.tag) not in allowed_children for child in dlabel):
+        raise _UnsupportedChart("unsupported-chart-point-labels")
+    idx = _element_val(dlabel.find("c:idx", C_NS))
+    if idx is None or not idx.isdigit():
+        raise _UnsupportedChart("unsupported-chart-point-labels")
+    point_index = int(idx)
+    if point_index < 0 or point_index >= point_count:
+        raise _UnsupportedChart("unsupported-chart-point-labels")
+
+    for tag in ("showLegendKey", "showBubbleSize"):
+        elem = dlabel.find(f"c:{tag}", C_NS)
+        if elem is not None and ooxml_bool(elem.attrib.get("val"), True):
+            raise _UnsupportedChart("unsupported-chart-point-labels")
+
+    item: dict[str, Any] = {"idx": point_index}
+    delete = dlabel.find("c:delete", C_NS)
+    if delete is not None:
+        item["delete"] = ooxml_bool(delete.attrib.get("val"), True)
+    item.update(_data_label_flag_payload(dlabel, include_missing=False))
+    position = _data_label_position_payload(dlabel)
+    if position:
+        item["position"] = position
+    num_fmt = dlabel.find("c:numFmt", C_NS)
+    if num_fmt is not None and num_fmt.attrib.get("formatCode"):
+        item["number_format"] = num_fmt.attrib["formatCode"]
+    tx_pr = dlabel.find("c:txPr", C_NS)
+    if tx_pr is not None:
+        item.update(_source_data_label_text_style(tx_pr, palette))
+
+    tx = dlabel.find("c:tx", C_NS)
+    if tx is not None:
+        rich = tx.find("c:rich", C_NS)
+        if rich is None or len(list(tx)) != 1:
+            raise _UnsupportedChart("unsupported-chart-point-labels")
+        paragraphs = rich.findall("a:p", C_NS)
+        if not paragraphs:
+            raise _UnsupportedChart("unsupported-chart-point-labels")
+        lines = ["".join(node.text or "" for node in p.findall(".//a:t", C_NS)) for p in paragraphs]
+        text = "\n".join(lines)
+        if not text:
+            raise _UnsupportedChart("unsupported-chart-point-labels")
+        item["text"] = text
+        item.update(_source_data_label_text_style(rich, palette))
+    return item
+
+
+def _source_data_labels_ooxml(dlabels: ET.Element) -> dict[str, str]:
+    if any(
+        isinstance(name, str) and name.startswith(f"{{{NS['r']}}}")
+        for node in dlabels.iter()
+        for name in node.attrib
+    ):
+        raise _UnsupportedChart("unsupported-chart-series-data-labels")
+    payload = ET.tostring(dlabels, encoding="utf-8")
+    return {
+        "encoding": "base64",
+        "payload": base64.b64encode(payload).decode("ascii"),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def _data_labels_payload(
+    dlabels: ET.Element | None,
+    *,
+    palette: ColorPalette | None = None,
+    point_count: int | None = None,
+    preserve_source: bool = False,
+) -> dict[str, Any] | None:
+    if dlabels is None:
+        return None
+    point_nodes = dlabels.findall("c:dLbl", C_NS)
+    if point_nodes and point_count is None:
+        raise _UnsupportedChart("unsupported-chart-point-labels")
+    allowed_children = {
+        "dLbl", "extLst", "numFmt", "spPr", "txPr", "dLblPos", "showLegendKey", "showVal",
+        "showCatName", "showSerName", "showPercent", "showBubbleSize",
+        "showLeaderLines",
+    }
+    if any(
+        child.tag.rsplit("}", 1)[-1] not in allowed_children
+        for child in dlabels
+    ):
+        raise _UnsupportedChart("unsupported-chart-data-labels")
+    for tag in ("showLegendKey", "showBubbleSize"):
+        elem = dlabels.find(f"c:{tag}", C_NS)
+        if elem is not None and ooxml_bool(elem.attrib.get("val"), True):
+            raise _UnsupportedChart("unsupported-chart-data-labels")
+
+    config: dict[str, Any] = _data_label_flag_payload(
+        dlabels,
+        include_missing=True,
+    )
+
+    leader_lines = dlabels.find("c:showLeaderLines", C_NS)

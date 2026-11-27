@@ -1,0 +1,149 @@
+"""Classic native chart XML emitters."""
+
+from __future__ import annotations
+
+import base64
+import binascii
+import hashlib
+from typing import Any
+from xml.etree import ElementTree as ET
+
+from ..drawingml.utils import (
+    _xml_escape,
+    detect_text_lang,
+    text_has_rtl_characters,
+    text_uses_rtl,
+)
+from .chart_data import (
+    _DEFAULT_CHART_COLORS,
+    _category_axis_is_date,
+    _category_axis_reversed,
+    _chart_list,
+    _chart_plot_area_layout,
+    _data_label_position,
+    _data_label_point_items,
+    _data_labels_config,
+    data_labels_show_unlisted,
+)
+from .chart_style import (
+    _alpha_xml,
+    _axis_title_xml,
+    _axis_titles,
+    _chart_area_sp_pr_xml,
+    _chart_line_sp_pr_xml,
+    _chart_text_entry,
+    _chart_text_entry_color,
+    _chart_text_entry_font_face,
+    _chart_text_entry_font_size,
+    _chart_text_sizes,
+    _chart_title_is_bounded,
+    _chart_tx_pr_xml,
+    _classic_chart_style,
+    _font_face_xml,
+    _inferred_bar_gap_width,
+    _inferred_bar_overlap,
+    _inferred_cross_between,
+    _major_gridlines_xml,
+)
+from .marker_attributes import native_json_is_authoritative
+from .marker_common import (
+    PACKAGE_REL_TYPE,
+    _bool_attr,
+    _chart_bool,
+    _clean_hex,
+    _compact_key,
+    _excel_col,
+    _first_present,
+    _font_size_hpt,
+    _hex_or_none,
+    _powerpoint_line_width_emu,
+)
+
+
+def _string_cache(values: list[str]) -> str:
+    points = "".join(
+        f'<c:pt idx="{idx}"><c:v>{_xml_escape(value)}</c:v></c:pt>'
+        for idx, value in enumerate(values)
+    )
+    return f'<c:strCache><c:ptCount val="{len(values)}"/>{points}</c:strCache>'
+
+
+def _number_cache(
+    values: list[int | float],
+    number_format: str = "General",
+) -> str:
+    points = "".join(
+        f'<c:pt idx="{idx}"><c:v>{value}</c:v></c:pt>'
+        for idx, value in enumerate(values)
+        if value is not None
+    )
+    return (
+        f'<c:numCache><c:formatCode>{_xml_escape(number_format)}</c:formatCode>'
+        f'<c:ptCount val="{len(values)}"/>{points}</c:numCache>'
+    )
+
+
+def _category_reference_xml(
+    categories: list[Any],
+    *,
+    column_index: int = 1,
+    numeric: bool,
+    number_format: str | None = None,
+) -> str:
+    reference_tag = "numRef" if numeric else "strRef"
+    cache = (
+        _number_cache(categories, number_format or "General")
+        if numeric
+        else _string_cache([str(value) for value in categories])
+    )
+    return (
+        f"<c:cat><c:{reference_tag}>"
+        f"<c:f>Sheet1!${_excel_col(column_index)}$2:"
+        f"${_excel_col(column_index)}${len(categories) + 1}</c:f>"
+        f"{cache}"
+        f"</c:{reference_tag}></c:cat>"
+    )
+
+
+def _series_color_xml(
+    color: str | None,
+    *,
+    line: bool = True,
+    fill_opacity: Any = None,
+    line_width: Any = None,
+) -> str:
+    if not color:
+        return ""
+    clean = _clean_hex(color, "#4472C4")
+    alpha_xml = _alpha_xml(fill_opacity, "series fill_opacity")
+    line_width_xml = ""
+    if line_width is not None:
+        line_width_xml = (
+            f' w="{_powerpoint_line_width_emu(line_width, "series line_width")}"'
+        )
+    line_xml = (
+        f'<a:ln{line_width_xml}><a:solidFill><a:srgbClr val="{clean}"/></a:solidFill></a:ln>'
+        if line else '<a:ln><a:noFill/></a:ln>'
+    )
+    return (
+        "<c:spPr>"
+        f'<a:solidFill><a:srgbClr val="{clean}">{alpha_xml}</a:srgbClr></a:solidFill>'
+        f'{line_xml}'
+        "</c:spPr>"
+    )
+
+
+def _data_label_flags_xml(config: dict[str, Any]) -> str:
+    show_value = _chart_bool(
+        _first_present(config.get("show_value"), config.get("showValue"), config.get("value")),
+        True,
+    )
+    show_category = _chart_bool(
+        _first_present(config.get("show_category"), config.get("showCategory"), config.get("category")),
+        False,
+    )
+    show_series = _chart_bool(
+        _first_present(config.get("show_series"), config.get("showSeries"), config.get("series")),
+        False,
+    )
+    show_percent = _chart_bool(

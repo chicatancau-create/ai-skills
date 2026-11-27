@@ -1,0 +1,112 @@
+            "share_of_uncompressed_parts": 0.0,
+            "top_contributors": [],
+        },
+        "motion": {
+            "transitions": {
+                "carrier_slide_count": 0,
+                "visual_effect_slide_count": 0,
+                "timed_advance_slide_count": 0,
+                "carrier_slides": [],
+                "visual_effect_slides": [],
+                "timed_advance_slides": [],
+                "effects": {},
+            },
+            "object_animations": {
+                "timing_slide_count": 0,
+                "object_animation_slide_count": 0,
+                "audio_timing_slide_count": 0,
+                "timing_slides": [],
+                "object_animation_slides": [],
+                "audio_timing_slides": [],
+            },
+        },
+        "errors": [],
+        "advisories": [],
+    }
+
+
+def _content_type_maps(
+    archive: zipfile.ZipFile,
+    errors: list[dict[str, object]],
+) -> tuple[dict[str, str], dict[str, str]]:
+    try:
+        root = ET.fromstring(archive.read("[Content_Types].xml"))
+    except KeyError:
+        errors.append(
+            _issue(
+                "missing_content_types",
+                "PPTX package is missing [Content_Types].xml.",
+            )
+        )
+        return {}, {}
+    except ET.ParseError as exc:
+        errors.append(
+            _issue(
+                "invalid_content_types",
+                f"PPTX content-types XML is invalid: {exc}.",
+            )
+        )
+        return {}, {}
+    expected_root = f"{{{CONTENT_TYPES_NS}}}Types"
+    if root.tag != expected_root:
+        errors.append(
+            _issue(
+                "invalid_content_types",
+                "PPTX content-types XML uses an invalid Types namespace.",
+            )
+        )
+        return {}, {}
+
+    defaults: dict[str, str] = {}
+    overrides: dict[str, str] = {}
+    default_tag = f"{{{CONTENT_TYPES_NS}}}Default"
+    override_tag = f"{{{CONTENT_TYPES_NS}}}Override"
+    for node in root:
+        if node.tag == default_tag:
+            raw_extension = (node.attrib.get("Extension") or "").strip()
+            content_type = (node.attrib.get("ContentType") or "").strip()
+            extension = raw_extension.lower()
+            if not extension or extension.startswith(".") or not content_type:
+                errors.append(
+                    _issue(
+                        "invalid_content_types",
+                        "PPTX content-types Default entry is incomplete.",
+                    )
+                )
+                continue
+            if extension in defaults:
+                errors.append(
+                    _issue(
+                        "invalid_content_types",
+                        "PPTX content-types XML has a duplicate Default extension.",
+                        extension=raw_extension,
+                    )
+                )
+                continue
+            defaults[extension] = content_type
+            continue
+        if node.tag == override_tag:
+            raw_part_name = (node.attrib.get("PartName") or "").strip()
+            content_type = (node.attrib.get("ContentType") or "").strip()
+            part_name = raw_part_name.lstrip("/")
+            if (
+                not raw_part_name.startswith("/")
+                or not part_name
+                or ".." in PurePosixPath(part_name).parts
+                or not content_type
+            ):
+                errors.append(
+                    _issue(
+                        "invalid_content_types",
+                        "PPTX content-types Override entry is incomplete or invalid.",
+                        part=raw_part_name or None,
+                    )
+                )
+                continue
+            if part_name in overrides:
+                errors.append(
+                    _issue(
+                        "invalid_content_types",
+                        "PPTX content-types XML has a duplicate Override part.",
+                        part=raw_part_name,
+                    )

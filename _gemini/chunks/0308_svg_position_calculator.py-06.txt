@@ -1,0 +1,125 @@
+        # Generate polygon points attribute
+        lines.append("")
+        lines.append("=== SVG Polygon Points ===")
+        points_str = " ".join([f"{p.x},{p.y}" for p in points])
+        lines.append(f'points="{points_str}"')
+
+        return "\n".join(lines)
+
+
+# =============================================================================
+# Line / Scatter Chart Calculator
+# =============================================================================
+
+@dataclass
+class DataPoint:
+    """Data point"""
+    index: int
+    x_value: float
+    y_value: float
+    svg_x: float
+    svg_y: float
+    label: Optional[str] = None
+
+
+def slot_midpoint_points(points: List['DataPoint'], coord: 'CoordinateSystem') -> List['DataPoint']:
+    """Re-place points at category slot centres across the chart area width."""
+    if not points:
+        return points
+    area = coord.chart_area
+    slot = (area.x_max - area.x_min) / len(points)
+    for index, point in enumerate(points):
+        point.svg_x = round(area.x_min + slot * (index + 0.5), 1)
+    return points
+
+
+class LineChartCalculator:
+    """Line / scatter chart calculator"""
+
+    def __init__(self, coord_system: CoordinateSystem):
+        self.coord = coord_system
+
+    def calculate(self, data: List[Tuple[float, float]],
+                  x_range: Optional[Tuple[float, float]] = None,
+                  y_range: Optional[Tuple[float, float]] = None,
+                  labels: Optional[List[str]] = None) -> List[DataPoint]:
+        """
+        Calculate data point coordinates
+
+        Args:
+            data: Data point list [(x1, y1), (x2, y2), ...]
+            x_range: X axis range; auto-calculated if None
+            y_range: Y axis range; auto-calculated if None
+            labels: Point label list
+        """
+        if not data:
+            return []
+
+        x_values = [p[0] for p in data]
+        y_values = [p[1] for p in data]
+
+        if x_range is None:
+            x_range = (min(x_values), max(x_values))
+        if y_range is None:
+            y_min = 0
+            y_max = max(y_values) * 1.1
+            y_range = (y_min, y_max)
+
+        results = []
+        for i, (x, y) in enumerate(data):
+            svg_x, svg_y = self.coord.data_to_svg(x, y, x_range, y_range)
+
+            results.append(DataPoint(
+                index=i + 1,
+                x_value=x,
+                y_value=y,
+                svg_x=round(svg_x, 1),
+                svg_y=round(svg_y, 1),
+                label=labels[i] if labels and i < len(labels) else None
+            ))
+
+        return results
+
+    def generate_path(self, points: List[DataPoint], closed: bool = False) -> str:
+        """Generate SVG path d attribute"""
+        if not points:
+            return ""
+
+        parts = [f"M {points[0].svg_x},{points[0].svg_y}"]
+        for p in points[1:]:
+            parts.append(f"L {p.svg_x},{p.svg_y}")
+
+        if closed:
+            parts.append("Z")
+
+        return " ".join(parts)
+
+    def format_table(self, points: List[DataPoint]) -> str:
+        """Format as table output"""
+        lines = []
+        area = self.coord.chart_area
+        lines.append(f"Chart area: ({area.x_min}, {area.y_min}) - ({area.x_max}, {area.y_max})")
+        lines.append("")
+        lines.append("Index X_Value    Y_Value    SVG_X     SVG_Y")
+        lines.append("----  ---------  ---------  --------  --------")
+
+        for p in points:
+            label_part = f"  ({p.label})" if p.label else ""
+            lines.append(
+                f"{p.index:4d}  {p.x_value:>9.2f}  {p.y_value:>9.2f}  {p.svg_x:>8.1f}  {p.svg_y:>8.1f}{label_part}"
+            )
+
+        lines.append("")
+        lines.append("=== SVG Path ===")
+        lines.append(self.generate_path(points))
+
+        return "\n".join(lines)
+
+
+# =============================================================================
+# Grid Layout Calculator
+# =============================================================================
+
+@dataclass
+class GridCell:
+    """Grid cell"""

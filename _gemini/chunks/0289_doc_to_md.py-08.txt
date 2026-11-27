@@ -1,0 +1,103 @@
+        return ""
+
+    width = max(len(row) for row in rows)
+    rows = [row + [""] * (width - len(row)) for row in rows]
+    header, body = rows[0], rows[1:]
+    lines = [
+        "| " + " | ".join(header) + " |",
+        "| " + " | ".join("---" for _ in range(width)) + " |",
+    ]
+    lines.extend("| " + " | ".join(row) + " |" for row in body)
+    return "\n".join(lines)
+
+
+def _docx_inject_tables_markdown(
+    input_file: Path,
+) -> tuple[Path, dict[str, str]] | None:
+    """Replace text-only DOCX tables with Markdown placeholders in a temp DOCX."""
+    try:
+        with zipfile.ZipFile(input_file) as docx:
+            document_xml = docx.read("word/document.xml")
+            footnotes = _docx_footnote_texts(docx)
+    except (KeyError, zipfile.BadZipFile, OSError):
+        return None
+    try:
+        root = ET.fromstring(document_xml)
+    except ET.ParseError:
+        return None
+
+    parent_map = {child: parent for parent in root.iter() for child in parent}
+    token_base = uuid.uuid4().hex
+    replacements: dict[str, str] = {}
+    for index, table in enumerate(root.findall(".//w:tbl", DOCX_NS)):
+        if _docx_table_has_media(table):
+            continue
+        markdown = _docx_table_to_markdown(table)
+        if not markdown:
+            continue
+        # The table never reaches mammoth, so its footnotes would lose both
+        # the reference and the note text; keep them under the table.
+        for reference in table.iter(f"{{{W_NS}}}footnoteReference"):
+            note_id = reference.get(f"{{{W_NS}}}id", "")
+            if footnotes.get(note_id):
+                markdown += f"\n\n[^{note_id}]: {footnotes[note_id]}"
+        parent = parent_map.get(table)
+        if parent is None:
+            continue
+        position = list(parent).index(table)
+        token = f"MARKDOWNTABLE{token_base}{index:04d}"
+        parent.remove(table)
+        parent.insert(position, _make_text_paragraph(token))
+        replacements[token] = markdown
+    if not replacements:
+        return None
+
+    for prefix, uri in DOCX_NS.items():
+        if prefix != "rel":
+            ET.register_namespace(prefix, uri)
+    patched_xml = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".docx", delete=False)
+    tmp.close()
+    out_path = Path(tmp.name)
+    with zipfile.ZipFile(input_file) as zin, \
+            zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            data = patched_xml if item.filename == "word/document.xml" else zin.read(item.filename)
+            zout.writestr(item, data)
+    return out_path, replacements
+
+
+def _docx_chart_markdown(chart_xml: bytes, name: str) -> str:
+    """Render one embedded Word chart's cached data as a Markdown table."""
+    import importlib.util
+
+    if importlib.util.find_spec("pptx") is None:
+        return f"> [Chart] {name} — data unavailable (python-pptx is not installed)"
+    from pptx.chart.chart import Chart
+    from pptx.oxml import parse_xml
+    from ppt_to_md import chart_to_markdown
+
+    return chart_to_markdown(Chart(parse_xml(chart_xml), None), name)
+
+
+def _docx_inject_charts_markdown(
+    input_file: Path,
+) -> tuple[Path, dict[str, str], list[str]] | None:
+    """Place each embedded chart's cached data after its paragraph in a temp DOCX.
+
+    Mammoth drops ``c:chart`` drawings entirely, so the chart values — often
+    the only copy of a report's numbers — would vanish from the Markdown.
+    """
+    try:
+        with zipfile.ZipFile(input_file) as docx:
+            document_xml = docx.read("word/document.xml")
+            rels_root = ET.fromstring(docx.read("word/_rels/document.xml.rels"))
+            chart_parts = {
+                name: docx.read(name)
+                for name in docx.namelist()
+                if name.startswith("word/charts/") and name.endswith(".xml")
+            }
+    except (KeyError, ET.ParseError, zipfile.BadZipFile, OSError):
+        return None
+    try:

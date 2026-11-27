@@ -1,0 +1,88 @@
+        // ratio leftovers. Non-PPT keeps a plain integer — large px, snapping moot.
+        if (isPptCanvas(STATE.canvas)) return Math.round(raw / 2) * 2;
+        return Math.round(raw);
+    }
+
+    // Canvas dimensions (viewBox user units) parsed from a catalog `dim` like
+    // "1242×1660" or from a custom canvas string containing WxH; null if unknown.
+    function canvasDimensions(canvasVal) {
+        var dim = null;
+        (CAT.canvas || []).forEach(function (o) { if (o.id === canvasVal) dim = o.dim; });
+        var m = String(dim || canvasVal || "").match(/(\d{2,5})\s*[×xX*]\s*(\d{2,5})/);
+        return m ? { width: parseInt(m[1], 10), height: parseInt(m[2], 10) } : null;
+    }
+
+    // PPT canvases (16:9 / 4:3) take the fixed per-reading-mode body px;
+    // other canvases use the canvas-owned effective-span rule below.
+    function isPptCanvas(canvasVal) {
+        var id = String(canvasVal || "").toLowerCase();
+        return id === "ppt169" || id === "ppt43";
+    }
+
+    // Body baseline in **px** per reading mode (legacy key:
+    // delivery_purpose). The system is px-only — these mirror the registered-PPT
+    // values in references/canvas-formats.md. No pt layer, no conversion. `def` is the fixed
+    // recommendation; lo/hi are a sanity envelope for the out-of-range flag only.
+    function deliveryBodyPx(purposeId) {
+        if (purposeId === "text") return { lo: 18, hi: 21, def: 20 };
+        if (purposeId === "presentation") return { lo: 28, hi: 32, def: 32 };
+        return { lo: 22, hi: 25, def: 24 }; // balanced — the default
+    }
+
+    // Mirrors references/canvas-formats.md § "Typography Scale Start". The
+    // 3× short-side cap keeps extreme aspect ratios from inflating the scale;
+    // lo/hi remain advisory and def is the initial anchor, never a hard floor.
+    function bodySizeBandForCanvas(canvasVal, purposeId) {
+        if (isPptCanvas(canvasVal)) return deliveryBodyPx(purposeId);
+        var dims = canvasDimensions(canvasVal);
+        if (!dims) return { lo: 32, hi: 48, def: 40 }; // legacy invalid-custom fallback
+        var shortSide = Math.min(dims.width, dims.height);
+        var longSide = Math.max(dims.width, dims.height);
+        var span = Math.min(longSide, 3 * shortSide);
+        return {
+            lo: Math.round(span * 0.025),
+            hi: Math.round(span * 0.033),
+            def: Math.round(span * 0.029)
+        };
+    }
+
+    function defaultBodySizeForCanvas(canvasVal, purposeId) {
+        return bodySizeBandForCanvas(canvasVal, purposeId).def;
+    }
+
+    // Resolve the only deterministic same-stage size dependency locally. The
+    // backend authors Stage 2 once; changing reading mode or body size updates
+    // only unpinned values already visible in this page.
+    function syncUnpinnedTypographySizes(resetBodyFromReadingMode) {
+        if (!STATE.typography) STATE.typography = { name: "", heading: {}, body: {} };
+        if (!STATE.typography.sizes) STATE.typography.sizes = {};
+        if (resetBodyFromReadingMode && !TYPOGRAPHY_SIZE_OVERRIDES.body) {
+            STATE.typography.body_size = defaultBodySizeForCanvas(
+                STATE.canvas, STATE.delivery_purpose
+            );
+        }
+        var body = parseFloat(STATE.typography.body_size);
+        if (!isFinite(body)) {
+            body = defaultBodySizeForCanvas(STATE.canvas, STATE.delivery_purpose);
+        }
+        SIZE_ROLES.forEach(function (role) {
+            if (!TYPOGRAPHY_SIZE_OVERRIDES[role]) {
+                STATE.typography.sizes[role] = deriveSize(role, body);
+            }
+        });
+        refreshSizeInputs();
+        refreshBodySizeHint();
+        refreshStylePreview();
+    }
+
+    function roundSize(value) {
+        return Math.round(value * 100) / 100;
+    }
+
+    function formatPtFromPx(value) {
+        var px = parseFloat(value);
+        if (!isFinite(px)) return "";
+        var pt = Math.round(px * 0.75 * 10) / 10;
+        return pt % 1 === 0 ? String(Math.round(pt)) : String(pt);
+    }
+

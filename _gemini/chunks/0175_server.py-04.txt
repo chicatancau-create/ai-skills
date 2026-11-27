@@ -1,0 +1,93 @@
+    if data.get('phase') != 'template':
+        raise ValueError(f'{TEMPLATE_OPTIONS_LABEL} phase must be template')
+    if data.get('default_mode') not in {'free_design', 'templates'}:
+        raise ValueError(
+            f'{TEMPLATE_OPTIONS_LABEL} default_mode must be free_design or templates'
+        )
+    if 'lang' in data and (
+        not isinstance(data['lang'], str) or not data['lang'].strip()
+    ):
+        raise ValueError(f'{TEMPLATE_OPTIONS_LABEL} lang must be a non-empty string')
+    if 'explicit_workspace_roots' not in data:
+        raise ValueError(
+            f'{TEMPLATE_OPTIONS_LABEL} must include explicit_workspace_roots'
+        )
+    raw_roots = data['explicit_workspace_roots']
+    if not isinstance(raw_roots, list):
+        raise ValueError(
+            f'{TEMPLATE_OPTIONS_LABEL} explicit_workspace_roots must be an array'
+        )
+    if raw_roots and data['default_mode'] != 'templates':
+        raise ValueError(
+            f'{TEMPLATE_OPTIONS_LABEL} default_mode must be templates when '
+            'explicit_workspace_roots is non-empty'
+        )
+
+    roots = []
+    seen = set()
+    for index, raw_root in enumerate(raw_roots):
+        if not isinstance(raw_root, str) or not raw_root.strip():
+            raise ValueError(
+                f'{TEMPLATE_OPTIONS_LABEL} explicit_workspace_roots[{index}] '
+                'must be a non-empty string'
+            )
+        candidate = Path(raw_root)
+        if not candidate.is_absolute():
+            raise ValueError(
+                f'{TEMPLATE_OPTIONS_LABEL} explicit_workspace_roots[{index}] '
+                'must be an absolute path'
+            )
+        try:
+            root = candidate.resolve()
+        except (OSError, RuntimeError) as exc:
+            raise ValueError(
+                f'cannot resolve explicit workspace root {raw_root}: {exc}'
+            ) from exc
+        canonical = str(root)
+        if canonical in seen:
+            raise ValueError(
+                f'{TEMPLATE_OPTIONS_LABEL} contains duplicate workspace root: {canonical}'
+            )
+        if not root.is_dir():
+            raise ValueError(f'explicit workspace root is not a directory: {canonical}')
+        _template_design_specs(root)
+        seen.add(canonical)
+        roots.append(root)
+    return data, roots
+
+
+def _build_template_library() -> tuple[dict, dict[str, dict], dict[str, dict], dict]:
+    """Build indexed library groups without scanning template directories."""
+    library = {}
+    candidates = {}
+    registered_roots = {}
+    index_contracts = {}
+    for kind, (directory_name, index_name) in _TEMPLATE_LIBRARY_CONFIG.items():
+        kind_dir = (_TEMPLATES_DIR / directory_name).resolve()
+        index_path = kind_dir / index_name
+        index_data = _read_json_object(index_path)
+        index_contracts[kind] = index_data
+        group = []
+        for template_id, metadata in index_data.items():
+            if not _safe_template_id(template_id):
+                raise ValueError(
+                    f'{index_path} contains unsafe template id: {template_id!r}'
+                )
+            if not isinstance(metadata, dict):
+                raise ValueError(
+                    f'{index_path} entry {template_id!r} must be an object'
+                )
+            workspace_root = (kind_dir / template_id).resolve()
+            if workspace_root.parent != kind_dir:
+                raise ValueError(
+                    f'{index_path} entry {template_id!r} does not resolve to a '
+                    f'direct child of {kind_dir}'
+                )
+            if not workspace_root.is_dir():
+                raise ValueError(
+                    f'{index_path} entry {template_id!r} workspace does not exist: '
+                    f'{workspace_root}'
+                )
+            spec_path = workspace_root / 'templates' / 'design_spec.md'
+            if not spec_path.is_file():
+                raise ValueError(

@@ -1,0 +1,119 @@
+        return None
+
+    # --- Donut-chart arc segment detection ---
+    if preset_geom is None and _is_donut_circle(elem, ctx):
+        dasharray = _get_attr(elem, 'stroke-dasharray', ctx)
+        parsed_dasharray = parse_project_stroke_dasharray(
+            dasharray,
+            allow_zero_gap=True,
+        )
+        if parsed_dasharray is None:
+            raise ValueError('Thick-circle arc requires one dash/gap pair')
+        _preset, dash_values = parsed_dasharray
+        dash_len = dash_values[0]
+        raw_dash_offset = elem.get('stroke-dashoffset')
+        dash_offset = (
+            parse_project_geometry_length(
+                raw_dash_offset,
+                'stroke-dashoffset',
+            )
+            if raw_dash_offset is not None else 0.0
+        )
+        stroke_width = svg_length_size(_get_attr(elem, 'stroke-width', ctx), ctx, 1)
+
+        rotate_deg = 0.0
+        transform = elem.get('transform', '')
+        if transform:
+            operations = parse_transform_operations(transform)
+            if len(operations) != 1 or operations[0][0] != 'rotate':
+                raise ValueError(
+                    'Thick-circle arc transform must be one rotate operation'
+                )
+            rotate_deg = operations[0][1][0]
+
+        geom, min_x, min_y, w_emu, h_emu = _build_arc_ring_path(
+            ctx_x(cx_, ctx) / ctx.scale_x,
+            ctx_y(cy_, ctx) / ctx.scale_y,
+            r, stroke_width, dash_len, dash_offset, rotate_deg,
+            ctx.scale_x, ctx.scale_y,
+        )
+        if not geom:
+            return None
+
+        # Use the stroke color/gradient as fill for the arc shape
+        stroke_val = _get_attr(elem, 'stroke', ctx)
+        op = get_stroke_opacity(elem, ctx)
+        grad_id = resolve_url_id(stroke_val) if stroke_val else None
+        if grad_id and grad_id in ctx.defs:
+            fill = build_gradient_fill(
+                ctx.defs[grad_id],
+                op,
+                ctx.theme_color_spec,
+                "fill",
+            )
+        elif stroke_val:
+            color, color_alpha = parse_svg_color(stroke_val)
+            fill = (
+                build_solid_fill(
+                    color,
+                    combine_opacity(op, color_alpha),
+                    ctx.theme_color_spec,
+                    "fill",
+                )
+                if color else '<a:noFill/>'
+            )
+        else:
+            fill = '<a:noFill/>'
+
+        stroke_xml = '<a:ln><a:noFill/></a:ln>'
+
+        effect = ''
+        filt_id = get_effective_filter_id(elem, ctx)
+        if filt_id and filt_id in ctx.defs:
+            effect = build_effect_xml(
+                ctx.defs[filt_id],
+                get_element_opacity(elem, ctx),
+            )
+
+        shape_id = _claim_element_shape_id(elem, ctx)
+        return ShapeResult(
+            xml=_wrap_shape(
+                shape_id, f'Arc {shape_id}',
+                min_x, min_y, w_emu, h_emu,
+                geom, fill, stroke_xml, effect,
+            ),
+            bounds_emu=(min_x, min_y, min_x + w_emu, min_y + h_emu),
+        )
+
+    # --- Normal circle ---
+    transform = elem.get('transform')
+    cx_s = ctx_x(cx_, ctx)
+    cy_s = ctx_y(cy_, ctx)
+    r_x = r * ctx.scale_x
+    r_y = r * ctx.scale_y
+
+    x = cx_s - r_x
+    y = cy_s - r_y
+    w = r_x * 2
+    h = r_y * 2
+
+    fill_op = get_fill_opacity(elem, ctx)
+    stroke_op = get_stroke_opacity(elem, ctx)
+    fill = build_fill_xml(elem, ctx, fill_op)
+    stroke = build_stroke_xml(elem, ctx, stroke_op)
+
+    effect = ''
+    filt_id = get_effective_filter_id(elem, ctx)
+    if filt_id and filt_id in ctx.defs:
+        effect = build_effect_xml(
+            ctx.defs[filt_id],
+            get_element_opacity(elem, ctx),
+        )
+
+    geom = preset_geom or '<a:prstGeom prst="ellipse"><a:avLst/></a:prstGeom>'
+
+    shape_id = _claim_element_shape_id(elem, ctx)
+    if preset_geom is not None:
+        xfrm = _shape_xfrm_from_preset_frame(
+            elem,
+            ctx,

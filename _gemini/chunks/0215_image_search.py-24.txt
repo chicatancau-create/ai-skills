@@ -1,0 +1,101 @@
+    chain.extend(ZERO_CONFIG_PROVIDERS)
+    return chain
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    _load_search_env_file()
+
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        if args.filename:
+            args.filename = _validate_bare_filename(args.filename)
+        if args.promote:
+            args.promote = _validate_bare_filename(
+                args.promote, field_name="--promote candidate filename"
+            )
+    except ValueError as exc:
+        parser.error(str(exc))
+    if args.min_width < 1 or args.min_height < 1:
+        parser.error("--min-width and --min-height must both be positive integers")
+    if args.max_candidates < 0:
+        parser.error("--max-candidates must be zero or a positive integer")
+    if args.candidate_page < 1:
+        parser.error("--candidate-page must be a positive integer")
+    if args.max_candidates == 0 and args.candidate_page != 1:
+        parser.error("--candidate-page must be 1 when --max-candidates is 0")
+    if args.batch and args.query and not args.promote and not args.from_url:
+        parser.error(
+            "a positional query is not used in --batch mode; put the query in "
+            "the manifest row, or drop --batch for a single-query search"
+        )
+
+    output_dir = Path(args.output)
+
+    # --- Promote mode ---
+    if args.promote:
+        if not args.filename:
+            parser.error("--filename is required in --promote mode")
+        return promote_candidate(
+            output_dir,
+            args.filename,
+            args.promote,
+            manifest_path=Path(args.manifest) if args.manifest else None,
+            queries_manifest_path=Path(args.batch) if args.batch else None,
+        )
+
+    # --- Manual URL replacement ---
+    if args.from_url:
+        if not args.filename:
+            parser.error("--filename is required with --from-url")
+        return fetch_url_replace(
+            output_dir,
+            args.filename,
+            args.from_url,
+            manifest_path=Path(args.manifest) if args.manifest else None,
+            slide=args.slide,
+            purpose=args.purpose,
+            search_query=args.query or "",
+            orientation="" if args.orientation == "any" else args.orientation,
+            required_terms=_parse_required_terms(args.require_terms),
+            min_width=args.min_width,
+            min_height=args.min_height,
+        )
+
+    # --- Batch mode ---
+    if args.batch:
+        if not os.path.isfile(args.batch):
+            print(f"Error: queries manifest not found: {args.batch}", file=sys.stderr)
+            return 1
+        try:
+            manifest = load_search_manifest(args.batch)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        batch_output_dir = (
+            output_dir if args.output != "." else Path(args.batch).parent
+        )
+        batch_output_dir.mkdir(parents=True, exist_ok=True)
+        sources_manifest_path = (
+            Path(args.manifest) if args.manifest
+            else default_manifest_path(str(batch_output_dir))
+        )
+        try:
+            _, needs_selection, needs_manual, failed, _ = run_search_manifest(
+                manifest,
+                args.batch,
+                output_dir=batch_output_dir,
+                sources_manifest_path=sources_manifest_path,
+                concurrency=_resolve_search_concurrency(args.concurrency),
+                save_candidates=args.save_candidates,
+                max_candidates=args.max_candidates,
+                candidate_page=args.candidate_page,
+                default_provider=args.provider,
+                default_strict=args.strict_no_attribution,
+                default_min_width=args.min_width,
+                default_min_height=args.min_height,
+            )
+        except KeyboardInterrupt:
+            print("\n\nInterrupted by user. Partial progress preserved in manifest.")
+            return 130

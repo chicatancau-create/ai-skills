@@ -1,0 +1,94 @@
+        if _roundtrip_note_changed(project_path, row, page):
+            candidates.discard(index)
+        derived = row.get("derivedResources")
+        if not isinstance(derived, list):
+            raise RuntimeError(
+                f"Round-trip manifest slide {page.source_slide} lacks "
+                "derivedResources"
+            )
+        for resource_index, raw in enumerate(derived):
+            if not isinstance(raw, dict):
+                raise RuntimeError(
+                    f"Round-trip slide {index} derivedResources[{resource_index}] "
+                    "must be an object"
+                )
+            relative = raw.get("file")
+            expected_sha = raw.get("sha256")
+            if not isinstance(relative, str) or not isinstance(expected_sha, str):
+                raise RuntimeError(
+                    f"Round-trip slide {index} derived resource is incomplete"
+                )
+            path = (project_path / relative).resolve()
+            try:
+                path.relative_to(project_path.resolve())
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"Round-trip derived resource escapes the project: {relative}"
+                ) from exc
+            if not path.is_file() or _path_sha256(path) != expected_sha:
+                candidates.discard(index)
+                break
+    candidates.difference_update(changed_resource_pages)
+    return candidates
+
+
+def _roundtrip_slide_patches(
+    project_path: Path,
+    authoring_report: dict[str, object] | None,
+    passthrough_slides: set[int],
+    pages: tuple[RoundtripPage, ...],
+    *,
+    changed_resource_pages: frozenset[int],
+    force_visual_changed: bool,
+    force_motion_changed: bool,
+    force_transition_changed: bool,
+    force_transition_replaced: bool,
+    force_animation_changed: bool,
+    force_notes_changed: bool,
+    force_advance_changed: bool = False,
+) -> dict[int, RoundtripSlidePatch]:
+    """Build strict source-overlay metadata for edited authoring slides."""
+    if authoring_report is None:
+        return {}
+    manifest = load_roundtrip_manifest(project_path)
+    if manifest is None:
+        raise RuntimeError("Round-trip manifest is missing")
+    raw_slides = manifest.get("slides")
+    if not isinstance(raw_slides, list):
+        raise RuntimeError("Round-trip manifest slides must be an array")
+    slide_rows = {
+        int(row["index"]): row
+        for row in raw_slides
+        if isinstance(row, dict) and isinstance(row.get("index"), int)
+    }
+    sidecars = manifest.get("sidecars")
+    animation = sidecars.get("animations") if isinstance(sidecars, dict) else None
+    animation_file = animation.get("file") if isinstance(animation, dict) else None
+    if not isinstance(animation_file, str):
+        raise RuntimeError(
+            "Round-trip manifest must declare sidecars.animations.file"
+        )
+    try:
+        animation_config = json.loads(
+            (project_path / animation_file).read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"Cannot read round-trip animation sidecar: {exc}"
+        ) from exc
+    if not isinstance(animation_config, dict):
+        raise RuntimeError("Round-trip animation sidecar must be a JSON object")
+    animation_config = _roundtrip_animation_config_for_pages(
+        animation_config,
+        pages,
+    )
+    baseline = animation.get("baseline")
+    if not isinstance(baseline, dict):
+        # Older workspaces stored only a combined hash. Recover their import
+        # projection in memory from the immutable source, without publishing it.
+        from pptx_to_svg.converter import ConvertOptions, convert_pptx_to_svg
+
+        baseline = convert_pptx_to_svg(
+            source_pptx_path(project_path),
+            options=ConvertOptions(inheritance_mode="both", roundtrip=True),
+        ).animation_config

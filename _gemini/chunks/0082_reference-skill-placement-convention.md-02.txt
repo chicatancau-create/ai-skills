@@ -1,0 +1,41 @@
+  its root. Diagnose with `Get-ChildItem 'C:\Users\Admin\.qoder\skills' | Select Name,LinkType,Target`
+  (`os.path.islink()` reads False on a junction, so Python alone will misreport it as a plain dir).
+- **`create` failing with bare `SKILL_OPERATION_FAILED` (no app-log trace) = your YAML, not the disk.**
+  Measured 2026-09-24 creating `install-github-skill-on-windows-qoder`: the first attempt was rejected because
+  the one-line `description` contained an ASCII colon followed by a space (`核心顺序: 实测…`), which breaks a
+  YAML plain scalar; nothing was written and `%APPDATA%\com.qoder.app.stable\logs\<run>\main.log` had **no**
+  corresponding entry (unlike plugin-install failures, which do log a `stage`/`errorCode`). Retry with full-width
+  `：` or a dash, and always grep the current run log before blaming the app's write path.
+  Second variant measured the same day creating `verify-page-in-headless-edge`: a space followed by `#` inside
+  the plain scalar (`…必须走 #PROBE 节点…`) is a YAML comment start and gets rejected the same bare way.
+  Safest is to wrap the whole `description` in double quotes — that neutralizes both `: ` and ` #`; then
+  verify it came back as one line of the expected length rather than assuming.
+
+  Companion code measured 2026-09-24 (a later `create` that was since deleted): frontmatter that has
+  `name` but **no `description`** is rejected as bare `SKILL_DOCUMENT_INVALID` — write both fields on the
+  first attempt; `create` is atomic, so a rejection leaves nothing on disk (confirm with `ls ~/.qoder/skills`).
+- **Windows deep-path / junction deletion facts** (measured 2026-09-24 on Python 3.14.2, preserved here after the
+  `install-github-skill-on-windows-qoder` skill that carried them was folded away and deleted):
+  - Plain `os.makedirs` dies at nesting level 8 (path 271 chars) with `WinError 3` — a self-nested copy can be
+    built only halfway, so a bad copy can leave a tree no plain call can finish removing.
+  - Plain `shutil.rmtree` on such a tree raises **`WinError 145` (directory not empty)** and has already eaten
+    part of it; `shutil.rmtree('\\' + '\\' + '?' + '\\' + abspath)` removes it in one go. Build that prefix with
+    `chr(92)` in snippets — backslash literals get mangled on the way into files.
+  - Before any recursive delete, `os.path.isjunction(p)` first and drop links with `os.rmdir` only. On this
+    box's 3.14 `shutil.rmtree` did *not* follow a junction into its target, but that is version-dependent — never
+    rely on it. Order: `rmdir` the link, then `rmtree` the entity.
+  - Copy guard that earns its keep: `assert not os.path.abspath(dst).startswith(src + os.sep) and dst != src`
+    before `copytree`, plus a source-vs-destination file count afterwards. Wrong target arithmetic is how a skill
+    gets copied inside itself.
+  - "Installed but the skill list doesn't show it": each root lists **only its direct children**, and a real dir
+    sitting outside a scanned root is invisible. Confirm by comparing against the session's available-skills
+    list, never by `ls` alone.
+- **Qoder plugin-upload failure route** (the two diagnosis skills that documented it were deleted by a
+  concurrent session on 2026-09-24; these are what survived): grep
+  `%APPDATA%\com.qoder.app.stable\logs\<run-id>\main.log` for `"stage":"...","errorCode":"..."` and count across
+  run stamps. Measured here: `publish` + `EXTENSION_INSTALL_WRITE_FAILED` 18x and
+  `package-extract` + `EXTENSION_PACKAGE_TOO_MANY_FILES` 1x. Three different archive layouts failing at the same
+  stage with the same code means it is the app, not the package; prove it by renaming a same-bytes `.tmp` over
+  `~/.qoder/plugins/installed_plugins_v2.json` — if the rename succeeds nothing holds the file locked, so the fix
+  is a full app restart, not another repack. That registry is itself written tmp+rename, so the
+  `installed_plugins_v2.json.<uuid>.tmp` litter is failed writes: move it aside, never `rmtree` that directory.

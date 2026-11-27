@@ -1,0 +1,111 @@
+                    for child in inherited
+                    if isinstance(child.tag, str)
+                    and child.tag.rsplit("}", 1)[-1] in group
+                ),
+                None,
+            )
+            if inherited_child is not None:
+                body_pr.append(copy.deepcopy(inherited_child))
+                local_names.add(inherited_child.tag.rsplit("}", 1)[-1])
+    return effective
+
+
+def _materialize_inherited_list_styles(
+    tx_body: ET.Element | None,
+    inherited_lst_styles: tuple[ET.Element, ...],
+) -> tuple[ET.Element | None, bool]:
+    """Flatten placeholder list-style inheritance into the preserved txBody."""
+    if not inherited_lst_styles:
+        return tx_body, True
+    if tx_body is None:
+        return None, False
+
+    effective = copy.deepcopy(tx_body)
+    lst_style = effective.find("a:lstStyle", NS)
+    if lst_style is None:
+        lst_style = ET.Element(f"{{{NS['a']}}}lstStyle")
+        body_pr = effective.find("a:bodyPr", NS)
+        insert_at = list(effective).index(body_pr) + 1 if body_pr is not None else 0
+        effective.insert(insert_at, lst_style)
+
+    for level in range(1, 10):
+        local_level = lst_style.find(f"a:lvl{level}pPr", NS)
+        inherited_levels = [
+            level_pr
+            for inherited in inherited_lst_styles
+            if (level_pr := inherited.find(f"a:lvl{level}pPr", NS)) is not None
+        ]
+        if local_level is None and not inherited_levels:
+            continue
+
+        merged = ET.Element(f"{{{NS['a']}}}lvl{level}pPr")
+        for source in reversed(inherited_levels):
+            _merge_text_property_element(merged, source)
+        if local_level is not None:
+            _merge_text_property_element(merged, local_level)
+
+        if local_level is None:
+            lst_style.append(merged)
+        else:
+            index = list(lst_style).index(local_level)
+            lst_style.remove(local_level)
+            lst_style.insert(index, merged)
+
+    return effective, True
+
+
+def _merge_text_property_element(
+    target: ET.Element,
+    source: ET.Element,
+) -> None:
+    """Overlay one DrawingML paragraph/run property node by choice group."""
+    target.attrib.update(source.attrib)
+    for source_child in source:
+        key = _text_property_child_key(source_child)
+        target_child = next(
+            (
+                child
+                for child in target
+                if _text_property_child_key(child) == key
+            ),
+            None,
+        )
+        if (
+            source_child.tag == f"{{{NS['a']}}}defRPr"
+            and target_child is not None
+        ):
+            _merge_text_property_element(target_child, source_child)
+            continue
+        if target_child is not None:
+            index = list(target).index(target_child)
+            target.remove(target_child)
+            target.insert(index, copy.deepcopy(source_child))
+        else:
+            target.append(copy.deepcopy(source_child))
+
+
+def _text_property_child_key(child: ET.Element) -> str:
+    """Return the OOXML choice-group key for one text-property child."""
+    name = child.tag.rsplit("}", 1)[-1]
+    groups = (
+        ("fill", {
+            "noFill", "solidFill", "gradFill", "blipFill", "pattFill", "grpFill",
+        }),
+        ("effect", {"effectLst", "effectDag"}),
+        ("bullet-color", {"buClrTx", "buClr"}),
+        ("bullet-size", {"buSzTx", "buSzPct", "buSzPts"}),
+        ("bullet-font", {"buFontTx", "buFont"}),
+        ("bullet-kind", {"buNone", "buAutoNum", "buChar", "buBlip"}),
+        ("underline-line", {"uLnTx", "uLn"}),
+        ("underline-fill", {"uFillTx", "uFill"}),
+    )
+    for key, names in groups:
+        if name in names:
+            return key
+    return name
+
+
+def _counter_reflected_text_svg(text_svg: str, xfrm: Xfrm) -> str:
+    """Keep text upright when DrawingML flips its owning shape geometry."""
+    if not text_svg or xfrm.rot or not (xfrm.flip_h or xfrm.flip_v):
+        return text_svg

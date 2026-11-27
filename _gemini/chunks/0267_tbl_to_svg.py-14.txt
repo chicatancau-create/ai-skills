@@ -1,0 +1,108 @@
+    palette: ColorPalette | None,
+    theme_fonts: dict[str, str],
+) -> list[dict[str, Any]] | None:
+    """Materialize runs only when the legacy plain contract was insufficient."""
+    if tx_body is None or not _legacy_text_body_has_unsupported_formatting(tx_body):
+        return None
+
+    paragraphs: list[
+        tuple[str | None, int | float | None, list[dict[str, Any]]]
+    ] = []
+    style_signatures: set[tuple[tuple[str, Any], ...]] = set()
+    needs_runs = False
+    run_only_fields = {
+        "italic", "underline", "strike", "font_family", "lang", "alt_lang",
+        "baseline_percent", "outline",
+    }
+    for paragraph in tx_body.findall("a:p", NS):
+        p_pr = paragraph.find("a:pPr", NS)
+        align = p_pr.get("algn") if p_pr is not None else None
+        if align not in {"l", "ctr", "r", "just"}:
+            align = None
+        line_spacing_percent = _paragraph_line_spacing_percent(p_pr)
+        default_r_pr = p_pr.find("a:defRPr", NS) if p_pr is not None else None
+        runs = [
+            _native_run_payload(run, default_r_pr, palette, theme_fonts)
+            for run in paragraph.findall("a:r", NS)
+        ]
+        paragraphs.append((align, line_spacing_percent, runs))
+        if line_spacing_percent is not None:
+            needs_runs = True
+        for run in runs:
+            style = _run_style_signature(run)
+            style_signatures.add(style)
+            if run_only_fields.intersection(run):
+                needs_runs = True
+
+    if len(style_signatures) > 1:
+        needs_runs = True
+    if not needs_runs:
+        return None
+
+    payloads: list[dict[str, Any]] = []
+    for align, line_spacing_percent, runs in paragraphs:
+        paragraph_payload: dict[str, Any]
+        if runs:
+            paragraph_payload = {"runs": runs}
+        else:
+            paragraph_payload = {"text": ""}
+        if align is not None:
+            paragraph_payload["align"] = align
+        if line_spacing_percent is not None:
+            paragraph_payload["line_spacing_percent"] = line_spacing_percent
+        payloads.append(paragraph_payload)
+    return payloads
+
+
+def _cell_fill_payload(
+    tc_pr: ET.Element | None,
+    palette: ColorPalette | None,
+) -> tuple[str | None, int | float | None]:
+    """Return one normalized solid cell fill and optional opacity."""
+    fill = resolve_fill(tc_pr, palette)
+    color = fill.attrs.get("fill") if fill.attrs else None
+    if not color or not color.startswith("#"):
+        return None, None
+    opacity_raw = fill.attrs.get("fill-opacity")
+    opacity = (
+        _round_payload_number(float(opacity_raw))
+        if opacity_raw is not None
+        else None
+    )
+    return color, opacity
+
+
+def _cell_text_color(tx_body: ET.Element | None, palette: ColorPalette | None) -> str | None:
+    for r_pr in _text_run_props_in_priority(tx_body):
+        solid_fill = r_pr.find("a:solidFill", NS)
+        if solid_fill is not None and not _solid_fill_is_unsafe(solid_fill, palette):
+            try:
+                color, _alpha = resolve_color(find_color_elem(solid_fill), palette)
+            except (AttributeError, OverflowError, TypeError, ValueError):
+                continue
+            if color:
+                return color
+    return None
+
+
+def _cell_font_size_px(tx_body: ET.Element | None) -> int | float | None:
+    for r_pr in _text_run_props_in_priority(tx_body):
+        size = _canonical_source_font_size_px(r_pr.get("sz"))
+        if size is not None:
+            return size
+    return None
+
+
+def _canonical_source_font_size_px(raw_size: str | None) -> int | float | None:
+    """Return a writer-stable font size for one bounded DrawingML token."""
+    if (
+        raw_size is None
+        or not raw_size.isascii()
+        or not raw_size.isdigit()
+        or len(raw_size) > 6
+    ):
+        return None
+    size_hpt = int(raw_size)
+    if not 100 <= size_hpt <= 400000:
+        return None
+    # The writer emits sizes at 0.1pt precision; canonicalize on first import

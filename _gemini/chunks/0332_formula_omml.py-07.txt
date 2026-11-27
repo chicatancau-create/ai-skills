@@ -1,0 +1,97 @@
+        "scr" in actual or "sty" in actual
+    ):
+        raise FormulaCompileError(
+            "m:rPr cannot combine m:nor with m:scr or m:sty"
+        )
+
+
+def _math_value(element: ET.Element) -> str:
+    value = element.get(_math_tag("val"))
+    if value is None:
+        element_name = _qualified_name(element.tag)[1]
+        raise FormulaCompileError(f"m:{element_name} requires m:val")
+    return value
+
+
+def _validate_math_value(element: ET.Element, element_name: str) -> None:
+    value = _math_value(element)
+    allowed_values = {
+        "baseJc": {"top", "center", "bot"},
+        "jc": {"left", "right", "center", "centerGroup"},
+        "limLoc": {"subSup", "undOvr"},
+        "pos": {"top", "bot"},
+        "scr": {
+            "roman", "sans-serif", "monospace", "double-struck",
+            "script", "fraktur",
+        },
+        "sty": {"p", "b", "i", "bi"},
+        "type": {"bar", "lin", "noBar", "skw"},
+        "vertJc": {"top", "bot"},
+    }
+    if element_name in _ON_OFF_ELEMENTS:
+        if value not in {"on", "off", "true", "false", "1", "0"}:
+            raise FormulaCompileError(
+                f"m:{element_name} has invalid on/off value: {value!r}"
+            )
+        return
+    if element_name == "count":
+        if not value.isascii() or not value.isdigit() or not 1 <= int(value) <= 64:
+            raise FormulaCompileError("m:count must be an integer from 1 to 64")
+        return
+    if element_name in {"begChr", "chr", "endChr", "sepChr"}:
+        if len(value) > 1:
+            raise FormulaCompileError(
+                f"m:{element_name} must contain at most one character"
+            )
+        return
+    allowed = allowed_values.get(element_name)
+    if allowed is not None and value not in allowed:
+        raise FormulaCompileError(
+            f"m:{element_name} has invalid value: {value!r}"
+        )
+
+
+def _validate_drawing_element(element: ET.Element, element_name: str) -> None:
+    attributes = {
+        _qualified_name(name)[1]: value for name, value in element.attrib.items()
+    }
+    children = _child_names(element)
+    if element_name == "rPr":
+        unknown = set(attributes) - {"b", "dirty", "i", "lang", "sz"}
+        if unknown:
+            raise FormulaCompileError(
+                f"a:rPr contains unsupported attributes: {sorted(unknown)!r}"
+            )
+        for name in ("b", "dirty", "i"):
+            if name in attributes and attributes[name] not in {
+                "on", "off", "true", "false", "1", "0",
+            }:
+                raise FormulaCompileError(
+                    f"a:rPr@{name} has invalid on/off value"
+                )
+        if "sz" in attributes and (
+            not attributes["sz"].isascii()
+            or not attributes["sz"].isdigit()
+            or not 100 <= int(attributes["sz"]) <= 400_000
+        ):
+            raise FormulaCompileError("a:rPr@sz must be from 100 to 400000")
+        expected_order = ("solidFill", "latin", "ea", "cs")
+        if len(children) != len(set(children)):
+            raise FormulaCompileError("a:rPr contains duplicate child properties")
+        if any(name not in expected_order for name in children):
+            raise FormulaCompileError("a:rPr contains unsupported child properties")
+        order = [expected_order.index(name) for name in children]
+        if order != sorted(order):
+            raise FormulaCompileError("a:rPr child properties are out of order")
+        return
+    if element_name == "solidFill":
+        if attributes or children != ["srgbClr"]:
+            raise FormulaCompileError("a:solidFill must contain one a:srgbClr")
+        return
+    if element_name == "srgbClr":
+        if children or set(attributes) != {"val"} or not re.fullmatch(
+            r"[0-9A-Fa-f]{6}", attributes["val"]
+        ):
+            raise FormulaCompileError("a:srgbClr@val must be six hexadecimal digits")
+        return
+    if element_name in {"latin", "ea", "cs"}:

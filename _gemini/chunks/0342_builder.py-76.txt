@@ -1,0 +1,83 @@
+                        target_mode = rel.get('target_mode')
+                        mode_attr = (
+                            f" TargetMode={quoteattr(target_mode)}"
+                            if target_mode is not None
+                            else ''
+                        )
+                        extra_rels += (
+                            f"\n  <Relationship Id={quoteattr(rel['id'])} "
+                            f"Type={quoteattr(rel['type'])} "
+                            f"Target={quoteattr(rel['target'])}{mode_attr}/>"
+                        )
+
+                    rels_xml = f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1"
+                Type="{SLIDE_LAYOUT_REL_TYPE}"
+                Target="{structure.slide_layout_target(slide_num)}"/>{extra_rels}
+</Relationships>'''
+                    with open(rels_path, 'w', encoding='utf-8') as f:
+                        f.write(rels_xml)
+
+                    # Track image formats for Content_Types
+                    for media_name in media_name_map.values():
+                        ext = media_name.rsplit('.', 1)[-1].lower()
+                        dotted_ext = f'.{ext}'
+                        if dotted_ext in AUDIO_CONTENT_TYPES:
+                            audio_exts_used.add(dotted_ext)
+                        else:
+                            _content_type_for_extension(ext)
+                            image_exts_used.add(ext)
+                            has_any_image = True
+
+                # ---- Legacy SVG embedding mode ----
+                else:
+                    slide_cfg = _slide_config(animation_config, svg_path.stem)
+                    (
+                        slide_transition,
+                        slide_transition_effect_options,
+                        slide_transition_duration,
+                        slide_auto_advance,
+                        slide_transition_sound_path,
+                    ) = (
+                        _slide_transition_settings(
+                            default_transition_cfg,
+                            slide_cfg,
+                            transition,
+                            transition_effect_options,
+                            transition_duration,
+                            auto_advance,
+                            transition_sound,
+                            animation_cli_overrides,
+                        )
+                    )
+                    svg_filename = f'image{i}.svg'
+                    png_filename = f'image{i}.png'
+                    png_rid = 'rId2'
+                    svg_rid = 'rId3' if use_compat_mode else 'rId2'
+
+                    shutil.copy(svg_path, media_dir / svg_filename)
+
+                    slide_has_png = False
+                    if use_compat_mode:
+                        if prerender_results is not None:
+                            png_success = prerender_results.get(i, False)
+                        else:
+                            png_path = media_dir / png_filename
+                            png_success = convert_svg_to_png(
+                                svg_path, png_path,
+                                width=pixel_width, height=pixel_height,
+                            )
+                        if png_success:
+                            slide_has_png = True
+                            has_any_image = True
+                            image_exts_used.add('png')
+                        else:
+                            if verbose:
+                                print(
+                                    f"  [{i}/{len(svg_files)}] {svg_path.name} - "
+                                    "PNG generation failed, using pure SVG"
+                                )
+                            svg_rid = 'rId2'
+
+                    slide_xml_path = extract_dir / 'ppt' / 'slides' / f'slide{slide_num}.xml'

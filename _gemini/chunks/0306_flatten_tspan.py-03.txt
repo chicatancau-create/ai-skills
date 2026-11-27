@@ -1,0 +1,94 @@
+    """Return direct tspan children plus an optional synthetic leading line.
+
+    The synthetic line lets paragraph classification accept common SVG
+    authoring where the first visual line is direct text under <text>. This
+    helper does not mutate the tree; _emit_mergeable_paragraph commits the
+    synthetic line only after all paragraph checks pass.
+    """
+    direct_children = list(text_el)
+    direct_tspans = [c for c in direct_children if is_svg_tag(c, "tspan")]
+    if len(direct_tspans) != len(direct_children):
+        return None
+
+    raw_lead = text_el.text or ""
+    synthetic_first: ET.Element | None = None
+    # A first visual line may also open with an inline run (a bold lead word)
+    # and no direct text; it is the same leading line with an empty prefix.
+    leads_with_inline_run = bool(direct_tspans) and not _is_new_line_tspan(direct_tspans[0])
+    if raw_lead.strip() or leads_with_inline_run:
+        base_x_raw = get_attr(text_el, "x")
+        if base_x_raw is None:
+            return None
+        synthetic_first = ET.Element(f"{{{SVG_NS}}}tspan")
+        synthetic_first.set("x", base_x_raw)
+        synthetic_first.text = raw_lead.lstrip()
+
+    view = ([synthetic_first] if synthetic_first is not None else []) + direct_tspans
+    return view, synthetic_first
+
+
+def _is_svg_tag(el: ET.Element, name: str) -> bool:
+    """Return whether one element has the requested SVG namespace tag."""
+    return el.tag == f"{{{SVG_NS}}}{name}"
+
+
+def _is_new_line_tspan(tspan: ET.Element) -> bool:
+    """Return whether one direct tspan starts a positioned visual line."""
+    t_dy_attr = get_attr(tspan, "dy")
+    t_y_attr = get_attr(tspan, "y")
+    t_x_attr = get_attr(tspan, "x")
+    dy_val = parse_first_number(t_dy_attr) if t_dy_attr is not None else None
+    return (
+        t_y_attr is not None
+        or (dy_val is not None and dy_val != 0)
+        or t_x_attr is not None
+    )
+
+
+def _get_font_size_px(elem: ET.Element) -> float | None:
+    """Read font-size from an attribute or inline style."""
+    size = parse_first_number(get_attr(elem, "font-size"))
+    if size is not None:
+        return size
+    style_size = parse_style(get_attr(elem, "style")).get("font-size")
+    return parse_first_number(style_size)
+
+
+def _effective_line_font_size_px(
+    text_el: ET.Element,
+    line_group: list[ET.Element],
+) -> float:
+    """Return the positioned line starter's effective font size."""
+    line_size = _get_font_size_px(line_group[0])
+    if line_size is not None:
+        return line_size
+    parent_size = _get_font_size_px(text_el)
+    return parent_size if parent_size is not None else 16.0
+
+
+def _classify_paragraph_block(
+    text_el: ET.Element,
+    is_svg_tag,
+    is_new_line_tspan,
+    preserve_line_breaks: bool,
+) -> tuple[float, list[float], list[str], list[list[ET.Element]], ET.Element | None] | None:
+    """Detect a mergeable paragraph block.
+
+    Returns ``(base_line_height_px, extra_space_before_px_per_line,
+    break_kind_per_line, line_groups, synthetic_first_line)`` if the children
+    form a mergeable paragraph. Each list has one entry per direct-child tspan
+    (line), including a synthetic first line when the source used leading text:
+
+      - extra_space_before_px_per_line[i]: extra px above base line-height,
+        used as <a:spcBef> on the downstream <a:p>. First entry is 0.
+      - break_kind_per_line[i]: ``paragraph`` starts a fresh <a:p>, ``soft``
+        joins the previous line for reflow, and ``line`` preserves the visual
+        boundary as a hard DrawingML break. First entry is ``paragraph``.
+
+    Conditions (all must hold):
+      - No direct text under <text>, except leading text that can be
+        promoted into a synthetic first-line <tspan>; inline runs (and their
+        tail text) that follow it before the first line break stay on that
+        line.
+      - A line made of a single positioned <tspan> carries no tail text.
+      - Every direct child is a <tspan>.

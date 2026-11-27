@@ -1,0 +1,103 @@
+                spec.layout_elements,
+                prototype.layout_elements,
+            )
+            if literal_visual:
+                literal_difference = _mirror_structure_difference(
+                    prototype,
+                    spec,
+                    prototype.layout_elements,
+                )
+                if literal_difference:
+                    difference += f"; first difference: {literal_difference}"
+            if adherence == "strict":
+                errors.append(
+                    f"{spec.svg_path.name}: strict Layout {qualifier} contract "
+                    f"differs from prototype {reference.svg_path.name}; {difference}"
+                )
+            else:
+                errors.append(
+                    f"{spec.svg_path.name}: adaptive output reused prototype layout "
+                    f"key {prototype.layout_key!r} but changed its {qualifier} "
+                    f"contract; {difference}; assign a new key and name"
+                )
+    return errors
+
+
+_PRESERVE_PLACEHOLDER_TYPE_ORDER = {
+    "title": ("title", "ctrTitle"),
+    "subtitle": ("subTitle", "body", "obj"),
+    "body": ("body", "obj", "subTitle"),
+    "picture": ("pic", "obj"),
+    "chart": ("chart", "obj"),
+    "table": ("tbl", "obj"),
+    "object": ("obj",),
+    "media": ("media", "obj", "pic"),
+    "date": ("dt",),
+    "footer": ("ftr",),
+    "slide-number": ("sldNum",),
+}
+
+
+def match_native_placeholders(
+    spec: TemplateSlideSpec,
+    layout: NativeLayoutSpec,
+) -> tuple[tuple[TemplateElementSpec, NativePlaceholderSpec], ...]:
+    """Match slide placeholder markers to source layout placeholder identities."""
+    available = list(layout.placeholders)
+    matches: list[tuple[TemplateElementSpec, NativePlaceholderSpec]] = []
+    for item in spec.placeholders:
+        allowed_types = _PRESERVE_PLACEHOLDER_TYPE_ORDER.get(
+            item.placeholder or "",
+            (),
+        )
+        candidate_index = None
+        for placeholder_type in allowed_types:
+            for index, candidate in enumerate(available):
+                if candidate.placeholder_type != placeholder_type:
+                    continue
+                if (
+                    item.placeholder_idx is not None
+                    and candidate.effective_idx != item.placeholder_idx
+                ):
+                    continue
+                candidate_index = index
+                break
+            if candidate_index is not None:
+                break
+        if candidate_index is None:
+            idx_note = (
+                f" idx={item.placeholder_idx}"
+                if item.placeholder_idx is not None
+                else ""
+            )
+            raise TemplateStructureError(
+                f"{spec.svg_path.name}: placeholder {item.element_id!r} "
+                f"({item.placeholder}{idx_note}) has no compatible source placeholder "
+                f"in layout {layout.key!r}"
+            )
+        matches.append((item, available.pop(candidate_index)))
+    return tuple(matches)
+
+
+def native_structure_lock_errors(
+    specs: list[TemplateSlideSpec],
+    structure_lock: PptxStructureLock,
+    contract: NativeStructureContract,
+) -> list[str]:
+    """Return preserve-mode mismatches against the imported source contract."""
+    if structure_lock.mode != "preserve":
+        return []
+    errors: list[str] = []
+    references = {item.slide_num: item for item in structure_lock.layouts}
+    contract_layouts = {layout.key: layout for layout in contract.layouts}
+
+    for reference in structure_lock.layouts:
+        layout = contract_layouts.get(reference.layout_key)
+        if layout is None:
+            errors.append(
+                f"spec_lock.md P{reference.slide_num:02d} references unknown source "
+                f"layout key {reference.layout_key!r}"
+            )
+            continue
+        if reference.layout_name and reference.layout_name != layout.name:
+            errors.append(

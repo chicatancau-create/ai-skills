@@ -1,0 +1,105 @@
+    function updatePendingStatus() {
+        if (!pendingStatusEl) return;
+        var edits = pendingDirectEditCount();
+        var annotations = pendingAnnotationChangeCount();
+        if (edits === 0 && annotations === 0) {
+            pendingStatusEl.className = "pending-status empty";
+            pendingStatusEl.textContent = t("pending_none");
+            return;
+        }
+        var pages = pendingSlideNames();
+        pendingStatusEl.className = "pending-status active";
+        pendingStatusEl.innerHTML =
+            '<div>' + escapeHtml(t("pending_summary", {
+                edits: edits,
+                annotations: annotations,
+            })) + '</div>' +
+            (pages.length ? '<div class="pending-pages">' + escapeHtml(t("pending_pages", {
+                pages: pages.join(", "),
+            })) + '</div>' : '');
+    }
+
+    function markAnnotationChanged(slide) {
+        if (!slide) return;
+        annotationEditSlides[slide] = true;
+        annotationsDirty = true;
+        updatePendingStatus();
+    }
+
+    function initAnnotationQuickActions() {
+        if (!annotationQuickActions) return;
+        var actions = [
+            { key: "quick_align" },
+            { key: "quick_resize" },
+            { key: "quick_replace_image" },
+            { key: "quick_copy" },
+            { key: "quick_relayout" },
+        ];
+        annotationQuickActions.innerHTML = "";
+        actions.forEach(function (action) {
+            var btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "annotation-quick-chip";
+            btn.textContent = t(action.key);
+            btn.addEventListener("click", function () {
+                var label = t(action.key);
+                var prefix = (LANG === "zh" || LANG === "ja") ? label + "：" : label + ": ";
+                if (!annotationText.value.trim()) {
+                    annotationText.value = prefix;
+                } else if (annotationText.value.indexOf(prefix) === -1) {
+                    annotationText.value = prefix + annotationText.value;
+                }
+                annotationText.focus();
+                annotationText.selectionStart = annotationText.selectionEnd = annotationText.value.length;
+            });
+            annotationQuickActions.appendChild(btn);
+        });
+    }
+
+    // Staged edits live in server memory until "Apply changes"; the server can
+    // still idle-timeout or be killed and drop them. Warn before the tab leaves
+    // so the user remembers to apply (browsers show their own generic prompt).
+    function hasUnsavedWork() {
+        if (annotationsDirty) return true;
+        return Object.keys(editStackCount).some(function (k) {
+            return editStackCount[k] > 0;
+        });
+    }
+    window.addEventListener("beforeunload", function (e) {
+        if (!hasUnsavedWork()) return undefined;
+        e.preventDefault();
+        e.returnValue = "";
+        return "";
+    });
+
+    function readSlideFromLocation() {
+        try {
+            var params = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+            return params.get("slide");
+        } catch (err) {
+            return null;
+        }
+    }
+
+    function rememberSlideInLocation(name) {
+        if (!name) return;
+        var params;
+        try {
+            params = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+        } catch (err) {
+            params = new URLSearchParams();
+        }
+        params.set("slide", name);
+        var url = window.location.pathname + window.location.search + "#" + params.toString();
+        window.history.replaceState(null, "", url);
+    }
+
+    function currentSlideIndex() {
+        if (!currentSlide) return -1;
+        return slideNames.indexOf(currentSlide);
+    }
+
+    function gotoSlideIndex(idx) {
+        if (idx < 0 || idx >= slideNames.length) return;
+        var name = slideNames[idx];
+        if (name === currentSlide) return;

@@ -1,0 +1,101 @@
+            return f"| {' | '.join(row_cells(node))} |\n"
+        if node.name == 'table':
+            carried: dict[int, int] = {}
+            rows = [
+                cells for cells in (
+                    row_cells(tr, carried) for tr in node.find_all('tr')
+                    if tr.find_parent('table') is node
+                ) if cells
+            ]
+            if not rows:
+                return f"\n\n{inner_text}\n\n"
+            width = max(len(cells) for cells in rows)
+            rows = [cells + [''] * (width - len(cells)) for cells in rows]
+            lines = [f"| {' | '.join(cells)} |" for cells in rows]
+            lines.insert(1, '| ' + ' | '.join(['---'] * width) + ' |')
+            caption = node.find('caption')
+            caption_text = (
+                fold(caption) if caption is not None and caption.find_parent('table') is node
+                else ''
+            )
+            lead = f"{caption_text}\n\n" if caption_text else ''
+            return f"\n\n{lead}" + '\n'.join(lines) + "\n\n"
+
+        return f"{prefix}{inner_text}{suffix}"
+
+    # Actually, a simpler approach for this script is "just get string" but with markers?
+    # Let's use a simplified approach: use get_text but with 'separator' logic?
+    # text = soup.get_text(separator='\n\n')
+    # But that loses links and boldness.
+
+    # Recommendation: Let's stick to the traversal above which constructs a string.
+    md = traverse(soup)
+
+    # Cleanup Markdown
+    if md:
+        # Remove excessive newlines
+        md = re.sub(r'\n{3,}', '\n\n', md)
+        md = md.strip()
+    return md or ""
+
+
+PLAIN_TEXT_SUFFIXES = (".md", ".markdown", ".txt")
+
+
+def is_plain_text_document(url: str, body: str) -> bool:
+    """Return whether a fetched URL is raw Markdown / plain text, not HTML.
+
+    A raw file such as ``.../CHANGELOG.md`` on raw.githubusercontent.com is
+    already Markdown; running it through the HTML extractor loses the file or
+    fails on a missing body. The URL suffix decides, guarded by the absence of
+    an HTML document tag near the top of the body.
+    """
+    path = urlparse(url).path.lower()
+    if not path.endswith(PLAIN_TEXT_SUFFIXES):
+        return False
+    head = body[:4096].lower()
+    return "<html" not in head and "<body" not in head and "<!doctype html" not in head
+
+
+def _save_plain_text_document(
+    url: str, body: str, output_file: str | None,
+) -> tuple[bool, str, str | None, str | None]:
+    stem = os.path.splitext(os.path.basename(urlparse(url).path))[0]
+    output_path = output_file or os.path.join(
+        CONFIG["output_dir"], f"{derive_base_name(stem, url)}.md",
+    )
+    output_dirname = os.path.dirname(output_path) or "."
+    os.makedirs(output_dirname, exist_ok=True)
+    header = (
+        "<!--\n"
+        f"  Source: {url}\n"
+        f"  Crawled: {datetime.datetime.now().isoformat()}\n"
+        "  Format: raw Markdown / plain text saved verbatim\n"
+        "-->\n\n"
+    )
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(header + body)
+    profile_path = write_conversion_profile_best_effort(
+        input_path=url,
+        markdown_path=output_path,
+        converter="web_to_md.py",
+        conversion_type="web",
+        asset_dir=None,
+    )
+    print(f"   [OK] Raw Markdown / plain text: {len(body)} chars saved verbatim")
+    print(f"   [OK] Saved: {output_path}")
+    if profile_path:
+        print(f"   [OK] Conversion profile: {profile_path}")
+    return True, url, None, output_path
+
+
+_DOCUMENT_CONTENT_TYPES = {
+    "application/pdf": ".pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    "application/msword": ".doc",
+    "application/vnd.ms-excel": ".xls",
+    "application/epub+zip": ".epub",
+}
+_DOCUMENT_URL_SUFFIXES = frozenset(

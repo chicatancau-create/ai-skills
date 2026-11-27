@@ -1,0 +1,95 @@
+            except (OSError, json.JSONDecodeError, ValueError):
+                rec_ok = False
+        resp = jsonify({
+            'status': 'ok',
+            'service': 'confirm_ui',
+            'pid': os.getpid(),
+            'project': str(project_path),
+            'recommendations': rec_ok,
+            'stage': stage,
+            'session': _build_session_state(
+                confirm_dir,
+                server_port=app.config.get('SERVER_PORT'),
+            ),
+        })
+        resp.headers['Cache-Control'] = 'no-store'
+        return resp
+
+    @app.route('/api/session')
+    def get_session():
+        """Expose the derived template/Strategist wizard state for polling."""
+        session = _sync_session_state(
+            confirm_dir,
+            server_port=app.config.get('SERVER_PORT'),
+            event='poll',
+        )
+        resp = jsonify(session)
+        resp.headers['Cache-Control'] = 'no-store'
+        return resp
+
+    @app.route('/api/catalogs')
+    def get_catalogs():
+        """Serve the option universe; canvas is synced live from config.py so
+        the static catalogs.json copy can never drift from the real formats."""
+        try:
+            resp = jsonify(_build_catalogs())
+            resp.headers['Cache-Control'] = 'no-store'
+            return resp
+        except (OSError, json.JSONDecodeError) as exc:
+            return jsonify({'error': f'invalid catalogs.json: {exc}'}), 500
+
+    @app.route('/api/icon-previews')
+    def get_icon_previews():
+        """Serve real sample icons from templates/icons for the icon chooser."""
+        resp = jsonify(_build_icon_previews())
+        resp.headers['Cache-Control'] = 'no-store'
+        return resp
+
+    @app.route('/api/ai-image-comparison')
+    def get_ai_image_comparison_manifest():
+        """Serve generated-image rendering references for the current UI."""
+        try:
+            resp = jsonify(_build_ai_image_comparison())
+            resp.headers['Cache-Control'] = 'no-store'
+            return resp
+        except (OSError, json.JSONDecodeError) as exc:
+            return jsonify({'error': f'invalid ai-image-comparison manifest: {exc}'}), 500
+
+    @app.route('/ai-image-comparison/<kind>/<filename>')
+    def get_ai_image_comparison(kind: str, filename: str):
+        """Serve rendering images for generated-image strategy candidates."""
+        if kind != 'rendering':
+            return jsonify({'error': 'invalid comparison kind'}), 404
+        if not re.fullmatch(r'[A-Za-z0-9_.-]+\.png', filename or ''):
+            return jsonify({'error': 'invalid comparison filename'}), 404
+        return send_from_directory(_AI_IMAGE_COMPARISON_DIR / kind, filename)
+
+    @app.route('/api/recommendations')
+    def get_recommendations():
+        """Serve the Strategist-authored recommendations for this project."""
+        result_file = confirm_dir / RESULT_NAME
+        if (
+            _result_stage(result_file) == 'final'
+            and not _fresh_template_restart(confirm_dir)
+        ):
+            return jsonify({
+                'error': (
+                    'the current run is complete; revise recommendations.stage1.json '
+                    '(revision for a new round) before starting another'
+                ),
+            }), 409
+        rec_file = _active_recommendations_path(confirm_dir)
+        if not rec_file.exists():
+            return jsonify({'error': f'{rec_file.name} not found'}), 404
+        try:
+            rec_file, data = _read_active_recommendations(confirm_dir)
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            return jsonify({
+                'error': f'invalid current recommendation file: {exc}',
+            }), 400
+        rec_stage_number = _recommendation_stage(data)
+        if rec_stage_number == 1:
+            stage1_error = _stage1_ready_error(confirm_dir)
+            if stage1_error:
+                return jsonify({
+                    'error': f'Stage 1 is not ready: {stage1_error}',

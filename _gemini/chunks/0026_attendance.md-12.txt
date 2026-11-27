@@ -1,0 +1,82 @@
+  - **排除**：如果用户说的是"导出**排班**表"/"导出**排班**"/"**排班**导出"，这属于**排班查询导出**，应路由到 [attendance-schedule.md](./attendance-schedule.md)，而非本条。判断标准：句中含"排班"二字 → 走排班；不含"排班"或明确说"考勤报表/考勤数据/出勤统计" → 走报表。
+  - **严禁**绕过 `attendance-report.md` 直接调用 `python scripts/attendance_report_*.py` 任何脚本
+  - **严禁**仅凭脚本 `--help` 或本文件"自动化脚本"表格里的脚本路径就推断参数自行组装命令
+  - 该文档定义了：报表类型默认值、列选择策略（`--column-keywords`）、阶段 1 人员获取流程、错误处理、输出摘要规范，缺一不可
+  - 违反约束的后果：报表数据不全、列错位、人员遗漏、用户得到错误结果
+用户说"假期数据/年假/病假/请假记录" → `report query-leave`
+用户说"假期/我的假期/假期规则" → `vacation types`
+用户说"病假余额/年假余额/事假剩余假期"等查询指定假期规则的余额 → `vacation balance`
+用户说"导出假期余额/假期余额列表/所有假期规则余额/假期余额 Excel/年假病假调休余额导出"等全部假期规则余额的查询 → **必须先 `read_file` 读取 [attendance-vacation.md](./attendance-vacation.md) 后按其中工作流执行**
+用户说"假期变更/假期记录/请假扣减" → `vacation records`
+用户说"更新假期规则/修改假期类型/编辑假期规则" → `vacation update-type --leave-code <LEAVE_CODE>`
+用户说"设置假期余额/调整假期额度/更新假期余额" → 先调用 `vacation balance` 获取当前余额，计算修改后的值，再调用 `vacation save-balance`
+用户说"增加假期余额/发放年假/给员工加年假" → 先调用 `vacation balance` 获取当前余额，加上要增加的天数，再调用 `vacation save-balance` 设置新总额度
+用户说"签到/签到记录" → `checkin records`
+
+## 核心工作流
+
+```bash
+# 导入排班记录
+dws attendance schedule import --group-id 123456 \
+  --schedules '[{"userId":"user001","classId":123,"workDate":"2026-04-22","checkBeginTime":"09:00","checkEndTime":"18:00"}]' \
+  --yes --format json
+
+#  获取排班记录 — 禁止直接调用，必须走 attendance-schedule.md 排班查询导出工作流
+# python scripts/attendance_schedule_export.py --users user001,user002 --start 2026-04-01 --end 2026-04-30
+
+# 查询可管理的班次列表
+dws attendance class search --format json
+dws attendance class search --query "早班" --filter-type MINE_OWN --format json
+
+# 查询班次详情
+dws attendance class get --class-id 1170996821 --format json
+
+# 更新班次
+dws attendance class update --class-id 1170996821 --name "新早班" --timeout 10 --format json
+dws attendance class update --class-id 1170996821 --class-vo '{"sections":[{"times":[{"checkType":"OnDuty","checkTime":"08:30","across":0},{"checkType":"OffDuty","checkTime":"17:30","across":0}]}]}' --timeout 10 --format json
+
+# 查询补卡规则
+dws attendance adjustment search --page 1 --limit 20 --format json
+dws attendance adjustment search --query "标准" --page 1 --limit 20 --format json
+
+# 查询补卡规则详情
+dws attendance adjustment get --adjustment-id 12345 --format json
+
+# 查询加班规则
+dws attendance overtime search --page 1 --limit 20 --format json
+
+# 查询加班规则详情
+dws attendance overtime get --overtime-id 12345 --format json
+
+# 查询考勤组列表
+dws attendance group search --query "研发" --page 1 --limit 20 --format json
+dws attendance group search --type FIXED --page 1 --limit 20 --format json
+
+# 查询考勤组全量信息
+dws attendance group get --group-id 123456 --format json
+
+# 按需查询考勤组成员/地址/蓝牙/Wifi
+dws attendance group filtered-get --group-id 123456 --member --format json
+dws attendance group filtered-get --group-id 123456 --position --wifi --format json
+
+# 更新考勤组成员
+dws attendance group update-members --group-id 123456 --add-users userId1,userId2 --timeout 10 --format json
+dws attendance group update-members --group-id 123456 --remove-users userId1 --timeout 10 --format json
+dws attendance group update-members --group-id 123456 --add-depts deptId1 --remove-users userId2 --timeout 10 --format json
+
+# 更新考勤组配置
+dws attendance group update --group-id 123456 --name "研发考勤组" --timeout 10 --format json
+dws attendance group update --group-id 123456 --classIds '[1374234767]' --timeout 10 --format json
+dws attendance group update --group-id 123456 --group-vo '{"positions":[{"title":"总部","address":"北京市","latitude":39.9,"longitude":116.4,"offset":200}]}' --timeout 10 --format json
+
+# 创建考勤组
+dws attendance group create --name "研发考勤组" --type FIXED --group-vo '{"defaultClassId":1170996821,"workDayClassList":[0,1170996821,0,0,0,0,0]}' --timeout 10 --format json
+dws attendance group create --name "自由工时分组" --type NONE --timeout 10 --format json
+
+# 查看考勤统计摘要
+dws attendance summary --user <USER_ID> --date "2026-03-12 15:00:00" --format json
+
+# 查看考勤组和规则
+dws attendance rules --date 2026-03-14 --format json
+
+# 查看指定用户的打卡提醒设置

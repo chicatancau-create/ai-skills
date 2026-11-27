@@ -1,0 +1,113 @@
+        (guide.name, authored.get(guide.name, guide.formula))
+        for guide in get_preset_registry().get(prst).adjustments
+    ]
+
+
+def _build_preset_geom_from_meta(elem: ET.Element) -> str | None:
+    """Build validated native DrawingML preset geometry from SVG metadata."""
+    prst, guides, _frame = _parse_preset_geometry_metadata(elem)
+    if prst is None:
+        return None
+    if not guides:
+        return f'<a:prstGeom prst="{prst}"><a:avLst/></a:prstGeom>'
+    completed = complete_preset_adjustments(prst, guides)
+    guide_xml = ''.join(
+        f'<a:gd name="{_xml_escape(name)}" fmla="{_xml_escape(fmla)}"/>'
+        for name, fmla in completed
+    )
+    return f'<a:prstGeom prst="{prst}"><a:avLst>{guide_xml}</a:avLst></a:prstGeom>'
+
+
+def _build_preserved_custom_geom(elem: ET.Element) -> str | None:
+    """Return unchanged native ``a:custGeom`` metadata, or mark it stale."""
+    kind = elem.get('data-pptx-geometry-kind')
+    if kind is None:
+        return None
+    if kind != 'custom':
+        raise ValueError(f'Unsupported data-pptx-geometry-kind {kind!r}')
+    encoded = elem.get('data-pptx-custgeom')
+    expected_hash = elem.get('data-pptx-geometry-sha256')
+    if not encoded or not expected_hash:
+        raise ValueError(
+            'Custom geometry metadata requires data-pptx-custgeom and '
+            'data-pptx-geometry-sha256'
+        )
+    actual_hash = hashlib.sha256(
+        (elem.get('d') or '').strip().encode('utf-8')
+    ).hexdigest()
+    if actual_hash != expected_hash:
+        return None
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+        custom = ET.fromstring(raw)
+        decoded = raw.decode('utf-8')
+    except (ValueError, binascii.Error, UnicodeDecodeError, ET.ParseError) as exc:
+        raise ValueError(f'Invalid custom geometry metadata: {exc}') from exc
+    if custom.tag != (
+        '{http://schemas.openxmlformats.org/drawingml/2006/main}custGeom'
+    ):
+        raise ValueError('Custom geometry metadata payload must be a:custGeom')
+    if has_relationship_attributes(custom):
+        raise ValueError(
+            'Custom geometry metadata must not contain relationship attributes'
+        )
+    return decoded
+
+
+def _shape_xfrm_from_preset_frame(
+    elem: ET.Element,
+    ctx: ConvertContext,
+    fallback_raw_rect: tuple[float, float, float, float],
+    fallback_resolved_rect: tuple[float, float, float, float],
+    transform: str | None,
+) -> tuple[str, int, int, int, int, tuple[int, int, int, int]]:
+    """Use the preserved logical frame for native preset size when present."""
+    prst, _guides, frame = _parse_preset_geometry_metadata(elem)
+    if frame is None:
+        raw_x, raw_y, raw_w, raw_h = fallback_raw_rect
+        x, y, w, h = fallback_resolved_rect
+    else:
+        raw_x, raw_y, raw_w, raw_h = frame
+        x = ctx_x(raw_x, ctx)
+        y = ctx_y(raw_y, ctx)
+        w = ctx_w(raw_w, ctx)
+        h = ctx_h(raw_h, ctx)
+    preserves_zero_axis = (
+        elem.get('data-pptx-object') == 'connector'
+        or prst in CONNECTOR_PRESET_TYPES
+    )
+    xfrm_attr, off_x, off_y, ext_cx, ext_cy, bounds_emu = _shape_xfrm_from_svg_rect(
+        ctx,
+        raw_x,
+        raw_y,
+        raw_w,
+        raw_h,
+        x,
+        y,
+        w,
+        h,
+        transform,
+        preserve_degenerate_axes=preserves_zero_axis,
+    )
+    if not preserves_zero_axis:
+        ext_cx = max(ext_cx, 1)
+        ext_cy = max(ext_cy, 1)
+    bounds_emu = (
+        bounds_emu[0],
+        bounds_emu[1],
+        max(bounds_emu[2], off_x + ext_cx),
+        max(bounds_emu[3], off_y + ext_cy),
+    )
+    return xfrm_attr, off_x, off_y, ext_cx, ext_cy, bounds_emu
+
+
+def _pathlike_preset_xfrm(
+    elem: ET.Element,
+    ctx: ConvertContext,
+    transform: str | None,
+    min_x: float,
+    min_y: float,
+    width: float,
+    height: float,
+) -> tuple[str, int, int, int, int, tuple[int, int, int, int]]:
+    """Resolve a path-like preset xfrm from its logical frame or visual bounds."""

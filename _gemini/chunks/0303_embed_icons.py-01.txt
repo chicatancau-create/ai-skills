@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+"""
+SVG Icon Embedding Tool
+
+Replaces icon placeholders in SVG files with actual icon code.
+
+Placeholder syntax (every SVG must include the exact project-local namespace):
+    <use data-icon="chunk-filled/rocket" x="100" y="200" width="48" height="48" fill="#0076A8"/>
+    <use data-icon="tabler-filled/home" x="100" y="200" width="48" height="48" fill="#0076A8"/>
+    <use data-icon="tabler-outline/home" x="100" y="200" width="48" height="48" fill="#0076A8"/>
+    <use data-icon="tabler-outline/home" x="100" y="200" width="48" height="48" fill="#0076A8" stroke-width="3"/>
+    <use data-icon="imported/layered_slide_06_ill01"/>
+
+Optional `stroke-width` (stroke-style libraries only — e.g. tabler-outline):
+    Default 2 (matches the source). Pass 1.5 for thin, 3 for bold.
+    Ignored on fill-style libraries.
+
+After replacement:
+    <g transform="translate(100, 200) scale(3)" fill="#0076A8">
+      <path d="..."/>
+    </g>
+
+Project icon namespaces (subdirectories of <project>/icons/):
+    chunk-filled/      - 640+ fill icons, 16x16 viewBox
+    tabler-filled/     - 1000+ fill icons, 24x24 viewBox (use prefix: tabler-filled/name)
+    tabler-outline/    - 5000+ stroke icons, 24x24 viewBox (use prefix: tabler-outline/name)
+    phosphor-duotone/  - 1200+ duotone icons, 256x256 viewBox (single color + 0.2-opacity backplate)
+    simple-icons/      - 3400+ brand logos, 24x24 viewBox (brand-inset library — used alongside the chosen primary library, NOT as a standalone library for generic icons)
+    imported/          - extracted vector illustrations with data-icon-style="preserve-color"; preserve source colors and natural viewBox aspect ratio
+
+Bundled icons must first be copied into the project with icon_sync.py. This
+tool never reads templates/icons directly and never accepts a bare icon name.
+
+Usage:
+    python3 scripts/svg_finalize/embed_icons.py <svg_file> [svg_file2] ...
+    python3 scripts/svg_finalize/embed_icons.py svg_output/*.svg
+
+Options:
+    --dry-run             Only show what would be replaced, without modifying files
+    --verbose             Show detailed information
+"""
+
+from __future__ import annotations
+
+import argparse
+import html
+import os
+import re
+import sys
+from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
+
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from console_encoding import configure_utf8_stdio  # noqa: E402
+from resource_paths import icon_dir_for_svg  # noqa: E402
+from svg_to_pptx.drawingml.utils import parse_project_geometry_length  # noqa: E402
+
+configure_utf8_stdio()
+
+
+# Icon base size per library
+ICON_BASE_SIZES = {
+    'chunk-filled': 16,
+    'tabler-filled': 24,
+    'tabler-outline': 24,
+    'phosphor-duotone': 256,
+    'simple-icons': 24,
+    'imported': 24,
+}
+_ICON_IDENTIFIER_RE = re.compile(
+    r'(?P<library>[a-z0-9][a-z0-9-]*)/(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)'
+)
+_ICON_COLOR_RE = re.compile(
+    r'#(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})'
+    r'|[a-z]+|(?:rgba?|hsla?)\([0-9\s.,%]+\)',
+    re.IGNORECASE | re.ASCII,
+)
+_NUMBER_PATTERN = r'[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?'
+_TRANSFORM_FUNCTION_PATTERN = (
+    rf'(?:matrix|translate|scale|rotate|skewX|skewY)\(\s*{_NUMBER_PATTERN}'
+    rf'(?:(?:\s*,\s*|\s+){_NUMBER_PATTERN})*\s*\)'
+)
+_ICON_TRANSFORM_RE = re.compile(
+    rf'{_TRANSFORM_FUNCTION_PATTERN}(?:\s*,?\s*{_TRANSFORM_FUNCTION_PATTERN})*',
+    re.ASCII,
+)
+_ICON_STROKE_WIDTH_RE = re.compile(rf'{_NUMBER_PATTERN}(?:px|em|%)?')
+DEFAULT_ICON_BASE_SIZE = 24
+BaseGeometry = float | tuple[float, float, float, float]
+
+
+def _xml_attr(value: object) -> str:
+    """Escape a value for insertion into a quoted SVG attribute."""
+    return html.escape(str(value), quote=True)
+
+
+def _validate_icon_attr(value: str, attr: str, pattern: re.Pattern[str]) -> str:
+    """Reject unsafe icon attributes while preserving legal source spelling."""

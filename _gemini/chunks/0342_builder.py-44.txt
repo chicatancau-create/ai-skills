@@ -1,0 +1,101 @@
+        if len(shape_ids) != 1:
+            continue
+        slide_path = extract_dir / "ppt" / "slides" / f"slide{slide_num}.xml"
+        tree = ET.parse(slide_path)
+        shape = _shape_with_id(tree.getroot(), shape_ids[0])
+        if shape is None:
+            continue
+        expected_text = str(first_slide_number + slide_num - 1)
+        if _replace_literal_run_with_slidenum_field(shape, expected_text, field_guid):
+            _write_xml_tree(slide_path, tree)
+            converted += 1
+
+    if verbose and converted:
+        print(
+            f"  {context} slide-number fields: "
+            f"converted {converted} page number(s)"
+        )
+    return converted
+
+
+def _remove_relationship(rels_path: Path, rel_id: str) -> None:
+    """Remove one relationship entry by rId."""
+    rels_content = rels_path.read_text(encoding="utf-8")
+    pattern = re.compile(
+        rf'[ \t]*<Relationship\b[^>]*\bId="{re.escape(rel_id)}"[^>]*/>[ \t]*\n?'
+    )
+    new_content, removed = pattern.subn("", rels_content, count=1)
+    if not removed:
+        raise RuntimeError(f"Relationship {rel_id} not found in {rels_path}")
+    rels_path.write_text(new_content, encoding="utf-8")
+
+
+def _remove_content_type_override(content_types_path: Path, part_name: str) -> None:
+    """Remove the Override content-type entry for a deleted package part."""
+    normalized = "/" + part_name.lstrip("/")
+    content = content_types_path.read_text(encoding="utf-8")
+    pattern = re.compile(
+        rf'[ \t]*<Override\b[^>]*\bPartName="{re.escape(normalized)}"[^>]*/>[ \t]*\n?'
+    )
+    new_content, removed = pattern.subn("", content, count=1)
+    if removed:
+        content_types_path.write_text(new_content, encoding="utf-8")
+
+
+def _remove_trailing_layout_definition_slides(
+    extract_dir: Path,
+    public_slide_count: int,
+    total_slide_count: int,
+) -> int:
+    """Remove internal carrier slides after their Layouts are registered."""
+    if total_slide_count <= public_slide_count:
+        return 0
+    presentation_part = "ppt/presentation.xml"
+    presentation_path = extract_dir / presentation_part
+    presentation_rels = _relationships_path_for_part(
+        extract_dir,
+        presentation_part,
+    )
+    tree = ET.parse(presentation_path)
+    root = tree.getroot()
+    slide_list = root.find(f"{{{PML_NS}}}sldIdLst")
+    if slide_list is None:
+        raise RuntimeError("presentation.xml has no p:sldIdLst")
+    entries_by_rel_id = {
+        entry.get(f"{{{REL_NS}}}id", ""): entry
+        for entry in slide_list.findall(f"{{{PML_NS}}}sldId")
+    }
+    relationships = _read_relationships(presentation_rels)
+    content_types_path = extract_dir / "[Content_Types].xml"
+    removed = 0
+    for slide_num in range(public_slide_count + 1, total_slide_count + 1):
+        slide_part = f"ppt/slides/slide{slide_num}.xml"
+        rel_ids = [
+            rel_id
+            for rel_id, attrs in relationships.items()
+            if attrs.get("Type") == SLIDE_REL_TYPE
+            and _resolve_package_target(
+                presentation_part,
+                attrs.get("Target", ""),
+            ) == slide_part
+        ]
+        if len(rel_ids) != 1:
+            raise RuntimeError(
+                f"Internal Layout carrier {slide_part} must have exactly one "
+                "Presentation relationship"
+            )
+        rel_id = rel_ids[0]
+        entry = entries_by_rel_id.get(rel_id)
+        if entry is None:
+            raise RuntimeError(
+                f"presentation.xml has no p:sldId entry for {slide_part}"
+            )
+        slide_list.remove(entry)
+        _remove_relationship(presentation_rels, rel_id)
+        slide_path = extract_dir / slide_part
+        slide_rels = _relationships_path_for_part(extract_dir, slide_part)
+        if not slide_path.is_file() or not slide_rels.is_file():
+            raise RuntimeError(
+                f"Internal Layout carrier package parts are incomplete: {slide_part}"
+            )
+        slide_path.unlink()

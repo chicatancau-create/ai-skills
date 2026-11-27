@@ -1,0 +1,80 @@
+                actions.append("MIRRORED %s\\%s (%dB)" % (name, rel, sz))
+            except OSError as e:
+                actions.append("MIRROR FAILED %s\\%s: %s" % (name, rel, e))
+
+    # 3. the default window must always expose both skills
+    try:
+        os.makedirs(ACTIVE, exist_ok=True)
+        for name in PROTECTED:
+            link = os.path.join(ACTIVE, name)
+            tgt = os.path.join(LIB, name)
+            if os.path.exists(link) and os.path.isfile(os.path.join(link, "SKILL.md")):
+                continue
+            if os.path.exists(link):
+                # a real dir or a dangling link: only remove it if it is empty
+                try:
+                    if os.listdir(link):
+                        actions.append("WINDOW %s exists but unreadable and NOT empty -> left alone" % name)
+                        continue
+                    if getattr(os.lstat(link), "st_reparse_tag", 0):
+                        os.rmdir(link)
+                    else:
+                        os.rmdir(link)
+                except OSError as e:
+                    actions.append("WINDOW %s cleanup failed: %s" % (name, e))
+                    continue
+            r = subprocess.run(["cmd", "/c", "mklink", "/J", link, tgt],
+                               capture_output=True, text=True, timeout=60)
+            if r.returncode == 0:
+                actions.append("WINDOW rebuilt junction %s" % name)
+            else:
+                actions.append("WINDOW mklink %s failed: %s" % (name, (r.stderr or "").strip()[:100]))
+    except OSError as e:
+        actions.append("WINDOW check failed: %s" % e)
+
+    if verbose:
+        for a in actions:
+            log(a)
+    return actions
+
+
+def snapshot():
+    os.makedirs(ZIPDIR, exist_ok=True)
+    dst = os.path.join(ZIPDIR, "skills-%s.zip" % time.strftime("%Y%m%d-%H%M%S"))
+    n = 0
+    with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as z:
+        for name in PROTECTED:
+            root = os.path.join(LIB, name)
+            for rel in files_of(root):
+                z.write(os.path.join(root, rel), os.path.join(name, rel))
+                n += 1
+    log("SNAPSHOT %s (%d files, %dB)" % (dst, n, os.path.getsize(dst)))
+    return dst
+
+
+def status():
+    for name in PROTECTED:
+        lf = files_of(os.path.join(LIB, name))
+        mf = files_of(os.path.join(MIRROR, name))
+        link = os.path.join(ACTIVE, name)
+        rp = getattr(os.lstat(link), "st_reparse_tag", 0) if os.path.exists(link) else 0
+        print("%-13s library=%2d files  mirror=%2d files  window=%s SKILL.md=%s" % (
+            name, len(lf), len(mf),
+            ("junction" if rp else ("real" if os.path.exists(link) else "MISSING")),
+            os.path.isfile(os.path.join(link, "SKILL.md"))))
+    print("mirror root: %s (exists=%s)" % (MIRROR, os.path.isdir(MIRROR)))
+
+
+def main():
+    if "--status" in sys.argv:
+        status()
+        return
+    a = tick()
+    if not a:
+        print("shield: nothing to do (library, mirror and window all consistent)")
+    if "--snapshot" in sys.argv:
+        snapshot()
+
+
+if __name__ == "__main__":
+    main()

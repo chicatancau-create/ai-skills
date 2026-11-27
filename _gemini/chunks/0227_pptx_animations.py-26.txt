@@ -1,0 +1,120 @@
+            errors.append(
+                'animation row absolute offset exceeds the OOXML '
+                f'millisecond limit: {absolute_offset}'
+            )
+        return absolute_offset
+    if trigger_shape_id is not None:
+        return leaf_delay or 0
+    return leaf_delay or 0
+
+
+def _row_matches_powerpoint_behavior(
+    row: ET.Element,
+    *,
+    shape_id: int,
+    effect: str,
+    effect_options: Mapping[str, object],
+    trigger: str,
+    duration_ms: int,
+    repeat_count: float | None,
+    repeat_duration_ms: int | None,
+    auto_reverse: bool,
+    rewind: bool,
+    accelerate: float,
+    decelerate: float,
+    bounce_end: float,
+    restart: str,
+    after_effect: str,
+    after_effect_color: str | None,
+    sound_relationship_id: str | None,
+    sound_name: str | None,
+) -> bool:
+    """Match one read-back row to its reconstructed native behavior tree."""
+    spec = NATIVE_ANIMATIONS[effect]
+    target = AnimationTarget(
+        shape_id=shape_id,
+        delay_ms=0,
+        effect=effect,
+        duration_ms=duration_ms,
+        effect_options=effect_options,
+        trigger=trigger,
+        repeat_count=repeat_count,
+        repeat_duration_ms=repeat_duration_ms,
+        auto_reverse=True if auto_reverse else None,
+        rewind=True if rewind else None,
+        accelerate=accelerate or None,
+        decelerate=decelerate or None,
+        bounce_end=bounce_end or None,
+        restart=restart if row.get('restart') is not None else None,
+        after_effect=after_effect,
+        after_effect_color=after_effect_color,
+        sound_relationship_id=sound_relationship_id,
+        sound_name=sound_name,
+    )
+    option_candidates = [dict(effect_options)]
+    option_candidates.extend(
+        {
+            name: value
+            for name, value in effect_options.items()
+            if name != omitted
+        }
+        for omitted in effect_options
+    )
+    option_candidates.append({})
+    seen: set[tuple[tuple[str, object], ...]] = set()
+    for candidate in option_candidates:
+        candidate_key = tuple(sorted(candidate.items()))
+        if candidate_key in seen:
+            continue
+        seen.add(candidate_key)
+        expected = _animation_row_for_options(effect, candidate)
+        if spec['durationScalable']:
+            _scale_animation_row_duration(
+                expected,
+                base_duration_ms=int(spec['defaultDurationMs']),
+                requested_duration_ms=duration_ms,
+            )
+        _apply_timing_options(expected, target)
+        row_id = row.get('id')
+        expected.set('id', row_id if row_id and row_id.isdigit() else '1')
+        _append_after_effect(
+            expected,
+            target,
+            int(expected.get('id', '1')),
+        )
+        _append_animation_sound(expected, target)
+        if _animation_spec_matches_row(
+            row,
+            {'rowXml': ET.tostring(expected, encoding='unicode')},
+        ):
+            return True
+    return False
+
+
+def _animation_rows(
+    slide_root: ET.Element,
+    errors: list[str],
+    *,
+    require_behavior_signatures: bool = False,
+) -> list[AnimationRowSummary]:
+    parent_map = {
+        child: parent
+        for parent in slide_root.iter()
+        for child in list(parent)
+    }
+    rows: list[AnimationRowSummary] = []
+    for row in slide_root.iter(_qn(PML_NS, 'cTn')):
+        preset_class = row.get('presetClass')
+        if preset_class not in set(_PRESET_CLASS_BY_CATEGORY.values()):
+            continue
+        node_type = row.get('nodeType')
+        trigger = _NODE_TYPE_TRIGGERS.get(node_type or '')
+        if trigger is None:
+            errors.append(
+                f'unsupported object-animation nodeType {node_type!r}; expected '
+                f'{", ".join(_NODE_TYPE_TRIGGERS)}'
+            )
+            continue
+        shape_id = _row_shape_id(row, errors)
+        filter_name = _row_filter(row, preset_class, errors)
+        supported_effects, resolved_class, preset_id, preset_subtype = (

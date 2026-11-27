@@ -1,0 +1,100 @@
+    candidate_list = list(candidates)
+    exact = [item for item in candidate_list if _placeholder_match(item, target)]
+    if len(exact) == 1:
+        return exact[0]
+    if len(exact) > 1:
+        raise MirrorMaterializationError(
+            f"Ambiguous placeholder identity for semantic role {_semantic_role(target)!r}"
+        )
+    semantic = [
+        item
+        for item in candidate_list
+        if _semantic_role(item) == _semantic_role(target)
+    ]
+    return semantic[0] if len(semantic) == 1 else None
+
+
+def _native_geometry(placeholder: dict[str, Any]) -> tuple[float, float, float, float] | None:
+    geometry = placeholder.get("geometry")
+    if not isinstance(geometry, dict):
+        return None
+    try:
+        values = tuple(float(geometry[name]) for name in ("x", "y", "width", "height"))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not all(math.isfinite(item) for item in values) or values[2] <= 0 or values[3] <= 0:
+        return None
+    return values
+
+
+def _slot_plans(
+    layout: dict[str, Any],
+    layout_root: ET.Element,
+    source_slides: list[dict[str, Any]],
+    slide_roots: dict[int, ET.Element],
+    master: dict[str, Any],
+    master_root: ET.Element,
+) -> list[SlotPlan]:
+    plans: list[SlotPlan] = []
+    placeholders = _require_list(
+        layout.get("placeholders", []),
+        context=f"layout {layout.get('key')} placeholders",
+    )
+    master_placeholders = _require_list(
+        master.get("placeholders", []),
+        context=f"master {master.get('key')} placeholders",
+    )
+    for raw in placeholders:
+        if not isinstance(raw, dict):
+            raise MirrorMaterializationError(
+                f"Layout {layout.get('key')} placeholder must be an object"
+            )
+        shape_id = _require_string(
+            raw.get("shapeId"),
+            context=f"layout {layout.get('key')} placeholder shapeId",
+        )
+        bounds = _frame(_element_by_ref(layout_root, f"layout:{shape_id}"))
+        if bounds is None:
+            for slide in source_slides:
+                matching = next(
+                    (
+                        item
+                        for item in slide.get("placeholders", [])
+                        if isinstance(item, dict) and _placeholder_match(item, raw)
+                    ),
+                    None,
+                )
+                if matching is None:
+                    continue
+                slide_element = _element_by_ref(
+                    slide_roots[int(slide["index"])],
+                    f"slide:{matching['shapeId']}",
+                )
+                bounds = _frame(slide_element) or _native_geometry(matching)
+                if bounds is not None:
+                    break
+        if bounds is None:
+            matching_master = _placeholder_with_semantic_fallback(
+                (item for item in master_placeholders if isinstance(item, dict)),
+                raw,
+            )
+            if matching_master is not None:
+                master_element = _element_by_ref(
+                    master_root,
+                    f"master:{matching_master['shapeId']}",
+                )
+                bounds = _frame(master_element) or _native_geometry(matching_master)
+            else:
+                bounds = _frame(
+                    _placeholder_guide_by_semantic(master_root, _semantic_role(raw))
+                )
+        bounds = bounds or _native_geometry(raw)
+        if bounds is None:
+            raise MirrorMaterializationError(
+                f"Layout {layout.get('key')!r} placeholder {shape_id!r} has no "
+                "positive deterministic bounds in Layout, Slide, Master, or native facts"
+            )
+        plans.append(SlotPlan(
+            slot_id=f"slot-{_safe_prefix(str(layout['key']))}-{_safe_prefix(shape_id)}",
+            semantic_role=_semantic_role(raw),
+            placeholder_type=(str(raw.get("type")) if raw.get("type") is not None else None),

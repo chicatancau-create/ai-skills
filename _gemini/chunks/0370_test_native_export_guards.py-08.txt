@@ -1,0 +1,67 @@
+                self.assertEqual(gradient.attrib, attributes)
+                self.assertEqual(build_gradient_fill(gradient, opacity=None), original)
+                self.assertEqual(build_gradient_fill(gradient, opacity=1.0), original)
+                self.assertEqual(build_gradient_fill(gradient, opacity=0.5), ET.tostring(tinted, encoding='unicode'))
+                transparent = ET.fromstring(build_gradient_fill(gradient, opacity=0.0))
+                self.assertEqual([n.get('val') for n in transparent.findall('.//a:alpha', NS)], ['0', '0'])
+
+    def test_native_gradient_shape_opacity_exports_each_stop(self) -> None:
+        gradient = self._native_gradient()
+        self._svg(
+            f'<defs>{ET.tostring(gradient, encoding="unicode")}</defs>'
+            '<rect x="100" y="100" width="200" height="100" fill="url(#g)" opacity="0.5"/>'
+            '<rect x="400" y="100" width="200" height="100" fill="url(#g)"/>',
+        )
+        self.assertFalse(self._check()['errors'])
+        gradients = self._export().findall('.//a:gradFill', NS)
+        self.assertEqual([n.get('val') for n in gradients[0].findall('.//a:alpha', NS)], ['50000', '50000'])
+        self.assertFalse(gradients[1].findall('.//a:alpha', NS))
+
+    def test_inline_dx_adds_only_spacing_runs_to_text_body(self) -> None:
+        for dx in ('10', '-10', '-200', '0'):
+            with self.subTest(dx=dx):
+                body = (
+                    '<text x="100" y="120"><tspan {dx}>Alpha</tspan>'
+                    '<tspan fill="#123456" dx="20">Beta</tspan></text>'
+                )
+                attributes = 'font-family="Arial" font-size="20"'
+                self._svg(body.format(dx=f'dx="{dx}"'), attributes)
+                self.assertFalse(self._check()['errors'])
+                shifted = self._export().find('.//p:txBody', NS)
+                self._svg(body.format(dx='').replace(' dx="20"', ''), attributes)
+                unshifted = self._export().find('.//p:txBody', NS)
+                paragraph = shifted.find('a:p', NS)
+                spacers = [r for r in paragraph.findall('a:r', NS) if r.find('a:t', NS).text == '\u00a0']
+                self.assertEqual(len(spacers), 1 if dx == '0' else 2)
+                if dx != '0':
+                    spacing = int(spacers[0].find('a:rPr', NS).get('spc'))
+                    self.assertGreater(spacing, 0) if dx == '10' else self.assertLess(spacing, 0)
+                for spacer in spacers:
+                    paragraph.remove(spacer)
+                self.assertEqual(ET.tostring(shifted), ET.tostring(unshifted))
+
+    def test_inline_dx_keeps_nested_and_tail_runs(self) -> None:
+        self._svg(
+            '<text x="100" y="120"><tspan dx="10">A<tspan dx="-4" fill="#123456">B</tspan>C</tspan>'
+            'D<tspan dx="5">E</tspan></text>',
+            'font-family="Arial" font-size="20"',
+        )
+        self.assertFalse(self._check()['errors'])
+        texts = [n.text for n in self._export().findall('.//a:t', NS)]
+        self.assertEqual(texts, ['\u00a0', 'A', '\u00a0', 'B', 'CD', '\u00a0', 'E'])
+
+    def test_inline_dx_does_not_coalesce_into_plain_ab(self) -> None:
+        self._svg(
+            '<text x="100" y="120"><tspan dx="10">A</tspan><tspan dx="20">B</tspan></text>',
+            'font-family="Arial" font-size="20"',
+        )
+        shifted = self._export()
+        runs = shifted.findall('.//a:r', NS)
+        self.assertEqual([r.find('a:t', NS).text for r in runs], ['\u00a0', 'A', '\u00a0', 'B'])
+        # Arial's 0.2778 em NBSP leaves 4.444 / 14.444 px of tracking at 20 px.
+        self.assertEqual([r.find('a:rPr', NS).get('spc') for r in runs], ['333', None, '1083', None])
+        self._svg('<text x="100" y="120"><tspan>A</tspan><tspan>B</tspan></text>',
+                  'font-family="Arial" font-size="20"')
+        self.assertEqual([t.text for t in self._export().findall('.//a:t', NS)], ['AB'])
+
+    def test_inline_dx_survives_empty_span_and_first_line_compaction(self) -> None:

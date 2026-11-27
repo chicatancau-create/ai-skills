@@ -1,0 +1,101 @@
+        # dy strictly greater than base = hard paragraph break. List markers
+        # and font-size changes also start a fresh paragraph so semantically
+        # distinct visual lines do not merge into one PowerPoint line.
+        reflow_candidate = (
+            abs(extra) <= DY_TOLERANCE_PX
+            and not _starts_with_list_marker(line_groups[idx])
+            and abs(line_font_sizes[idx] - line_font_sizes[idx - 1]) <= 1e-6
+        )
+        explicit_soft_break = line_groups[idx][0].get(
+            PARAGRAPH_SOFT_BREAK_ATTR
+        )
+        if explicit_soft_break == "0":
+            break_kind = "paragraph"
+        elif explicit_soft_break == "1":
+            break_kind = "soft"
+        elif reflow_candidate:
+            break_kind = "line" if preserve_line_breaks else "soft"
+        else:
+            break_kind = "paragraph"
+        extras.append(0.0 if break_kind != "paragraph" else extra)
+        break_kinds.append(break_kind)
+
+    return base, extras, break_kinds, line_groups, synthetic_first
+
+
+def classify_paragraph_block(
+    text_el: ET.Element,
+    preserve_line_breaks: bool = False,
+) -> tuple[float, list[float], list[str], list[list[ET.Element]], ET.Element | None] | None:
+    """Classify one paragraph block with the shared synthetic-first logic."""
+    return _classify_paragraph_block(
+        text_el,
+        _is_svg_tag,
+        _is_new_line_tspan,
+        preserve_line_breaks,
+    )
+
+
+def _emit_mergeable_paragraph(
+    text_el: ET.Element,
+    base_dy: float,
+    extras: list[float],
+    break_kinds: list[str],
+    line_groups: list[list[ET.Element]],
+    synthetic_first: ET.Element | None = None,
+) -> None:
+    """Rewrite text_el in place so it stays a single <text> with paragraph rows.
+
+    The base line-height goes on the parent <text> via PARAGRAPH_MARK_ATTR.
+    Each direct-child tspan is normalized: x/y/dx/dy stripped; inline-run
+    styling and nested tspans are preserved. Per-tspan attrs:
+      - PARAGRAPH_SOFT_BREAK_ATTR="1" on tspans that should be appended to
+        the previous <a:p> downstream (SVG used dy to simulate wrap)
+      - PARAGRAPH_LINE_BREAK_ATTR="1" on tspans that retain an authored line
+        boundary inside the previous <a:p>
+      - PARAGRAPH_SPACE_BEFORE_ATTR on tspans that open a new paragraph
+        with an extra gap (omitted when 0)
+    """
+    text_el.set(PARAGRAPH_MARK_ATTR, format_number(base_dy))
+    if synthetic_first is not None:
+        text_el.text = None
+        text_el.insert(0, synthetic_first)
+
+    # Normalize authoring variants before the downstream converter reads the
+    # paragraph: a line-break tspan may be followed by direct-child inline
+    # formatting tspans. Wrap those original siblings in one unstyled line
+    # container so every direct child of <text> is one logical visual line.
+    # Keeping the authored runs as siblings is important: nesting later runs
+    # under the positioned first run would incorrectly inherit its typography,
+    # and moving them independently would lose the first run's tail whitespace.
+    normalized_lines: list[ET.Element] = []
+    for group in line_groups:
+        line = group[0]
+        if len(group) == 1:
+            normalized_lines.append(line)
+            continue
+
+        container = ET.Element(f"{{{SVG_NS}}}tspan")
+        for k in ("x", "y", "dx", "dy"):
+            line.attrib.pop(k, None)
+        for run in group:
+            container.append(run)
+        normalized_lines.append(container)
+
+    for child in list(text_el):
+        text_el.remove(child)
+    for line in normalized_lines:
+        text_el.append(line)
+
+    extras_iter = iter(extras)
+    break_iter = iter(break_kinds)
+    for tspan in normalized_lines:
+        for k in ("x", "y", "dx", "dy"):
+            if k in tspan.attrib:
+                del tspan.attrib[k]
+        for k in (
+            PARAGRAPH_SOFT_BREAK_ATTR,
+            PARAGRAPH_LINE_BREAK_ATTR,
+            PARAGRAPH_SPACE_BEFORE_ATTR,
+        ):
+            tspan.attrib.pop(k, None)

@@ -1,0 +1,117 @@
+            cell_y = row_tops[r]
+            cell_w = sum(col_widths[c:c + cell.col_span])
+            cell_h = sum(row_heights[r:r + cell.row_span])
+            tcPr = cell.element.find("a:tcPr", NS)
+            for tag, x1, y1, x2, y2 in (
+                ("a:lnT", cell_x, cell_y, cell_x + cell_w, cell_y),
+                ("a:lnR", cell_x + cell_w, cell_y, cell_x + cell_w, cell_y + cell_h),
+                ("a:lnB", cell_x, cell_y + cell_h, cell_x + cell_w, cell_y + cell_h),
+                ("a:lnL", cell_x, cell_y, cell_x, cell_y + cell_h),
+            ):
+                line_xml = _border_line(
+                    tcPr, table_style, r, c, len(rows), len(col_widths), tag,
+                    x1, y1, x2, y2, palette,
+                    id_prefix=f"{id_prefix}stk", id_seq=marker_seq, defs=defs,
+                )
+                if line_xml:
+                    body_parts.append(line_xml)
+
+    return TableResult(
+        svg="\n".join(body_parts),
+        defs=defs,
+        native_payload=native_payload,
+        native_status=native_status,
+        effect_reason=effect_reason,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Geometry helpers
+# ---------------------------------------------------------------------------
+
+def _column_widths_px(tbl: ET.Element) -> list[float]:
+    grid = tbl.find("a:tblGrid", NS)
+    if grid is None:
+        return []
+    widths: list[float] = []
+    for col in grid.findall("a:gridCol", NS):
+        w_emu = col.attrib.get("w")
+        if w_emu is None:
+            widths.append(0.0)
+            continue
+        value = _safe_emu_integer(w_emu)
+        widths.append(emu_to_px(value) if value is not None else 0.0)
+    return widths
+
+
+def _row_height_px(row: ET.Element) -> float:
+    h_emu = row.attrib.get("h")
+    if h_emu is None:
+        return 0.0
+    value = _safe_emu_integer(h_emu)
+    return emu_to_px(value) if value is not None else 0.0
+
+
+def _safe_emu_integer(raw_value: str) -> int | None:
+    """Return a bounded ASCII DrawingML coordinate without float overflow."""
+    token = raw_value.strip(" \t\r\n")
+    digits = token[1:] if token.startswith("-") else token
+    if (
+        not digits
+        or not digits.isascii()
+        or not digits.isdigit()
+        or len(digits) > 10
+    ):
+        return None
+    value = int(token)
+    if not _POWERPOINT_COORD_MIN <= value <= _POWERPOINT_COORD_MAX:
+        return None
+    return value
+
+
+def _cumulative_starts(origin: float, sizes: list[float]) -> list[float]:
+    out = [origin]
+    acc = origin
+    for size in sizes[:-1]:
+        acc += size
+        out.append(acc)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Cell grid
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _CellSlot:
+    """Per-grid-position resolution of <a:tc> attributes."""
+
+    element: ET.Element
+    col_span: int = 1
+    row_span: int = 1
+    is_dropped: bool = False  # True for h/vMerge slaves: don't paint anything
+
+
+@dataclass(frozen=True)
+class _CanonicalMergeRegion:
+    row: int
+    col: int
+    row_span: int
+    col_span: int
+
+
+def _build_cell_grid(rows: list[ET.Element], col_count: int) -> list[list[_CellSlot | None]]:
+    """Map each (row, col) to the <a:tc> that owns it.
+
+    Anchor cells (the top-left of a merge) carry col_span/row_span; merged
+    slaves are marked is_dropped so the renderer skips them. Cells not part
+    of any merge get span 1×1.
+    """
+    grid: list[list[_CellSlot | None]] = [[None] * col_count for _ in rows]
+
+    for r, row in enumerate(rows):
+        row_cells = row.findall("a:tc", NS)
+        # PowerPoint writes one physical <a:tc> for every grid column, including
+        # explicit hMerge/vMerge continuation cells. In that canonical form the
+        # physical index is the grid column; advancing by gridSpan would consume
+        # the continuation cell twice and shift every following cell left.

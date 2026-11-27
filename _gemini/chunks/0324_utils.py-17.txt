@@ -1,0 +1,116 @@
+        tag = _svg_element_tag(elem) or str(elem.tag)
+        elem_id = elem.get('id')
+        label = f'<{tag} id={elem_id!r}>' if elem_id else f'<{tag}>'
+        try:
+            parse_project_paint(raw, property_name)
+        except ValueError as exc:
+            errors.append(
+                f'{label} {source} {property_name}={raw!r}: {exc}'
+            )
+    return errors
+
+
+def project_definition_index(
+    root: ET.Element,
+) -> tuple[dict[str, ET.Element], set[str]]:
+    """Return direct ``<defs>`` children by id plus duplicate ids."""
+    definitions: dict[str, ET.Element] = {}
+    duplicates: set[str] = set()
+    for defs_elem in root.iter():
+        if _svg_element_tag(defs_elem) != 'defs':
+            continue
+        for child in defs_elem:
+            definition_id = (child.get('id') or '').strip()
+            if not definition_id:
+                continue
+            if definition_id in definitions:
+                duplicates.add(definition_id)
+            definitions[definition_id] = child
+    return definitions, duplicates
+
+
+def project_definition_errors(root: ET.Element) -> list[str]:
+    """Return errors for definitions outside the closed local-ref contract."""
+    parent_by_id = {
+        id(child): parent
+        for parent in root.iter()
+        for child in list(parent)
+    }
+    definitions, duplicate_definition_ids = project_definition_index(root)
+    errors = {
+        f'Duplicate direct <defs> id {definition_id!r} makes local references ambiguous'
+        for definition_id in duplicate_definition_ids
+    }
+    all_id_counts = Counter(
+        elem.get('id')
+        for elem in root.iter()
+        if (elem.get('id') or '').strip()
+    )
+    for definition_id in definitions:
+        if all_id_counts[definition_id] > 1:
+            errors.add(
+                f'Definition id {definition_id!r} is duplicated in the SVG; '
+                'local references require one unique target'
+            )
+
+    for elem in root.iter():
+        tag = _svg_element_tag(elem)
+        if tag not in PROJECT_DEFINITION_TAGS:
+            continue
+        label = _transform_element_label(elem)
+        parent = parent_by_id.get(id(elem))
+        if parent is None or _svg_element_tag(parent) != 'defs':
+            errors.add(f'{label} must be a direct child of <defs>')
+        if not (elem.get('id') or '').strip():
+            errors.add(f'{label} requires a non-empty unique id')
+    return sorted(errors)
+
+
+def _project_marker_polygon_points(
+    raw: str,
+) -> list[tuple[float, float]] | None:
+    """Parse finite marker polygon points from the closed project grammar."""
+    tokens = [token for token in re.split(r'[\s,]+', raw.strip()) if token]
+    if not tokens or len(tokens) % 2:
+        return None
+    try:
+        values = [float(token) for token in tokens]
+    except ValueError:
+        return None
+    if not all(math.isfinite(value) for value in values):
+        return None
+    return list(zip(values[::2], values[1::2]))
+
+
+def _project_marker_path_points(raw: str) -> list[tuple[float, float]]:
+    """Return the explicit M/L points from an already-validated marker path."""
+    points = [
+        (float(x), float(y))
+        for x, y in _PROJECT_MARKER_COMMAND_POINT_RE.findall(raw)
+    ]
+    return [
+        point
+        for point in points
+        if all(math.isfinite(coordinate) for coordinate in point)
+    ]
+
+
+def _project_marker_cross(
+    first: tuple[float, float],
+    second: tuple[float, float],
+    third: tuple[float, float],
+) -> float:
+    """Return the signed turn for three marker vertices."""
+    return (
+        (second[0] - first[0]) * (third[1] - second[1])
+        - (second[1] - first[1]) * (third[0] - second[0])
+    )
+
+
+def _project_marker_segments_cross(
+    first_start: tuple[float, float],
+    first_end: tuple[float, float],
+    second_start: tuple[float, float],
+    second_end: tuple[float, float],
+) -> bool:
+    """Return whether two non-adjacent marker edges strictly intersect."""

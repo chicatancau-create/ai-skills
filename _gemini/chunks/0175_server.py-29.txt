@@ -1,0 +1,107 @@
+                'confirmation stage=%s is not ready: %s',
+                wait_stage,
+                readiness_error,
+            )
+            return 1
+        if not _live_lock(lock_file):
+            launch_error = _confirmation_launch_error(confirm_dir)
+            if launch_error:
+                logger.error('%s', launch_error)
+                return 1
+            exact_port = args.port is not None
+            recovery_port = (
+                args.port
+                if exact_port
+                else _preferred_recovery_port(lock_file, DEFAULT_PORT)
+            )
+            try:
+                _, actual_port, _ = _launch_background_server(
+                    project_path,
+                    preferred_port=recovery_port,
+                    exact_port=exact_port,
+                    idle_timeout=args.timeout,
+                    open_browser=False,
+                )
+            except RuntimeError as exc:
+                logger.error('%s', exc)
+                return 1
+            if actual_port != recovery_port and not args.no_browser:
+                open_preview_browser(_server_url(actual_port), logger=logger)
+            logger.info(
+                'recovered confirm UI for wait-only at %s; the browser polling should resume',
+                _server_url(actual_port),
+            )
+        return _wait_only_for_result(
+            result_file,
+            lock_file,
+            args.wait_timeout,
+            wait_stage,
+        )
+
+    confirm_dir = project_path / CONFIRM_DIR_NAME
+    launch_error = _confirmation_launch_error(confirm_dir)
+    if launch_error:
+        logger.error('%s', launch_error)
+        return 1
+
+    if args.daemon:
+        lock_file = project_path / LOCK_FILE_NAME
+        existing = _read_lock(lock_file)
+        if existing and _process_alive(_lock_pid(existing)):
+            existing_pid = existing.get('pid', '?')
+            existing_port = existing.get('port', '?')
+            logger.error(
+                'confirm UI is already running for this project '
+                '(pid=%s, port=%s). Open http://%s:%s',
+                existing_pid, existing_port, PUBLIC_HOST, existing_port,
+            )
+            return 1
+
+        confirm_dir = project_path / CONFIRM_DIR_NAME
+        result_file = confirm_dir / RESULT_NAME
+        expected_stage = _expected_result_stage(confirm_dir)
+        try:
+            proc, port, _ = _launch_background_server(
+                project_path,
+                preferred_port=args.port if args.port is not None else DEFAULT_PORT,
+                exact_port=args.port is not None,
+                idle_timeout=args.timeout,
+                open_browser=not args.no_browser,
+            )
+        except RuntimeError as exc:
+            logger.error('%s', exc)
+            return 1
+        if args.wait:
+            return _wait_for_result(
+                result_file,
+                proc,
+                args.wait_timeout,
+                expected_stage,
+            )
+        return 0
+
+    try:
+        port = args.port if args.port is not None else _find_free_port(DEFAULT_PORT)
+    except RuntimeError as exc:
+        logger.error('%s', exc)
+        return 1
+
+    # Per-project mutual exclusion: refuse duplicate launches. Stale locks
+    # (dead pid) are overwritten by _claim_lock.
+    lock_file = project_path / LOCK_FILE_NAME
+    existing = _claim_lock(lock_file, port)
+    if existing:
+        existing_pid = existing.get('pid', '?')
+        existing_port = existing.get('port', '?')
+        logger.error(
+            'confirm UI is already running for this project '
+            '(pid=%s, port=%s). Open http://%s:%s, or run: kill %s',
+            existing_pid, existing_port, PUBLIC_HOST, existing_port, existing_pid,
+        )
+        return 1
+    atexit.register(_release_lock, lock_file)
+
+    def _on_sigterm(signum: int, _frame) -> None:
+        logger.info('received signal %s, exiting', signum)
+        sys.exit(0)
+    try:

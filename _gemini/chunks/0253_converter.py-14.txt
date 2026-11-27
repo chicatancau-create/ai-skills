@@ -1,0 +1,105 @@
+    # Layered mode: write masters and layouts first so they sort ahead of slides.
+    for art in result.masters:
+        (svg_dir / art.filename).write_text(
+            _svg_for_target(art.svg, svg_dir),
+            encoding="utf-8",
+        )
+        _collect_media(art.media_files)
+    for art in result.layouts:
+        (svg_dir / art.filename).write_text(
+            _svg_for_target(art.svg, svg_dir),
+            encoding="utf-8",
+        )
+        _collect_media(art.media_files)
+
+    # Slides (primary view).
+    for art in result.slides:
+        target = svg_dir / f"slide_{art.index:02d}.svg"
+        target.write_text(
+            _svg_for_target(art.svg, target.parent),
+            encoding="utf-8",
+        )
+        _collect_media(art.media_files)
+    for filename, blob in result.animation_media_files.items():
+        _validate_media_filename(filename)
+        existing = sounds_written.get(filename)
+        if existing is not None and existing != blob:
+            raise RuntimeError(
+                f"Sound filename collision with different bytes: {filename}"
+            )
+        sounds_written[filename] = blob
+
+    # Inheritance graph alongside the layered SVGs (only meaningful when we
+    # actually emitted a layered view).
+    if options.inheritance_mode in {"layered", "both"}:
+        _write_inheritance_json(svg_dir, result)
+
+    # Flat companion view (only when result.flat_slides is populated).
+    if result.flat_slides:
+        flat_dir = output_dir / (
+            ROUNDTRIP_FLAT_SVG_DIR if options.roundtrip else Path("svg-flat")
+        )
+        flat_dir.mkdir(parents=True, exist_ok=True)
+        for art in result.flat_slides:
+            target = flat_dir / f"slide_{art.index:02d}.svg"
+            target.write_text(
+                _svg_for_target(art.svg, target.parent),
+                encoding="utf-8",
+            )
+            _collect_media(art.media_files)
+
+    _write_animation_config(output_dir, result)
+    _write_speaker_notes(output_dir, result, write_total=not options.roundtrip)
+    if result.native_structure is not None:
+        if result.source_pptx_path is None:
+            raise RuntimeError(
+                "Round-trip source structure is missing its source PPTX path"
+            )
+        source_target = output_dir / SOURCE_TEMPLATE_NAME
+        source_target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(result.source_pptx_path, source_target)
+        structure_target = output_dir / NATIVE_STRUCTURE_NAME
+        structure_target.parent.mkdir(parents=True, exist_ok=True)
+        structure_target.write_text(
+            json.dumps(
+                result.native_structure,
+                ensure_ascii=False,
+                indent=2,
+            ) + "\n",
+            encoding="utf-8",
+        )
+    embedded_fonts_descriptor: dict[str, object] | None = None
+    embedded_font_paths: tuple[str, ...] = ()
+    if result.embedded_fonts is not None:
+        (
+            embedded_fonts_descriptor,
+            embedded_font_paths,
+        ) = write_embedded_font_bundle(output_dir, result.embedded_fonts)
+    _write_conversion_report(
+        output_dir,
+        result,
+        options,
+        embedded_fonts_descriptor=embedded_fonts_descriptor,
+        embedded_font_paths=embedded_font_paths,
+    )
+    write_workspace_resources(
+        output_dir,
+        result.resource_inventory,
+        include_images=not options.embed_images,
+    )
+    if media_written:
+        media_dir.mkdir(parents=True, exist_ok=True)
+    for filename, blob in media_written.items():
+        target = media_dir / filename
+        if _path_lexists(target):
+            if (
+                target.is_symlink()
+                or not target.is_file()
+                or target.read_bytes() != blob
+            ):
+                raise RuntimeError(
+                    f"Asset filename collision with different bytes: {filename}"
+                )
+            continue
+        target.write_bytes(blob)
+    if sounds_written:

@@ -1,0 +1,109 @@
+        if item.get("Extension") and item.get("ContentType")
+    }
+    overrides = {
+        str(item.get("PartName", "")).lstrip("/"): str(
+            item.get("ContentType", "")
+        )
+        for item in root.findall(f"{{{_CONTENT_TYPES_NS}}}Override")
+        if item.get("PartName") and item.get("ContentType")
+    }
+    return defaults, overrides
+
+
+def _expected_content_type_formats(content_type: str) -> frozenset[str]:
+    normalized = content_type.partition(";")[0].strip().lower()
+    known = _FORMAT_BY_CONTENT_TYPE.get(normalized)
+    if known is not None:
+        return known
+    if "spreadsheetml" in normalized:
+        return frozenset({"ooxml-xlsx"})
+    if "wordprocessingml" in normalized:
+        return frozenset({"ooxml-docx"})
+    if "presentationml" in normalized:
+        return frozenset({"ooxml-pptx"})
+    return frozenset()
+
+
+def _validate_changed_resource_format(
+    *,
+    spec: WorkspaceResourceSpec,
+    payload: bytes,
+    source_payload: bytes,
+    content_type: str,
+) -> None:
+    """Refuse changed bytes that no longer fit their source package part."""
+    suffix = PurePosixPath(spec.package_part).suffix.lower()
+    actual_format = _sniff_resource_format(payload)
+    source_format = _sniff_resource_format(source_payload)
+    expected_by_extension = _FORMAT_BY_EXTENSION.get(suffix, frozenset())
+    expected_by_content_type = _expected_content_type_formats(content_type)
+    declared_media_kind = content_type.partition("/")[0].lower()
+    actual_media_kind = _FORMAT_MEDIA_KIND.get(actual_format or "")
+    has_declared_expectation = bool(
+        source_format
+        or expected_by_extension
+        or expected_by_content_type
+        or declared_media_kind in {"audio", "image", "video"}
+    )
+    mismatch = actual_format is None or not has_declared_expectation or (
+        actual_format is not None
+        and (
+            (source_format is not None and actual_format != source_format)
+            or (
+                bool(expected_by_extension)
+                and actual_format not in expected_by_extension
+            )
+            or (
+                bool(expected_by_content_type)
+                and actual_format not in expected_by_content_type
+            )
+            or (
+                declared_media_kind in {"audio", "image", "video"}
+                and actual_media_kind not in {declared_media_kind, "media"}
+            )
+        )
+    )
+    if not mismatch:
+        return
+    detected = actual_format or "unrecognized"
+    raise RuntimeError(
+        "Changed round-trip resource format does not match its source part: "
+        f"{spec.workspace_path.as_posix()} is {detected}, but "
+        f"{spec.package_part} uses extension {suffix or '<none>'} and "
+        f"Content-Type {content_type!r}"
+    )
+
+
+def _source_part_for_relationships(rels_path: str) -> str | None:
+    if rels_path == "_rels/.rels":
+        return None
+    marker = "/_rels/"
+    if marker not in rels_path or not rels_path.endswith(".rels"):
+        return None
+    parent, filename = rels_path.split(marker, 1)
+    return f"{parent}/{filename[:-5]}"
+
+
+def _resolve_relationship_target(source_part: str | None, target: str) -> str:
+    normalized = target.replace("\\", "/")
+    if normalized.startswith("/"):
+        return normalized.lstrip("/")
+    base_dir = posixpath.dirname(source_part or "")
+    return posixpath.normpath(posixpath.join(base_dir, normalized)).lstrip("/")
+
+
+def _transition_relationship_ids(
+    package: zipfile.ZipFile,
+    source_part: str | None,
+) -> set[str]:
+    if source_part is None or not source_part.startswith("ppt/slides/"):
+        return set()
+    try:
+        root = ET.fromstring(package.read(source_part))
+    except (KeyError, ET.ParseError):
+        return set()
+    ids: set[str] = set()
+    for transition in root.iter(_TRANSITION_TAG):
+        for node in transition.iter():
+            for name, value in node.attrib.items():
+                if name.startswith(_REL_ATTR_PREFIX) and value:

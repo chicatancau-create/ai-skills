@@ -1,0 +1,91 @@
+            item.get("svgFile"),
+            context=f"native Layout {item.get('key')!r} svgFile",
+        )
+        for item in retained_layouts
+    }
+    inherited_layouts: dict[str, dict[str, Any]] = {}
+    for item in _require_list(
+        inheritance.get("layouts"),
+        context="inheritance layouts",
+    ):
+        if not isinstance(item, dict) or item.get("file") not in retained_layout_files:
+            continue
+        inherited_layouts[_require_string(
+            item.get("file"),
+            context="inheritance layout file",
+        )] = item
+    inherited_slides = {
+        int(item.get("index")): item
+        for item in _require_list(inheritance.get("slides"), context="inheritance slides")
+        if isinstance(item, dict) and isinstance(item.get("index"), int)
+    }
+    if retained_layout_files != set(inherited_layouts):
+        raise MirrorMaterializationError(
+            "Reachable inheritance Layout roster differs from native graph"
+        )
+    if set(inherited_slides) != {int(item["index"]) for item in slides}:
+        raise MirrorMaterializationError("Inheritance Slide roster differs from native graph")
+
+    master_file_by_key = {
+        item["key"]: item["svgFile"]
+        for item in retained_masters
+    }
+    layout_file_by_key = {
+        item["key"]: item["svgFile"]
+        for item in retained_layouts
+    }
+    layout_master_by_key = {
+        item["key"]: item["masterKey"]
+        for item in retained_layouts
+    }
+    for layout in retained_layouts:
+        inherited = inherited_layouts[layout["svgFile"]]
+        if inherited.get("master") != master_file_by_key.get(layout.get("masterKey")):
+            raise MirrorMaterializationError(
+                f"Layout {layout.get('key')!r} Master parent differs across native facts"
+            )
+        inherited_visibility = _require_boolean(
+            inherited.get("showMasterShapes"),
+            context=f"inheritance Layout {layout.get('key')!r} showMasterShapes",
+        )
+        native_visibility = _require_boolean(
+            layout.get("showMasterShapes"),
+            context=f"native Layout {layout.get('key')!r} showMasterShapes",
+        )
+        if inherited_visibility != native_visibility:
+            raise MirrorMaterializationError(
+                f"Layout {layout.get('key')!r} showMasterShapes differs across facts"
+            )
+    for slide in slides:
+        inherited = inherited_slides[int(slide["index"])]
+        if slide.get("masterKey") != layout_master_by_key.get(slide.get("layoutKey")):
+            raise MirrorMaterializationError(
+                f"Slide {slide.get('index')} Master does not match its Layout parent"
+            )
+        if inherited.get("layout") != layout_file_by_key.get(slide.get("layoutKey")):
+            raise MirrorMaterializationError(
+                f"Slide {slide.get('index')} Layout parent differs across native facts"
+            )
+        if inherited.get("master") != master_file_by_key.get(slide.get("masterKey")):
+            raise MirrorMaterializationError(
+                f"Slide {slide.get('index')} Master parent differs across native facts"
+            )
+        inherited_visibility = _require_boolean(
+            inherited.get("showInheritedShapes"),
+            context=f"inheritance Slide {slide.get('index')} showInheritedShapes",
+        )
+        native_visibility = _require_boolean(
+            slide.get("showInheritedShapes"),
+            context=f"native Slide {slide.get('index')} showInheritedShapes",
+        )
+        if inherited_visibility != native_visibility:
+            raise MirrorMaterializationError(
+                f"Slide {slide.get('index')} showInheritedShapes differs across facts"
+            )
+    return expected_files
+
+
+def _absolutize_local_hrefs(root: ET.Element, base_dir: Path) -> None:
+    for element in root.iter():
+        for attribute in ("href", f"{{{XLINK_NS}}}href"):
+            value = element.get(attribute)

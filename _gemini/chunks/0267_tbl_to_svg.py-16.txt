@@ -1,0 +1,110 @@
+        _run_props_need_render_normalization(node, palette)
+        for node in run_props
+    ):
+        render_tx_body = copy.deepcopy(tx_body)
+        for node in render_tx_body.iter():
+            if node.tag not in {
+                f"{{{NS['a']}}}defRPr",
+                f"{{{NS['a']}}}endParaRPr",
+                f"{{{NS['a']}}}rPr",
+            }:
+                continue
+            if (
+                node.get("sz") is not None
+                and _canonical_source_font_size_px(node.get("sz")) is None
+            ):
+                node.attrib.pop("sz", None)
+            solid_fill = node.find("a:solidFill", NS)
+            if solid_fill is not None and _solid_fill_is_unsafe(solid_fill, palette):
+                node.remove(solid_fill)
+
+    body_pr = render_tx_body.find("a:bodyPr", NS)
+    overrides = _tcPr_inset_overrides(tcPr)
+    saved: dict[str, str | None] = {}
+    if overrides and body_pr is not None:
+        for key, val in overrides.items():
+            saved[key] = body_pr.attrib.get(key)
+            body_pr.set(key, val)
+    try:
+        try:
+            return convert_txbody(
+                render_tx_body, cell_xfrm, palette, theme_fonts=theme_fonts,
+                fallback_run_props=fallback_run_props,
+                slide_number=slide_number,
+                id_prefix=id_prefix,
+                id_seq=id_seq,
+                hyperlink_resolver=hyperlink_resolver,
+                strict=strict,
+                diagnostic_sink=diagnostic_sink,
+            )
+        except TextImportError:
+            raise
+        except (AttributeError, OverflowError, TypeError, ValueError):
+            plain_tx_body = _plain_table_text_body(render_tx_body, overrides)
+            return convert_txbody(
+                plain_tx_body, cell_xfrm, palette, theme_fonts=theme_fonts,
+                fallback_run_props=(),
+                slide_number=slide_number,
+                id_prefix=id_prefix,
+                id_seq=id_seq,
+                hyperlink_resolver=hyperlink_resolver,
+                strict=strict,
+                diagnostic_sink=diagnostic_sink,
+            )
+    finally:
+        if overrides and body_pr is not None:
+            for key, prior in saved.items():
+                if prior is None:
+                    body_pr.attrib.pop(key, None)
+                else:
+                    body_pr.set(key, prior)
+
+
+def _run_props_need_render_normalization(
+    run_props: ET.Element,
+    palette: ColorPalette | None,
+) -> bool:
+    size = run_props.get("sz")
+    if size is not None and _canonical_source_font_size_px(size) is None:
+        return True
+    solid_fill = run_props.find("a:solidFill", NS)
+    return solid_fill is not None and _solid_fill_is_unsafe(solid_fill, palette)
+
+
+def _solid_fill_is_unsafe(
+    solid_fill: ET.Element,
+    palette: ColorPalette | None,
+) -> bool:
+    color = find_color_elem(solid_fill)
+    if color is not None and not _color_numeric_tokens_are_finite(color):
+        return True
+    try:
+        resolve_color(color, palette)
+    except (AttributeError, OverflowError, TypeError, ValueError):
+        return True
+    return False
+
+
+def _color_numeric_tokens_are_finite(color: ET.Element) -> bool:
+    """Reject non-finite numeric tokens before the resolver can clamp them."""
+    base_numeric_attrs = {
+        "hslClr": ("hue", "sat", "lum"),
+        "scrgbClr": ("r", "g", "b"),
+    }
+    modifier_tags = {
+        "alpha", "alphaMod", "alphaOff", "hueMod", "hueOff",
+        "lumMod", "lumOff", "satMod", "satOff", "shade", "tint",
+    }
+    for node in color.iter():
+        name = node.tag.rsplit("}", 1)[-1]
+        attrs = base_numeric_attrs.get(name, ())
+        if name in modifier_tags:
+            attrs = ("val",)
+        for attr in attrs:
+            raw = node.get(attr)
+            if raw is None:
+                return False
+            try:
+                value = float(raw)
+            except (OverflowError, TypeError, ValueError):
+                return False

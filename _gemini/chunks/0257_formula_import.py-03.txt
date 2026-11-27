@@ -1,0 +1,89 @@
+        left = _property_value(element, "dPr", "begChr", "(")
+        right = _property_value(element, "dPr", "endChr", ")")
+        separator = _property_value(element, "dPr", "sepChr", "")
+        segments = [
+            _serialize_children(child)
+            for child in element.findall(f"{_M}e")
+        ]
+        middle = f"\\middle{_delimiter(separator, side='middle')}" if separator else ""
+        return (
+            f"\\left{_delimiter(left, side='left')}"
+            + middle.join(segments)
+            + f"\\right{_delimiter(right, side='right')}"
+        )
+    if name == "m":
+        rows = []
+        for row in element.findall(f"{_M}mr"):
+            rows.append("&".join(
+                _serialize_children(cell)
+                for cell in row.findall(f"{_M}e")
+            ))
+        return r"\begin{matrix}" + r"\\".join(rows) + r"\end{matrix}"
+    if name == "eqArr":
+        rows = [
+            _serialize_children(row, alignment=True)
+            for row in element.findall(f"{_M}e")
+        ]
+        return r"\begin{aligned}" + r"\\".join(rows) + r"\end{aligned}"
+    if name == "acc":
+        character = _property_value(element, "accPr", "chr", "")
+        command = _ACCENT_COMMAND_BY_CHARACTER.get(character)
+        if character == "̸":
+            command = "not"
+        if command is None:
+            raise FormulaImportError(f"unsupported reversible accent: {character!r}")
+        return f"\\{command}{{{_serialize_argument(element, 'e')}}}"
+    if name == "bar":
+        position = _property_value(element, "barPr", "pos", "top")
+        command = "overline" if position == "top" else "underline"
+        return f"\\{command}{{{_serialize_argument(element, 'e')}}}"
+    if name == "groupChr":
+        key = (
+            _property_value(element, "groupChrPr", "chr", ""),
+            _property_value(element, "groupChrPr", "pos", "top"),
+            _property_value(element, "groupChrPr", "vertJc", "bot"),
+        )
+        command = _GROUP_COMMANDS.get(key)
+        if command is None:
+            raise FormulaImportError(f"unsupported reversible group character: {key!r}")
+        return f"\\{command}{{{_serialize_argument(element, 'e')}}}"
+    if name == "limLow":
+        base = _serialize_argument(element, "e")
+        lower = _serialize_argument(element, "lim")
+        return f"\\underset{{{lower}}}{{{base}}}"
+    if name == "limUpp":
+        base = _serialize_argument(element, "e")
+        upper = _serialize_argument(element, "lim")
+        return f"\\overset{{{upper}}}{{{base}}}"
+    if name == "func":
+        function_name = _serialize_argument(element, "fName")
+        body = _serialize_optional_argument(element, "e")
+        source = f"\\mathop{{{function_name}}}"
+        return source + (f"{{{body}}}" if body else "")
+    if name == "box":
+        enabled = _property_value(element, "boxPr", "opEmu", "off")
+        if enabled not in {"on", "true", "1"}:
+            raise FormulaImportError("only operator-emulator m:box is reversible")
+        return f"\\mathrel{{{_serialize_argument(element, 'e')}}}"
+    if name == "phant":
+        properties = element.find(f"{_M}phantPr")
+        zero_width = _on_property(properties, "zeroWid")
+        zero_ascent = _on_property(properties, "zeroAsc")
+        zero_descent = _on_property(properties, "zeroDesc")
+        if zero_width:
+            command = "vphantom"
+        elif zero_ascent and zero_descent:
+            command = "hphantom"
+        else:
+            command = "phantom"
+        return f"\\{command}{{{_serialize_argument(element, 'e')}}}"
+    if name == "borderBox":
+        properties = element.find(f"{_M}borderBoxPr")
+        rising = _on_property(properties, "strikeBLTR")
+        falling = _on_property(properties, "strikeTLBR")
+        hidden = all(
+            _on_property(properties, side)
+            for side in ("hideTop", "hideBot", "hideLeft", "hideRight")
+        )
+        if hidden and rising and falling:
+            command = "xcancel"

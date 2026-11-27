@@ -1,0 +1,110 @@
+                rows,
+                project_path,
+                lock_entries,
+                lock_error,
+                svg_references,
+                inline_image_counts,
+                image_placements,
+            )
+        else:
+            for row in slice_rows:
+                filename = self._row_filename(row)
+                if not filename:
+                    continue
+                if filename not in lock_images:
+                    self._illustration_issues.append((
+                        'error',
+                        'slice_missing_lock',
+                        f"{filename} is a slice row but is absent from spec_lock.md images.",
+                    ))
+                if (
+                    self._row_status(row) == 'generated'
+                    and not (project_path / 'images' / filename).exists()
+                ):
+                    self._illustration_issues.append((
+                        'error',
+                        'slice_file_missing',
+                        f"{filename} is a Generated slice row but "
+                        f"images/{filename} does not exist.",
+                    ))
+
+    @staticmethod
+    def _resolve_project_path(dir_path: Path) -> Path:
+        """Resolve a checker target directory to its project root."""
+        candidate = dir_path.parent if dir_path.is_file() else dir_path
+        if (
+            _project_root_for_svg_path is not None
+            and candidate.name in _SVG_WORK_DIR_NAMES
+        ):
+            return _project_root_for_svg_path(candidate)
+        if (
+            (candidate / 'svg_output').exists()
+            or (candidate / 'design_spec.md').exists()
+        ):
+            return candidate
+        return candidate.parent
+
+    @staticmethod
+    def _split_md_table_row(line: str) -> List[str]:
+        """Split a simple Markdown table row into stripped cells."""
+        return [cell.strip().strip('`') for cell in line.strip().strip('|').split('|')]
+
+    @classmethod
+    def _extract_image_resource_rows(cls, spec_text: str) -> List[Dict[str, str]]:
+        """Extract rows from design_spec.md §VIII Image Resource List."""
+        section_match = re.search(
+            r"^##\s+VIII\.\s+Image Resource List\b.*?(?=^##\s+|\Z)",
+            spec_text,
+            re.MULTILINE | re.DOTALL,
+        )
+        if not section_match:
+            return []
+
+        lines = section_match.group(0).splitlines()
+        header = None
+        rows: List[Dict[str, str]] = []
+        in_resource_table = False
+        for line in lines:
+            if not line.strip().startswith('|'):
+                if in_resource_table and rows:
+                    break
+                continue
+
+            cells = cls._split_md_table_row(line)
+            if not cells:
+                continue
+            if header is None:
+                if any(cell.lower() == 'filename' for cell in cells):
+                    header = cells
+                    in_resource_table = True
+                continue
+            if set(cell.replace('-', '').strip() for cell in cells) == {''}:
+                continue
+            if not in_resource_table:
+                continue
+            row = {header[i]: cells[i] if i < len(cells) else '' for i in range(len(header))}
+            filename = row.get('Filename', '').strip()
+            if (
+                filename.lower() != 'filename'
+                and any(value.strip() for value in row.values())
+            ):
+                rows.append(row)
+
+        return rows
+
+    @staticmethod
+    def _row_filename(row: Dict[str, str]) -> str:
+        return Path(row.get('Filename', '').strip()).name
+
+    @staticmethod
+    def _row_raw_filename(row: Dict[str, str]) -> str:
+        return row.get('Filename', '').strip()
+
+    @staticmethod
+    def _row_type(row: Dict[str, str]) -> str:
+        return row.get('Type', '').strip()
+
+    @staticmethod
+    def _row_acquire(row: Dict[str, str]) -> str:
+        return row.get('Acquire Via', '').strip().lower()
+

@@ -1,0 +1,74 @@
+        'lgConfetti', 'horzBrick', 'diagBrick', 'solidDmnd', 'openDmnd',
+        'dotDmnd', 'plaid', 'sphere', 'weave', 'wave', 'trellis', 'zigZag',
+        'divot', 'shingle',
+    })
+
+    def _check_pattern_fills(self, root: ET.Element, result: Dict):
+        """Audit <pattern> defs that drive PPTX <a:pattFill> output.
+
+        svg_to_pptx maps <pattern fill> to native <a:pattFill prst="...">. The
+        preset name comes from `data-pptx-pattern` (e.g. `lgGrid` / `smGrid` /
+        `dkUpDiag`). Patterns marked with `data-pptx-text-image-fill` instead
+        map to run-level <a:blipFill> and are validated by converter preflight.
+        Two preset-pattern failure modes are worth catching pre-export:
+
+        1. Missing annotation → the converter compatibility fallback chooses
+           `ltUpDiag` (diagonal stripes), which is not an authoring contract.
+        2. Invalid preset name → PPTX schema rejects the file; PowerPoint
+           opens it with "needs to be repaired". OOXML
+           `ST_PresetPatternVal` is a closed enum — only the names in
+           `_OOXML_PATTERN_PRESETS` are legal. Inventing `ltGrid` (no such
+           value) is the canonical mistake; the only grids are `smGrid` /
+           `lgGrid` / `dotGrid`.
+        """
+        definitions, _duplicates = _direct_defs_index(root)
+        referenced_patterns: set[str] = set()
+        for elem in root.iter():
+            style_values = (
+                _parse_inline_style(elem.get('style'))
+                if _parse_inline_style is not None else {}
+            )
+            fill = style_values.get('fill') or elem.get('fill')
+            match = re.fullmatch(r'url\(#([^)]+)\)', (fill or '').strip())
+            if match is None:
+                continue
+            definition = definitions.get(match.group(1))
+            if definition is not None and _local_name(definition) == 'pattern':
+                referenced_patterns.add(match.group(1))
+
+        for pattern in (
+            elem for elem in root.iter()
+            if _local_name(elem) == 'pattern'
+        ):
+            pat_id = pattern.get('id', '<unnamed>')
+            prst = pattern.get('data-pptx-pattern')
+            if pattern.get(_TEXT_IMAGE_FILL_ATTR) is not None:
+                continue
+            if pat_id in referenced_patterns and not prst:
+                result['warnings'].append(
+                    f"Fidelity warning: <pattern id=\"{pat_id}\"> has no "
+                    "data-pptx-pattern attribute, so the converter will use its "
+                    "compatible `ltUpDiag` fallback. Generated SVG should declare a valid "
+                    "data-pptx-pattern to make the intended preset explicit; "
+                    "set data-pptx-fg/data-pptx-bg or matching child paints "
+                    "when explicit pattern colors are required. No change is "
+                    "required for export."
+                )
+            if pat_id in referenced_patterns and pattern.get('patternTransform'):
+                result['errors'].append(
+                    f"<pattern id=\"{pat_id}\"> cannot use patternTransform; "
+                    "the native preset mapping does not preserve custom tile transforms"
+                )
+            if prst not in self._OOXML_PATTERN_PRESETS:
+                if not prst:
+                    continue
+                result['errors'].append(
+                    f"<pattern id=\"{pat_id}\"> uses data-pptx-pattern=\"{prst}\" "
+                    "which is not in OOXML ST_PresetPatternVal — exported PPTX "
+                    "will fail schema validation ('needs to be repaired'). "
+                    "Use one of: smGrid / lgGrid / dotGrid (grids), "
+                    "ltUpDiag / dkUpDiag / cross / diagCross / weave / plaid / "
+                    "horzBrick (others); see references/native-data-interface.md §1 "
+                    "for the full authoring enum."
+                )
+            elif prst and _parse_pattern_colors is not None:

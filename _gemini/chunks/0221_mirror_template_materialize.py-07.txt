@@ -1,0 +1,88 @@
+                f"Authoring SVG is missing: {authoring_path}"
+            )
+        if not source_path.is_file() or source_path.suffix.lower() != ".svg":
+            raise MirrorMaterializationError(f"Lossless source SVG is missing: {source_path}")
+
+        expected_source_sha = _require_string(
+            raw.get("source_sha256"),
+            context=f"documents[{index}].source_sha256",
+        )
+        actual_source_sha = _sha256_file(source_path)
+        if actual_source_sha != expected_source_sha:
+            raise MirrorMaterializationError(
+                f"Lossless source SVG changed: {source_path.name}; expected "
+                f"{expected_source_sha}, found {actual_source_sha}"
+            )
+
+        refs_raw = raw.get("source_refs")
+        if not isinstance(refs_raw, dict):
+            raise MirrorMaterializationError(
+                f"documents[{index}].source_refs must be an object"
+            )
+        refs: dict[str, SourceRefRecord] = {}
+        source_root_element = _parse_svg(source_path)
+        for source_ref, ref_raw in refs_raw.items():
+            if not isinstance(source_ref, str) or not isinstance(ref_raw, dict):
+                raise MirrorMaterializationError(
+                    f"Invalid source-ref record in {authoring_name}"
+                )
+            path_raw = ref_raw.get("source_path")
+            if not (
+                isinstance(path_raw, list)
+                and all(isinstance(item, int) and item >= 0 for item in path_raw)
+            ):
+                raise MirrorMaterializationError(
+                    f"{authoring_name} source ref {source_ref!r} has invalid source_path"
+                )
+            initial_hash = _require_string(
+                ref_raw.get("initial_authoring_subtree_sha256"),
+                context=f"{authoring_name} source ref {source_ref!r} hash",
+            )
+            source_path_tuple = tuple(path_raw)
+            source_element = _source_element(source_root_element, source_path_tuple)
+            if _source_identity(source_element) != source_ref:
+                raise MirrorMaterializationError(
+                    f"{authoring_name} source ref {source_ref!r} resolves to "
+                    f"{_source_identity(source_element)!r}"
+                )
+            refs[source_ref] = SourceRefRecord(source_path_tuple, initial_hash)
+
+        documents[authoring_name] = AuthoringDocument(
+            name=authoring_name,
+            initial_authoring_sha256=str(raw.get("initial_authoring_sha256") or ""),
+            authoring_path=authoring_path,
+            source_path=source_path,
+            source_sha256=expected_source_sha,
+            source_refs=refs,
+        )
+
+    if required_names != set(documents):
+        raise MirrorMaterializationError(
+            "Reachable authoring manifest roster differs; missing="
+            f"{sorted(required_names - set(documents))}, extra="
+            f"{sorted(set(documents) - required_names)}"
+        )
+    if manifest.get("file_count") != len(documents_raw):
+        raise MirrorMaterializationError(
+            "authoring_manifest.json file_count does not match documents"
+        )
+    return authoring_root, documents
+
+
+def _load_vector_assets(
+    workspace: Path,
+    documents: dict[str, AuthoringDocument],
+) -> dict[str, VectorAssetRecord]:
+    inventory_path = workspace / "authoring-svg_vector_asset_inventory.json"
+    if not inventory_path.exists():
+        return {}
+    inventory = _load_json(inventory_path, context="vector asset inventory")
+    if inventory.get("schema") != VECTOR_INVENTORY_SCHEMA:
+        raise MirrorMaterializationError(
+            f"Unsupported vector inventory schema: {inventory.get('schema')!r}"
+        )
+    if inventory.get("icon_namespace") != IMPORTED_ICON_NAMESPACE:
+        raise MirrorMaterializationError(
+            "Mirror vector inventory must use icon_namespace='imported'"
+        )
+    if inventory.get("asset_role") != DECORATION_ASSET_ROLE:

@@ -1,0 +1,106 @@
+VERTICAL_TEXT_MODES = {"eaVert", "vert", "wordArtVert", "wordArtVertRtl"}
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def convert_txbody(
+    tx_body: ET.Element | None,
+    xfrm: Xfrm,
+    palette: ColorPalette | None,
+    *,
+    theme_fonts: dict[str, str] | None = None,
+    slide_number: int | None = None,
+    default_fill: str = DEFAULT_FILL_HEX,
+    default_font_size_px: float = DEFAULT_FONT_SIZE_PX,
+    fallback_lst_styles: tuple[ET.Element, ...] = (),
+    fallback_run_props: tuple[ET.Element, ...] = (),
+    id_prefix: str = "txt",
+    id_seq: list[int] | None = None,
+    hyperlink_resolver: HyperlinkResolver | None = None,
+    inline_formula_resolver: InlineFormulaResolver | None = None,
+    strict: bool = False,
+    diagnostic_sink: TextDiagnosticSink | None = None,
+) -> TextResult:
+    """Convert <p:txBody> under the given shape geometry to SVG <text>(s)."""
+    if tx_body is None:
+        return TextResult()
+
+    body_pr = tx_body.find("a:bodyPr", NS)
+    paragraphs = _parse_paragraphs(
+        tx_body, palette, theme_fonts or {}, default_fill=default_fill,
+        default_font_size_px=default_font_size_px,
+        fallback_lst_styles=fallback_lst_styles,
+        fallback_run_props=fallback_run_props,
+        slide_number=slide_number, id_prefix=id_prefix, id_seq=id_seq,
+        hyperlink_resolver=hyperlink_resolver,
+        inline_formula_resolver=inline_formula_resolver,
+        strict=strict,
+        diagnostic_sink=diagnostic_sink,
+    )
+    if not paragraphs or not _has_visible_text(paragraphs):
+        return TextResult()
+    _apply_norm_autofit(body_pr, paragraphs)
+
+    # Insets + anchor + wrap
+    lins = _read_emu_attr(body_pr, "lIns", DEFAULT_INSETS_EMU["l"])
+    tins = _read_emu_attr(body_pr, "tIns", DEFAULT_INSETS_EMU["t"])
+    rins = _read_emu_attr(body_pr, "rIns", DEFAULT_INSETS_EMU["r"])
+    bins = _read_emu_attr(body_pr, "bIns", DEFAULT_INSETS_EMU["b"])
+    anchor = body_pr.attrib.get("anchor", "t") if body_pr is not None else "t"
+    wrap_mode = body_pr.attrib.get("wrap", "square") if body_pr is not None else "square"
+    respect_edge_spacing = (
+        body_pr is not None
+        and body_pr.attrib.get("spcFirstLastPara") in {"1", "true"}
+    )
+
+    inner_x = xfrm.x + lins
+    inner_y = xfrm.y + tins
+    inner_w = max(xfrm.w - lins - rins, 1.0)
+    inner_h = max(xfrm.h - tins - bins, 1.0)
+
+    # Pre-wrap each paragraph into concrete display lines.
+    wrap_width = inner_w if wrap_mode == "square" else float("inf")
+    para_lines: list[list[list[TextRun]]] = [
+        _wrap_paragraph_into_lines(p, wrap_width) for p in paragraphs
+    ]
+
+    # Pre-compute heights to support anchor=ctr / b
+    para_heights = [
+        _paragraph_height_from_lines(p, lines)
+        for p, lines in zip(paragraphs, para_lines)
+    ]
+    space_before = [paragraph.space_before_px for paragraph in paragraphs]
+    space_after = [paragraph.space_after_px for paragraph in paragraphs]
+    if not respect_edge_spacing:
+        space_before[0] = 0.0
+        space_after[-1] = 0.0
+    total_h = sum(
+        before + height + after
+        for before, height, after in zip(
+            space_before,
+            para_heights,
+            space_after,
+        )
+    )
+    if anchor == "ctr":
+        cursor_y = inner_y + max(0.0, (inner_h - total_h) / 2.0)
+    elif anchor == "b":
+        cursor_y = inner_y + max(0.0, inner_h - total_h)
+    else:
+        cursor_y = inner_y
+
+    bottom_y = inner_y + inner_h
+    text_blocks: list[str] = []
+    for para, lines, height, before, after in zip(
+        paragraphs,
+        para_lines,
+        para_heights,
+        space_before,
+        space_after,
+    ):
+        cursor_y += before
+        visible_lines = _clip_lines_to_bottom(para, lines, cursor_y, bottom_y)
+        if visible_lines:
+            text_blocks.append(

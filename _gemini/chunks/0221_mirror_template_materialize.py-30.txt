@@ -1,0 +1,95 @@
+        root = _compose_template(
+            native=native,
+            master=master,
+            layout=layout,
+            master_root=prepared_masters[str(master["key"])],
+            layout_root=prepared_layouts[str(layout["key"])],
+            slide=slide,
+            slide_root=prepared_slides[index],
+            slot_plans=plans_by_layout[str(layout["key"])],
+        )
+        materialized_roots.append((filename, root))
+
+    asset_sources: dict[Path, Path] = {}
+    files: list[MaterializedFile] = []
+    output_roots: list[tuple[Path, ET.Element]] = []
+    native_payloads: dict[str, bytes] = {}
+    native_payload_stats = NativePayloadStats()
+    for relative_path, root in materialized_roots:
+        final_path = template_workspace / relative_path
+        _rewrite_packaged_assets(
+            root,
+            source_base=authoring_root,
+            final_svg_path=final_path,
+            template_workspace=template_workspace,
+            asset_sources=asset_sources,
+        )
+        total_stats.detached_connector_endpoints += _sanitize_connector_references(root)
+        total_stats.upright_text_compensations += (
+            _compensate_reflected_group_text(root)
+        )
+        compact_svg_tree(root, compact_native_frames=False)
+        compact_svg_style_tree(root)
+        # Compaction may hoist a Slide-specific font to the shared SVG root.
+        # Localize it again so Master/Layout resources have stable inheritance.
+        parents = {child: parent for parent in root.iter() for child in parent}
+        for text in root.iter(f"{{{SVG_NS}}}text"):
+            for name in _ROOT_TYPOGRAPHY_ATTRIBUTES:
+                ancestor = text
+                while ancestor is not None:
+                    value = _paint_value(ancestor, name)
+                    if value is not None:
+                        if ancestor is root:
+                            text.set(name, value)
+                        break
+                    ancestor = parents.get(ancestor)
+        for name in _ROOT_TYPOGRAPHY_ATTRIBUTES:
+            root.attrib.pop(name, None)
+        _refresh_preset_preview_hashes(root)
+        _refresh_fresh_native_fallback_hashes(root)
+        try:
+            native_payload_stats.merge(
+                externalize_native_payloads(root, native_payloads)
+            )
+        except NativePayloadError as exc:
+            raise MirrorMaterializationError(
+                f"Cannot externalize native payloads in {relative_path}: {exc}"
+            ) from exc
+        output_roots.append((relative_path, root))
+
+    for icon in sorted(referenced_icons):
+        record = vector_assets[icon]
+        icon_root, stats = _materialize_icon(
+            record,
+            documents[record.origin_document],
+        )
+        total_stats.merge(stats)
+        relative_path = Path("icons") / f"{icon}.svg"
+        final_path = template_workspace / relative_path
+        _rewrite_packaged_assets(
+            icon_root,
+            source_base=record.asset_path.parent,
+            final_svg_path=final_path,
+            template_workspace=template_workspace,
+            asset_sources=asset_sources,
+        )
+        total_stats.detached_connector_endpoints += _sanitize_connector_references(
+            icon_root
+        )
+        compact_svg_tree(icon_root, compact_native_frames=False)
+        compact_svg_style_tree(icon_root)
+        _refresh_preset_preview_hashes(icon_root)
+        _refresh_fresh_native_fallback_hashes(icon_root)
+        try:
+            native_payload_stats.merge(
+                externalize_native_payloads(icon_root, native_payloads)
+            )
+        except NativePayloadError as exc:
+            raise MirrorMaterializationError(
+                f"Cannot externalize native payloads in {relative_path}: {exc}"
+            ) from exc
+        output_roots.append((relative_path, icon_root))
+
+    native_record_keys: set[str] = set()
+    try:
+        for _relative_path, root in output_roots:

@@ -1,0 +1,141 @@
+# 通讯录 (contact) 命令参考
+
+> **CRITICAL — 命令合法性**：contact 只有 `user` / `dept` / `label` / `relation` 四个二级子命令。
+> 不存在 `contact search`、`contact find`、`contact list`、`contact get`、`contact user find/list`。
+> 构造命令前必须确认路径在下方「命令总览」中存在；不确定时，**根据意图对照下方「意图判断」选择正确命令**。
+>
+> **CRITICAL — 根部门**：钉钉根部门 `deptId=1`。`dept` 系列命令查根部门统一传 `--dept 1` 或 `--depts 1`，不要传 `self / me / root / 0`。
+>
+> **CRITICAL — 搜人首选 aisearch**：凡是"找人/搜人/谁负责 XX/某事项/某项目的人/上级/下级/团队成员"——**第一反应**是 `dws aisearch person`（详见 [aisearch.md](./aisearch.md)），不是 `contact user search`，**更不是反问用户要文档链接**。典型反例：用户说"查询集团推进事项"= 问"集团推进事项这个职责/项目下的人是谁"，正确做法是 `dws aisearch person --keyword "集团推进事项" --dimension duty --format json`。
+
+## 命令总览
+
+### user (人员查询)
+
+#### 获取当前用户信息
+```
+Usage:
+  dws contact user get-self [flags]
+Aliases:
+  get-self, self, me, whoami, current
+Example:
+  dws contact user get-self
+  dws contact user self       # 别名
+  dws contact user me         # 别名
+  dws contact user whoami     # 别名
+  dws contact user current    # 别名
+Notes:
+  - 触发词：我是谁 / 我的信息 / 我的 userId / 当前用户 / 本人 / self / me / whoami
+  - 顶层亦已挂 `dws contact get-self / user-self / current-user` 提示，误写会引导到正确命令
+  - **禁止**用 `dws contact user get --ids me/self/current` 代替（会报错）；正确用法是 `get-self` 或其别名
+```
+
+#### 按关键词搜索用户
+```
+Usage:
+  dws contact user search [flags]
+Example:
+  dws contact user search --query "张三"
+Flags:
+      --query string   搜索关键词 (必填)
+Returns: (列表，每项包含以下字段)
+  name             string   成员姓名
+  nick             string   成员昵称
+  userId           string   成员 ID（仅同事关系时返回）
+  title            string   员工职位（仅同事关系时返回）
+  openDingTalkId   string   当前用户视角下的目标用户唯一标识，不可跨用户共享；可用于发消息等好友关系场景的操作
+```
+
+> **CAUTION:** 多人同名时禁止默认选第一个 — `user search` 不返回部门信息，须追加 `contact user get --ids userId1,userId2,...` 获取部门/职位后请用户确认。详见 [08-directory.md](../best_practices/08-directory.md)「多命中」。
+
+#### 按手机号搜索用户
+```
+Usage:
+  dws contact user search-mobile [flags]
+Example:
+  dws contact user search-mobile --mobile 13800138000
+Flags:
+      --mobile string   手机号 (必填)
+```
+
+#### 批量获取用户详情
+```
+Usage:
+  dws contact user get [flags]
+Example:
+  dws contact user get --ids userId1,userId2
+Flags:
+      --ids string   用户 ID 列表，逗号分隔 (必填)
+Notes:
+  - **禁止**将 `self/me/current/whoami` 作为 userId 传入；查自己请用 `dws contact user get-self`
+```
+
+### profile (用户档案 / 花名册)
+
+#### 查询花名册有权限的字段列表
+```
+Usage:
+  dws contact user profile fields
+Example:
+  dws contact user profile fields
+Flags:
+  无
+```
+
+查询花名册有权限的字段列表，根据当前用户查询花名册有权限的字段列表。认证信息（corpId、optUserId）由系统自动注入，无需手动传入。
+
+#### 查询员工花名册字段信息（个人档案）
+```
+Usage:
+  dws contact user profile get [flags]
+Example:
+  dws contact user profile get --staff-id STAFF_ID
+  dws contact user profile get --staff-id STAFF_ID --fields fieldCode1,fieldCode2
+Flags:
+      --staff-id string  查询员工 ID（可选）
+      --fields string    指定字段集合, 逗号分隔, 可通过 profile fields 获取（可选）
+```
+
+查询员工花名册字段信息，根据当前用户指定员工和字段列表，查询相应管理范围内员工的字段值信息。
+花名册字段包含：试用/转正信息、个人/家庭信息、学历信息、银行卡/合同信息、紧急联系人和其他企业自定义信息。
+
+> **与 `contact user get` 的区别**：`user get` 返回组织管理信息（部门、主管、管理员权限），`user profile get` 返回个人档案信息（学历、家庭、银行卡等）。
+
+### dismission (离职员工)
+
+#### 分页获取离职员工列表
+```
+Usage:
+  dws contact user dismission search [flags]
+Example:
+  dws contact user dismission search
+  dws contact user dismission search --name "张三"
+  dws contact user dismission search --start 2026-01-01 --end 2026-03-31
+  dws contact user dismission search --depts 123456,789012 --page 1 --limit 50
+Flags:
+      --name string      员工姓名，模糊搜索（可选）
+      --start string     离职日期查询范围开始，格式 YYYY-MM-DD（可选）
+      --end string       离职日期查询范围结束，格式 YYYY-MM-DD（可选）
+      --depts string     部门 ID 列表，逗号分隔（可选）
+      --hide-retirement  是否隐藏退休，默认 true（可选）
+      --hide-partner     是否隐藏合作伙伴，默认 false（可选）
+      --page int         页码，从 1 开始（可选，默认 1）
+      --limit int        页大小，200 以内（可选，默认 20）
+```
+
+查询离职员工列表，支持按员工姓名、离职日期范围、部门进行过滤。认证信息（corpId、optUserId）由系统自动注入，无需手动传入。
+`--start` 和 `--end` 必须同时设置或同时不设置，不允许只传其中一个。
+
+### dept (部门查询)
+
+#### 搜索部门
+```
+Usage:
+  dws contact dept search [flags]
+Example:
+  dws contact dept search --query "技术部"
+Flags:
+      --query string   搜索关键词 (必填)
+```
+
+#### 获取部门详情

@@ -1,0 +1,67 @@
+            structure_lock = load_pptx_structure_lock(project_path)
+            if structure_lock is not None:
+                errors.extend(template_prototype_lock_errors(structure_lock))
+        except (ImportError, TemplateStructureError) as exc:
+            errors.append(f"spec_lock.md structure preflight failed: {exc}")
+    if legacy_design or legacy_lock:
+        errors.extend(
+            validate_communication_trace(
+                project_path,
+                check_lock=legacy_lock,
+                check_design=legacy_design,
+            )
+        )
+    return errors, warnings
+
+
+def scaffold_project_artifact(project_path: Path, artifact: str) -> str:
+    """Render one versioned Markdown scaffold without overwriting user work."""
+    assets = {
+        "design_spec": (SCAFFOLD_DIR / "design_spec.md", "design_spec.md"),
+        "spec_lock": (SCAFFOLD_DIR / "spec_lock.md", "spec_lock.md"),
+    }
+    if artifact not in assets:
+        raise ValueError(f"Unsupported scaffold artifact: {artifact}")
+    if not project_path.exists() or not project_path.is_dir():
+        raise FileNotFoundError(f"Project directory does not exist: {project_path}")
+
+    info = get_project_info_common(str(project_path))
+    format_key = str(info.get("format", "unknown"))
+    if format_key not in CANVAS_FORMATS:
+        raise ValueError(
+            "Cannot derive the canvas format from the project directory name. "
+            "Use a standard <name>_<format>_<YYYYMMDD> project path."
+        )
+    canvas = CANVAS_FORMATS[format_key]
+    created_date = str(info.get("date_formatted", "Unknown date"))
+    if created_date == "Unknown date":
+        created_date = "[fill]"
+    context = {
+        "PROJECT_NAME": str(info.get("name", project_path.name)),
+        "CANVAS_NAME": str(canvas["name"]),
+        "CANVAS_DIMENSIONS": str(canvas["dimensions"]),
+        "VIEWBOX": str(canvas["viewbox"]),
+        "CREATED_DATE": created_date,
+    }
+
+    scaffold_path, target_name = assets[artifact]
+    target_path = project_path / target_name
+    existing_spec = info.get("spec_file") if artifact == "design_spec" else None
+    if isinstance(existing_spec, str):
+        existing_path = project_path / existing_spec
+        raise FileExistsError(
+            f"Refusing to shadow existing design spec: {existing_path}"
+        )
+    if target_path.exists() or target_path.is_symlink():
+        raise FileExistsError(f"Refusing to overwrite existing artifact: {target_path}")
+    rendered = scaffold_path.read_text(encoding="utf-8")
+    for key, value in context.items():
+        rendered = rendered.replace(f"{{{{{key}}}}}", value)
+    unresolved = sorted(set(_SCAFFOLD_TOKEN_RE.findall(rendered)))
+    if unresolved:
+        raise ValueError(
+            f"Unresolved scaffold token(s) in {scaffold_path}: {', '.join(unresolved)}"
+        )
+    with target_path.open("x", encoding="utf-8") as stream:
+        stream.write(rendered)
+    return str(target_path)

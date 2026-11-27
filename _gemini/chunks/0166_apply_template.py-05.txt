@@ -1,0 +1,80 @@
+    publication using the same checks as Confirm UI handoff.
+    """
+    content_root = content_root or project
+    receipt_path = content_root / INSTALL_RECEIPT_NAME
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ApplyTemplateError(f"Cannot read {receipt_path}; run apply_template.py: {exc}") from exc
+    if not isinstance(receipt, dict) or receipt.get("schema_version") != 1:
+        raise ApplyTemplateError(f"Invalid {INSTALL_RECEIPT_NAME}; rerun apply_template.py")
+    if (receipt.get("project") != str(project.resolve())
+            or receipt.get("roots") != snapshots
+            or receipt.get("selection_sha256") != selection_sha256):
+        raise ApplyTemplateError("Template installation does not match the confirmed roots/snapshot")
+    specs, roster, expected_paths = _install_contract(snapshots)
+    files = receipt.get("files")
+    if (receipt.get("installed_specs") != specs or receipt.get("active_roster") != roster
+            or not isinstance(files, dict) or set(files) != expected_paths):
+        raise ApplyTemplateError("Template installation spec/roster/asset receipt is incomplete")
+    actual_specs = sorted(path.name for path in (content_root / "templates").glob("design_spec*.md"))
+    actual_roster = {
+        path.relative_to(content_root).as_posix()
+        for path in _iter_files(content_root / "templates")
+        if not _is_spec_file(path) and path.suffix.lower() not in BITMAP_SUFFIXES
+    }
+    if actual_specs != specs or actual_roster != set(roster["files"] if roster else []):
+        raise ApplyTemplateError("Installed template specs or active roster differ from the selection")
+    for name, digest in files.items():
+        path = content_root / name
+        if not path.is_file() or _file_sha256(path) != digest:
+            raise ApplyTemplateError(f"Installed template file changed or is missing: {name}")
+    return receipt
+
+
+def validate_template_snapshot_sources(
+    project: Path, snapshots: list[dict], selection_sha256: str,
+) -> None:
+    """Reject source drift, allowing only an installer-proven in-place change."""
+    for root in snapshots:
+        path = Path(root["workspace_root"])
+        if _workspace_files(path) == root["files"]:
+            continue
+        if path == project.resolve():
+            read_template_install(project, snapshots, selection_sha256)
+        else:
+            raise ApplyTemplateError(f"Confirmed template source changed: {path}; confirm Stage 1 again")
+
+
+def _write(plan: InstallPlan) -> None:
+    """Stage and verify the full install, then publish with rollback on failure.
+
+    Directory renames are atomic individually. The journal restores all earlier
+    renames if any publication fails, including removed Deck files and the old
+    receipt. Backups survive if rollback itself fails so recovery remains possible.
+    """
+    transaction = Path(tempfile.mkdtemp(prefix=".template-install-", dir=plan.project))
+    staged = transaction / "staged"
+    backup = transaction / "backup"
+    moved: list[str] = []
+    published: list[str] = []
+    cleanup = True
+    try:
+        staged.mkdir()
+        backup.mkdir()
+        names = ["templates", *ASSET_DIRS]
+        for name in names:
+            current = plan.project / name
+            if current.exists():
+                shutil.copytree(current, staged / name)
+        for path in plan.removals:
+            (staged / path.relative_to(plan.project)).unlink()
+        for mapping in plan.mappings:
+            destination = staged / mapping.dst.relative_to(plan.project)
+            if mapping.status != "identical":
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if mapping.content is not None:
+                    destination.write_bytes(mapping.content)
+                else:
+                    shutil.copy2(mapping.src, destination)
+            expected = (

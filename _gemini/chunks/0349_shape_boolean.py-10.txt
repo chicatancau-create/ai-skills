@@ -1,0 +1,153 @@
+        components.append(component)
+    return components
+
+
+def _bounds_contain(
+    outer: tuple[float, float, float, float],
+    inner: tuple[float, float, float, float],
+) -> bool:
+    scale = max(
+        *(abs(value) for value in outer),
+        *(abs(value) for value in inner),
+        1.0,
+    )
+    tolerance = scale * 1e-7
+    return (
+        outer[0] <= inner[0] + tolerance
+        and outer[1] <= inner[1] + tolerance
+        and outer[2] >= inner[2] - tolerance
+        and outer[3] >= inner[3] - tolerance
+    )
+
+
+def _contour_depth(
+    index: int,
+    parents: Sequence[int | None],
+) -> int:
+    depth = 0
+    seen = {index}
+    parent = parents[index]
+    while parent is not None:
+        if parent in seen:
+            raise ValueError("Shape Boolean fragment produced cyclic contours")
+        seen.add(parent)
+        depth += 1
+        parent = parents[parent]
+    return depth
+
+
+def _path_is_empty(path: Any) -> bool:
+    bounds = path.bounds
+    if bounds is None or len(path) == 0:
+        return True
+    width = bounds[2] - bounds[0]
+    height = bounds[3] - bounds[1]
+    scale = max(abs(width), abs(height), 1.0)
+    return (
+        width <= 0
+        or height <= 0
+        or not math.isfinite(path.area)
+        or path.area <= scale * scale * 1e-12
+    )
+
+
+def _path_sort_key(
+    path: Any,
+) -> tuple[
+    float,
+    float,
+    float,
+    float,
+    float,
+    tuple[tuple[str, tuple[float, ...]], ...],
+]:
+    bounds = path.bounds
+    signature = tuple(
+        (
+            str(verb),
+            tuple(
+                round(coordinate, _RESULT_PRECISION)
+                for point in points
+                for coordinate in point
+            ),
+        )
+        for verb, points in path
+    )
+    if bounds is None:
+        return (
+            math.inf,
+            math.inf,
+            math.inf,
+            math.inf,
+            math.inf,
+            signature,
+        )
+    return (
+        round(bounds[1], _RESULT_PRECISION),
+        round(bounds[0], _RESULT_PRECISION),
+        round(bounds[3], _RESULT_PRECISION),
+        round(bounds[2], _RESULT_PRECISION),
+        round(path.area, _RESULT_PRECISION),
+        signature,
+    )
+
+
+def _effective_style(
+    element: ET.Element,
+    parents: Mapping[ET.Element, ET.Element],
+) -> dict[str, str]:
+    values: dict[str, str] = {}
+    opacity = 1.0
+    parent_opacity = 1.0
+    chain = _element_chain(element, parents)
+    for index, current in enumerate(chain):
+        inline = parse_inline_style(current.get("style"))
+        raw_opacity = inline.get("opacity", current.get("opacity"))
+        if raw_opacity is None:
+            local_opacity = 1.0
+        elif raw_opacity.strip() == "inherit":
+            local_opacity = parent_opacity
+        else:
+            local_opacity = parse_opacity(raw_opacity)
+        if index > 0:
+            opacity *= local_opacity
+        parent_opacity = local_opacity
+        for name in _PRESENTATION_ATTRS:
+            if name == "opacity":
+                continue
+            raw = inline.get(name, current.get(name))
+            if raw is not None and raw.strip() != "inherit":
+                values[name] = raw.strip()
+    if opacity < 1.0:
+        values["opacity"] = _format_number(opacity)
+    return {
+        name: values[name]
+        for name in _PRESENTATION_ATTRS
+        if name in values
+    }
+
+
+def _serialize_result_path(
+    path: Any,
+    result_id: str,
+    style: Mapping[str, str],
+    pathops: Any,
+) -> str:
+    path_data = _pathops_to_svg_path(path, pathops)
+    attributes = {
+        "id": result_id,
+        "d": path_data,
+        **style,
+    }
+    return f"<path{attrs_to_xml(attributes)}/>"
+
+
+def _pathops_to_svg_path(path: Any, pathops: Any) -> str:
+    path.convertConicsToQuads(0.05)
+    parts: list[str] = []
+    current: tuple[float, float] | None = None
+    subpath_start: tuple[float, float] | None = None
+    open_subpath = False
+
+    for verb, points in path:
+        if verb == pathops.PathVerb.MOVE:

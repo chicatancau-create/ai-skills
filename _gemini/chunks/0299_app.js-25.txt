@@ -1,0 +1,102 @@
+                html += '<span class="prop-ro">' + escapeHtml(spec.value) + '</span>';
+            } else {
+                html += renderAttributeControl(spec);
+            }
+            html += '</td></tr>';
+        });
+
+        html += '</table>';
+        return html;
+    }
+
+    function nearestParentGroup(el) {
+        var node = el ? el.parentElement : null;
+        while (node && node !== svgContent) {
+            if (node.tagName && localName(node) === "g" && node.id) return node;
+            node = node.parentElement;
+        }
+        return null;
+    }
+
+    function ownAttributeSpecs(el) {
+        var specs = [];
+        Array.from(el.attributes).forEach(function (attr) {
+            var key = attr.name;
+            if (key === "class" || key === "data-edit-target" || key === "data-edit-annotation") return;
+            specs.push({
+                key: key,
+                value: attr.value,
+                editable: isEditableAttributeName(key)
+            });
+        });
+        return specs;
+    }
+
+    function isEditableAttributeName(key) {
+        var k = String(key).toLowerCase();
+        if (k === "id" || k === "class" || k === "href" || k === "xlink:href") return false;
+        if (k.indexOf("on") === 0) return false;
+        return /^[A-Za-z_][A-Za-z0-9_.:-]*$/.test(key);
+    }
+
+    function textStyleTargetsForSelection(el) {
+        if (!el) return [];
+        var tag = localName(el);
+        if (tag === "tspan") return el.id ? [el] : [];
+        if (tag === "text") return textStyleLeavesForText(el);
+
+        var targets = [];
+        el.querySelectorAll("text").forEach(function (textEl) {
+            targets = targets.concat(textStyleLeavesForText(textEl));
+        });
+        return uniqueElements(targets);
+    }
+
+    function textStyleLeavesForText(textEl) {
+        var tspans = Array.from(textEl.querySelectorAll("tspan")).filter(function (tspan) {
+            return !!tspan.id;
+        });
+        if (tspans.length > 0) return tspans;
+        return textEl.id ? [textEl] : [];
+    }
+
+    function uniqueElements(elements) {
+        var seen = new Set();
+        return elements.filter(function (el) {
+            if (!el || !el.id || seen.has(el.id)) return false;
+            seen.add(el.id);
+            return true;
+        });
+    }
+
+    function textStyleSpecs(targets) {
+        return [
+            { key: "fill", type: "color" },
+            { key: "font-size", type: "text" },
+            { key: "font-family", type: "text" },
+            { key: "font-weight", type: "select",
+              options: ["", "normal", "bold", "300", "400", "500", "600", "700", "800"] },
+            { key: "text-anchor", type: "select", options: ["", "start", "middle", "end"] }
+        ].map(function (spec) {
+            var value = commonAttrValue(targets, spec.key);
+            var copy = Object.assign({}, spec);
+            copy.value = value === null ? "" : value;
+            copy.mixed = value === null;
+            return copy;
+        });
+    }
+
+    function renderTextStyleControl(spec, targets) {
+        var targetIds = encodeURIComponent(JSON.stringify(targets.map(function (el) { return el.id; })));
+        var placeholder = spec.mixed ? t("multi_mixed") : "";
+        if (spec.type === "color") {
+            return '<input type="color" class="prop-edit prop-edit-text-style-color" data-key="' +
+                escapeHtml(spec.key) + '" data-target-ids="' + targetIds +
+                '" value="' + normalizeHexForPicker(spec.value) + '">' +
+                '<input type="text" class="prop-edit prop-edit-text-style" data-key="' +
+                escapeHtml(spec.key) + '" data-target-ids="' + targetIds +
+                '" placeholder="' + escapeHtml(placeholder) +
+                '" value="' + escapeHtml(spec.mixed ? "" : spec.value) + '">';
+        }
+        if (spec.type === "select") {
+            var html = '<select class="prop-edit prop-edit-text-style" data-key="' +

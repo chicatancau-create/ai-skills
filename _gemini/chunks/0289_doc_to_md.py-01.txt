@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""
+Document to Markdown Converter (hybrid Python + Pandoc fallback)
+
+Primary formats (pure Python, no external tools required):
+    .docx   → mammoth (tables and embedded chart data as Markdown tables;
+              OMML equations rewritten to inline LaTeX)
+    .html   → markdownify + BeautifulSoup
+    .epub   → ebooklib + markdownify
+    .ipynb  → nbconvert
+
+Fallback formats (require pandoc installed):
+    .doc .odt .rtf .tex .latex .rst .org .typ
+
+All paths produce the same output convention:
+    <input>.md                     Markdown file
+    <input>_files/<asset>          Extracted media (relative references in MD)
+"""
+
+import argparse
+import base64
+import hashlib
+import json
+import mimetypes
+import posixpath
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import uuid
+import zipfile
+from pathlib import Path
+from urllib.parse import unquote, urlparse
+from xml.etree import ElementTree as ET
+
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from console_encoding import configure_utf8_stdio  # noqa: E402
+from _batch import run_path_batch  # noqa: E402
+from _conversion_profile import write_conversion_profile_best_effort  # noqa: E402
+
+configure_utf8_stdio()
+
+# ─────────────────────────────────────────────────────────────
+# Format registry
+# ─────────────────────────────────────────────────────────────
+
+# Formats handled by pure-Python paths
+NATIVE_FORMATS = {".docx", ".html", ".htm", ".epub", ".ipynb"}
+
+# Formats handled by pandoc fallback: suffix → (pandoc input format, description)
+PANDOC_FORMATS = {
+    ".doc":   ("doc",    "Microsoft Word 97-2003"),
+    ".odt":   ("odt",    "OpenDocument Text"),
+    ".rtf":   ("rtf",    "Rich Text Format"),
+    ".tex":   ("latex",  "LaTeX"),
+    ".latex": ("latex",  "LaTeX"),
+    ".rst":   ("rst",    "reStructuredText"),
+    ".org":   ("org",    "Emacs Org-mode"),
+    ".typ":   ("typst",  "Typst"),
+}
+
+# Formats pandoc should extract embedded media from
+PANDOC_MEDIA_FORMATS = {".odt"}
+OFFICE_VECTOR_EXTENSIONS = {".emf", ".wmf"}
+IMAGE_ASSET_SUFFIXES = {
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif",
+    ".emf", ".wmf", ".svg",
+}
+
+DOCX_NS = {
+    "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+    "wp": "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing",
+    "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+    "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+    "rel": "http://schemas.openxmlformats.org/package/2006/relationships",
+    "v": "urn:schemas-microsoft-com:vml",
+    "o": "urn:schemas-microsoft-com:office:office",
+    "mc": "http://schemas.openxmlformats.org/markup-compatibility/2006",
+    "m": "http://schemas.openxmlformats.org/officeDocument/2006/math",
+}
+EMU_PER_INCH = 914400
+CHART_NS = "http://schemas.openxmlformats.org/drawingml/2006/chart"
+# Word's built-in Title / Subtitle styles carry the cover heading; mammoth
+# leaves them as plain paragraphs unless mapped.
+DOCX_STYLE_MAP = """
+p[style-name='Title'] => h1:fresh
+p[style-name='Subtitle'] => h2:fresh
+"""
+MATH_NS = DOCX_NS["m"]
+W_NS = DOCX_NS["w"]
+XML_SPACE_ATTR = "{http://www.w3.org/XML/1998/namespace}space"
+
+# OMML n-ary operator chars (m:nary/m:naryPr/m:chr) → LaTeX command.
+NARY_OPS = {
+    "∑": r"\sum", "∏": r"\prod", "∐": r"\coprod",
+    "∫": r"\int", "∬": r"\iint", "∭": r"\iiint", "∮": r"\oint",
+    "⋃": r"\bigcup", "⋂": r"\bigcap", "⋁": r"\bigvee", "⋀": r"\bigwedge",
+}
+# OMML accent chars (m:acc/m:accPr/m:chr) → LaTeX command.
+ACCENT_CMDS = {
+    "̂": r"\hat", "̃": r"\tilde", "̄": r"\bar", "→": r"\vec", "⃗": r"\vec",
+    "̇": r"\dot", "̈": r"\ddot", "̌": r"\check", "́": r"\acute", "̀": r"\grave",
+}
+
+
+# ─────────────────────────────────────────────────────────────
+# Shared helpers
+# ─────────────────────────────────────────────────────────────
+
+def _format_size(size: int) -> str:

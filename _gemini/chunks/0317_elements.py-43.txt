@@ -1,0 +1,112 @@
+) -> tuple[int, int, int, int] | None:
+    """Compute DrawingML ``<a:srcRect>`` (l, t, r, b) for SVG slice mode.
+
+    SVG ``preserveAspectRatio="<align> slice"`` means: scale the image so it
+    fully covers the box (CSS object-fit: cover) and crop the overflow at the
+    given alignment anchor. DrawingML ``srcRect`` expresses the same intent
+    by specifying which sub-rectangle of the source image to display, in
+    units of 1/1000 of a percent (0–100000).
+
+    Returns ``None`` when no cropping is required (image and box already
+    match) or when inputs are degenerate.
+    """
+    if img_w <= 0 or img_h <= 0 or box_w <= 0 or box_h <= 0:
+        return None
+
+    # Scale factor that makes the image cover the box (cover semantics).
+    scale = max(box_w / img_w, box_h / img_h)
+    visible_w = box_w / scale  # ≤ img_w
+    visible_h = box_h / scale  # ≤ img_h
+
+    if (
+        math.isclose(visible_w, img_w, rel_tol=1e-9, abs_tol=1e-9)
+        and math.isclose(visible_h, img_h, rel_tol=1e-9, abs_tol=1e-9)
+    ):
+        return None  # No crop needed
+
+    x_anchor, y_anchor = PROJECT_IMAGE_ASPECT_RATIO_ANCHORS[align]
+    crop_w_total = max(
+        0,
+        min(99999, int(round((1.0 - visible_w / img_w) * 100000))),
+    )
+    crop_h_total = max(
+        0,
+        min(99999, int(round((1.0 - visible_h / img_h) * 100000))),
+    )
+    l = max(0, min(crop_w_total, int(round(crop_w_total * x_anchor))))
+    t = max(0, min(crop_h_total, int(round(crop_h_total * y_anchor))))
+    r = crop_w_total - l
+    b = crop_h_total - t
+    if not any((l, t, r, b)):
+        return None
+
+    return (l, t, r, b)
+
+
+def _resolve_image_src_rect_values(
+    elem: ET.Element,
+    img_data: bytes,
+    box_w: float, box_h: float,
+) -> tuple[int, int, int, int] | None:
+    """Resolve DrawingML source-crop values for an SVG slice image.
+
+    Slice mode is resolved into a srcRect so the original image is embedded
+    intact and PowerPoint's crop tool / "Reset Picture" continue to work.
+    Meet mode is handled separately by ``_resolve_image_meet_fit`` (which
+    shrinks the picture frame to match image aspect ratio); none mode keeps
+    the legacy stretch behaviour intentionally.
+    """
+    align, mode = parse_project_image_aspect_ratio(
+        elem.get('preserveAspectRatio')
+    )
+
+    if align == 'none' or mode != 'slice':
+        return None
+
+    img_w, img_h = _read_image_size(img_data)
+    if img_w is None or img_h is None:
+        return None
+
+    return _compute_slice_src_rect(
+        float(img_w),
+        float(img_h),
+        box_w,
+        box_h,
+        align,
+    )
+
+
+def _src_rect_xml(rect: tuple[int, int, int, int] | None) -> str:
+    """Serialize an optional DrawingML source crop."""
+    if rect is None:
+        return ''
+    l, t, r, b = rect
+    return f'<a:srcRect l="{l}" t="{t}" r="{r}" b="{b}"/>'
+
+
+def _resolve_image_meet_fit(
+    elem: ET.Element,
+    img_data: bytes,
+    box_w: float, box_h: float,
+) -> tuple[float, float, float, float] | None:
+    """For SVG ``preserveAspectRatio="<align> meet"``, compute the letterboxed
+    sub-rectangle ``(dx, dy, fit_w, fit_h)`` inside the original box that
+    matches the image's intrinsic aspect ratio.
+
+    PowerPoint has no native ``meet`` semantic — ``<a:stretch><a:fillRect/>``
+    fills the entire frame and would distort the image whenever the SVG
+    container ratio differs from the source image ratio. The fix is to shrink
+    the ``<p:pic>`` frame itself (off + ext) so the frame and image share an
+    aspect ratio; the stretch then fills a correctly-shaped frame.
+
+    Returns ``None`` when the adjustment is not applicable:
+      - mode is ``slice`` (handled by srcRect path)
+      - align is ``none`` (SVG spec says: stretch — do not adjust)
+      - intrinsic image dimensions cannot be read
+      - frame already matches image ratio (no-op)
+    """
+    align, mode = parse_project_image_aspect_ratio(
+        elem.get('preserveAspectRatio')
+    )
+
+    if align == 'none' or mode == 'slice':

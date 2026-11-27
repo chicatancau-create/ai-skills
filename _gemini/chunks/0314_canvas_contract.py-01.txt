@@ -1,0 +1,124 @@
+"""Project root-SVG canvas parsing and cross-file validation."""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, localcontext
+from pathlib import Path
+from typing import Iterable
+from xml.etree import ElementTree as ET
+
+
+class CanvasContractError(ValueError):
+    """Raised when a root SVG canvas cannot map faithfully to one slide."""
+
+
+PPTX_SLIDE_EMU_MIN = 914400
+PPTX_SLIDE_EMU_MAX = 51206400
+
+
+_SVG_NUMBER = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
+_VIEWBOX_RE = re.compile(
+    rf"^\s*({_SVG_NUMBER})(?:\s*,\s*|\s+)"
+    rf"({_SVG_NUMBER})(?:\s*,\s*|\s+)"
+    rf"({_SVG_NUMBER})(?:\s*,\s*|\s+)"
+    rf"({_SVG_NUMBER})\s*$"
+)
+
+
+@dataclass(frozen=True)
+class ProjectViewBox:
+    """One validated zero-origin project canvas."""
+
+    width: Decimal
+    height: Decimal
+
+    @property
+    def values(self) -> tuple[Decimal, Decimal, Decimal, Decimal]:
+        return Decimal(0), Decimal(0), self.width, self.height
+
+    @property
+    def pixel_dimensions(self) -> tuple[float, float]:
+        return float(self.width), float(self.height)
+
+    @property
+    def emu_dimensions(self) -> tuple[int, int]:
+        """Quantize the SVG canvas to DrawingML's integer EMU dimensions."""
+        width_emu, height_emu = self._scaled_emu_values()
+        width = int(width_emu.to_integral_value(ROUND_HALF_UP))
+        height = int(height_emu.to_integral_value(ROUND_HALF_UP))
+        return width, height
+
+    def _scaled_emu_values(self) -> tuple[Decimal, Decimal]:
+        precision = max(
+            28,
+            len(self.width.as_tuple().digits) + 8,
+            len(self.height.as_tuple().digits) + 8,
+        )
+        with localcontext() as context:
+            context.prec = precision
+            return self.width * Decimal(9525), self.height * Decimal(9525)
+
+    @property
+    def canonical(self) -> str:
+        return f"0 0 {_format_decimal(self.width)} {_format_decimal(self.height)}"
+
+    @property
+    def has_integer_dimensions(self) -> bool:
+        return (
+            self.width == self.width.to_integral_value()
+            and self.height == self.height.to_integral_value()
+        )
+
+
+def _format_decimal(value: Decimal) -> str:
+    token = format(value, "f")
+    if "." in token:
+        token = token.rstrip("0").rstrip(".")
+    return token or "0"
+
+
+def parse_project_viewbox(
+    raw: str | None,
+    *,
+    context: str = "root viewBox",
+) -> ProjectViewBox:
+    """Parse the registered project root-viewBox subset.
+
+    Equivalent SVG numeric spellings are accepted so callers can distinguish
+    compatible input from canonical authoring. Semantic values stay closed:
+    the origin is exactly zero and dimensions map to positive DrawingML sizes.
+    Fractional dimensions remain read-compatible because imported custom PPTX
+    slide sizes are not necessarily whole CSS pixels.
+    """
+    if raw is None or not raw.strip():
+        raise CanvasContractError(f"{context} is required")
+
+    match = _VIEWBOX_RE.fullmatch(raw)
+    if match is None:
+        raise CanvasContractError(
+            f"{context} must contain exactly four SVG numbers; got {raw!r}"
+        )
+
+    try:
+        values = tuple(Decimal(token) for token in match.groups())
+    except InvalidOperation as exc:
+        raise CanvasContractError(
+            f"{context} contains an invalid numeric value; got {raw!r}"
+        ) from exc
+    if not all(value.is_finite() for value in values):
+        raise CanvasContractError(
+            f"{context} values must be finite; got {raw!r}"
+        )
+
+    x, y, width, height = values
+    if x != 0 or y != 0:
+        raise CanvasContractError(
+            f'{context} origin must be "0 0"; got {raw!r}'
+        )
+    if width <= 0 or height <= 0:
+        raise CanvasContractError(
+            f"{context} width and height must be positive; got {raw!r}"
+        )
+    viewbox = ProjectViewBox(width=width, height=height)

@@ -1,0 +1,119 @@
+"""In-memory expansion of project icons and static local ``<use>`` elements.
+
+The icon placeholder ``<use data-icon="...">`` is a project-internal SVG
+extension; standard renderers (browsers, PowerPoint's SVG parser) and our
+own DrawingML dispatcher do not understand it. ``finalize_svg`` already
+expands it on disk into ``svg_final/``; this module provides the same
+expansion in memory so ``svg_to_pptx`` can consume ``svg_output/`` directly
+without first running the on-disk finalize step.
+
+Public API:
+    expand_use_data_icons(root, icons_dir) -> int
+        Walk the SVG element tree, replace every ``<use data-icon="...">``
+        with its expanded ``<g>`` group of primitive shapes, and return
+        the number of replacements made.
+    expand_local_use_references(root) -> int
+        Materialize same-document ``href="#id"`` references, including
+        ``<symbol>`` viewBox mapping, and return the number of instances.
+    expand_local_use_references_in_file(svg_path) -> int
+        Apply the same expansion to an SVG file in place.
+
+The heavy lifting (icon resolution, color application, scaling) is
+delegated to ``svg_finalize.embed_icons`` so the two pipelines stay
+behaviourally aligned.
+"""
+
+from __future__ import annotations
+
+import copy
+import math
+import re
+import sys
+from pathlib import Path
+from xml.etree import ElementTree as ET
+
+
+SVG_NS = 'http://www.w3.org/2000/svg'
+XLINK_NS = 'http://www.w3.org/1999/xlink'
+
+_LOCAL_HREF_RE = re.compile(r'^#([^#\s]+)$')
+_LENGTH_RE = re.compile(
+    r'^\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)\s*(?:px)?\s*$'
+)
+_VIEWBOX_SPLIT_RE = re.compile(r'[\s,]+')
+_URL_REF_RE = re.compile(r'''url\(#([^#\s()'"\\]+)\)''')
+_URL_FUNCTION_RE = re.compile(r'\burl\s*\([^)]*\)', re.IGNORECASE)
+_URL_FUNCTION_START_RE = re.compile(r'\burl\s*\(', re.IGNORECASE)
+_MAX_LOCAL_USE_DEPTH = 64
+_MAX_LOCAL_USE_INSTANCES = 10_000
+_NON_REUSABLE_METADATA_PREFIXES = (
+    'data-pptx-authoring',
+    'data-pptx-object',
+    'data-pptx-prst',
+    'data-pptx-frame',
+    'data-pptx-av-',
+    'data-pptx-layer',
+    'data-pptx-replace-with',
+    'data-pptx-replacement-',
+    'data-pptx-import-source',
+    'data-pptx-fallback-',
+    'data-pptx-native',
+    'data-pptx-visual-status',
+    'data-pptx-route-status',
+    'data-pptx-placeholder',
+)
+_REFERENCE_TAGS = frozenset({
+    'symbol', 'g', 'use',
+    'rect', 'circle', 'ellipse', 'line', 'path', 'polygon', 'polyline',
+    'text', 'image',
+})
+
+
+class UseExpansionError(ValueError):
+    """Raised when a static local ``<use>`` cannot be expanded safely."""
+
+
+def _local_tag(elem: ET.Element) -> str:
+    """Return an ElementTree node's local tag name."""
+    return elem.tag.rsplit('}', 1)[-1] if '}' in str(elem.tag) else str(elem.tag)
+
+
+def _qualified_tag(elem: ET.Element, local: str) -> str:
+    """Return ``local`` in the same namespace as ``elem``."""
+    tag = str(elem.tag)
+    if tag.startswith('{') and '}' in tag:
+        return f'{tag.split("}", 1)[0]}}}{local}'
+    return local
+
+
+def _fmt_number(value: float) -> str:
+    """Format a finite SVG transform number without negative zero."""
+    if abs(value) < 1e-12:
+        value = 0.0
+    return f'{value:.12g}'
+
+
+def _numeric_length(
+    elem: ET.Element,
+    name: str,
+    default: float | None = None,
+) -> float | None:
+    """Parse a unitless/px local-use geometry value."""
+    raw = elem.get(name)
+    if raw is None:
+        return default
+    match = _LENGTH_RE.fullmatch(raw)
+    if match is None:
+        raise UseExpansionError(
+            f'<use> {name} must be a finite unitless or px value, got {raw!r}'
+        )
+    value = float(match.group(1))
+    if not math.isfinite(value):
+        raise UseExpansionError(f'<use> {name} must be finite, got {raw!r}')
+    return value
+
+
+def _parse_viewbox(symbol: ET.Element) -> tuple[float, float, float, float]:
+    """Parse a positive four-number symbol viewBox."""
+    raw = symbol.get('viewBox', '')
+    parts = [part for part in _VIEWBOX_SPLIT_RE.split(raw.strip()) if part]

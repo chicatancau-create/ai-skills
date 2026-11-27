@@ -1,0 +1,92 @@
+# 从我的听记里仅按关键词搜索（"从我的听记里搜技术方案"）
+dws minutes list mine --query "技术方案" --format json
+```
+
+### 搜索无结果时的 Fallback 策略
+
+1. `--query` 无结果 --> 尝试缩短关键词（如「神威数智需求变更沟通会议」缩短为「神威数智」）
+2. 仍无结果 --> 扩大搜索范围（`list mine` 换为 `list all`）
+3. 仍无结果 --> 放宽时间范围（扩大 `--start` / `--end`）
+4. 最终无结果 --> 如实告知用户未找到匹配的听记，建议用户确认关键词或时间范围
+
+## 转写翻页异常处理
+
+### 翻页空响应防御规则（必须遵守）
+
+`get transcription` 使用 `--next-token` 进行分页查询。在自动翻页过程中，可能遇到以下异常情况：
+
+| 异常现象 | 含义 | 处理方式 |
+|----------|------|----------|
+| 返回 JSON 中不包含 `nextToken` 字段 | 已到达最后一页，无更多数据 | 正常终止翻页，拼合已拉取内容 |
+| `nextToken` 字段值为空字符串 `""` | 等同于无 nextToken，已到达最后一页 | 正常终止翻页 |
+| 使用同一个 `next-token` 值连续 2 次返回 stdout 为空 | 服务端临时异常或该 token 已失效 | 立即终止翻页，不再重试；基于已拉取的内容进行分析 |
+| 返回 JSON 但 `paragraphList` 为空数组 `[]` | 当前页无内容（可能是中间空页） | 如果有 nextToken 则继续翻页；如果无 nextToken 则终止 |
+
+### 翻页流程伪代码
+
+```
+已累积文本 = ""
+当前token = ""（首页不传）
+连续空响应计数 = 0
+上一次token = null
+
+loop:
+  调用 get transcription --id <uuid> [--next-token 当前token]
+  
+  if stdout 为空 or 返回无效:
+    if 当前token == 上一次token:
+      连续空响应计数 += 1
+      if 连续空响应计数 >= 2:
+        终止翻页，输出已累积内容
+        break
+    else:
+      连续空响应计数 = 1
+    上一次token = 当前token
+    continue
+  
+  连续空响应计数 = 0
+  拼合本页转写文本到已累积文本
+  
+  if len(已累积文本) > 12000:
+    暂停翻页
+    询问用户："当前已拉取约 N 字符，已达上限，是否继续？"
+    if 用户拒绝: break
+  
+  if 返回中无 nextToken 或 nextToken 为空:
+    break（最后一页）
+  
+  上一次token = 当前token
+  当前token = 返回的 nextToken
+```
+
+### 严禁的翻页行为
+
+- [禁止] 同一个 next-token 值连续重试超过 2 次
+- [禁止] 翻页失败后换用不同的 flag 名（如 --next-token 换成 --nextToken）重试
+- [禁止] 累积超过 12000 字符后不暂停，继续拉取所有页
+- [禁止] 拉到空页就立即放弃全部已累积内容，应基于已有内容进行分析
+
+## 注意事项
+- `taskUuid` 是听记的唯一标识，所有 get/update 操作均以此为入参
+- `record start` 对应 MCP 工具 `execute_listening_note_command` 的 `cmd=create`，通常会返回可继续控制录音的 `taskUuid/uuid`
+- `record pause` / `record resume` / `record stop` 对应 `cmd=pause/resume/end`，需要传入 `--id`（映射 MCP 入参 `uuid`）
+- 如果用户传入听记 URL（格式: `https://shanji.dingtalk.com/app/transcribes/<taskUuid>`），直接从路径末段提取 taskUuid 作为 `--id` 参数，无需再调用 list 查询
+- `list mine`、`list shared`、`list all` 统一走 `list_by_keyword_and_time_range` 链路，通过 `belongingConditionId` 区分（`created` / `shared` / `noLimit`）
+- 三个 list 命令均支持 `--max`、`--next-token` 分页及 `--query`、`--start`、`--end` 筛选
+- `list mine`、`list shared` 默认每页 20 条，`list all` 默认每页 10 条
+- `get summary` 返回 AI 生成的结构化 Markdown 摘要
+- `get transcription` 的 `--direction` 控制时间排序: 0=正序(默认), 1=倒序；当用户明确要求查看/分析转写原文时，默认自动翻页拉取全部原文（不需要用户手动说"拉第一页"），如果用户意图不是专门看原文（如查列表、看摘要），则不应主动调用此命令
+- `get transcription` 默认按"时间线"返回各段落，**拉完后 AI 必须主动追问用户"是否需要按发言人分组聚类并提取核心内容"**；用户确认后 AI 在本地完成聚类与摘要，并进一步引导用户通过关键词模糊匹配（如"李总主要讲了战略规划"）确认"发言人编号 ↔ 真实姓名"的映射，最终调用 `speaker replace` 写回。完整工作流见对应命令章节的"四阶段工作流"
+- `get batch` 支持一次查询多个听记，用逗号分隔 taskUuid
+- `get audio` 返回听记原始音频/视频文件的 OSS 地址，操作人需拥有该听记"读"权限及以上；以下场景不返回地址：听记已被删除、A1 无痕模式听记、临存过期的听记（媒体未准备好或临时存储已过期）
+- `update summary` 全量覆盖纪要内容，不触发 AI 重新生成；适用于手动编辑或 AI Agent 修改纪要
+- `mind-graph create` 触发异步任务，需通过 `mind-graph status` 轮询状态（0=进行中，1=成功，2=失败）
+- `speaker replace` 精确匹配源发言人昵称，替换所有段落并自动更新纪要和待办中的发言人信息
+- `hot-word add` 支持逗号分隔批量添加，每个热词不超过 10 个汉字或 5 个英文单词
+- `replace-text` 区分大小写精确匹配，同时替换转写段落和纪要摘要中的文字
+- 文件上传流程为三步：`upload create` → HTTP PUT 上传 → `upload complete`；`upload complete` 幂等，同一 sessionId 重复调用不会重复创建
+- `upload create` 返回的 `presignedUrl` 用于 HTTP PUT 上传文件，上传时不需要带任何 HEADER
+- 所有需要 taskUuid 的子命令均支持 --task-uuid / --uuid / --url 作为 --id 的隐藏别名，传入后自动降级，无需报错重试
+- 同一个 taskUuid + 同一个命令，最多重试 1 次（总计最多调用 2 次），dingOpenErrcode=300/403/404 为不可重试错误
+- 当用户提供关键词或时间范围时，必须使用 --query / --start / --end 在服务端筛选，严禁全量拉取后本地过滤。**严禁在 dws 命令后拼接 shell 管道做本地过滤**（如 `| grep "关键词"` / `| head -50` / `python -c "import json;..."` / `> /tmp/xxx.txt && grep ...`），这些写法在 Windows 沙箱里 100% 失败（`head`/`grep`/`wait` 不是 Windows 内置命令），即使在 macOS 上也会因 list 本身失败导致整个管道链路断掉。正确做法是始终使用 `--query` / `--start` / `--end` / `--max` 等 cli 内置参数在服务端完成筛选
+- `dws minutes list` 后面**必须跟 `mine` / `shared` / `all` 子命令**，不能直接 `dws minutes list --start ... --end ...`（会报 `unknown flag: --start`）。正确写法：`dws minutes list mine --start ... --end ...` 或 `dws minutes list all --query "关键词" --start ... --end ...`

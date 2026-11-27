@@ -1,0 +1,124 @@
+    extra_width = img_width - crop_width
+    extra_height = img_height - crop_height
+    
+    left = int(extra_width * x_anchor)
+    top = int(extra_height * y_anchor)
+    right = left + crop_width
+    bottom = top + crop_height
+    
+    # Crop only, no scaling
+    return img.crop((left, top, right, bottom))
+
+
+def process_svg_images(
+    svg_file: str,
+    output_dir: str | Path | None = None,
+    dry_run: bool = False,
+    verbose: bool = True,
+) -> tuple[int, int]:
+    """
+    Process images in an SVG file, cropping based on the preserveAspectRatio attribute.
+
+    Args:
+        svg_file: SVG file path
+        output_dir: Output directory for cropped images (default: images/cropped/)
+        dry_run: Preview only, no actual processing
+        verbose: Verbose output
+
+    Returns:
+        (processed_count, error_count)
+    """
+    svg_path = Path(svg_file)
+    svg_dir = svg_path.parent
+    
+    # Default output directory
+    if output_dir is None:
+        # Find the project's images directory
+        # Parent directory of svg_output or svg_final, under images
+        project_dir = svg_dir.parent
+        output_dir = project_dir / 'images' / 'cropped'
+    else:
+        output_dir = Path(output_dir)
+    
+    # Parse SVG
+    try:
+        ET.register_namespace('', 'http://www.w3.org/2000/svg')
+        ET.register_namespace('xlink', 'http://www.w3.org/1999/xlink')
+        tree = ET.parse(str(svg_path))
+        root = tree.getroot()
+    except Exception as e:
+        if verbose:
+            print(f"  [ERROR] Failed to parse SVG: {e}")
+        return (0, 1)
+    
+    ns = {'svg': 'http://www.w3.org/2000/svg', 'xlink': 'http://www.w3.org/1999/xlink'}
+    
+    processed_count = 0
+    error_count = 0
+    modified = False
+    
+    # Find all image elements
+    for image in root.iter('{http://www.w3.org/2000/svg}image'):
+        # Get href attribute
+        href = image.get('{http://www.w3.org/1999/xlink}href') or image.get('href')
+        if not href:
+            continue
+        
+        # Skip Base64 inline images
+        if href.startswith('data:'):
+            continue
+        
+        # Get preserveAspectRatio attribute
+        par = image.get('preserveAspectRatio', '')
+        align, mode = parse_preserve_aspect_ratio(par)
+        
+        # Only process slice mode
+        if mode != 'slice':
+            continue
+        
+        # Get target dimensions
+        try:
+            target_width = int(float(image.get('width', 0)))
+            target_height = int(float(image.get('height', 0)))
+        except (ValueError, TypeError):
+            continue
+        
+        if target_width <= 0 or target_height <= 0:
+            continue
+        
+        # Parse image path
+        href_decoded = unquote(href)
+        if href_decoded.startswith('../'):
+            img_path = (svg_dir / href_decoded).resolve()
+        else:
+            img_path = (svg_dir / href_decoded).resolve()
+        
+        if not img_path.exists():
+            if verbose:
+                print(f"    [SKIP] Image not found: {href}")
+            continue
+        
+        # Get crop anchor point
+        x_anchor, y_anchor = get_crop_anchor(align)
+        
+        if dry_run:
+            if verbose:
+                print(f"    [DRY] {img_path.name} -> {target_width}x{target_height} "
+                      f"(align: {align}, anchor: {x_anchor},{y_anchor})")
+            processed_count += 1
+            continue
+        
+        # Create output directory
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        try:
+            # Open and process image
+            with Image.open(img_path) as source:
+                img = ImageOps.exif_transpose(source)
+            output_is_png = img_path.suffix.lower() == '.png'
+
+            # Preserve alpha for PNG assets such as translucent overlays.
+            if output_is_png:
+                if img.mode == 'P':
+                    img = img.convert('RGBA')
+                elif img.mode not in ('RGBA', 'LA', 'RGB', 'L'):

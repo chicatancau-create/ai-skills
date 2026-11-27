@@ -1,0 +1,103 @@
+    with lock:
+        entry = cache.get(path)
+        if entry is None or entry[0] != mtime:
+            return None
+        return entry[1]
+
+
+def _cache_put(cache: dict, lock: threading.Lock, path: str, mtime: float, value) -> None:
+    with lock:
+        cache[path] = (mtime, value)
+
+
+def _normalize_preview_hrefs(root: ET.Element) -> None:
+    """Normalize legacy XLink references in the browser-only SVG copy.
+
+    ElementTree otherwise serializes an unregistered/legacy namespace with an
+    arbitrary prefix. The HTML SVG parser only gives special namespace handling
+    to ``xlink:href``; an arbitrary prefix can therefore render as an inert
+    attribute after ``innerHTML`` insertion. SVG 2 ``href`` works for both
+    images and local ``use`` references and avoids that parser boundary.
+    """
+    for elem in root.iter():
+        legacy_href = elem.get(_XLINK_HREF)
+        if legacy_href is None:
+            continue
+        if elem.get('href') is None:
+            elem.set('href', legacy_href)
+        elem.attrib.pop(_XLINK_HREF, None)
+
+
+# Lock / liveness helpers are shared with confirm_ui via server_common.
+
+
+def _inline_icons(
+    content: str,
+    icons_dir: Path,
+    target_dir: Path,
+) -> tuple[str, list[dict]]:
+    """Replace <use data-icon="..."/> with rendered <g> for browser preview.
+
+    Resolve icons only from the prepared project directory.
+    Returns (rewritten_content, warnings). Each warning is
+    ``{"icon": <name>, "reason": <str>}`` so the frontend can surface
+    "icon X not found" to the user instead of silently dropping it.
+    """
+    warnings: list[dict] = []
+    matches = list(_USE_ICON_PATTERN.finditer(content))
+    if not matches:
+        return content, warnings
+    new_content = content
+    for match in reversed(matches):
+        use_str = match.group(0)
+        icon_name: str = ''
+        try:
+            attrs = parse_use_element(use_str)
+            icon_name = str(attrs.get('icon') or '')
+            if not icon_name:
+                warnings.append({'icon': '', 'reason': 'missing data-icon attribute'})
+                continue
+            icon_path, _ = resolve_icon_path(icon_name, icons_dir)
+            color = str(attrs.get('fill', '#000000'))
+            elements, style, base_size = extract_paths_from_icon(
+                icon_path,
+                color,
+                target_dir=target_dir,
+            )
+        except Exception as exc:
+            warnings.append({'icon': icon_name, 'reason': f'{type(exc).__name__}: {exc}'})
+            logger.warning('icon inline failed: name=%r reason=%s', icon_name, exc)
+            continue
+        if not elements:
+            warnings.append({'icon': icon_name, 'reason': 'no renderable paths in icon'})
+            continue
+        replacement = generate_icon_group(attrs, elements, style, base_size)
+        id_match = re.search(r'\bid="([^"]+)"', use_str)
+        if id_match:
+            preview_attrs = [
+                f'id="{_xml_attr(id_match.group(1))}"',
+                f'data-icon="{_xml_attr(icon_name)}"',
+            ]
+            for key in ('x', 'y', 'width', 'height'):
+                if key in attrs:
+                    preview_attrs.append(f'data-use-{key}="{_xml_attr(attrs[key])}"')
+            if 'transform' in attrs:
+                preview_attrs.append('data-use-has-transform="1"')
+            replacement = replacement.replace(
+                '<g ', f'<g {" ".join(preview_attrs)} ', 1,
+            )
+        new_content = new_content[:match.start()] + replacement + new_content[match.end():]
+    return new_content, warnings
+
+
+def _strip_edited_inline_geometry(
+    elem: ET.Element,
+    attr_names: Iterable[str],
+) -> None:
+    """Remove style declarations superseded by edited geometry attributes."""
+    style = elem.get('style')
+    if not style:
+        return
+    tag = elem.tag.rsplit('}', 1)[-1] if '}' in elem.tag else elem.tag
+    supported = INLINE_GEOMETRY_PROPERTIES.get(tag, frozenset())
+    edited = {

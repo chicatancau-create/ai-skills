@@ -1,0 +1,127 @@
+# -*- coding: utf-8 -*-
+"""Keep the headroom hop in front of cc-switch, even after cc-switch rewrites configs.
+
+WHY THIS EXISTS
+---------------
+cc-switch's mode controller rewrites the client config on every attach/detach.
+Observed 2026-11-15 01:55:56 detach -> 01:56:04 attach: both
+  ~/.claude/settings.json  env.ANTHROPIC_BASE_URL
+  ~/.codex/config.toml     [model_providers.custom] base_url
+were reset from http://127.0.0.1:8787 back to http://127.0.0.1:15721, silently
+bypassing headroom (no error anywhere -- tokens just stop being saved).
+Re-running the wiring by hand is not a fix; this guard re-asserts it.
+
+RESPECTS THE USER
+-----------------
+It only rewrites when cc-switch reports mode=proxy AND attached=true for that app,
+i.e. cc-switch itself just put 15721 there.  If the user deliberately detaches to
+go direct (mode=direct), the guard leaves the config alone.  It also refuses to
+point an agent at headroom unless headroom's /health actually answers 200.
+
+USAGE
+    python wire_guard.py --status     report only
+    python wire_guard.py --once       fix now if needed (used by ops.py)
+    python wire_guard.py --watch      loop forever (used by the logon entry)
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+HOME = r"C:\Users\Admin"
+CLAUDE = os.path.join(HOME, ".claude", "settings.json")
+CODEX = os.path.join(HOME, ".codex", "config.toml")
+LIVE = os.path.join(HOME, ".cc-switch", "live-state.json")
+HR = r"D:\uv\bin\headroom.exe"
+BACKUP = r"G:\AIrenwu\03_备份\_backup\headroom-wire"
+STATE = os.path.join(os.environ.get("AI_SHARED_SKILLS_STATE_DIR", r"D:\AI-Tool-State"),
+                     "wire-guard")
+LOG = os.path.join(STATE, "guard.log")
+
+WANT_CLAUDE = "http://127.0.0.1:8787"
+WANT_CODEX = "http://127.0.0.1:8787/v1"
+CC_CLAUDE = "http://127.0.0.1:15721"
+CC_CODEX = "http://127.0.0.1:15721/v1"
+
+INTERVAL = 20          # seconds between watch ticks
+START_COOLDOWN = 300   # don't try to start headroom more than once per 5 min
+_last_start = 0.0
+
+
+def log(msg):
+    line = "%s %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg)
+    try:
+        os.makedirs(STATE, exist_ok=True)
+        with open(LOG, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+    if "--watch" not in sys.argv:
+        print(line)
+
+
+def healthy(port=8787, t=4):
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:%d/health" % port, timeout=t) as r:
+            return r.status == 200 and b'"healthy"' in r.read()
+    except Exception:
+        return False
+
+
+def read_json(p):
+    for _ in range(3):
+        try:
+            with open(p, encoding="utf-8") as f:
+                return json.load(f)
+        except (PermissionError, OSError):
+            time.sleep(0.4)
+        except ValueError:
+            return None
+    return None
+
+
+def write_text(p, txt):
+    """Atomic-ish replace with retry: cc-switch may hold the file briefly."""
+    tmp = p + ".guardtmp"
+    for attempt in range(4):
+        try:
+            with open(tmp, "w", encoding="utf-8", newline="") as f:
+                f.write(txt)
+            os.replace(tmp, p)
+            return True
+        except (PermissionError, OSError):
+            time.sleep(0.5 * (attempt + 1))
+    try:
+        if os.path.isfile(tmp):
+            os.remove(tmp)
+    except OSError:
+        pass
+    return False
+
+
+def backup(p, tag):
+    try:
+        d = os.path.join(BACKUP, tag)
+        os.makedirs(d, exist_ok=True)
+        dst = os.path.join(d, "%s-guard-%s" % (time.strftime("%Y%m%d-%H%M%S"), os.path.basename(p)))
+        shutil.copy2(p, dst)
+        return dst
+    except OSError as e:
+        log("backup failed for %s: %s" % (p, e))
+        return None
+
+
+def cc_mode(app):
+    L = read_json(LIVE)
+    if not isinstance(L, dict):
+        return None, None
+    a = (L.get("apps") or {}).get(app) or {}
+    return a.get("mode"), bool(a.get("attached"))
+
+
+def maybe_start_headroom():

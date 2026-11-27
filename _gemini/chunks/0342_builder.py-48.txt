@@ -1,0 +1,103 @@
+                for child in shape_tree
+                if child.tag in _TOP_LEVEL_SHAPE_TAGS
+            )
+        )
+        expected_placeholder_types = tuple(
+            sorted(_FLAT_SYSTEM_PLACEHOLDER_TYPES)
+        )
+        if actual_placeholder_types != expected_placeholder_types:
+            raise RuntimeError(
+                "Flat structure shell must retain only one each of the date, "
+                f"footer, and slide-number hooks: {part_path}"
+            )
+        if expected_layout and root.get("type") != "blank":
+            raise RuntimeError(f"Flat layout is not typed as Blank: {part_path}")
+
+    if verbose:
+        print(
+            "  Flat structure: project-owned Master + Blank Layout "
+            f"({pruned} stock layout(s), "
+            f"{removed_master_shapes + removed_layout_shapes} stock content "
+            "shape(s) removed, "
+            f"{len(retained_master_placeholders) + len(retained_layout_placeholders)} "
+            "system footer hook(s) retained)"
+        )
+        text_style_status = (
+            f"{master_count} master text style(s)"
+            if master_text_style_spec is not None
+            else "stock text defaults retained (no theme contract)"
+        )
+        print(f"  Flat theme: {theme_count} theme part(s), {text_style_status}")
+
+
+def _append_relationship(
+    rels_path: Path,
+    rel_type: str,
+    target: str,
+    *,
+    target_mode: str | None = None,
+) -> str:
+    """Append a relationship entry with the next available rId."""
+    with open(rels_path, 'r', encoding='utf-8') as f:
+        rels_content = f.read()
+
+    rid_numbers = [int(match) for match in re.findall(r'Id="rId(\d+)"', rels_content)]
+    next_rid = f'rId{max(rid_numbers, default=0) + 1}'
+    mode_attr = (
+        f" TargetMode={quoteattr(target_mode)}"
+        if target_mode is not None
+        else ""
+    )
+    rel_xml = (
+        f"  <Relationship Id={quoteattr(next_rid)} "
+        f"Type={quoteattr(rel_type)} Target={quoteattr(target)}{mode_attr}/>"
+    )
+    rels_content = rels_content.replace(
+        '</Relationships>', rel_xml + '\n</Relationships>',
+    )
+
+    with open(rels_path, 'w', encoding='utf-8') as f:
+        f.write(rels_content)
+
+    return next_rid
+
+
+def _add_default_content_type(content_types: str, extension: str, content_type: str) -> str:
+    """Add a Default content type if it is not already present."""
+    ext = extension.lstrip(".")
+    if f'Extension="{ext}"' in content_types:
+        return content_types
+    entry = f'  <Default Extension="{ext}" ContentType="{content_type}"/>'
+    override_pos = content_types.find('<Override ')
+    if override_pos >= 0:
+        return content_types[:override_pos] + entry + '\n' + content_types[override_pos:]
+    return content_types.replace('</Types>', entry + '\n</Types>')
+
+
+def _add_content_type_override(content_types: str, part_name: str, content_type: str) -> str:
+    """Add an Override content type if it is not already present."""
+    normalized = '/' + part_name.lstrip('/')
+    if f'PartName="{normalized}"' in content_types:
+        return content_types
+    extension = PurePosixPath(part_name).suffix.lstrip('.').casefold()
+    try:
+        root = ET.fromstring(content_types)
+    except ET.ParseError:
+        root = None
+    if root is not None:
+        for child in root:
+            if child.tag.rsplit('}', 1)[-1] != 'Default':
+                continue
+            if (
+                child.get('Extension', '').casefold() == extension
+                and child.get('ContentType') == content_type
+            ):
+                return content_types
+    entry = f'  <Override PartName="{normalized}" ContentType="{content_type}"/>'
+    return content_types.replace('</Types>', entry + '\n</Types>')
+
+
+def _content_type_contract(payload: bytes) -> tuple[tuple[str, tuple[tuple[str, str], ...]], ...] | None:
+    """Return the semantic Default/Override roster for exact-byte restoration."""
+    try:
+        root = ET.fromstring(payload)

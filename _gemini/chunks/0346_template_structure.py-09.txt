@@ -1,0 +1,88 @@
+            f"page_layouts P{slide_num:02d}",
+        )
+        if basename.startswith("layout_"):
+            raise TemplateStructureError(
+                f"spec_lock.md page_layouts P{slide_num:02d} cannot select "
+                f"obsolete definition-only template SVG {basename!r}; create "
+                "and select a complete Slide prototype"
+            )
+        prototypes.append(PptxPrototypeReference(
+            slide_num=slide_num,
+            template_basename=basename,
+            svg_path=svg_path,
+            replication_mode=template_replication_mode,
+        ))
+
+    if mode == "structured" and template_adherence and not prototypes:
+        raise TemplateStructureError(
+            "spec_lock.md structured template use requires one page_layouts row per page"
+        )
+    if prototypes and not template_adherence:
+        raise TemplateStructureError(
+            "spec_lock.md page_layouts requires template_adherence: strict or adaptive"
+        )
+    if template_reuse_scope in {"mirror", "layout"} and not prototypes:
+        raise TemplateStructureError(
+            "spec_lock.md template_reuse_scope mirror/layout requires one "
+            "page_layouts row per page"
+        )
+    if template_reuse_scope == "style" and prototypes:
+        raise TemplateStructureError(
+            "spec_lock.md template_reuse_scope: style must omit page_layouts"
+        )
+    if template_reuse_scope == "mirror":
+        non_mirror = sorted({
+            reference.template_basename
+            for reference in prototypes
+            if reference.replication_mode != "mirror"
+        })
+        if non_mirror:
+            raise TemplateStructureError(
+                "spec_lock.md template_reuse_scope: mirror requires a mirror "
+                "template workspace; non-mirror prototype(s): "
+                + ", ".join(non_mirror)
+            )
+    if mode == "structured" and template_reuse_scope is None and prototypes:
+        # Backward compatibility: projects created before the explicit reuse
+        # axis inherit their former behavior. Mirror workspaces stay literal;
+        # standard/fidelity workspaces remain structural layout references.
+        template_reuse_scope = (
+            "mirror"
+            if all(
+                reference.replication_mode == "mirror"
+                for reference in prototypes
+            )
+            else "layout"
+        )
+
+    layout_definitions: list[PptxLayoutDefinition] = []
+    references: list[PptxLayoutReference] = []
+    if mode == "structured":
+        if not layout_rows:
+            raise TemplateStructureError(
+                "spec_lock.md structured mode requires a non-empty "
+                "pptx_layouts definition section"
+            )
+        seen_layout_keys: set[str] = set()
+        for layout_key, raw_value in layout_rows:
+            if not _LAYOUT_KEY_RE.fullmatch(layout_key):
+                raise TemplateStructureError(
+                    f"spec_lock.md has invalid Layout key {layout_key!r}; use 1-64 "
+                    "characters, start with an ASCII letter or digit, and use only "
+                    "ASCII letters, digits, dots, underscores, or hyphens"
+                )
+            if layout_key in seen_layout_keys:
+                raise TemplateStructureError(
+                    f"spec_lock.md pptx_layouts repeats Layout key {layout_key!r}"
+                )
+            seen_layout_keys.add(layout_key)
+            parts = [part.strip() for part in raw_value.split("|")]
+            if len(parts) != 3 or not all(parts):
+                raise TemplateStructureError(
+                    f"spec_lock.md Layout {layout_key!r} must be "
+                    "'<master_key> | <PowerPoint layout name> | "
+                    "<P<NN> or template:<basename>>'"
+                )
+            master_key, layout_name, raw_source = parts
+            if not _MASTER_KEY_RE.fullmatch(master_key):
+                raise TemplateStructureError(

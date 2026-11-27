@@ -1,0 +1,119 @@
+  dws calendar event respond --id <EVENT_ID> --status tentative
+Flags:
+      --id string       日程 ID (必填)
+      --status string   响应状态: needsAction(未操作)|accepted(接受)|declined(拒绝)|tentative(暂定) (必填)
+```
+
+> **说明**：作为日程参会人，设置自己的响应状态（接受、拒绝、暂定）。`--status` 可选值：`needsAction`（未操作，默认值）、`accepted`（接受）、`declined`（拒绝）、`tentative`（暂定）。
+
+## 意图判断
+
+用户说"日程/会议/约会/日历":
+- 查看 → `event list`
+- 详情 → `event get`
+- 创建/约/给自己留时间块/个人日程 → `event create`（带参会人时加 `--attendees`，循环日程加 `--recurrence-*`）
+- 修改/改时间/改描述 → `event update`（支持修改标题、时间、描述、时区、循环规则）
+- 取消/删除 → `event delete`
+- 推荐时间/什么时候有空/协调时间 → `event suggest`
+- 接受/拒绝/暂定日程 → `event respond`
+
+用户说"参会人/与会者":
+- 查看 → `attendee list`
+- 邀请/添加 → `attendee add --attendees <USER_ID>`（可选参会人加 `--optional`）
+- 移除 → `attendee delete --attendees <USER_ID>`
+
+用户说"会议室/订会议室":
+- 哪个空闲 → `room search`
+- 按名找会议室（如「永澄亭」「永澄亭会议室」「约西湖厅」）→ 先在模型层精简名称（剔除「会议室」等通用后缀），再用 `room search --room-name <核心专名>`
+- 预订
+  - 给已有日程订会议室 → `room add --event <已有EVENT_ID> --rooms <ROOM_ID>`
+  - 创建新日程并订会议室 → `event create --rooms`（仅当日程尚不存在时）
+- 取消预定 → `room delete`
+- 分组 → `room list-groups`，取 groupId 后 `room search --group-id`（可再叠加 `--room-name` 在分组内过滤）
+
+用户说"有空吗/忙不忙/闲忙":
+- 查询用户闲忙 → `busy search --users <USER_ID>`
+- 查询会议室闲忙 → `busy search --rooms <ROOM_ID>`
+- 用户 + 会议室一起查 → `busy search --users <USER_ID> --rooms <ROOM_ID>`
+
+用户说"日程附件/给会议加文件/上传日程材料":
+- 添加 → `attachment add`（先用钉盘上传得 fileId，再 `attachment add --files <fileId>:<name>`）
+
+用户说"我有几个日历/查所有日历/共享日历本":
+- 列表 → `book list`（主日历 id 固定为 `primary`）
+
+用户说"查下xxx的日程安排":
+- 查询是否有共享关系 -> `book list`
+  - 场景1: 共享日历本中有来自 xxx 的，且权限大于reader，那么通过 `event list --calendar-id <xxx的日历本id> `可查到xxx完整的日程安排
+  - 场景2: 共享日历本中没有来自 xxx 的。那么通过 `busy search -- <USER_ID>`，查询xxx的忙闲安排
+
+## 核心工作流
+
+### 创建会议 + 邀请参会人 + 预订会议室
+
+`event create` 支持 `--attendees` 在创建时直接指定参会人，**自 calendar MCP v2 起**也支持 `--rooms` 在创建时一并预定会议室；旧流程的「先创建日程再 `room add`」依然有效。
+
+**关键区分**：`event create --rooms` 仅在**日程尚不存在**时使用；若日程已存在（同一会话刚创建、或用户指向已有日程），必须走「给已有日程订会议室」流程（见下方），**禁止**重复 `event create`。
+
+**方式一：创建时一步完成（仅当日程尚不存在时推荐）**
+
+```bash
+# Step 1: 搜索空闲会议室，记下 roomId
+dws calendar room search --start "2026-03-10T14:00:00+08:00" --end "2026-03-10T15:00:00+08:00" --format json
+# 若返回错误(会议室超100条)，先查分组再按分组搜索:
+#   dws calendar room list-groups --format json
+#   dws calendar room search --start ... --end ... --group-id <GROUP_ID> --format json
+
+# Step 2: 创建日程时直接指定参会人 + 会议室
+dws calendar event create --title "Q1 复盘会" \
+  --start "2026-03-10T14:00:00+08:00" --end "2026-03-10T15:00:00+08:00" \
+  --attendees userId1,userId2 \
+  --rooms <ROOM_ID_FROM_STEP1> --format json
+```
+
+**方式二：先创建日程，再单独添加参会人 / 会议室**
+
+```bash
+# Step 1: 创建日程 — 提取 eventId
+dws calendar event create --title "Q1 复盘会" \
+  --start "2026-03-10T14:00:00+08:00" --end "2026-03-10T15:00:00+08:00" --format json
+
+# Step 2: 添加参会人（必须用 Step 1 返回的 eventId）
+dws calendar attendee add --event <EVENT_ID> --attendees userId1,userId2 --format json
+
+# Step 3: 搜索空闲会议室
+dws calendar room search --start ... --end ... --format json
+
+# Step 4: 预定会议室
+dws calendar room add --event <EVENT_ID> --rooms <ROOM_ID> --format json
+```
+
+### 给已存在的日程加附件
+
+```bash
+# Step 1: 用钉盘上传文件，得到 fileId（参见 dws drive 系列命令）
+# Step 2: 把附件挂到指定日程
+dws calendar attachment add --event <EVENT_ID> --files <FILE_ID>:report.pdf,<FILE_ID2>:slides.pptx --format json
+```
+
+### 查看日程列表
+
+```bash
+dws calendar event list --start "2026-03-10T14:00:00+08:00" --end "2026-03-10T15:00:00+08:00" --format json
+```
+
+## 上下文传递表
+
+| 操作 | 从返回中提取 | 用于 |
+|------|-------------|------|
+| `event create` | `eventId` | attendee/room/attachment 操作的 --event |
+| `event list` | `events[].eventId` | event get/update/delete/respond 的 --id |
+| `event suggest` | 推荐的时间段 | event create 的 --start/--end |
+| `event respond` | 响应结果 | — |
+| `room search` | `rooms[].roomId` | room add 的 --rooms 或 event create 的 --rooms |
+| `room list-groups` | `groups[].groupId` | room search 的 --group-id |
+| `book list` | `id`（如 `primary`） | event list/get 的 --calendar-id |
+| 钉盘上传 | 文件 `fileId` | attachment add 的 --files `<fileId>:<name>` |
+
+## 注意事项
+

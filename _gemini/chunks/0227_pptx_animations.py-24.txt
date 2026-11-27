@@ -1,0 +1,123 @@
+        if not re.fullmatch(r'\d+', raw):
+            errors.append(
+                f'object-animation {attribute} must be numeric; found {raw!r}'
+            )
+            return 0.0
+        number = int(raw)
+        if number > 100000:
+            errors.append(
+                f'object-animation {attribute} exceeds 100000; found {number}'
+            )
+        return number / 100000
+
+    accelerate = ratio('accel')
+    decelerate = ratio('decel')
+    if accelerate + decelerate > 1:
+        errors.append('object-animation accel + decel exceeds 100000')
+    raw_bounce_values = {
+        node.get(_qn(_P14_NS, 'bounceEnd'))
+        for node in row.iter()
+        if node.get(_qn(_P14_NS, 'bounceEnd')) is not None
+    }
+    preset_bounce = row.get(_qn(_P14_NS, 'presetBounceEnd'))
+    if preset_bounce is not None:
+        raw_bounce_values.add(preset_bounce)
+    bounce_end = 0.0
+    if len(raw_bounce_values) > 1:
+        errors.append(
+            'object-animation behaviors disagree on p14:bounceEnd'
+        )
+    elif raw_bounce_values:
+        raw_bounce = next(iter(raw_bounce_values))
+        if raw_bounce is None or not re.fullmatch(r'\d+', raw_bounce):
+            errors.append(
+                f'object-animation p14:bounceEnd must be numeric; '
+                f'found {raw_bounce!r}'
+            )
+        else:
+            bounce_value = int(raw_bounce)
+            if bounce_value > 100000:
+                errors.append(
+                    'object-animation p14:bounceEnd exceeds 100000; '
+                    f'found {bounce_value}'
+                )
+            bounce_end = bounce_value / 100000
+    auto_reverse = row.get('autoRev') == '1'
+    rewind = row.get('fill') == 'remove'
+    restart = {
+        None: 'never',
+        'always': 'always',
+        'whenNotActive': 'when-not-active',
+        'never': 'never',
+    }.get(row.get('restart'))
+    if restart is None:
+        errors.append(
+            f'object-animation restart has unknown value: {row.get("restart")!r}'
+        )
+        restart = 'never'
+
+    playback_duration_ms = None
+    if duration_ms is not None:
+        one_play = duration_ms * (2 if auto_reverse else 1)
+        if repeat_duration_ms is not None:
+            playback_duration_ms = repeat_duration_ms
+        elif repeat_count is not None:
+            playback_duration_ms = max(1, round(one_play * repeat_count))
+        else:
+            playback_duration_ms = one_play
+    return (
+        repeat_count,
+        repeat_duration_ms,
+        auto_reverse,
+        rewind,
+        accelerate,
+        decelerate,
+        bounce_end,
+        restart,
+        playback_duration_ms,
+    )
+
+
+def _after_effect_summary(
+    row: ET.Element,
+    errors: list[str],
+) -> tuple[str, str | None]:
+    sub_timing = row.find(_qn(PML_NS, 'subTnLst'))
+    if sub_timing is None:
+        return 'none', None
+    after_nodes = [
+        node
+        for node in list(sub_timing)
+        if any(
+            ctn.get('afterEffect') == '1'
+            for ctn in node.iter(_qn(PML_NS, 'cTn'))
+        )
+    ]
+    if not after_nodes:
+        return 'none', None
+    if len(after_nodes) != 1:
+        errors.append(
+            f'object-animation row contains {len(after_nodes)} after effects'
+        )
+        return 'none', None
+    node = after_nodes[0]
+    if node.tag == _qn(PML_NS, 'animClr'):
+        return (
+            'dim',
+            _read_animation_color(node, errors, 'animation dim after effect'),
+        )
+    if node.tag == _qn(PML_NS, 'set'):
+        ctns = list(node.iter(_qn(PML_NS, 'cTn')))
+        master_relation = ctns[0].get('masterRel') if ctns else None
+        if master_relation == 'sameClick':
+            return 'hide', None
+        if master_relation == 'nextClick':
+            return 'hide-on-next-click', None
+    errors.append('object-animation row contains an unknown after effect')
+    return 'none', None
+
+
+def _sound_summary(
+    row: ET.Element,
+    errors: list[str],
+) -> tuple[str | None, str | None]:

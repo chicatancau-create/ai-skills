@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""
+PDF to Markdown Converter
+Uses PyMuPDF to extract PDF text content and convert to Markdown format.
+Supports heading levels, bold, italic, and list detection.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import math
+import os
+import re
+import sys
+import unicodedata
+from pathlib import Path
+from collections import Counter
+
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from console_encoding import configure_utf8_stdio  # noqa: E402
+from _batch import run_path_batch  # noqa: E402
+from _conversion_profile import write_conversion_profile_best_effort  # noqa: E402
+
+configure_utf8_stdio()
+
+# Help must not depend on the optional conversion packages: a stdlib-only
+# interpreter still gets the argparse usage (docs/rules/code-style.md §4).
+_HELP_REQUESTED = __name__ == "__main__" and any(
+    arg in {"-h", "--help"} for arg in sys.argv[1:]
+)
+if not _HELP_REQUESTED:
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        print("[ERROR] PyMuPDF not installed. Run: pip install PyMuPDF", file=sys.stderr)
+        sys.exit(1)
+
+FONT_BODY_SIZE = 12
+FONT_H1_SIZE = 24
+FONT_H2_SIZE = 18
+FONT_H3_SIZE = 14
+HEADER_FOOTER_SAMPLE_LIMIT = 40
+HEADER_FOOTER_EDGE_SAMPLE_SIZE = 20
+CONTROL_CHARS_RE = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]')
+
+
+def analyze_font_sizes(doc: fitz.Document) -> dict[str, float]:
+    """Analyze font size distribution to infer heading levels.
+
+    Args:
+        doc: Open PDF document.
+
+    Returns:
+        A size mapping containing body and inferred heading sizes.
+    """
+    size_counter = Counter()
+
+    for page in doc:
+        blocks = page.get_text("dict")["blocks"]
+        for block in blocks:
+            if block["type"] == 0:
+                for line in block["lines"]:
+                    for span in line["spans"]:
+                        size = round(span["size"], 1)
+                        text = span["text"].strip()
+                        if text:
+                            size_counter[size] += len(text)
+
+    if not size_counter:
+        return {
+            "body": FONT_BODY_SIZE,
+            "h1": FONT_H1_SIZE,
+            "h2": FONT_H2_SIZE,
+            "h3": FONT_H3_SIZE,
+        }
+
+    sorted_sizes = sorted(size_counter.items(), key=lambda x: x[1], reverse=True)
+    body_size = sorted_sizes[0][0]
+
+    all_sizes = sorted(size_counter.keys(), reverse=True)
+    larger_sizes = [s for s in all_sizes if s > body_size + 1]
+
+    size_map = {"body": body_size}
+    if len(larger_sizes) >= 1:
+        size_map["h1"] = larger_sizes[0]
+    if len(larger_sizes) >= 2:
+        size_map["h2"] = larger_sizes[1]
+    if len(larger_sizes) >= 3:
+        size_map["h3"] = larger_sizes[2]
+
+    return size_map
+
+
+def get_heading_level(size: float, size_map: dict, text: str = "",
+                      flags: int = 0, strict: bool = True) -> int:
+    """
+    Determine heading level using multiple heuristics.
+
+    Args:
+        size: Font size
+        size_map: Font size mapping
+        text: Text content (used for additional heuristics)
+        flags: Font flags (bit 4 = bold)
+        strict: Strict mode, requires more conditions to be met
+
+    Returns:
+        Heading level (0 = body text, 1-3 = H1-H3)
+    """
+    # Initial determination based on font size
+    level = 0
+    if "h1" in size_map and size >= size_map["h1"] - 0.5:
+        level = 1
+    elif "h2" in size_map and size >= size_map["h2"] - 0.5:
+        level = 2
+    elif "h3" in size_map and size >= size_map["h3"] - 0.5:
+        level = 3
+
+    if level == 0:
+        return 0
+
+    # Non-strict mode returns directly (backward compatible)
+    if not strict or not text:
+        return level
+
+    # Strict mode: additional validation conditions
+    text = text.strip()
+
+    # Exclusion: text too long is unlikely to be a heading
+    if len(text) > 80:
+        return 0
+

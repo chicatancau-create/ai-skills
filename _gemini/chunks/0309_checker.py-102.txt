@@ -1,0 +1,103 @@
+                if result['errors']:
+                    f.write(f"\nErrors:\n")
+                    for error in result['errors']:
+                        f.write(f"  - {error}\n")
+
+                if result['warnings']:
+                    f.write(f"\nWarnings:\n")
+                    for warning in result['warnings']:
+                        f.write(f"  - {warning}\n")
+
+                f.write("\n" + "-" * 80 + "\n\n")
+
+            # Write summary
+            f.write("\n" + "=" * 80 + "\n")
+            f.write("Check Summary\n")
+            f.write("=" * 80 + "\n\n")
+            f.write(f"Total files: {self.summary['total']}\n")
+            f.write(f"Fully passed: {self.summary['passed']}\n")
+            f.write(f"With warnings: {self.summary['warnings']}\n")
+            f.write(f"With errors: {self.summary['errors']}\n")
+
+        print(f"\n[REPORT] Check report exported: {output_file}")
+
+    def _provenance_categories(self) -> Dict[str, object]:
+        """Classify every issue by provenance.
+
+        Single source for the JSON report's ``categories`` block and the
+        terminal summary, so the console and the report never disagree about
+        what blocks a release export.
+        """
+        self._apply_aggregated_issue_counts()
+        introduced: List[Dict[str, str]] = []
+        blocking: List[Dict[str, str]] = []
+        inherited: List[Dict[str, str]] = []
+        for result in self.results:
+            filename = str(result.get('file') or '')
+            introduced.extend({
+                'file': filename,
+                'message': warning,
+            } for warning in result.get('warnings', []))
+            blocking.extend({
+                'file': filename,
+                'message': error,
+            } for error in result.get('errors', []))
+            info = result.get('info') or {}
+            for item in info.get('inherited', []):
+                if isinstance(item, dict):
+                    inherited.append({
+                        'file': filename,
+                        'kind': str(item.get('kind') or 'prototype'),
+                        'message': str(item.get('message') or ''),
+                    })
+
+        project_issues = {
+            'template': [
+                {'severity': severity, 'kind': kind, 'message': message}
+                for severity, kind, message in self._template_issues
+            ],
+            'animation': [
+                {'severity': severity, 'message': message}
+                for severity, message in self._animation_issues
+            ],
+            'illustration': [
+                {'severity': severity, 'kind': kind, 'message': message}
+                for severity, kind, message in self._illustration_issues
+            ],
+            'communication_trace': [
+                {'severity': severity, 'message': message}
+                for severity, message in self._communication_trace_issues
+            ],
+            'pptx_structure': [
+                {'severity': severity, 'message': message}
+                for severity, message in self._pptx_structure_issues
+            ],
+        }
+        for group, issues in project_issues.items():
+            for issue in issues:
+                item = {
+                    'scope': group,
+                    'message': issue['message'],
+                }
+                if issue['severity'] == 'error':
+                    blocking.append(item)
+                else:
+                    introduced.append(item)
+
+        return {
+            'blocking': blocking,
+            'introduced': introduced,
+            'inherited': inherited,
+            'project_issues': project_issues,
+            'source_import': dict(self._source_import_summary),
+        }
+
+    def export_json_report(
+        self,
+        output_file: str,
+        *,
+        target: str,
+        stage: str,
+    ) -> None:
+        """Write a machine-readable quality report with provenance classes."""
+        categories = self._provenance_categories()

@@ -1,0 +1,108 @@
+    # The visual fallback is deliberately best-effort and isolated from the
+    # active native payload. A renderer defect must never downgrade a chart
+    # that the native schema has already validated.
+    try:
+        normalized_svg = render_normalized_chart_svg(payload, visual_styles)
+    except (KeyError, TypeError, ValueError, OverflowError, ArithmeticError):
+        normalized_svg = None
+    return ChartResult(native_payload=payload, normalized_svg=normalized_svg)
+
+
+def _payload_from_chart_xml(
+    chart_root: ET.Element,
+    xfrm: Xfrm,
+    *,
+    palette: ColorPalette | None = None,
+) -> tuple[dict[str, Any], list[SeriesVisualStyle]]:
+    plot_area = chart_root.find(".//c:plotArea", C_NS)
+    if plot_area is None:
+        raise _UnsupportedChart("unsupported-chart-plot")
+
+    chart_nodes = [
+        child
+        for child in list(plot_area)
+        if _local_name(child.tag).endswith("Chart")
+    ]
+    if not chart_nodes:
+        raise _UnsupportedChart("unsupported-chart-plot")
+    date_system = chart_root.find("c:date1904", C_NS)
+    if date_system is not None and (
+        not set(date_system.attrib).issubset({"val"}) or list(date_system)
+    ):
+        raise _UnsupportedChart("unsupported-date-system")
+    uses_1904_dates = _strict_axis_bool(
+        date_system,
+        date_system is not None,
+    )
+    if len(chart_nodes) > 1:
+        if uses_1904_dates and any(
+            _category_cache_is_numeric(chart) for chart in chart_nodes
+        ):
+            raise _UnsupportedChart("unsupported-date-system")
+        payload, visual_styles = _combo_payload(
+            chart_root,
+            plot_area,
+            chart_nodes,
+            xfrm,
+            palette=palette,
+        )
+        return payload, visual_styles
+
+    chart = chart_nodes[0]
+    chart_tag = _local_name(chart.tag)
+    has_date_axis = plot_area.find("c:dateAx", C_NS) is not None
+    if uses_1904_dates and has_date_axis:
+        raise _UnsupportedChart("unsupported-date-system")
+    if has_date_axis:
+        _validate_canonical_series_order(
+            [chart],
+            "unsupported-chart-series-order",
+        )
+    if chart_tag in {"area3DChart", "bar3DChart", "line3DChart", "pie3DChart", "surface3DChart"}:
+        raise _UnsupportedChart("unsupported-3d-chart")
+    if has_date_axis and chart_tag not in {"areaChart", "stockChart"}:
+        raise _UnsupportedChart("unsupported-date-axis")
+    if chart_tag == "barChart":
+        payload = _category_payload(chart, _bar_chart_type(chart), xfrm)
+    elif chart_tag in {
+        "areaChart",
+        "doughnutChart",
+        "lineChart",
+        "ofPieChart",
+        "pieChart",
+        "radarChart",
+    }:
+        chart_type = {
+            "areaChart": "area",
+            "doughnutChart": "doughnut",
+            "lineChart": "line",
+            "ofPieChart": "of_pie",
+            "pieChart": "pie",
+            "radarChart": "radar",
+        }[chart_tag]
+        category_kind = "date" if has_date_axis else "text"
+        if chart_tag == "radarChart" and _category_cache_is_numeric(chart):
+            category_kind = "numeric"
+        payload = _category_payload(
+            chart,
+            chart_type,
+            xfrm,
+            category_kind=category_kind,
+        )
+        if chart_tag == "radarChart":
+            if category_kind == "numeric":
+                payload["categories"] = [
+                    str(value) for value in payload["categories"]
+                ]
+            payload["radar_style"] = _effective_radar_style(chart)
+    elif chart_tag == "scatterChart":
+        payload = _xy_payload(chart, "scatter", xfrm)
+        payload["axes"] = _xy_axis_contract(plot_area, chart)
+    elif chart_tag == "bubbleChart":
+        payload = _xy_payload(chart, "bubble", xfrm)
+        payload["axes"] = _xy_axis_contract(plot_area, chart)
+    elif chart_tag == "stockChart":
+        payload, visual_styles = _stock_payload(
+            chart_root,
+            plot_area,
+            chart,

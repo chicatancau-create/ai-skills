@@ -1,0 +1,110 @@
+            args.no_notes = True
+    elif (diagnostic_source or compatibility_export) and not args.roundtrip:
+        if args.pptx_structure not in {None, 'flat'}:
+            print(
+                "Error: a diagnostic or dangerous compatibility source "
+                "supports only --pptx-structure flat",
+                file=sys.stderr,
+            )
+            return 1
+        args.pptx_structure = 'flat'
+
+    project_path = Path(args.project_path)
+    if not project_path.exists():
+        print(f"Error: Path does not exist: {project_path}")
+        return 1
+    page_plan_path = project_path / ROUNDTRIP_PAGE_PLAN_PATH
+    if page_plan_path.exists() and not args.roundtrip:
+        print(
+            "Error: page_plan.json is valid only for --roundtrip export from "
+            "a pptx_to_svg.py --roundtrip workspace",
+            file=sys.stderr,
+        )
+        return 1
+    if page_plan_path.exists() and args.roundtrip:
+        required_roundtrip_paths = (
+            ROUNDTRIP_MANIFEST_PATH,
+            native_structure_path(project_path).relative_to(project_path),
+            source_pptx_path(project_path).relative_to(project_path),
+        )
+        missing_roundtrip_paths = [
+            relative.as_posix()
+            for relative in required_roundtrip_paths
+            if not (project_path / relative).is_file()
+        ]
+        if missing_roundtrip_paths:
+            print(
+                "Error: page_plan.json requires a pptx_to_svg.py --roundtrip "
+                "workspace; missing: "
+                + ", ".join(missing_roundtrip_paths),
+                file=sys.stderr,
+            )
+            return 1
+
+    structure_lock = None
+    native_structure_contract = None
+    roundtrip_manifest: dict[str, object] | None = None
+    roundtrip_resources: tuple[WorkspaceResourceSpec, ...] = ()
+    pptx_structure = args.pptx_structure
+    lock_path = project_path / 'spec_lock.md'
+    lockless_export = (
+        args.quick_generate
+        or diagnostic_source
+        or compatibility_export
+    )
+    if not lockless_export and not lock_path.is_file():
+        print(
+            "Error: spec_lock.md is required for release SVG export",
+            file=sys.stderr,
+        )
+        return 1
+    declared_structure_mode = (
+        None
+        if lockless_export
+        else _declared_pptx_structure_mode(project_path)
+    )
+    primary_language = None
+    try:
+        primary_language = (
+            normalize_language_tag(args.primary_language)
+            if args.primary_language
+            else _declared_primary_language(project_path)
+        )
+    except LanguageTagError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    if primary_language is None:
+        print(
+            "Warning: no deck language declared ("
+            + (
+                "root <svg lang=\"...\"> on the first page, or --primary-language"
+                if lockless_export
+                else "spec_lock.md communication.primary_language"
+            )
+            + "); using legacy per-run language detection.",
+            file=sys.stderr,
+        )
+    if (
+        pptx_structure in _LEGACY_PPTX_STRUCTURE_MODES
+        and not (args.roundtrip and pptx_structure == 'preserve')
+    ):
+        _print_structure_contract_error(pptx_structure)
+        return 1
+    if (
+        declared_structure_mode is not None
+        and declared_structure_mode not in _RELEASE_PPTX_STRUCTURE_MODES
+    ):
+        _print_structure_contract_error(declared_structure_mode)
+        return 1
+    if pptx_structure is None:
+        if args.quick_generate:
+            pass
+        elif declared_structure_mode is None:
+            pptx_structure = 'flat'
+            print(
+                "Warning: spec_lock.md has no pptx_structure.mode; using flat "
+                "compatibility mode.",
+                file=sys.stderr,
+            )
+        else:
+            pptx_structure = declared_structure_mode

@@ -1,0 +1,98 @@
+                "name": str(item.get("name") or f"Series {idx}"),
+                "values": values,
+            })
+        return {
+            "kind": "chartex",
+            "series": series,
+            "type": chart_type,
+        }
+
+    raise RuntimeError(f"Native PPTX {chart_type} chart is outside current basic chart support")
+
+
+def _stock_chart_data(payload: dict[str, Any]) -> dict[str, Any]:
+    if _data_labels_config(payload) is not None:
+        raise RuntimeError("Native PPTX stock chart data labels are outside current support")
+    axes = _chart_axes(payload, {"category", "value"})
+    if "category" in axes and not _category_axis_is_date(axes):
+        raise RuntimeError("Native PPTX stock chart category axis must be date")
+    categories = [
+        _chart_number(item)
+        for item in _chart_list(payload.get("categories", payload.get("dates", [])), "categories")
+    ]
+    if not categories:
+        raise RuntimeError("Native PPTX stock chart requires non-empty categories or dates")
+
+    raw_series = payload.get("series")
+    if raw_series is None:
+        field_names = [("open", "Open"), ("high", "High"), ("low", "Low"), ("close", "Close")]
+        raw_series = [
+            {"name": default_name, "values": payload.get(field_name, [])}
+            for field_name, default_name in field_names
+        ]
+    series = _category_series(
+        {"series": raw_series},
+        categories,
+        chart_type="stock",
+        grouping=None,
+    )
+    if len(series) != 4:
+        raise RuntimeError("Native PPTX stock chart requires exactly four series: open, high, low, close")
+    return {
+        "axes": axes,
+        "categories": categories,
+        "kind": "category",
+        "series": series,
+        "type": "stock",
+    }
+
+
+def _point_values(point: Any, *, chart_type: str) -> tuple[Any, Any, Any | None]:
+    if isinstance(point, dict):
+        return point.get("x"), point.get("y"), point.get("size", point.get("bubble_size"))
+    if isinstance(point, (list, tuple)):
+        if len(point) < 2:
+            raise RuntimeError("Native PPTX XY chart points require x and y")
+        size = point[2] if len(point) > 2 else None
+        return point[0], point[1], size
+    raise RuntimeError("Native PPTX XY chart points must be objects or arrays")
+
+
+def _xy_chart_data(
+    payload: dict[str, Any],
+    chart_type: str,
+    alias_style: str | None,
+) -> dict[str, Any]:
+    if _data_labels_config(payload) is not None:
+        raise RuntimeError(
+            f"Native PPTX {chart_type} chart data labels are outside current support"
+        )
+    axes = _chart_axes(payload, {"x", "y"})
+    raw_series = payload.get("series", [])
+    if not isinstance(raw_series, list) or not raw_series:
+        raise RuntimeError("Native PPTX XY chart requires non-empty series")
+
+    series: list[dict[str, Any]] = []
+    for idx, item in enumerate(raw_series, start=1):
+        if not isinstance(item, dict):
+            raise RuntimeError("Native PPTX chart series entries must be objects")
+
+        if item.get("points") is not None:
+            points = [
+                _point_values(point, chart_type=chart_type)
+                for point in _chart_list(item.get("points"), "series[].points")
+            ]
+            x_values = [_chart_number(point[0]) for point in points]
+            y_values = [_chart_number(point[1]) for point in points]
+            size_values = [_chart_number(point[2]) for point in points if point[2] is not None]
+        else:
+            x_raw = _chart_list(item.get("x", item.get("xs", [])), "series[].x")
+            y_raw = _chart_list(
+                item.get("y", item.get("ys", item.get("values", []))),
+                "series[].y",
+            )
+            size_raw = _chart_list(
+                item.get("size", item.get("sizes", item.get("bubble_size", []))),
+                "series[].size",
+            )
+            x_values = [_chart_number(value) for value in x_raw]

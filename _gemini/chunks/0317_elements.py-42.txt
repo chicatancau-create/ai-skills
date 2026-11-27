@@ -1,0 +1,115 @@
+    """Downscale a PIL image to the target dimensions without upsampling."""
+    width, height = img.size
+    if target_w >= width and target_h >= height:
+        return img
+    ratio = min(target_w / width, target_h / height)
+    if ratio >= 1.0:
+        return img
+    try:
+        from PIL import Image  # type: ignore
+    except ImportError:
+        return img
+    new_size = (
+        max(1, int(math.ceil(width * ratio))),
+        max(1, int(math.ceil(height * ratio))),
+    )
+    return img.resize(new_size, Image.Resampling.LANCZOS)
+
+
+def _encode_optimized_image(img: Any, *, prefer_jpeg: bool, quality: int) -> tuple[bytes, str] | None:
+    """Encode a PIL image for PPTX media."""
+    buf = io.BytesIO()
+    try:
+        if prefer_jpeg and not _image_has_alpha(img):
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            img.save(buf, format='JPEG', quality=max(1, min(quality, 100)), optimize=True)
+            return buf.getvalue(), 'jpg'
+        if img.mode == 'P':
+            img = img.convert('RGBA' if _image_has_alpha(img) else 'RGB')
+        elif img.mode not in {'1', 'L', 'LA', 'I', 'I;16', 'RGB', 'RGBA'}:
+            img = img.convert('RGBA' if _image_has_alpha(img) else 'RGB')
+        img.save(buf, format='PNG', optimize=True)
+        return buf.getvalue(), 'png'
+    except (OSError, ValueError):
+        return None
+
+
+def _optimize_image_for_pptx(
+    ctx: ConvertContext,
+    img_data: bytes,
+    img_format: str,
+    display_w: float,
+    display_h: float,
+    *,
+    visible_source_fraction: tuple[float, float] | None = None,
+) -> tuple[bytes, str]:
+    """Optimize full raster image bytes for native PPTX embedding."""
+    if not ctx.image_optimize:
+        return img_data, img_format
+    if img_format.lower() in {'svg', 'emf', 'wmf'}:
+        return img_data, img_format
+
+    try:
+        from PIL import Image, UnidentifiedImageError  # type: ignore
+    except ImportError:
+        return img_data, img_format
+
+    try:
+        img = Image.open(io.BytesIO(img_data))
+        img.load()
+    except (UnidentifiedImageError, OSError, ValueError):
+        return img_data, img_format
+
+    # Multi-frame images (animated GIF / WebP / APNG): resize/re-encode
+    # below keeps frame 0 only, flattening the animation in the exported
+    # PPTX. Pass the original bytes through — animations are exempt from
+    # optimization and the size cap (before this optimizer existed, the
+    # native path embedded raster bytes verbatim and animations survived).
+    if getattr(img, 'is_animated', False):
+        return img_data, img_format
+
+    geometry_normalized = _has_exif_geometry_transform(img)
+    img = _prepare_raster_for_geometry(img)
+    target_w, target_h = _fit_full_image_target(
+        img.size[0],
+        img.size[1],
+        display_w,
+        display_h,
+        sizing=ctx.image_sizing,
+        max_dimension=ctx.image_max_dimension,
+        scale=ctx.image_scale,
+        visible_source_fraction=visible_source_fraction,
+    )
+
+    original_size = img.size
+    img = _resize_for_target(img, target_w, target_h)
+    resized = img.size != original_size
+    if (
+        ctx.image_sizing == 'cap'
+        and not geometry_normalized
+        and not resized
+    ):
+        return img_data, img_format
+    # Preserve source semantics: only an original JPEG stays lossy. PNG and
+    # other static raster formats use lossless PNG after any resize.
+    prefer_jpeg = img_format.lower() in {'jpg', 'jpeg'}
+    encoded = _encode_optimized_image(img, prefer_jpeg=prefer_jpeg, quality=ctx.image_quality)
+    if encoded is None:
+        return img_data, img_format
+
+    optimized_data, optimized_format = encoded
+    if (
+        not geometry_normalized
+        and not resized
+        and len(optimized_data) >= len(img_data)
+    ):
+        return img_data, img_format
+
+    return optimized_data, optimized_format
+
+
+def _compute_slice_src_rect(
+    img_w: float, img_h: float,
+    box_w: float, box_h: float,
+    align: str,

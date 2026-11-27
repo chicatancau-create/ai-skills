@@ -1,0 +1,81 @@
+            content = source_bytes.decode('utf-8')
+
+            # 0. Parse XML once — every other check assumes the file is valid
+            # XML. Bail early on failure so the regex-based checks below don't
+            # produce misleading errors on a broken document.
+            root = self._parse_xml_root(content, result)
+            if root is not None:
+                self._check_canonical_authoring(root, result)
+                try:
+                    hydrated_payloads = hydrate_native_payload_refs(root, svg_path)
+                except NativePayloadError as exc:
+                    result['errors'].append(
+                        f"Invalid native payload reference: {exc}"
+                    )
+                else:
+                    if hydrated_payloads:
+                        result['info']['native_payload_refs'] = hydrated_payloads
+
+                roster = discover_slide_svgs(svg_path.parent) if self.quick_generate else []
+                if (
+                    roster
+                    and svg_path.name == roster[0].name
+                    and not (
+                        root.get('lang')
+                        or root.get('{http://www.w3.org/XML/1998/namespace}lang')
+                    )
+                ):
+                    result['warnings'].append(
+                        'Quick roster declares no deck language: put '
+                        'lang="<BCP-47>" (vi-VN, he-IL, ...) on the first '
+                        "page's root <svg>; export reads it for run proofing "
+                        'language, right-to-left defaults, theme script slots '
+                        'and docProps (advisory)'
+                    )
+
+                # 1. Check viewBox
+                self._check_viewbox(
+                    root,
+                    svg_path,
+                    result,
+                    expected_format,
+                    expected_viewbox=expected_viewbox,
+                    expected_viewbox_label=expected_viewbox_label,
+                )
+                self._check_legacy_pptx_attributes(root, svg_path, result)
+                self._record_carrier_receipt(root, result)
+
+                # 1a. Validate exact importer transport before compatible
+                # inline geometry is materialized on the shared tree.
+                svg_contracts.check_nested_svg_crop_contract(root, result)
+
+                # 2. Check forbidden elements
+                svg_contracts.check_forbidden_elements(content, root, result)
+                svg_contracts.check_mask_contract(root, result)
+
+                # 2a. Validate direct geometry lengths and stroke widths.
+                svg_contracts.check_geometry_length_values(root, result)
+                self._check_shape_coordinate_ranges(root, result)
+
+                # 2b. Validate line-presentation grammar and mappings.
+                svg_contracts.check_stroke_style_values(root, result)
+
+                # 2c. Validate image fit/crop grammar and mappings.
+                self._check_image_contract(root, svg_path, result)
+                svg_contracts.check_image_aspect_ratio_values(root, result)
+
+                # 2d. Validate complete path-data and point-list grammar.
+                svg_contracts.check_freeform_geometry_values(root, result)
+
+                # 2e. Validate complete transform grammar and native mappings.
+                svg_contracts.check_transform_values(root, result)
+
+                # 2f. Validate opacity grammar and native alpha mappings.
+                svg_contracts.check_opacity_values(root, result)
+
+                # 2g. Validate the closed authoring-property surface and
+                # conditional definition interfaces before export.
+                svg_contracts.check_authoring_property_contract(root, result)
+                svg_contracts.check_text_property_contract(root, result)
+                self._check_preserved_txbody_contract(root, result)
+                svg_contracts.check_paint_compatibility(root, result)

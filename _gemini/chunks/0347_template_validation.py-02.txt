@@ -1,0 +1,113 @@
+        rels_part = _relationships_part_for(source_part)
+        root = self.xml(rels_part)
+        relationships: list[_Relationship] = []
+        seen_ids: set[str] = set()
+        if root is not None:
+            for elem in root:
+                attrs = {
+                    key.rsplit("}", 1)[-1]: value
+                    for key, value in elem.attrib.items()
+                }
+                rel_id = attrs.get("Id", "")
+                rel_type = attrs.get("Type", "")
+                target = attrs.get("Target", "")
+                if not rel_id or not rel_type or not target:
+                    self.errors.append(
+                        f"{rels_part} contains a relationship without Id, Type, or Target"
+                    )
+                    continue
+                if rel_id in seen_ids:
+                    self.errors.append(f"{rels_part} repeats relationship id {rel_id}")
+                    continue
+                seen_ids.add(rel_id)
+                relationships.append(_Relationship(
+                    rel_id=rel_id,
+                    rel_type=rel_type,
+                    target=target,
+                    target_mode=attrs.get("TargetMode"),
+                ))
+        result = tuple(relationships)
+        self._rels_cache[source_part] = result
+        return result
+
+
+def _validate_unique_creation_ids(
+    reader: _PackageReader,
+    parts: set[str],
+) -> None:
+    """Reject cloned PowerPoint parts that retain the same p14:creationId."""
+    owners: dict[int, str] = {}
+    for part in sorted(parts):
+        root = reader.xml(part)
+        if root is None:
+            continue
+        c_sld = root.find(f"{{{PML_NS}}}cSld")
+        if c_sld is None:
+            continue
+        seen_in_part: set[int] = set()
+        for creation_id in c_sld.findall(
+            f"{{{PML_NS}}}extLst/{{{PML_NS}}}ext/"
+            f"{{{P14_NS}}}creationId"
+        ):
+            raw_value = creation_id.get("val")
+            try:
+                value = int(raw_value or "")
+            except ValueError:
+                reader.errors.append(
+                    f"{part} has invalid p14:creationId value {raw_value!r}"
+                )
+                continue
+            if value < 0 or value > OOXML_UINT32_MAX:
+                reader.errors.append(
+                    f"{part} p14:creationId {value} is outside OOXML UInt32"
+                )
+                continue
+            if value in seen_in_part:
+                reader.errors.append(
+                    f"{part} repeats p14:creationId {value}"
+                )
+                continue
+            seen_in_part.add(value)
+            previous_owner = owners.setdefault(value, part)
+            if previous_owner != part:
+                reader.errors.append(
+                    f"p14:creationId {value} is shared by "
+                    f"{previous_owner} and {part}"
+                )
+
+
+def _top_level_shape_names(
+    root: ET.Element,
+    context: str,
+    errors: list[str],
+) -> tuple[str, ...]:
+    """Return deterministic names for every visible top-level OOXML shape."""
+    c_sld = root.find(f"{{{PML_NS}}}cSld")
+    shape_tree = (
+        c_sld.find(f"{{{PML_NS}}}spTree") if c_sld is not None else None
+    )
+    if shape_tree is None:
+        errors.append(f"{context} has no p:cSld/p:spTree")
+        return ()
+    names: list[str] = []
+    for child in shape_tree:
+        if child.tag not in _TOP_LEVEL_VISIBLE_TAGS:
+            continue
+        c_nv_pr = next(child.iter(f"{{{PML_NS}}}cNvPr"), None)
+        name = c_nv_pr.get("name") if c_nv_pr is not None else None
+        if not name:
+            errors.append(f"{context} contains a top-level shape without a name")
+            continue
+        names.append(name)
+    return tuple(names)
+
+
+def _validate_named_shape_roster(
+    root: ET.Element,
+    expected_names: set[str] | tuple[str, ...] | list[str],
+    context: str,
+    errors: list[str],
+    *,
+    exact: bool,
+    ordered: bool = False,
+) -> None:

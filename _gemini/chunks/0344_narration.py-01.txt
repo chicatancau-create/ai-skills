@@ -1,0 +1,116 @@
+"""Narration audio discovery and PPTX XML helpers."""
+
+from __future__ import annotations
+
+import base64
+import json
+import posixpath
+import re
+import subprocess
+import zipfile
+from collections.abc import Iterable
+from pathlib import Path
+from xml.etree import ElementTree as ET
+
+from pptx_workspace import load_roundtrip_manifest, source_pptx_path
+from pptx_transitions import (
+    AdvanceUpdate,
+    EnterUpdate,
+    MAX_OOXML_UNSIGNED_INT,
+    P14_NS,
+    PML_NS,
+    apply_slide_motion_xml,
+    parse_source_xml,
+    read_slide_transition_xml,
+    serialize_source_xml,
+    validate_seconds,
+)
+
+
+DRAWINGML_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+RELATIONSHIPS_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+MARKUP_COMPATIBILITY_NS = (
+    "http://schemas.openxmlformats.org/markup-compatibility/2006"
+)
+
+MEDIA_REL_TYPE = "http://schemas.microsoft.com/office/2007/relationships/media"
+AUDIO_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/audio"
+IMAGE_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+
+AUDIO_CONTENT_TYPES = {
+    ".m4a": "audio/mp4",
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+}
+
+NARRATION_EXTENSIONS = tuple(AUDIO_CONTENT_TYPES.keys())
+DEFAULT_NARRATION_START_FLOOR = 0.8
+NARRATION_SHAPE_PREFIX = "PPT Master narration: "
+
+AUDIO_MARKER_SIZE_EMU = 457200  # 48 SVG px
+AUDIO_MARKER_OFF_CANVAS_EMU = -AUDIO_MARKER_SIZE_EMU
+AUDIO_MARKER_PNG_BYTES = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAABsUlEQVR4nO2aQZaDIAyG"
+    "cd4cQRdzgHqxeiy9mB5gFvUO7Qon0gAhJEDf+G/a92rJ9ycEqNaYS3XVSQ94uz+esWu"
+    "2ZRCLKzIQBdqnXDPsL+dA+8Qx88UJpAHPHTfJsRY4Jmo1yBUoCZ8Sj2SgNHxK3KiBWv"
+    "DU+EEDteGtQhxeA63AW/l4WMuolNa5zx4DNaCd/XXuWfAY15sBTXguOJTL9501GlG50"
+    "Ovc/xpjzDjtP+5nqj0gkXEL7763OhmQmj4S4FZY1iGnaAUkwQMxTlWouoz65CYBq4LV"
+    "0cTU6VMgw8frOO3e6273x3Nbhq7JCmCCVYDTqDkDMOuUajdnIFWXgdq6DEgLNm5oGbV"
+    "qzoBPcOmES+qxkW3L0FE2s1BWJDa5cdqjm5gxf7ddmqyAC4+dQq1EDYzTTpq3mTFO56"
+    "KTAam7xpJGsOxDTtUpJGEEZhw7lRb5SWlNcJs8dJx+q4DkwwcEJLsiLh86hTRNGMM3g"
+    "nFVXUYlGt1rQLsKqfLxBCvQiokQR3QK1TYRi0/qgVomKHHJTVzaBDUeC0rzBnBqoljL"
+    "qFY1OOP+3yf1PpX+r8TH6wW14c3/7xdFRAAAAABJRU5ErkJggg=="
+)
+
+
+for _prefix, _uri in (
+    ("p", PML_NS),
+    ("a", DRAWINGML_NS),
+    ("r", RELATIONSHIPS_NS),
+    ("p14", P14_NS),
+):
+    try:
+        ET.register_namespace(_prefix, _uri)
+    except (AttributeError, ValueError):
+        pass
+
+
+def _qn(namespace: str, tag: str) -> str:
+    return f"{{{namespace}}}{tag}"
+
+
+def _normalize_title(title: str) -> str:
+    text = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "_", title.strip())
+    return re.sub(r"_+", "_", text).strip("_").lower()
+
+
+def _leading_number(text: str) -> int | None:
+    match = re.match(r"^(\d{1,3})", text.strip())
+    return int(match.group(1)) if match else None
+
+
+def find_narration_files(audio_dir: Path, svg_files: list[Path]) -> dict[str, Path]:
+    """Match exact stems, imported narration, then legacy normalized/index names."""
+    if not audio_dir.exists() or not audio_dir.is_dir():
+        return {}
+
+    audio_files = [
+        path for path in sorted(audio_dir.iterdir())
+        if path.is_file() and path.suffix.lower() in NARRATION_EXTENSIONS
+    ]
+    exact: dict[str, list[Path]] = {}
+    normalized: dict[str, list[Path]] = {}
+    numbered: dict[int, list[Path]] = {}
+    for path in audio_files:
+        exact.setdefault(path.stem, []).append(path)
+        normalized.setdefault(_normalize_title(path.stem), []).append(path)
+        number = _leading_number(path.stem)
+        if number is not None:
+            numbered.setdefault(number, []).append(path)
+
+    unmatched_stems = [svg for svg in svg_files if svg.stem not in exact]
+    inherited = _roundtrip_narration_files(audio_dir, unmatched_stems) if unmatched_stems else {}
+    matched: dict[str, Path] = {}
+    claimed_by: dict[Path, str] = {}
+    for index, svg in enumerate(svg_files, 1):
+        stem = svg.stem

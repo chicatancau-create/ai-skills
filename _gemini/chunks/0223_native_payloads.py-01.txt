@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""
+PPT Master - Native SVG Metadata Store
+
+Deduplicate opaque PowerPoint-native payloads and repeated restoration
+attributes into one deterministic gzip-compressed workspace store, then
+hydrate legacy inline metadata on demand.
+
+Usage:
+    Imported by mirror materialization, SVG validation, and SVG-to-PPTX export.
+
+Examples:
+    from native_payloads import hydrate_native_payload_refs
+
+Dependencies:
+    None (standard library only).
+"""
+
+from __future__ import annotations
+
+import base64
+import binascii
+import gzip
+import hashlib
+import json
+import re
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from xml.etree import ElementTree as ET
+
+
+LEGACY_PAYLOAD_STORE_SCHEMA = "ppt-master.native-payload-store.v1"
+PAYLOAD_STORE_SCHEMA = "ppt-master.native-payload-store.v2"
+PAYLOAD_STORE_FILENAME = "native_payloads.json.gz"
+PAYLOAD_STORE_RELATIVE_PATH = Path("templates") / PAYLOAD_STORE_FILENAME
+PAYLOAD_STORE_REFERENCE_PREFIX = (
+    f"project:{PAYLOAD_STORE_RELATIVE_PATH.as_posix()}#sha256:"
+)
+
+NATIVE_RECORD_REF_ATTRIBUTE = "data-pptx-native-ref"
+TXBODY_REF_ATTRIBUTE = "data-pptx-ref"
+SHAPE_STYLE_ATTRIBUTE = "data-pptx-shape-style"
+SHAPE_STYLE_REF_ATTRIBUTE = "data-pptx-shape-style-ref"
+CUSTOM_GEOMETRY_ATTRIBUTE = "data-pptx-custgeom"
+CUSTOM_GEOMETRY_REF_ATTRIBUTE = "data-pptx-custgeom-ref"
+
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_NATIVE_RECORD_ID_RE = re.compile(r"r(?:0|[1-9][0-9]*)")
+_NATIVE_RECORD_ATTRIBUTES = frozenset({
+    "data-pptx-custgeom-ref",
+    "data-pptx-frame",
+    "data-pptx-geometry-kind",
+    "data-pptx-geometry-sha256",
+    "data-pptx-object",
+    "data-pptx-part",
+    "data-pptx-preview-sha256",
+    "data-pptx-prst",
+    "data-pptx-ref",
+    "data-pptx-shape-id",
+    "data-pptx-shape-name",
+    "data-pptx-shape-scope",
+    "data-pptx-shape-style-ref",
+    "data-pptx-text-sha256",
+})
+_NATIVE_RECORD_PREFIXES = (
+    "data-pptx-av-",
+    "data-pptx-end-",
+    "data-pptx-start-",
+)
+
+
+class NativePayloadError(ValueError):
+    """Reject malformed, missing, or contradictory native metadata transport."""
+
+
+@dataclass
+class NativePayloadStats:
+    """Count externalized native metadata and its original inline bytes."""
+
+    txbody_count: int = 0
+    shape_style_count: int = 0
+    custom_geometry_count: int = 0
+    inline_bytes: int = 0
+    native_record_count: int = 0
+    native_attribute_bytes: int = 0
+
+    def merge(self, other: "NativePayloadStats") -> None:
+        self.txbody_count += other.txbody_count
+        self.shape_style_count += other.shape_style_count
+        self.custom_geometry_count += other.custom_geometry_count
+        self.inline_bytes += other.inline_bytes
+        self.native_record_count += other.native_record_count
+        self.native_attribute_bytes += other.native_attribute_bytes
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "txbody_count": self.txbody_count,
+            "shape_style_count": self.shape_style_count,
+            "custom_geometry_count": self.custom_geometry_count,
+            "inline_bytes": self.inline_bytes,
+            "native_record_count": self.native_record_count,
+            "native_attribute_bytes": self.native_attribute_bytes,
+        }
+
+
+@dataclass(frozen=True)
+class NativePayloadStore:
+    """Validated payload and native-attribute records loaded from one store."""
+
+    payloads: dict[str, bytes]
+    native_records: dict[str, dict[str, str]]
+
+
+_STORE_CACHE: dict[Path, tuple[int, int, NativePayloadStore]] = {}
+
+
+def _local_name(name: object) -> str:
+    return name.rsplit("}", 1)[-1] if isinstance(name, str) else ""
+
+
+def _sha256(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _decode_base64(value: str, *, context: str) -> bytes:
+    try:
+        return base64.b64decode(value.strip(), validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise NativePayloadError(f"{context} is not valid base64: {exc}") from exc
+
+

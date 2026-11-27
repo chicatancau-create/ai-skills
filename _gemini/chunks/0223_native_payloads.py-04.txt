@@ -1,0 +1,104 @@
+            stats.custom_geometry_count += 1
+            stats.inline_bytes += len(geometry_encoded)
+    return stats
+
+
+def serialize_native_payload_store(
+    payloads: dict[str, bytes],
+    native_records: dict[str, dict[str, str]] | None = None,
+) -> bytes:
+    """Return one deterministic gzip-compressed native metadata store."""
+    encoded_payloads: dict[str, str] = {}
+    for digest, raw in sorted(payloads.items()):
+        if _SHA256_RE.fullmatch(digest) is None or _sha256(raw) != digest:
+            raise NativePayloadError(
+                f"Native payload store key does not match its content: {digest!r}"
+            )
+        encoded_payloads[digest] = base64.b64encode(raw).decode("ascii")
+    encoded_records: dict[str, dict[str, str]] = {}
+    for record_id, attributes in sorted((native_records or {}).items()):
+        if _NATIVE_RECORD_ID_RE.fullmatch(record_id) is None:
+            raise NativePayloadError(
+                f"Native metadata store contains an invalid record id: {record_id!r}"
+            )
+        if not isinstance(attributes, dict) or not attributes:
+            raise NativePayloadError(
+                f"Native metadata record {record_id} must be a non-empty object"
+            )
+        if any(
+            not isinstance(name, str)
+            or not isinstance(value, str)
+            or not _is_native_record_attribute(name)
+            for name, value in attributes.items()
+        ):
+            raise NativePayloadError(
+                f"Native metadata record {record_id} contains an unsupported field"
+            )
+        encoded_records[record_id] = dict(sorted(attributes.items()))
+    document = {
+        "schema": PAYLOAD_STORE_SCHEMA,
+        "hash": "sha256",
+        "payloads": encoded_payloads,
+        "native_records": encoded_records,
+    }
+    raw_json = json.dumps(
+        document,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return gzip.compress(raw_json, compresslevel=9, mtime=0)
+
+
+def _parse_reference(value: str) -> tuple[PurePosixPath, str]:
+    prefix = "project:"
+    marker = "#sha256:"
+    if not value.startswith(prefix) or marker not in value:
+        raise NativePayloadError(
+            f"Unsupported native payload reference: {value!r}"
+        )
+    path_text, digest = value[len(prefix):].split(marker, 1)
+    relative = PurePosixPath(path_text)
+    if (
+        not path_text
+        or relative.is_absolute()
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        raise NativePayloadError(
+            f"Native payload reference must use a safe project-relative path: {value!r}"
+        )
+    if _SHA256_RE.fullmatch(digest) is None:
+        raise NativePayloadError(
+            f"Native payload reference has an invalid SHA-256 digest: {value!r}"
+        )
+    return relative, digest
+
+
+def _resolve_store_path(svg_path: Path, relative: PurePosixPath) -> Path:
+    start = Path(svg_path).expanduser().resolve().parent
+    relative_path = Path(*relative.parts)
+    for base in (start, *start.parents):
+        candidate = base / relative_path
+        if candidate.is_file():
+            return candidate.resolve()
+    raise NativePayloadError(
+        f"Native payload store not found for {svg_path}: {relative.as_posix()}"
+    )
+
+
+def _load_store(path: Path) -> NativePayloadStore:
+    resolved = path.resolve()
+    try:
+        stat = resolved.stat()
+    except OSError as exc:
+        raise NativePayloadError(
+            f"Cannot inspect native payload store {resolved}: {exc}"
+        ) from exc
+    cached = _STORE_CACHE.get(resolved)
+    if cached and cached[0] == stat.st_mtime_ns and cached[1] == stat.st_size:
+        return cached[2]
+
+    try:
+        document = json.loads(gzip.decompress(resolved.read_bytes()).decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise NativePayloadError(

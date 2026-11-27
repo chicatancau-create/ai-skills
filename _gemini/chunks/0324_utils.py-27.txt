@@ -1,0 +1,94 @@
+        primitive_units = filter_elem.get('primitiveUnits')
+        if primitive_units not in (None, 'userSpaceOnUse'):
+            parameters_are_valid = False
+            errors.add(
+                f'{label} primitiveUnits must be userSpaceOnUse when '
+                f'explicit; got {primitive_units!r}'
+            )
+        primitives = [
+            _svg_element_tag(descendant) or str(descendant.tag)
+            for descendant in filter_elem.iter()
+            if descendant is not filter_elem
+        ]
+        unsupported = sorted(set(primitives) - PROJECT_FILTER_PRIMITIVES)
+        if unsupported:
+            errors.add(
+                f'{label} uses unsupported filter primitive(s): '
+                f'{", ".join(unsupported)}'
+            )
+        effect_primitives = [
+            primitive
+            for primitive in primitives
+            if primitive in PROJECT_FILTER_EFFECT_PRIMITIVES
+        ]
+        if not effect_primitives:
+            errors.add(f'{label} must contain feDropShadow or feGaussianBlur')
+        elif len(effect_primitives) > 1:
+            errors.add(
+                f'{label} contains multiple shadow/glow primitives; one '
+                'filter must map to exactly one native effect'
+            )
+        if any(
+            _svg_element_tag(descendant) == 'feFuncA'
+            and descendant.get('type') != 'linear'
+            for descendant in filter_elem.iter()
+        ):
+            errors.add(f'{label} requires feFuncA type="linear"')
+
+        for primitive in filter_elem.iter():
+            primitive_tag = _svg_element_tag(primitive)
+            if primitive_tag in {'feDropShadow', 'feFlood'}:
+                style_values = parse_inline_style(primitive.get('style'))
+                if (
+                    primitive.get('flood-opacity') is None
+                    and 'flood-opacity' not in style_values
+                ):
+                    parameters_are_valid = False
+                    errors.add(
+                        f'{label} <{primitive_tag}> requires explicit '
+                        'flood-opacity'
+                    )
+            if (
+                primitive_tag == 'feFuncA'
+                and primitive.get('intercept') is not None
+            ):
+                parameters_are_valid = False
+                errors.add(
+                    f'{label} <feFuncA> intercept is unsupported; project '
+                    'alpha transfer maps slope multiplication only'
+                )
+            if (
+                primitive_tag == 'feGaussianBlur'
+                and primitive.get('edgeMode') is not None
+            ):
+                parameters_are_valid = False
+                errors.add(
+                    f'{label} <feGaussianBlur> edgeMode is unsupported by '
+                    'the native effect mapping'
+                )
+            numeric_attrs: tuple[tuple[str, bool, bool], ...] = ()
+            if primitive_tag in {'feDropShadow', 'feGaussianBlur'}:
+                numeric_attrs = (('stdDeviation', True, True),)
+            elif primitive_tag == 'feOffset':
+                numeric_attrs = (
+                    ('dx', False, False),
+                    ('dy', False, False),
+                )
+            elif primitive_tag == 'feFuncA':
+                numeric_attrs = (('slope', True, True),)
+            if primitive_tag == 'feDropShadow':
+                numeric_attrs += (
+                    ('dx', False, True),
+                    ('dy', False, True),
+                )
+            for attribute_name, non_negative, required in numeric_attrs:
+                raw_value = primitive.get(attribute_name)
+                if raw_value is None:
+                    if required:
+                        parameters_are_valid = False
+                        errors.add(
+                            f'{label} <{primitive_tag}> requires explicit '
+                            f'{attribute_name}'
+                        )
+                    continue
+                try:

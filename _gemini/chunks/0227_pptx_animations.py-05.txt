@@ -1,0 +1,128 @@
+    decelerate: float | None = None
+    bounce_end: float | None = None
+    restart: str | None = None
+    after_effect: str = 'none'
+    after_effect_color: str | None = None
+    sound_relationship_id: str | None = None
+    sound_name: str | None = None
+
+    @property
+    def playback_duration_ms(self) -> int:
+        """Return the wall-clock duration used by after-previous scheduling."""
+        one_play = self.duration_ms * (2 if self.auto_reverse else 1)
+        if self.repeat_duration_ms is not None:
+            return self.repeat_duration_ms
+        if self.repeat_count is not None:
+            return max(1, round(one_play * self.repeat_count))
+        return one_play
+
+
+@dataclass(frozen=True)
+class AnimationRowSummary:
+    """Read-back summary for one object-animation row in the animation pane."""
+
+    shape_id: int
+    effect: str | None
+    supported_effects: tuple[str, ...]
+    preset_class: str
+    trigger: str
+    duration_ms: int | None
+    offset_ms: int
+    preset_id: int
+    preset_subtype: int
+    filter_name: str | None
+    effect_options: Mapping[str, object]
+    trigger_shape_id: int | None
+    repeat_count: float | None
+    repeat_duration_ms: int | None
+    auto_reverse: bool
+    rewind: bool
+    accelerate: float
+    decelerate: float
+    bounce_end: float
+    restart: str
+    after_effect: str
+    after_effect_color: str | None
+    sound_relationship_id: str | None
+    sound_name: str | None
+    playback_duration_ms: int | None
+
+
+@dataclass(frozen=True)
+class AnimationSequenceSummary:
+    """Read-back summary for the logical object sequence on one slide."""
+
+    timing_count: int
+    trigger: str | None
+    rows: tuple[AnimationRowSummary, ...]
+    audio_target_ids: tuple[int, ...]
+
+
+def _qn(namespace: str, tag: str) -> str:
+    return f'{{{namespace}}}{tag}'
+
+
+def _local_name(tag: str) -> str:
+    return tag.rsplit('}', 1)[-1]
+
+
+def normalize_animation_effect(
+    effect: object,
+    *,
+    allow_none: bool = True,
+    allow_modes: bool = True,
+) -> str | None:
+    """Return a supported effect/mode without silently substituting another."""
+    if effect is None or effect == 'none':
+        if allow_none:
+            return None
+        raise ValueError('animation effect is required')
+    if not isinstance(effect, str):
+        raise ValueError(f'animation effect must be a string: {effect!r}')
+    if effect in ANIMATION_ALIASES:
+        return ANIMATION_ALIASES[effect]
+    if effect in NATIVE_ANIMATIONS:
+        return effect
+    if allow_modes and effect in ANIMATION_MODES:
+        return effect
+    valid = list(ANIMATIONS)
+    if allow_modes:
+        valid.extend(ANIMATION_MODES)
+    if allow_none:
+        valid.append('none')
+    raise ValueError(
+        f'unknown animation effect {effect!r}; valid effects: {", ".join(valid)}'
+    )
+
+
+def _finite_number(value: object, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f'{field} must be a finite number: {value!r}')
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f'{field} must be a finite number: {value!r}')
+    return number
+
+
+def _normalize_animation_color(value: object, field: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(
+            f'{field} must be #RRGGBB or theme:<scheme-color>: {value!r}'
+        )
+    if re.fullmatch(r'#[0-9A-Fa-f]{6}', value):
+        return value.upper()
+    if re.fullmatch(
+        r'theme:(?:dk1|lt1|dk2|lt2|tx1|tx2|bg1|bg2|accent[1-6]|'
+        r'hlink|folHlink)',
+        value,
+    ):
+        return value
+    raise ValueError(
+        f'{field} must be #RRGGBB or theme:<scheme-color>: {value!r}'
+    )
+
+
+def _normalize_powerpoint_font_name(value: object, field: str) -> str:
+    """Return one concrete PowerPoint font name without checking installation."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(

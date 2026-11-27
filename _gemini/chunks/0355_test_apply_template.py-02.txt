@@ -1,0 +1,54 @@
+    def test_duplicate_kind_is_rejected_before_writing(self) -> None:
+        with self.assertRaises(ApplyTemplateError) as ctx:
+            self._apply(STYLE_ROOT, TEMPLATES / "styles" / "consulting-decision")
+        self.assertIn("one root per kind", str(ctx.exception))
+        self.assertEqual(list((self.project / "templates").iterdir()), [])
+
+    def test_destination_collision_is_rejected_before_writing(self) -> None:
+        images = self.project / "images"
+        images.mkdir()
+        (images / "logo.png").write_bytes(b"not the same logo")
+        with self.assertRaises(ApplyTemplateError) as ctx:
+            self._apply(BRAND_ROOT)
+        self.assertIn("destination collision", str(ctx.exception))
+        self.assertFalse(
+            (self.project / "templates" / "design_spec.brand.中国电信.md").exists()
+        )
+
+    def test_explicit_root_keeps_its_path_as_provenance(self) -> None:
+        explicit = self.tmp / "my_style"
+        shutil.copytree(STYLE_ROOT, explicit)
+        plan = self._apply(explicit)
+        spec = self.project / "templates" / "design_spec.style.incident-postmortem.md"
+        self.assertIn(
+            f"> **Installed from**: `{explicit.resolve()}/` (explicit)",
+            spec.read_text(encoding="utf-8"),
+        )
+        self.assertIn("sources=explicit", _receipt(plan))
+
+    def test_inner_templates_directory_is_refused(self) -> None:
+        with self.assertRaises(ApplyTemplateError) as ctx:
+            self._apply(STYLE_ROOT / "templates")
+        self.assertIn("workspace root", str(ctx.exception))
+
+    def test_dry_run_writes_nothing(self) -> None:
+        plan = self._apply(BRAND_ROOT, dry_run=True)
+        self.assertEqual(len(plan.mappings), 2)
+        self.assertEqual(list((self.project / "templates").iterdir()), [])
+        self.assertFalse((self.project / "images").exists())
+
+    def test_in_place_deck_roster_is_replaced_by_selected_layout(self) -> None:
+        # The project already consumed a Deck in place; a Layout then owns structure.
+        self._apply(DECK_ROOT)
+        plan = self._apply(self.project, LAYOUT_ROOT)
+        self.assertFalse((self.project / "templates" / "01_cover.svg").exists())
+        self.assertTrue((self.project / "templates" / "01_title_slide.svg").is_file())
+        self.assertTrue(
+            (self.project / "templates" / "design_spec.deck.中国电信.md").is_file()
+        )
+        self.assertIn("structure:layout", _receipt(plan))
+        self.assertIn("install=copied", _receipt(plan))
+
+
+if __name__ == "__main__":
+    unittest.main()

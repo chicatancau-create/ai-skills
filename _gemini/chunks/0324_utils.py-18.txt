@@ -1,0 +1,114 @@
+    first_a = _project_marker_cross(first_start, first_end, second_start)
+    first_b = _project_marker_cross(first_start, first_end, second_end)
+    second_a = _project_marker_cross(second_start, second_end, first_start)
+    second_b = _project_marker_cross(second_start, second_end, first_end)
+    return first_a * first_b < 0 and second_a * second_b < 0
+
+
+def _project_marker_quadrilateral_type(
+    points: list[tuple[float, float]],
+) -> str | None:
+    """Classify one simple four-point marker as diamond or stealth."""
+    if len(points) != 4:
+        return None
+    if (
+        _project_marker_segments_cross(points[0], points[1], points[2], points[3])
+        or _project_marker_segments_cross(
+            points[1], points[2], points[3], points[0]
+        )
+    ):
+        return None
+    turns = [
+        _project_marker_cross(
+            points[index],
+            points[(index + 1) % 4],
+            points[(index + 2) % 4],
+        )
+        for index in range(4)
+    ]
+    if any(abs(turn) <= 1e-12 for turn in turns):
+        return None
+    signs = {turn > 0 for turn in turns}
+    return 'diamond' if len(signs) == 1 else 'stealth'
+
+
+def classify_project_marker_shape(marker_elem: ET.Element) -> str | None:
+    """Classify one marker into a DrawingML line-end shape, if representable."""
+    visual_children = [
+        child
+        for child in list(marker_elem)
+        if _svg_element_tag(child)
+        not in PROJECT_NON_VISUAL_DEFINITION_CHILD_TAGS
+    ]
+    if len(visual_children) != 1:
+        return None
+    shape = visual_children[0]
+    tag = (_svg_element_tag(shape) or '').lower()
+    if tag in {'circle', 'ellipse'}:
+        return 'oval'
+    if tag == 'path':
+        path_data = shape.get('d', '')
+        if _PROJECT_MARKER_TRIANGLE_PATH_RE.fullmatch(path_data):
+            return 'triangle'
+        if _PROJECT_MARKER_ARROW_PATH_RE.fullmatch(path_data):
+            return 'arrow'
+        if _PROJECT_MARKER_DIAMOND_PATH_RE.fullmatch(path_data):
+            points = _project_marker_path_points(path_data)
+            return _project_marker_quadrilateral_type(points)
+        return None
+    if tag == 'polygon':
+        points = _project_marker_polygon_points(shape.get('points', ''))
+        if points is None:
+            return None
+        if len(points) == 3:
+            return 'triangle'
+        return _project_marker_quadrilateral_type(points)
+    return None
+
+
+def _project_effective_presentation_value(
+    elem: ET.Element,
+    name: str,
+    parent_by_id: dict[int, ET.Element],
+) -> str | None:
+    """Resolve one inherited presentation value for project validation."""
+    current: ET.Element | None = elem
+    while current is not None:
+        style_values = parse_inline_style(current.get('style'))
+        if name in style_values:
+            return style_values[name]
+        direct = current.get(name)
+        if direct is not None:
+            return direct
+        current = parent_by_id.get(id(current))
+    return None
+
+
+def project_marker_errors(root: ET.Element) -> list[str]:
+    """Validate SVG line-end markers against the native arrow contract."""
+    definitions, _duplicates = project_definition_index(root)
+    parent_by_id = {
+        id(child): parent
+        for parent in root.iter()
+        for child in list(parent)
+    }
+    errors: set[str] = set()
+    checked_markers: set[str] = set()
+
+    for elem in root.iter():
+        for attribute_name in ('marker-start', 'marker-end'):
+            raw_reference = elem.get(attribute_name)
+            if (
+                raw_reference is None
+                or raw_reference.strip().lower() == 'none'
+            ):
+                continue
+
+            label = _transform_element_label(elem)
+            tag = (_svg_element_tag(elem) or '').lower()
+            if tag not in {'line', 'path'}:
+                errors.add(
+                    f'{label} {attribute_name} is allowed only on <line> '
+                    'or <path>'
+                )
+

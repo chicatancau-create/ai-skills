@@ -1,0 +1,110 @@
+def _create_audio_timing_element(
+    shape_id: int,
+    ctn_id: int,
+    start_delay_ms: int,
+) -> ET.Element:
+    audio = ET.Element(_qn(PML_NS, "audio"))
+    media_node = ET.SubElement(
+        audio,
+        _qn(PML_NS, "cMediaNode"),
+        {"vol": "80000"},
+    )
+    time_node = ET.SubElement(
+        media_node,
+        _qn(PML_NS, "cTn"),
+        {"id": str(ctn_id), "fill": "hold", "display": "0"},
+    )
+    start_conditions = ET.SubElement(time_node, _qn(PML_NS, "stCondLst"))
+    ET.SubElement(
+        start_conditions,
+        _qn(PML_NS, "cond"),
+        {"delay": str(start_delay_ms)},
+    )
+    target = ET.SubElement(media_node, _qn(PML_NS, "tgtEl"))
+    ET.SubElement(target, _qn(PML_NS, "spTgt"), {"spid": str(shape_id)})
+    return audio
+
+
+def _direct_child(parent: ET.Element, tag: str, label: str) -> ET.Element:
+    children = [child for child in parent if child.tag == tag]
+    if len(children) != 1:
+        raise ValueError(
+            f"narration source must contain exactly one direct {label}; found {len(children)}"
+        )
+    return children[0]
+
+
+def _existing_timing_root(timing: ET.Element) -> ET.Element:
+    children = list(timing)
+    for tag, label in (
+        (_qn(PML_NS, "tnLst"), "p:tnLst"),
+        (_qn(PML_NS, "bldLst"), "p:bldLst"),
+        (_qn(PML_NS, "extLst"), "p:extLst"),
+    ):
+        if sum(child.tag == tag for child in children) > 1:
+            raise ValueError(f"narration source timing has multiple {label} elements")
+    node_list = _direct_child(timing, _qn(PML_NS, "tnLst"), "p:timing/p:tnLst")
+    node_index = children.index(node_list)
+    for tag, label in (
+        (_qn(PML_NS, "bldLst"), "p:bldLst"),
+        (_qn(PML_NS, "extLst"), "p:extLst"),
+    ):
+        sibling = next((child for child in children if child.tag == tag), None)
+        if sibling is not None and node_index > children.index(sibling):
+            raise ValueError(f"narration source p:tnLst must precede {label}")
+    timing_roots = [
+        element
+        for element in node_list.iter(_qn(PML_NS, "cTn"))
+        if element.get("nodeType") == "tmRoot"
+    ]
+    if len(timing_roots) != 1:
+        raise ValueError(
+            "narration source timing must contain exactly one tmRoot; "
+            f"found {len(timing_roots)}"
+        )
+    return timing_roots[0]
+
+
+def _new_timing(audio_timing: ET.Element, root_id: int) -> ET.Element:
+    timing = ET.Element(_qn(PML_NS, "timing"))
+    node_list = ET.SubElement(timing, _qn(PML_NS, "tnLst"))
+    parallel = ET.SubElement(node_list, _qn(PML_NS, "par"))
+    timing_root = ET.SubElement(
+        parallel,
+        _qn(PML_NS, "cTn"),
+        {
+            "id": str(root_id),
+            "dur": "indefinite",
+            "restart": "never",
+            "nodeType": "tmRoot",
+        },
+    )
+    child_nodes = ET.SubElement(timing_root, _qn(PML_NS, "childTnLst"))
+    child_nodes.append(audio_timing)
+    return timing
+
+
+def _root_extension_index(slide: ET.Element) -> int | None:
+    extension_lists = [
+        index
+        for index, child in enumerate(slide)
+        if child.tag == _qn(PML_NS, "extLst")
+    ]
+    if len(extension_lists) > 1:
+        raise ValueError("narration source has multiple root p:extLst elements")
+    if extension_lists and extension_lists[0] != len(slide) - 1:
+        raise ValueError("narration source root p:extLst is not the last slide child")
+    return extension_lists[0] if extension_lists else None
+
+
+def _validate_root_timing_position(slide: ET.Element, timing: ET.Element) -> None:
+    children = list(slide)
+    timing_index = children.index(timing)
+    for tag, label in (
+        (_qn(PML_NS, "cSld"), "p:cSld"),
+        (_qn(PML_NS, "clrMapOvr"), "p:clrMapOvr"),
+    ):
+        siblings = [index for index, child in enumerate(children) if child.tag == tag]
+        if len(siblings) > 1:
+            raise ValueError(f"narration source has multiple root {label} elements")
+        if siblings and siblings[0] > timing_index:

@@ -1,0 +1,111 @@
+                    f"slice_grid {rows}x{cols} requires {rows * cols}"
+                )
+            normalized_outputs: set[str] = set()
+            for name in names:
+                name_path = _validate_bare_output_name(
+                    name,
+                    field_name=f"{prefix} slice output name",
+                    reject_parent_marker=True,
+                )
+                if name_path.suffix and name_path.suffix.lower() != ".png":
+                    raise ValueError(
+                        f"{prefix} slice output name {name!r} must omit its "
+                        "extension or use .png"
+                    )
+                output_name = (
+                    name if name_path.suffix else f"{name}.png"
+                ).casefold()
+                if output_name in normalized_outputs:
+                    raise ValueError(
+                        f"{prefix} field 'slice_names' repeats output "
+                        f"{output_name!r}"
+                    )
+                normalized_outputs.add(output_name)
+                slice_outputs.append(output_name)
+
+        fname = item["filename"]
+        filename_path = _validate_bare_output_name(
+            fname,
+            field_name=f"{prefix} field 'filename'",
+            require_extension=True,
+        )
+        normalized_filename = fname.casefold()
+        if normalized_filename in claimed_outputs:
+            raise ValueError(
+                f"{prefix} output filename {fname!r} conflicts with "
+                f"{claimed_outputs[normalized_filename]} (case-insensitive)"
+            )
+        claimed_outputs[normalized_filename] = f"manifest output {fname!r}"
+
+        stem = filename_path.stem.casefold()
+        if stem in seen_stems:
+            raise ValueError(
+                f"{prefix} duplicate filename stem '{filename_path.stem}' "
+                "would reuse backend output"
+            )
+        seen_stems.add(stem)
+
+        for output_name in slice_outputs:
+            if output_name in claimed_outputs:
+                raise ValueError(
+                    f"{prefix} slice output {output_name!r} conflicts with "
+                    f"{claimed_outputs[output_name]} (case-insensitive)"
+                )
+            claimed_outputs[output_name] = (
+                f"slice output {output_name!r} from items[{i}]"
+            )
+
+    legacy_parts = []
+    if missing_page_role:
+        legacy_parts.append(
+            f"{missing_page_role} item(s) missing page_role (resolved as local)"
+        )
+    if missing_text_policy:
+        legacy_parts.append(
+            f"{missing_text_policy} item(s) missing text_policy (resolved as none)"
+        )
+    if legacy_parts:
+        print(
+            f"Warning: {path}: legacy manifest compatibility: "
+            + "; ".join(legacy_parts),
+            file=sys.stderr,
+        )
+
+    return data
+
+
+def save_manifest(path: str, data: dict) -> None:
+    """Atomically write manifest back to disk (tmp file + rename)."""
+    target = Path(path)
+    try:
+        mode = stat.S_IMODE(target.stat().st_mode)
+    except FileNotFoundError:
+        umask = os.umask(0)
+        os.umask(umask)
+        mode = 0o666 & ~umask
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=target.stem + ".",
+        suffix=".tmp",
+        dir=str(target.parent),
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        # mkstemp creates 0600; keep the manifest's own permissions.
+        os.chmod(tmp_path, mode)
+        os.replace(tmp_path, target)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _materialize_manifest_image(saved_path: str, target_path: Path) -> str:
+    """Validate backend output and place it at the manifest's exact target path."""
+    from image_backends.backend_common import (
+        save_image_bytes,
+        validate_image_file,
+    )

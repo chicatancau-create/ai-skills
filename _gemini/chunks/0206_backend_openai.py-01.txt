@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+"""
+OpenAI Compatible Image Generation Backend
+
+Generates images via OpenAI-compatible APIs (OpenAI, local models like Qwen-Image, etc.).
+Used by image_gen.py as a backend module.
+
+Configuration keys:
+  OPENAI_API_KEY   (required) API key
+  OPENAI_BASE_URL  (optional) Custom API endpoint (e.g. http://127.0.0.1:3000/v1)
+  OPENAI_MODEL     (optional) Model name (default: gpt-image-2)
+  OPENAI_SIZE_PRESET         (optional) auto, legacy, gpt-image, gpt-image-2, or dall-e-2
+  OPENAI_RESPONSE_FORMAT     (optional) auto, b64_json, url, or omit
+  OPENAI_QUALITY             (optional) auto, omit, low, medium, high, standard, or hd
+  OPENAI_OUTPUT_FORMAT       (optional) png, jpeg, or webp for GPT image models
+  OPENAI_OUTPUT_COMPRESSION  (optional) 0-100, only for jpeg/webp GPT image output
+  OPENAI_BACKGROUND          (optional) auto or opaque for gpt-image-2
+  OPENAI_MODERATION          (optional) auto or low for GPT image models
+  OPENAI_INPUT_FIDELITY      (optional) high or low for supported GPT image edits
+
+Image editing (image-to-image):
+  When image_gen.py passes reference_image=<path> (single-image CLI only,
+  via --reference-image), this backend calls /v1/images/edits with the source
+  image + the prompt as an edit instruction, instead of /v1/images/generations.
+
+Dependencies:
+  pip install requests Pillow
+"""
+
+import sys
+from pathlib import Path
+
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from console_encoding import configure_utf8_stdio  # noqa: E402
+
+configure_utf8_stdio()
+
+if __name__ == "__main__":
+    print(__doc__)
+    print("Use via: python3 skills/ppt-master/scripts/image_gen.py \"prompt\" --backend openai")
+    raise SystemExit(0 if any(arg in {"-h", "--help", "help"} for arg in sys.argv[1:]) else 1)
+
+import base64
+import mimetypes
+import os
+import time
+import threading
+from collections.abc import Mapping
+
+import requests
+from image_backends.backend_common import (
+    MAX_RETRIES,
+    download_image,
+    http_error,
+    is_permanent_error,
+    is_rate_limit_error,
+    normalize_image_size,
+    resolve_output_path,
+    retry_delay,
+    save_image_bytes,
+)
+
+
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║  Constants                                                      ║
+# ╚══════════════════════════════════════════════════════════════════╝
+
+# Aspect ratio -> DALL-E 3 / legacy compatible size mapping.
+# Unknown OpenAI-compatible models use this table to preserve old behavior.
+LEGACY_COMPAT_ASPECT_RATIO_TO_SIZE = {
+    "1:1":  "1024x1024",
+    "16:9": "1792x1024",
+    "9:16": "1024x1792",
+    "3:2":  "1536x1024",
+    "2:3":  "1024x1536",
+    "4:3":  "1536x1024",   # closest available
+    "3:4":  "1024x1536",   # closest available
+    "4:5":  "1024x1024",   # fallback to square
+    "5:4":  "1024x1024",   # fallback to square
+    "21:9": "1792x1024",   # closest wide format
+}
+
+# Legacy GPT Image models and chatgpt-image-latest support only square,
+# landscape, portrait, or auto.
+GPT_IMAGE_LEGACY_ASPECT_RATIO_TO_SIZE = {
+    "1:1":  "1024x1024",
+    "16:9": "1536x1024",
+    "9:16": "1024x1536",
+    "3:2":  "1536x1024",
+    "2:3":  "1024x1536",
+    "4:3":  "1536x1024",
+    "3:4":  "1024x1536",
+    "4:5":  "1024x1536",
+    "5:4":  "1536x1024",
+    "21:9": "1536x1024",
+}
+
+# GPT Image 2 supports flexible sizes when both edges are multiples of 16,
+# the edge ratio is <= 3:1, and the total pixels are within model limits.
+GPT_IMAGE_2_SIZES = {
+    "512px": {
+        "1:1": "1024x1024", "16:9": "1280x720", "9:16": "720x1280",
+        "3:2": "1248x832", "2:3": "832x1248", "4:3": "1024x768",
+        "3:4": "768x1024", "4:5": "896x1120", "5:4": "1120x896",
+        "21:9": "1280x544",
+    },
+    "1K": {
+        "1:1": "1024x1024", "16:9": "1280x720", "9:16": "720x1280",
+        "3:2": "1248x832", "2:3": "832x1248", "4:3": "1024x768",

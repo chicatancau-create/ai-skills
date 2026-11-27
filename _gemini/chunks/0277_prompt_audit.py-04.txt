@@ -1,0 +1,111 @@
+        if identity in accepted_identities:
+            raise AuditError(f"Duplicate duplicates.accepted identity: {identity}")
+        accepted_identities.add(identity)
+    return raw
+
+
+def _expand_globs(
+    root: Path,
+    patterns: Iterable[str],
+    *,
+    require_match: bool,
+) -> set[Path]:
+    paths: set[Path] = set()
+    for pattern in patterns:
+        matches = {path for path in root.glob(pattern) if path.is_file()}
+        if require_match and not matches:
+            raise AuditError(f"Document include pattern matched no files: {pattern}")
+        paths.update(matches)
+    return paths
+
+
+def discover_documents(root: Path, config: dict[str, Any]) -> list[Path]:
+    """Resolve the manifest's document corpus into a stable file list."""
+    include = config.get("include", [])
+    exclude = config.get("exclude", [])
+    if not isinstance(include, list) or not all(isinstance(item, str) for item in include):
+        raise AuditError("documents.include must be a list of path patterns")
+    if not isinstance(exclude, list) or not all(isinstance(item, str) for item in exclude):
+        raise AuditError("documents.exclude must be a list of path patterns")
+
+    paths = _expand_globs(root, include, require_match=True)
+    excluded = _expand_globs(root, exclude, require_match=False) if exclude else set()
+    return sorted(paths - excluded, key=lambda item: _relative_path(root, item))
+
+
+def _load_encoder(name: str) -> Any:
+    try:
+        import tiktoken
+    except ImportError as exc:
+        raise AuditError(
+            "tiktoken is required for exact prompt counts. "
+            "Install it with: pip install 'tiktoken>=0.7.0'"
+        ) from exc
+
+    try:
+        return tiktoken.get_encoding(name)
+    except (KeyError, ValueError) as exc:
+        raise AuditError(f"tiktoken does not provide the required encoding: {name}") from exc
+
+
+def count_documents(root: Path, paths: list[Path], encoding_name: str) -> list[Document]:
+    """Read corpus files and count exact tokenizer units."""
+    encoder = _load_encoder(encoding_name)
+    documents: list[Document] = []
+    for path in paths:
+        text = _read_utf8(path)
+        documents.append(
+            Document(
+                path=_relative_path(root, path),
+                absolute_path=path,
+                text=text,
+                tokens=len(encoder.encode(text, disallowed_special=())),
+            )
+        )
+    return documents
+
+
+def _matches_any(path: str, patterns: Iterable[str]) -> bool:
+    candidate = PurePosixPath(path)
+    return any(candidate.match(pattern) for pattern in patterns)
+
+
+def _load_entry_paths(root: Path, entry: Any) -> tuple[list[Path], int | None, str]:
+    if isinstance(entry, str):
+        path = root / entry
+        if not path.is_file():
+            raise AuditError(f"Load-set file does not exist: {entry}")
+        return [path], None, entry
+
+    if not isinstance(entry, dict) or not isinstance(entry.get("glob"), str):
+        raise AuditError("Each load-set file entry must be a path or an object with glob")
+
+    pattern = entry["glob"]
+    paths = sorted(root.glob(pattern))
+    paths = [path for path in paths if path.is_file()]
+    excludes = entry.get("exclude", [])
+    if excludes:
+        paths = [
+            path
+            for path in paths
+            if not _matches_any(_relative_path(root, path), excludes)
+        ]
+    if not paths:
+        raise AuditError(f"Load-set selector matched no files: {pattern}")
+
+    select = entry.get("select")
+    if not isinstance(select, int) or select < 1 or select > len(paths):
+        raise AuditError(
+            f"Load-set selector {pattern} has invalid select={select}; "
+            f"expected 1..{len(paths)}"
+        )
+    return paths, select, pattern
+
+
+def audit_load_sets(
+    root: Path,
+    config: dict[str, Any],
+    token_counts: dict[str, int],
+    manifest_label: str,
+    registry_members: dict[str, set[Any]],
+) -> tuple[list[dict[str, Any]], list[Finding], set[str]]:

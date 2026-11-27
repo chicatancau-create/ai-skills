@@ -1,0 +1,109 @@
+    cues: list[SubtitleCue] | None,
+    predicted_start_ms: int,
+) -> tuple[int, float]:
+    """Locate one page narration near its predicted exported-video position."""
+    start_ms, end_ms = _alignment_template_bounds(audio_fine, cues)
+    coarse_start = start_ms // _ALIGNMENT_COARSE_FACTOR
+    coarse_end = max(
+        coarse_start + 50,
+        end_ms // _ALIGNMENT_COARSE_FACTOR,
+    )
+    coarse_template = audio_coarse[coarse_start:coarse_end]
+    predicted_coarse = predicted_start_ms // _ALIGNMENT_COARSE_FACTOR
+    coarse_window = _ALIGNMENT_SEARCH_WINDOW_MS // _ALIGNMENT_COARSE_FACTOR
+    search_start = max(
+        0,
+        predicted_coarse + coarse_start - coarse_window,
+    )
+    search_end = min(
+        len(video_coarse),
+        predicted_coarse + coarse_start + coarse_window + len(coarse_template),
+    )
+    coarse_index, _coarse_score = _best_correlation(
+        video_coarse[search_start:search_end],
+        coarse_template,
+    )
+    coarse_audio_start_ms = (
+        search_start + coarse_index - coarse_start
+    ) * _ALIGNMENT_COARSE_FACTOR
+
+    fine_template = audio_fine[start_ms:end_ms]
+    fine_search_start = max(
+        0,
+        coarse_audio_start_ms + start_ms - _ALIGNMENT_REFINE_WINDOW_MS,
+    )
+    fine_search_end = min(
+        len(video_fine),
+        coarse_audio_start_ms
+        + start_ms
+        + _ALIGNMENT_REFINE_WINDOW_MS
+        + len(fine_template),
+    )
+    fine_index, fine_score = _best_correlation(
+        video_fine[fine_search_start:fine_search_end],
+        fine_template,
+    )
+    audio_start_ms = fine_search_start + fine_index - start_ms
+    return audio_start_ms, fine_score
+
+
+def _align_audio_starts_to_video(
+    *,
+    slide_names: list[str],
+    local_cues: dict[str, list[SubtitleCue] | None],
+    theoretical_starts: list[int],
+    audio_dir: Path,
+    video_path: Path,
+) -> tuple[list[int], list[float], list[Path]]:
+    """Align every page narration to the audio track of an exported video."""
+    if not video_path.is_file():
+        raise FileNotFoundError(f"Exported video does not exist: {video_path}")
+    ffmpeg_path = shutil.which("ffmpeg")
+    if ffmpeg_path is None:
+        raise RuntimeError(
+            "Exported-video timeline calibration requires ffmpeg. "
+            "Install ffmpeg and make it available on PATH."
+        )
+
+    video_fine, video_coarse = _decode_audio_envelopes(video_path, ffmpeg_path)
+    aligned_starts: list[int] = []
+    correlations: list[float] = []
+    audio_paths: list[Path] = []
+
+    for index, slide_name in enumerate(slide_names):
+        audio_path = _find_audio(audio_dir, slide_name)
+        audio_paths.append(audio_path)
+        audio_fine, audio_coarse = _decode_audio_envelopes(audio_path, ffmpeg_path)
+        slide_cues = local_cues.get(slide_name)
+        if (
+            slide_cues
+            and slide_cues[-1].end_ms
+            > len(audio_fine) + _ALIGNMENT_END_TOLERANCE_MS
+        ):
+            raise ValueError(
+                f"{slide_name}.srt ends after its narration audio: "
+                f"cue end={_seconds_from_ms(slide_cues[-1].end_ms):.3f}s, "
+                f"decoded audio={_seconds_from_ms(len(audio_fine)):.3f}s"
+            )
+        if index == 0:
+            predicted_start_ms = theoretical_starts[index]
+        else:
+            predicted_start_ms = (
+                aligned_starts[index - 1]
+                + theoretical_starts[index]
+                - theoretical_starts[index - 1]
+            )
+        aligned_start_ms, correlation = _locate_audio_start(
+            video_fine,
+            video_coarse,
+            audio_fine,
+            audio_coarse,
+            slide_cues,
+            predicted_start_ms,
+        )
+        if correlation < _ALIGNMENT_MIN_CORRELATION:
+            raise ValueError(
+                f"Exported-video audio match is unreliable for {slide_name}: "
+                f"correlation={correlation:.3f}, "
+                f"required>={_ALIGNMENT_MIN_CORRELATION:.2f}"
+            )

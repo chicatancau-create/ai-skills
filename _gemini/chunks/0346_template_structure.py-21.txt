@@ -1,0 +1,104 @@
+        for svg_path, root in roots
+        if not (root.get("data-pptx-master-name") or "").strip()
+    ]
+    missing_keys = [
+        svg_path.name
+        for svg_path, root in roots
+        if not (root.get("data-pptx-layout") or "").strip()
+    ]
+    missing_names = [
+        svg_path.name
+        for svg_path, root in roots
+        if not (root.get("data-pptx-layout-name") or "").strip()
+    ]
+    if missing_master_keys or missing_master_names or missing_keys or missing_names:
+        missing_fields: list[str] = []
+        if missing_master_keys:
+            missing_fields.append(
+                "data-pptx-master: " + ", ".join(missing_master_keys)
+            )
+        if missing_master_names:
+            missing_fields.append(
+                "data-pptx-master-name: " + ", ".join(missing_master_names)
+            )
+        if missing_keys:
+            missing_fields.append(
+                "data-pptx-layout: " + ", ".join(missing_keys)
+            )
+        if missing_names:
+            missing_fields.append(
+                "data-pptx-layout-name: " + ", ".join(missing_names)
+            )
+        raise TemplateStructureError(
+            "Explicit Layout metadata is all-or-none: once any SVG uses PPTX "
+            "structure metadata, every generated page root must declare "
+            "Master/Layout keys and names with non-empty values; "
+            "missing "
+            + "; ".join(missing_fields)
+        )
+    return parse_template_slides(svg_files)
+
+
+def flat_structure_metadata_errors(svg_files: list[Path]) -> list[str]:
+    """Return every Master/Layout marker forbidden by flat export."""
+    errors: list[str] = []
+    for svg_path in svg_files:
+        try:
+            root = _parse_svg_root(svg_path)
+        except (OSError, ET.ParseError, NativePayloadError) as exc:
+            errors.append(
+                f"{svg_path.name}: unable to inspect flat-mode metadata: {exc}"
+            )
+            continue
+        for elem in root.iter():
+            attrs = sorted(
+                attr
+                for attr in _FLAT_FORBIDDEN_STRUCTURE_ATTRS
+                if elem.get(attr) is not None
+            )
+            if not attrs:
+                continue
+            element_id = (elem.get("id") or _local_tag(elem)).strip()
+            errors.append(
+                f"{svg_path.name}: flat mode forbids Master/Layout structure "
+                f"metadata on {element_id!r}: " + ", ".join(attrs)
+            )
+    return errors
+
+
+def parse_preserve_slides(svg_files: list[Path]) -> list[TemplateSlideSpec]:
+    """Parse preserve-mode slides before source master grouping is known."""
+    specs = [
+        parse_template_slide(svg_path, slide_num, structured=False)
+        for slide_num, svg_path in enumerate(svg_files, start=1)
+    ]
+    if not specs:
+        raise TemplateStructureError("Preserve export requires at least one SVG slide")
+    return specs
+
+
+def structured_layout_definition_files(
+    specs: list[TemplateSlideSpec],
+    structure_lock: PptxStructureLock,
+) -> list[Path]:
+    """Validate the explicit registered Layout set and return unused carriers.
+
+    A generated page can be the carrier for a used Layout definition. A Layout
+    with no generated page must point at one installed template SVG; the builder
+    converts that SVG on an internal trailing slide and removes the carrier slide
+    after registering the reusable Layout.
+    Installed prototypes absent from ``pptx_layouts`` are never compiled.
+    Lockless Quick export compiles only its public pages' Layouts.
+    """
+    if structure_lock.mode != "structured":
+        return []
+    definitions = {
+        definition.layout_key: definition
+        for definition in structure_lock.layout_definitions
+    }
+    specs_by_slide = {spec.slide_num: spec for spec in specs}
+    used_layout_keys = {spec.layout_key for spec in specs}
+    master_names = {
+        master.master_key: master.master_name
+        for master in structure_lock.masters
+    }

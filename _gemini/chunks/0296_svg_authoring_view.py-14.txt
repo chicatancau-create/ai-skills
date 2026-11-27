@@ -1,0 +1,121 @@
+            "authoring": report.output.relative_to(output_dir).as_posix(),
+            "source_sha256": report.source_sha256,
+            "initial_authoring_sha256": report.initial_authoring_sha256,
+            "source_refs": {
+                reference.source_ref: reference.as_dict(output_dir)
+                for reference in sorted(
+                    report.source_references,
+                    key=lambda item: item.source_ref,
+                )
+            },
+        })
+
+    payload = {
+        "schema": AUTHORING_SCHEMA,
+        "projection_kind": projection_kind,
+        "source_root": _portable_path(source_root, output_dir),
+        "authoring_root": ".",
+        "source_ref_attribute": SOURCE_REF_ATTRIBUTE,
+        "file_count": len(documents),
+        "source_ref_count": sum(len(report.source_references) for report in reports),
+        "documents": documents,
+    }
+    return (
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    ).encode("utf-8")
+
+
+def _authoring_document_kind(path: Path) -> str:
+    name = path.name
+    if name.startswith("master_"):
+        return "master"
+    if name.startswith("layout_"):
+        return "layout"
+    if name.startswith("slide_"):
+        return "slide"
+    return "generic"
+
+
+def _authoring_summary_document(
+    path: Path,
+    relative_name: str,
+    *,
+    source_slide: int | None = None,
+) -> dict[str, object]:
+    try:
+        root = ET.parse(path).getroot()
+    except (OSError, ET.ParseError) as exc:
+        raise ValueError(f"Cannot summarize authoring SVG {path}: {exc}") from exc
+    if _local_name(root.tag) != "svg":
+        raise ValueError(f"Authoring document root is not <svg>: {path}")
+
+    elements = list(root.iter())
+    icon_references = sorted({
+        icon_name
+        for element in elements
+        if (icon_name := element.get("data-icon"))
+    })
+    text_elements = [
+        element for element in elements
+        if _local_name(element.tag) == "text"
+    ]
+    summary: dict[str, object] = {
+        "file": relative_name,
+        "kind": _authoring_document_kind(path),
+    }
+    if source_slide is not None:
+        summary["source_slide"] = source_slide
+    summary.update({
+        "bytes": path.stat().st_size,
+        "viewBox": root.get("viewBox"),
+        "elements": len(elements),
+        "top_level_elements": len(root),
+        "drawables": sum(
+            _local_name(element.tag) in _DRAWABLE_TAGS
+            for element in elements
+        ),
+        "text_elements": len(text_elements),
+        "text_characters": sum(
+            len("".join(element.itertext()))
+            for element in text_elements
+        ),
+        "images": sum(
+            _local_name(element.tag) == "image"
+            for element in elements
+        ),
+        "icon_uses": sum(
+            element.get("data-icon") is not None
+            for element in elements
+        ),
+        "icon_refs": icon_references,
+        "placeholders": sum(
+            element.get("data-pptx-placeholder") is not None
+            for element in elements
+        ),
+        "inline_source_refs": sum(
+            element.get(SOURCE_REF_ATTRIBUTE) is not None
+            for element in elements
+        ),
+        "source_proxies": sum(
+            element.get(SOURCE_PROXY_ATTRIBUTE) == SOURCE_PROXY_KIND
+            for element in elements
+        ),
+        "semantic_tables": sum(
+            element.get(SEMANTIC_OBJECT_ATTRIBUTE) == SEMANTIC_TABLE_KIND
+            for element in elements
+        ),
+        "semantic_shapes": sum(
+            element.get(SEMANTIC_OBJECT_ATTRIBUTE) == SEMANTIC_SHAPE_KIND
+            for element in elements
+        ),
+    })
+    return summary
+
+
+def _load_authoring_summary_manifest(
+    authoring_dir: Path,
+) -> tuple[dict[str, object], list[str], dict[str, int] | None]:
+    manifest_path = authoring_dir / AUTHORING_MANIFEST_NAME
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:

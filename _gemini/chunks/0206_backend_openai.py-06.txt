@@ -1,0 +1,102 @@
+    raise RuntimeError("No image was generated. The server may have refused the request.")
+
+
+def _edit_image(api_key: str, prompt: str, reference_image: str,
+                aspect_ratio: str = "1:1", image_size: str = "1K",
+                output_dir: str = None, filename: str = None,
+                model: str = DEFAULT_MODEL, base_url: str = None) -> str:
+    """
+    Image-to-image edit via the OpenAI-compatible /v1/images/edits endpoint.
+
+    Sends the reference image plus the prompt (used as the edit instruction).
+    Mirrors _generate_image's size/quality/format handling but posts
+    multipart/form-data instead of JSON.
+
+    Returns:
+        Path of the saved image file
+    """
+    size_preset = _read_size_preset()
+    size = _select_size(model, aspect_ratio, image_size, size_preset)
+    quality = None if _is_dall_e_2(model) else _read_quality(image_size, model)
+    output_ext = ".png"
+    request = {
+        "prompt": prompt,
+        "model": model,
+        "size": size,
+        "n": 1,
+    }
+    if quality is not None:
+        request["quality"] = quality
+    if _is_gpt_image_model(model):
+        gpt_options, output_ext = _gpt_image_options(model)
+        request.update(gpt_options)
+    input_fidelity = _read_input_fidelity(model)
+    if input_fidelity is not None:
+        request["input_fidelity"] = input_fidelity
+    _apply_response_format(request, model)
+
+    mode_label = f"Proxy: {base_url}" if base_url else "OpenAI API"
+    print(f"[OpenAI - {mode_label}]")
+    print(f"  Mode:         edit (image-to-image)")
+    print(f"  Model:        {model}")
+    print(f"  Reference:    {reference_image}")
+    print(f"  Prompt:       {prompt[:120]}{'...' if len(prompt) > 120 else ''}")
+    print(f"  Size:         {size} (from aspect_ratio={aspect_ratio})")
+    if size_preset and size_preset != "auto":
+        print(f"  Size Preset:  {size_preset}")
+    if quality is not None:
+        print(f"  Quality:      {quality} (from image_size={image_size})")
+    else:
+        print("  Quality:      omitted")
+    if request.get("response_format"):
+        print(f"  Response:     {request['response_format']}")
+    elif _read_response_format() == "omit":
+        print("  Response:     omitted")
+    if request.get("output_format"):
+        print(f"  Format:       {request['output_format']}")
+    if request.get("output_compression") is not None:
+        print(f"  Compression:  {request['output_compression']}")
+    if request.get("background"):
+        print(f"  Background:   {request['background']}")
+    if request.get("moderation"):
+        print(f"  Moderation:   {request['moderation']}")
+    if request.get("input_fidelity"):
+        print(f"  Input Fidelity: {request['input_fidelity']}")
+    print()
+
+    start_time = time.time()
+    print(f"  [..] Editing...", end="", flush=True)
+
+    heartbeat_stop = threading.Event()
+
+    def _heartbeat():
+        while not heartbeat_stop.is_set():
+            heartbeat_stop.wait(5)
+            if not heartbeat_stop.is_set():
+                elapsed = time.time() - start_time
+                print(f" {elapsed:.0f}s...", end="", flush=True)
+
+    hb_thread = threading.Thread(target=_heartbeat, daemon=True)
+    hb_thread.start()
+
+    try:
+        resp = _post_image_edit(api_key, base_url, request, reference_image)
+    finally:
+        heartbeat_stop.set()
+        hb_thread.join(timeout=1)
+
+    elapsed = time.time() - start_time
+    print(f"\n  [DONE] Image edited ({elapsed:.1f}s)")
+
+    data = _field(resp, "data") if resp is not None else None
+    if data:
+        path = resolve_output_path(prompt, output_dir, filename, output_ext)
+        first_image = data[0]
+        b64_json = _field(first_image, "b64_json")
+        image_url = _field(first_image, "url")
+        if b64_json:
+            image_data = base64.b64decode(b64_json)
+            return save_image_bytes(image_data, path)
+        if image_url:
+            return download_image(image_url, path)
+

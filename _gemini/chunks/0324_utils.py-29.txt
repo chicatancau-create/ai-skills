@@ -1,0 +1,126 @@
+        and carrier.get('data-pptx-frame') == parent.get('data-pptx-frame')
+        and carrier.get('filter') == elem.get('filter')
+    ):
+        return False
+    try:
+        expected_hash = resolve_preset_preview_hash(parent)
+    except ValueError:
+        return False
+    return (
+        expected_hash is not None
+        and svg_preset_preview_fingerprint(parent) == expected_hash
+    )
+
+
+def is_picture_effect_carrier(elem: ET.Element) -> bool:
+    """Recognize one effect carrier around exactly one clipped picture."""
+    if (
+        _svg_element_tag(elem) != 'g'
+        or elem.get('data-pptx-object') == 'group'
+        or re.fullmatch(
+            r'url\(#([^)]+)\)',
+            (elem.get('filter') or '').strip(),
+        ) is None
+        or elem.get('data-pptx-layer') not in {None, 'master', 'layout'}
+        or any(
+            elem.get(attribute) is not None
+            for attribute in (
+                'data-pptx-placeholder',
+                'data-pptx-binding',
+                'data-pptx-replace-with',
+                'data-pptx-native',
+            )
+        )
+    ):
+        return False
+    children = [
+        child for child in elem
+        if _svg_element_tag(child) not in PROJECT_NON_VISUAL_DEFINITION_CHILD_TAGS
+    ]
+    if len(children) != 1:
+        return False
+    picture = children[0]
+    if picture.get('filter') is not None:
+        return False
+    owner_kind = elem.get('data-pptx-object')
+    if _svg_element_tag(picture) == 'image':
+        if resolve_url_id(picture.get('clip-path', '')) is None:
+            return False
+        if owner_kind is None:
+            return True
+        shape_id = elem.get('data-pptx-shape-id')
+        return (
+            owner_kind == 'picture'
+            and shape_id is not None
+            and picture.get('data-pptx-object') == 'picture'
+            and picture.get('data-pptx-shape-id') == shape_id
+        )
+    if (
+        _svg_element_tag(picture) != 'svg'
+        or owner_kind != 'picture'
+        or picture.get('data-pptx-object') != 'picture'
+        or picture.get('viewBox') is None
+        or picture.get('preserveAspectRatio') != 'none'
+    ):
+        return False
+    shape_id = elem.get('data-pptx-shape-id')
+    if (
+        shape_id is None
+        or picture.get('data-pptx-shape-id') != shape_id
+    ):
+        return False
+    crop_children = list(picture)
+    return (
+        len(crop_children) == 1
+        and _svg_element_tag(crop_children[0]) == 'image'
+    )
+
+
+def parse_hex_color(color_str: str) -> str | None:
+    """Parse SVG color values to ``RRGGBB``, ignoring any alpha channel."""
+    if color_str and color_str.strip().lower() == 'transparent':
+        return None
+    color, _alpha = parse_svg_color(color_str)
+    return color
+
+
+def combine_opacity(*values: float | None) -> float | None:
+    """Multiply opacity components, returning ``None`` when fully opaque."""
+    combined = 1.0
+    for value in values:
+        if value is not None:
+            combined *= max(0.0, min(1.0, value))
+    return combined if combined < 1.0 else None
+
+
+def parse_stop_style(style_str: str) -> tuple[str | None, float]:
+    """Parse a gradient stop's style attribute.
+
+    Args:
+        style_str: Style string like 'stop-color:#XXX;stop-opacity:N'.
+
+    Returns:
+        (color, opacity) tuple.
+    """
+    color = None
+    color_alpha = 1.0
+    stop_opacity = 1.0
+    style_values = parse_inline_style(style_str)
+    if not style_values:
+        return color, stop_opacity
+
+    if 'stop-color' in style_values:
+        color, color_alpha = parse_svg_color(style_values['stop-color'])
+    if 'stop-opacity' in style_values:
+        stop_opacity = parse_opacity(
+            style_values['stop-opacity'],
+            allow_percentage=True,
+        )
+
+    return color, color_alpha * stop_opacity
+
+
+def resolve_url_id(url_str: str) -> str | None:
+    """Extract ID from 'url(#someId)' reference."""
+    if not url_str:
+        return None

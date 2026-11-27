@@ -1,0 +1,102 @@
+    # Other discouraged elements
+    if 'iframe' in local_names:
+        result['errors'].append("Detected <iframe> element (should not appear in SVG)")
+
+
+def check_paint_compatibility(
+    root: ET.Element,
+    result: Dict,
+) -> None:
+    """Reject unsupported paint and advise one generated-SVG spelling.
+
+    The exporter parser owns compatibility. Any paint it can parse remains
+    valid input; the checker only warns when that spelling differs from the
+    generated-SVG default (uppercase ``#RRGGBB`` plus explicit alpha).
+    """
+    helpers = (
+        _PAINT_PROPERTIES,
+        _PERCENTAGE_OPACITY_PROPERTIES,
+        _format_project_opacity,
+        _is_project_paint_default_form,
+        _iter_project_paints,
+        _parse_inline_style,
+        _parse_project_opacity,
+        _parse_project_paint,
+        _project_paint_errors,
+    )
+    if any(helper is None for helper in helpers):
+        result['warnings'].append(
+            "Unable to import svg_to_pptx paint parsers; skipped paint syntax check"
+        )
+        return
+
+    result['errors'].extend(_project_paint_errors(root))
+    recommendations: Counter[tuple[str, str, str]] = Counter()
+    recommendation_examples: Dict[tuple[str, str, str], List[str]] = defaultdict(list)
+
+    def remember_example(store: Dict, key: tuple, label: str) -> None:
+        labels = store[key]
+        if label not in labels and len(labels) < 3:
+            labels.append(label)
+
+    for elem, name, raw_value, source in _iter_project_paints(root):
+        try:
+            kind, normalized, color_alpha = _parse_project_paint(
+                raw_value,
+                name,
+            )
+        except ValueError:
+            continue
+        if _is_project_paint_default_form(raw_value, name):
+            continue
+
+        source_label = f'{_element_label(elem)} {source}'
+        if kind == 'none':
+            replacement = f'{name}="none"'
+        elif kind == 'reference':
+            replacement = f'{name}="url(#{normalized})"'
+        elif name in {'fill', 'stroke'} and raw_value.strip().lower() == 'transparent':
+            replacement = f'{name}="none"'
+        else:
+            replacement = f'{name}="#{normalized}"'
+            alpha_name = _CANONICAL_PAINT_ALPHA_PROPERTY.get(name)
+            if color_alpha < 1.0 and alpha_name is not None:
+                style_values = _parse_inline_style(elem.get('style'))
+                existing_alpha_raw = (
+                    style_values.get(alpha_name) or elem.get(alpha_name)
+                )
+                if existing_alpha_raw is None:
+                    existing_alpha = 1.0
+                else:
+                    try:
+                        existing_alpha = _parse_project_opacity(
+                            existing_alpha_raw,
+                            allow_percentage=(
+                                alpha_name in _PERCENTAGE_OPACITY_PROPERTIES
+                            ),
+                        )
+                    except ValueError:
+                        existing_alpha = None
+                effective_alpha = (
+                    color_alpha * existing_alpha
+                    if existing_alpha is not None else color_alpha
+                )
+                replacement += (
+                    f' {alpha_name}="'
+                    f'{_format_project_opacity(effective_alpha)}"'
+                )
+            elif color_alpha < 1.0:
+                replacement += (
+                    '; put alpha on the matching pattern child fill/stroke '
+                    'opacity'
+                )
+
+        key = (name, raw_value, replacement)
+        recommendations[key] += 1
+        remember_example(recommendation_examples, key, source_label)
+
+    for (name, raw_value, replacement), count in sorted(recommendations.items()):
+        examples = ', '.join(
+            recommendation_examples[(name, raw_value, replacement)]
+        )
+        result['warnings'].append(

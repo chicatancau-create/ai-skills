@@ -1,0 +1,95 @@
+        if tag in _NON_VISUAL_TAGS:
+            continue
+        hidden_reason = svg_hidden_reason(child, ctx.parent_by_id, preserve_native_carriers=True)
+        if hidden_reason and (tag != 'g' or hidden_reason == 'display:none'):
+            continue
+
+        if tag == 'rect' and _is_full_canvas_rect(child, ctx, canvas):
+            bg_xml = _background_xml_from_rect(child, ctx)
+            if bg_xml:
+                return bg_xml, id(child)
+            return '', None
+
+        if tag != 'g':
+            return '', None
+        if child.get('transform') or child.get('filter') or child.get('clip-path'):
+            return '', None
+        if child.get('data-pptx-shape-id') is not None:
+            # A source-identified object (including the round-trip
+            # native-restore placeholder for an unchanged full-canvas picture)
+            # must stay a shape so its native original can take its place.
+            return '', None
+        style_overrides = _extract_inheritable_styles(child)
+        local_opacity = get_element_opacity(child)
+        child_ctx = ctx.child(
+            style_overrides=style_overrides,
+            opacity_multiplier=1.0 if local_opacity is None else local_opacity,
+        )
+        visual_children = [
+            grandchild for grandchild in child
+            if grandchild.tag.replace(f'{{{SVG_NS}}}', '') not in _NON_VISUAL_TAGS
+        ]
+        if len(visual_children) != 1:
+            return '', None
+        only_child = visual_children[0]
+        if svg_hidden_reason(only_child, ctx.parent_by_id, preserve_native_carriers=True):
+            return '', None
+        only_tag = only_child.tag.replace(f'{{{SVG_NS}}}', '')
+        if only_tag == 'rect' and _is_full_canvas_rect(only_child, child_ctx, canvas):
+            bg_xml = _background_xml_from_rect(only_child, child_ctx)
+            if bg_xml:
+                ctx.sync_from_child(child_ctx)
+                return bg_xml, id(child)
+            return '', None
+        return '', None
+
+    return '', None
+
+
+def collect_defs(root: ET.Element) -> dict[str, ET.Element]:
+    """Collect all <defs> children into an {id: element} dictionary."""
+    definitions, _duplicates = project_definition_index(root)
+    return definitions
+
+
+def _build_source_shape_id_map(root: ET.Element) -> dict[tuple[str, str], int]:
+    """Allocate page-unique ids for part-scoped imported shape identities."""
+    source_entries: list[tuple[tuple[str, str], int]] = []
+    seen_keys: set[tuple[str, str]] = set()
+    for elem in root.iter():
+        raw_id = elem.get('data-pptx-shape-id')
+        if raw_id is None:
+            continue
+        scope = elem.get('data-pptx-shape-scope') or 'slide'
+        if re.fullmatch(r'[A-Za-z0-9_.-]{1,64}', scope) is None:
+            raise SvgNativeConversionError(
+                f'Invalid data-pptx-shape-scope {scope!r}'
+            )
+        try:
+            shape_id = int(raw_id)
+        except ValueError as exc:
+            raise SvgNativeConversionError(
+                f'Invalid data-pptx-shape-id {raw_id!r}'
+            ) from exc
+        if shape_id < 2 or shape_id > 0xFFFFFFFF:
+            raise SvgNativeConversionError(
+                f'data-pptx-shape-id must be between 2 and 4294967295, got {raw_id!r}'
+            )
+        key = (scope, raw_id)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        source_entries.append((key, shape_id))
+
+    preferred_ids = {shape_id for _key, shape_id in source_entries}
+    next_fresh = max(preferred_ids, default=1) + 1
+    used: set[int] = set()
+    mapping: dict[tuple[str, str], int] = {}
+    for key, preferred in source_entries:
+        output_id = preferred
+        if output_id in used:
+            while next_fresh in preferred_ids or next_fresh in used:
+                next_fresh += 1
+            if next_fresh > 0xFFFFFFFF:
+                raise SvgNativeConversionError('Exhausted PowerPoint shape id range')
+            output_id = next_fresh

@@ -1,0 +1,141 @@
+DEFAULT_SEARCH_CONCURRENCY = 3
+DEFAULT_CANDIDATE_PAGE_SIZE = 8
+
+SEARCH_STATUS_PENDING = "Pending"
+SEARCH_STATUS_SOURCED = "Sourced"
+SEARCH_STATUS_FAILED = "Failed"
+SEARCH_STATUS_NEEDS_SELECTION = "Needs-Selection"
+SEARCH_STATUS_NEEDS_MANUAL = "Needs-Manual"
+SEARCH_VALID_STATUSES = {
+    SEARCH_STATUS_PENDING,
+    SEARCH_STATUS_SOURCED,
+    SEARCH_STATUS_FAILED,
+    SEARCH_STATUS_NEEDS_SELECTION,
+    SEARCH_STATUS_NEEDS_MANUAL,
+}
+# Selection and manual rows are terminal until the agent promotes a candidate
+# or materially changes the query; only Pending/Failed rows auto-retry.
+SEARCH_RETRYABLE_STATUSES = {SEARCH_STATUS_PENDING, SEARCH_STATUS_FAILED}
+SEARCH_REQUIRED_ITEM_FIELDS = ("filename", "query", "status")
+SEARCH_FAILURE_NO_MATCH = "no-match"
+SEARCH_FAILURE_RETRYABLE = "retryable"
+_CANDIDATE_SELECTION_OUTPUT_FIELDS = (
+    "review_sheet",
+    "candidate_count",
+    "candidate_total",
+    "has_more_candidates",
+    "next_candidate_page",
+)
+
+_WEAK_REQUIRED_TERM_PARTS = frozenset({
+    "ancient town",
+    "bridge",
+    "canyon",
+    "cave",
+    "city",
+    "floating bridge",
+    "forest",
+    "gate",
+    "grand canyon",
+    "ground fissure",
+    "lake",
+    "monastery",
+    "monument",
+    "river",
+    "shrine",
+    "square",
+    "station",
+    "stone forest",
+    "stone pillar",
+    "stream",
+    "temple",
+    "valley",
+    "village",
+    "古城",
+    "古镇",
+    "地缝",
+    "大峡谷",
+    "寺",
+    "峡谷",
+    "广场",
+    "桥",
+    "洞",
+    "溪",
+    "石林",
+    "石柱",
+})
+
+
+def _parse_required_terms(raw: object) -> tuple[str, ...]:
+    """Parse entity-safety terms from CLI / batch JSON.
+
+    Multiple groups are ANDed. Alternatives inside one group are separated by
+    ``|``; comma splitting is accepted as CLI convenience. Examples:
+    ``["Chongqing", "Jiefangbei|Liberation Monument"]``.
+    """
+    if raw is None:
+        return ()
+    values: list[str]
+    if isinstance(raw, str):
+        values = [raw]
+    elif isinstance(raw, (list, tuple)):
+        values = []
+        for item in raw:
+            if not isinstance(item, str):
+                raise ValueError("required_terms items must be strings")
+            values.append(item)
+    else:
+        raise ValueError("required_terms must be a string or list of strings")
+
+    terms: list[str] = []
+    for value in values:
+        for part in value.split(","):
+            part = part.strip()
+            if part:
+                terms.append(part)
+    return tuple(terms)
+
+
+def _parse_query_variants(raw: object) -> tuple[str, ...]:
+    """Parse optional material query variants while preserving order."""
+    if raw is None:
+        return ()
+    if isinstance(raw, str):
+        values = [raw]
+    elif isinstance(raw, (list, tuple)):
+        values = list(raw)
+    else:
+        raise ValueError("query_variants must be a string or list of strings")
+
+    variants: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("query_variants items must be non-empty strings")
+        normalized = value.strip()
+        key = normalized.casefold()
+        if key not in seen:
+            seen.add(key)
+            variants.append(normalized)
+    return tuple(variants)
+
+
+def _search_request_variants(
+    request: ImageSearchRequest,
+) -> list[ImageSearchRequest]:
+    """Expand one intent into explicit provider queries without duplicates."""
+    queries = _parse_query_variants((request.query, *request.query_variants))
+    return [
+        replace(request, query=query, query_variants=())
+        for query in queries
+    ]
+
+
+def _warn_weak_required_terms(required_terms: tuple[str, ...]) -> None:
+    """Warn when required_terms contain generic category words.
+
+    These terms are useful in the query but dangerous as identity gates:
+    broadening a small Chinese attraction from its proper name to "canyon" /
+    "stone pillar" raises coverage while admitting wrong entities.
+    """
+    weak: list[str] = []

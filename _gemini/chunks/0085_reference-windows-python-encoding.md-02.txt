@@ -1,0 +1,76 @@
+`open('/d/platform-tools.zip','rb')` → `FileNotFoundError`，看着像"下载没成功"，其实文件在 `D:\` 上好好的。
+`ls -la` 和 `wc -c` 能读它是因为它走的是 bash 的路径转换。
+
+⇒ 同一条命令链里混用 shell 与 python 时，**传给 python 的路径一律写 `D:/...`、`G:/...` 正斜杠形式**；
+或者干脆用 stdin 把内容喂给 python（`curl ... | python -c "import sys; sys.stdin.read()"`），绕开落盘路径。
+报"文件不存在"先分清是**哪一侧**在解释这个路径。
+
+## `$(python -c ...)` 会带 `\r` 回来，把 shell 判断全骗掉（2026-11-01 实测）
+
+Windows 版 python 的 stdout 是 **CRLF**，所以 `for p in $(python -c "…print 路径列表…")` 里除了最后一项，
+每项都尾随一个 `\r`。于是 `[ -f "ets/$p.ets" ]` 对 6 个真实存在的文件报 MISSING、只有末尾那个报 OK，
+看起来像「路由指向不存在的文件」，其实是我的循环参数被 `\r` 污染。
+⇒ 别用 python 的 print 给 bash 喂列表；把清单直接写在 `for` 里，或加 `| tr -d '\r'`。
+凡是「批量存在性检查只有一项通过」，先怀疑行尾而不是怀疑文件。
+
+同源噪声：`grep -rhoE "(\$rawfile\()"` 这类带括号的模式写在 bash 双引号里会报 `Unmatched ( or \(`
+（`$(` 被当作命令替换开头），白白吃掉一个回合。⇒ 结构化的代码检索直接用 Grep 工具，别拼 bash 里的 grep 正则。
+
+## 容量与磁盘测量的两个坑
+
+- `os.statvfs` **在 Windows 上不存在** → 用 `shutil.disk_usage('C:')` 或 PowerShell `New-Object IO.DriveInfo`。
+- `os.path.join("C:", "pagefile.sys")` 生成的是 **驱动器相对路径 `C:pagefile.sys`**（不是 `C:\pagefile.sys`），
+  `os.stat` 直接报 WinError 2「找不到文件」，我就据此差点宣布"C 盘的页面文件消失了"。
+  ⇒ 盘符根下的文件必须写 `"C:\\\\pagefile.sys"` 或 `"C:/" + "pagefile.sys"` 或 `os.path.join("C:\\\\", f)`；
+  凡是"重要系统文件突然不存在"的读数，先打印出实际用的路径串再下结论。
+- 单位会骗人：`shutil` 返回字节，除以 `1e9` 是 **GB**，PowerShell `/1GB` 是 **GiB**（2^30），
+  同一块盘两个数差 ~7%。报数前先写清单位，别把两者当矛盾去「查真相」。
+- 逐目录 `os.walk` 求和会**重复计数硬链接/稀疏文件**（本机实测 `C:\` 各顶层目录之和比卷「已用」多约 13 GB，
+  主因 `WinSxS` 与 `System32` 共享硬链接），所以目录求和 ≠ 实际占盘，别据此宣称藏了多少垃圾。
+
+## `python -X utf8 -c "…"` 内联脚本经 bash 会烂（2026-11-04 一轮内连炸 4 次）
+
+上面"压反斜杠"那条在 **bash 双引号里的 `python -c`** 上表现得更恶劣，因为 bash 会先做一层
+`$`/反引号/反斜杠处理，报的还是**误导性的 Python 语法错**：
+
+- 脚本里有反引号（markdown 内容、`` `verified` `` 之类）→ `unexpected EOF while looking for matching ``'`。
+- 写 `r"D:\"` → **原始串不能以反斜杠结尾** → `SyntaxError: unterminated string literal`。
+- 写 `\u540e\u53f0` 混 `\\` 时 → `(unicode error) 'unicodeescape' codec can't decode … truncated \UXXXXXXXX escape`。
+- 写 `$var` 会被 bash 吃掉（PowerShell 侧同理，`$_`/`$p` 都会没）。
+
+⇒ **只要脚本超过两三行、或含中文/反引号/正则/Windows 路径，就用 Write 工具建 `.py` 文件再跑**；
+需要生成带 BOM+CRLF 的 `.ps1` 时，也用这个 `.py` 去生成（见 [[reference-unattended-elevated-scripts]] 的生成通路）。
+提权侧还有一条：`Start-Process -Verb RunAs -ArgumentList '-Command','python -c …'` 经常**静默不产出**
+（产物文件根本不出现），要提权跑东西就 `-File` 指一个生成好的 `.ps1`，别拼 `-Command`。
+
+**bash 双引号里的反引号会真的被执行**（同日改文档时踩到）：`python -c "…改 `start-hud-next.bat` 字串…"`
+会把命令名当命令跑，报 `command not found`，同时把这个词从字符串里**挖空**写进文件。
+⇒ 任何含反引号/`$( )` 的正文（尤其是要写进 md 的 code 片段）只能用 Write/Edit 工具或 `<<'PY'` 落盘；
+用 bash 内联 python 改文档后要回读那一行。
+
+## Git Bash 的 `curl -d` 会把中文 JSON 转码（2026-11-07 实测）
+
+在 Windows Git Bash 里把中文直接写进 `curl -d '{"name":"Java 迁移验证"}'`，Spring Boot 返回 **400**；
+同一接口换成 ASCII 名字立刻成功。原因是参数经过本地代码页（GBK）转换，服务端按 UTF-8 解 JSON 失败。
+这不是应用校验 bug，node/应用内测试直接构造 UTF-8 字符串也不受影响。
+
+⇒ 冒烟脚本优先用 ASCII 字段；必须发中文 JSON 时，把 payload 写成 **UTF-8 文件**再用
+`curl --data-binary @payload.json`，或把请求放进应用内测试。别把这类 400 误判成接口或校验逻辑错误。
+
+---
+
+## 国内版补充（2026-11-19 并入）
+
+> 来源：Qoder 国内版 `C:\Users\Admin\.qoder-cn\memory\reference-windows-python-encoding.md`（本地修改日期 2026-11-04），国际版没有的内容，逐字保留；只追加，不改写上文。
+
+**反斜杠在正则里同样会被吞（2026-11-04 连踩两次，浪费两个校验回合）**：
+- `re.split(r'(?<!\\)\|', s)` 落到 Python 变成 `(?<!\)\|` → `re.PatternError: missing ), unterminated subpattern at position 0`；
+- 判断「前一个字符不是反斜杠」写 `if prev != '\\'` 会变成 `'\'` → `SyntaxError: unterminated string literal`。
+- **`shutil.rmtree(path, ignore_errors=True)` 在 Windows 上会静默删失败**，于是下一轮重跑时报
+  `fatal: destination path '...' already exists`，看起来像网络/克隆问题，其实是上一轮的残留（`--filter=blob:none`
+  的半截 `.git` 目录里有只读 pack 文件）。正解：给 `rmtree` 传 `onerror` 回调里 `os.chmod(p, stat.S_IWRITE)` 再重试删除，
+  或者干脆每次用全新目录名；**删完必须 `os.path.exists` 复查并打印**，别信 `ignore_errors`。
+- **Edit 工具的 `old_string` 无法匹配文件里字面的 `\uXXXX`**：工具参数走 JSON，我写的 `\u5168` 会被解码成真实字符「全」，
+  而文件里存的是那 6 个字面字符，于是 `0 occurrences found`（用 Bash 打印出来的行看起来一模一样，很容易误判成空格/缩进问题）。
+  遇到这种行**别用 Edit 匹配**，改用 Python 按行号整行替换：`lines[2] = 'WORK = "..."\n'`，替换完立刻 `py_compile` 验证。
+- 顺带：`- <<'PY'` 里我写的 `\\u5168` 会变成 `\u5168` 落进 python 源码，而 raw 字符串不解码它 —— 拼中文路径就直接写中文字符或正斜杠。

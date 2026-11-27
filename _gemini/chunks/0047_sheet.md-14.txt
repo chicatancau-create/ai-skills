@@ -1,0 +1,126 @@
+  dws sheet filter-view get-criteria --node <NODE_ID> --sheet-id <SHEET_ID> --filter-view-id <FV_ID> --column 0
+
+  # 查看第 3 列（偏移量 2）的筛选条件
+  dws sheet filter-view get-criteria --node <NODE_ID> --sheet-id <SHEET_ID> --filter-view-id <FV_ID> --column 2
+Flags:
+      --node string             表格文档 ID 或 URL (必填)
+      --sheet-id string         工作表 ID 或名称 (必填)
+      --filter-view-id string   筛选视图 ID (必填)
+      --column int              列偏移量，从 0 开始 (必填)
+```
+
+获取指定筛选视图中某一列的筛选条件详情。
+- **用途**：查看某个筛选视图中指定列当前设置的筛选条件，包括条件类型、运算符和比较值。
+- **场景**：在修改某列条件前，先查看其当前配置；或验证 `update-criteria` 后该列条件是否正确。
+- **区分**：`get-criteria` 只返回指定列的条件；`list-criteria` 返回所有列的条件。`--column` 为列偏移量（从 0 开始），相对于筛选视图范围首列。
+- **实现**：内部调用 `get_filter_views` 获取视图详情后按列偏移量过滤 `criteria` 中的对应条件。
+
+### 导出表格为 xlsx（异步任务一站式）
+```
+Usage:
+  dws sheet export [flags]    # 一站式：提交 → 轮询 → 可选下载
+Example:
+  # 仅导出，返回 downloadUrl（链接有时效性，请尽快下载）
+  dws sheet export --node <NODE_ID>
+  dws sheet export --node "https://alidocs.dingtalk.com/i/nodes/<DOC_UUID>"
+
+  # 导出并自动下载为本地文件
+  dws sheet export --node <NODE_ID> --output ./report.xlsx
+
+  # --output 为目录时，自动按下载链接中的文件名保存
+  dws sheet export --node <NODE_ID> --output ./
+
+Flags:
+      --node string     表格文档 ID 或 URL (必填)
+      --output string   本地保存路径（可选，支持文件路径或目录）
+```
+
+将钉钉在线电子表格导出为 Office xlsx 格式。**单命令一站式**：命令内部自动完成「提交任务 → 渐进式退避轮询 → （可选）下载文件」全流程，AI Agent 无需自行拆分步骤或实现轮询。
+
+**内部流程**：
+1. 调 `submit_export_job` 获取 `jobId`
+2. 按渐进式退避策略轮询 `query_export_job` 直至任务终态或超时
+3. 任务成功后取得 `downloadUrl`；若指定了 `--output`，自动 HTTP GET 下载 xlsx 到本地文件
+
+**内置轮询策略（CLI 内实现，无需关心）**：
+- 第 1~5 次：每次间隔 2 秒
+- 第 6~10 次：每次间隔 5 秒
+- 第 11~20 次：每次间隔 10 秒
+- 第 21~30 次：每次间隔 15 秒
+- **硬上限：最多轮询 30 次（约 5 分钟）**，超时后命令返回错误
+
+**命令返回**：
+- `--output` 未指定：进度日志 + 末尾输出 `jobId` 和 `downloadUrl`（链接有时效性，请尽快下载）
+- `--output` 指定为文件路径：下载到该路径并输出 `导出完成: <path>`
+- `--output` 指定为已存在目录：自动从 `downloadUrl` 推断文件名并保存到该目录下
+
+**失败处理（命令内部已处理，Agent 仅需转述）**：
+- MCP 返回 `FAILED`：命令立即返回错误并附带失败原因，**禁止自动重试 `dws sheet export`**，告知用户稍后再试
+- 轮询 30 次仍 `PROCESSING`：命令返回超时错误，告知用户稍后再试
+
+**限制**：仅支持钉钉在线电子表格（alxs）→ xlsx。导出钉钉文字文档请使用 `doc` 产品对应的导出工具。
+
+## 核心工作流
+
+```bash
+# ── 工作流 1: 创建表格并写入数据 ──
+
+# 1. 创建表格文档 — 提取 nodeId
+dws sheet create --name "销售数据" --format json
+
+# 2. 查看工作表列表 — 提取 sheetId
+dws sheet list --node <NODE_ID> --format json
+
+# 3. 写入表头和数据
+dws sheet range update --node <NODE_ID> --sheet-id <SHEET_ID> --range "A1:C1" \
+  --values '[["姓名","部门","销售额"]]' --format json
+
+dws sheet range update --node <NODE_ID> --sheet-id <SHEET_ID> --range "A2:C4" \
+  --values '[["张三","销售部",50000],["李四","市场部",38000],["王五","销售部",62000]]' --format json
+
+# ── 工作流 2: 读取已有表格数据 ──
+
+# 1. 获取工作表列表
+dws sheet list --node <NODE_ID> --format json
+
+# 2. 查看工作表详情（行列数、最后非空位置等）
+dws sheet info --node <NODE_ID> --sheet-id <SHEET_ID> --format json
+
+# 3. 读取全部数据
+dws sheet range read --node <NODE_ID> --sheet-id <SHEET_ID> --format json
+
+# 4. 读取指定区域
+dws sheet range read --node <NODE_ID> --sheet-id <SHEET_ID> --range "A1:D10" --format json
+
+# ── 工作流 3: 多工作表管理 ──
+
+# 1. 新建工作表
+dws sheet new --node <NODE_ID> --name "汇总" --format json
+
+# 2. 在新工作表中写入汇总公式
+dws sheet range update --node <NODE_ID> --sheet-id <NEW_SHEET_ID> --range "A1:B1" \
+  --values '[["指标","数值"]]' --format json
+
+dws sheet range update --node <NODE_ID> --sheet-id <NEW_SHEET_ID> --range "A2:B2" \
+  --values '[["总销售额","=SUM(Sheet1!C2:C100)"]]' --format json
+
+# ── 工作流 4: 写入数据并设置样式 ──
+
+# 1. 写入数据
+dws sheet range update --node <NODE_ID> --sheet-id <SHEET_ID> --range "A1:C3" \
+  --values '[["商品","单价","数量"],["苹果",5.5,100],["香蕉",3.2,200]]' --format json
+
+# 2. 设置数字格式（人民币）——请走 set-style，不要放到 range update
+dws sheet range set-style --node <NODE_ID> --sheet-id <SHEET_ID> --range "B2:B3" \
+  --number-format "¥#,##0.00" --format json
+
+# 3. 写入超链接
+dws sheet range update --node <NODE_ID> --sheet-id <SHEET_ID> --range "D1" \
+  --hyperlinks '[[{"type":"path","link":"https://dingtalk.com","text":"详情"}]]' --format json
+
+# ── 工作流 5: 追加数据 ──
+
+# 1. 获取工作表列表
+dws sheet list --node <NODE_ID> --format json
+
+# 2. 查看工作表详情（确认列结构）

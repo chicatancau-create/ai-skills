@@ -1,0 +1,79 @@
+    print(f"  Aspect Ratio: {aspect_ratio}")
+    print()
+    print("  [..] Generating...", end="", flush=True)
+    start = time.time()
+    response = requests.post(url, headers=headers, json=payload, timeout=180)
+    elapsed = time.time() - start
+    print(f"\n  [DONE] Initial response received ({elapsed:.1f}s)")
+
+    if response.status_code not in (200, 201):
+        raise http_error(response, "Replicate generation request")
+
+    data = response.json()
+    status = str(data.get("status", "")).lower()
+    if status != "succeeded":
+        poll_url = ((data.get("urls") or {}).get("get"))
+        if not poll_url:
+            prediction_id = data.get("id")
+            if prediction_id:
+                poll_url = f"{base_url.rstrip('/')}/predictions/{prediction_id}"
+        if not poll_url:
+            raise RuntimeError(f"Replicate response missing poll URL: {data}")
+
+        print("  [..] Polling result...")
+        data = poll_json(
+            poll_url,
+            {"Authorization": f"Bearer {api_key}"},
+            status_label="status",
+            ready_values=["succeeded"],
+            failed_values=["failed", "canceled"],
+        )
+
+    image_url = _extract_output_url(data)
+    if not image_url:
+        raise RuntimeError(f"Replicate response missing output URL: {data}")
+
+    path = resolve_output_path(prompt, output_dir, filename, ".png")
+    return download_image(image_url, path)
+
+
+def generate(prompt: str,
+             aspect_ratio: str = "1:1", image_size: str = "1K",
+             output_dir: str = None, filename: str = None,
+             model: str = None, max_retries: int = MAX_RETRIES) -> str:
+    """Generate an image with retries using the Replicate backend."""
+    resolved_model = model or os.environ.get("REPLICATE_MODEL") or DEFAULT_MODEL
+    _resolve_request_options(aspect_ratio, image_size, resolved_model)
+    api_key = require_api_key(
+        "REPLICATE_API_KEY",
+        "REPLICATE_API_TOKEN",
+        message="No API key found. Set REPLICATE_API_KEY or REPLICATE_API_TOKEN in the current environment or a .env file.",
+    )
+    base_url = os.environ.get("REPLICATE_BASE_URL") or DEFAULT_BASE_URL
+
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            return _generate_image(
+                api_key=api_key,
+                prompt=prompt,
+                aspect_ratio=aspect_ratio,
+                image_size=image_size,
+                output_dir=output_dir,
+                filename=filename,
+                model=resolved_model,
+                base_url=base_url,
+            )
+        except Exception as exc:
+            last_error = exc
+            if is_permanent_error(exc):
+                raise
+            if attempt >= max_retries:
+                break
+            limited = is_rate_limit_error(exc)
+            delay = retry_delay(attempt, rate_limited=limited)
+            label = "Rate limit hit" if limited else f"Error: {exc}"
+            print(f"\n  [WARN] {label}. Retrying in {delay}s...")
+            time.sleep(delay)
+
+    raise RuntimeError(f"Failed after {max_retries + 1} attempts. Last error: {last_error}")

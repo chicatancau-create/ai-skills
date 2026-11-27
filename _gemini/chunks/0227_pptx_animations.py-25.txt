@@ -1,0 +1,106 @@
+    sounds = list(row.iter(_qn(PML_NS, 'sndTgt')))
+    if not sounds:
+        return None, None
+    if len(sounds) != 1:
+        errors.append(f'object-animation row contains {len(sounds)} sounds')
+        return None, None
+    relationship_id = sounds[0].get(_qn(_REL_NS, 'embed'))
+    name = sounds[0].get('name')
+    if relationship_id is None or name is None:
+        errors.append('object-animation sound is missing relationship id or name')
+    return relationship_id, name
+
+
+def _row_trigger_shape_id(
+    row: ET.Element,
+    parent_map: Mapping[ET.Element, ET.Element],
+    errors: list[str],
+) -> int | None:
+    current = parent_map.get(row)
+    while current is not None:
+        if (
+            current.tag == _qn(PML_NS, 'cTn')
+            and current.get('nodeType') == 'interactiveSeq'
+        ):
+            shape_targets = [
+                target
+                for condition in _direct_conditions(current)
+                if condition.get('evt') == 'onClick'
+                for target in condition.iter(_qn(PML_NS, 'spTgt'))
+            ]
+            if len(shape_targets) != 1:
+                errors.append(
+                    'interactive animation sequence must have one trigger shape'
+                )
+                return None
+            return _int_attribute(
+                shape_targets[0],
+                'spid',
+                'interactive animation trigger shape id',
+                errors,
+                minimum=1,
+                maximum=MAX_OOXML_UNSIGNED_INT,
+            )
+        current = parent_map.get(current)
+    return None
+
+
+def _row_offset_ms(
+    row: ET.Element,
+    trigger: str,
+    trigger_shape_id: int | None,
+    parent_map: Mapping[ET.Element, ET.Element],
+    errors: list[str],
+) -> int:
+    leaf_conditions = _direct_conditions(row)
+    leaf_delay = None
+    if (
+        len(leaf_conditions) == 1
+        and re.fullmatch(r'\d+', leaf_conditions[0].get('delay') or '')
+    ):
+        leaf_delay = int(leaf_conditions[0].get('delay', '0'))
+    else:
+        errors.append(
+            'object-animation row must have one numeric leaf start condition'
+        )
+    current = parent_map.get(row)
+    saw_indefinite = False
+    numeric_offset: int | None = None
+    while current is not None:
+        if current.tag == _qn(PML_NS, 'cTn'):
+            conditions = _direct_conditions(current)
+            if any(condition.get('delay') == 'indefinite' for condition in conditions):
+                saw_indefinite = True
+            if trigger in {'with-previous', 'after-previous'}:
+                numeric = [
+                    condition.get('delay')
+                    for condition in conditions
+                    if condition.get('evt') is None
+                    and re.fullmatch(r'\d+', condition.get('delay') or '')
+                ]
+                if numeric and numeric_offset is None:
+                    numeric_offset = int(numeric[0])
+                    if numeric_offset > MAX_OOXML_MILLISECONDS:
+                        errors.append(
+                            'animation row offset exceeds the OOXML '
+                            f'millisecond limit: {numeric_offset}'
+                        )
+        current = parent_map.get(current)
+
+    if (
+        trigger == 'on-click'
+        and trigger_shape_id is None
+        and not saw_indefinite
+    ):
+        errors.append(
+            'on-click object-animation row is missing an indefinite click wrapper'
+        )
+    if trigger in {'with-previous', 'after-previous'} and not saw_indefinite:
+        errors.append(f'{trigger} sequence is missing its sequence anchor')
+    if trigger in {'with-previous', 'after-previous'} and numeric_offset is None:
+        errors.append(
+            f'{trigger} object-animation row is missing its numeric offset wrapper'
+        )
+    if trigger in {'with-previous', 'after-previous'}:
+        absolute_offset = (numeric_offset or 0) + (leaf_delay or 0)
+        if absolute_offset > MAX_OOXML_MILLISECONDS:

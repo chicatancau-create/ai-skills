@@ -1,0 +1,30 @@
+The orchestrator partitions N pages into batches of ≤ K (default 5) and spawns one subagent per batch in parallel; each subagent reads the fixed inputs once, then iterates its pages. The orchestrator prompt is self-contained and the single place stating dispatch shape, batch size, and forbid lists; it carries (absolute paths): `<project_path>`; the full page list with `page_role` and each successful renderer record's `canvas` (parse `design_spec.md` §IX — **fixed compatibility default**: a `design_spec.md` without §IX uses `content` for every page and flags it in the report; a missing `design_spec.md` is restored through [`failure-recovery.md`](../governance/failure-recovery.md) §3 first); batch size K (10 for token-sensitive large decks, 3 for high-fidelity short decks — rubric §6.1); iteration budget (default 1; 2 only for final-cut runs — see the appendix); the rubric path; the Style Review Focus excerpt with its wording and source path when found; the dispatch contract reference (rubric §6); and the subagent forbid list (no edits to other pages, `design_spec.md`, `spec_lock.md`, `templates/`, `animations.json`, `image_prompts.json`, `images/`).
+
+**Host compatibility**: `TeamCreate` and `SendMessage` are Claude-Code primitives; a host with parallel anonymous subagents runs the batches in parallel with the main agent aggregating their returned reports; elsewhere the main agent processes the same batches sequentially with the same prompts — token savings persist, wall-clock grows roughly N/K-fold.
+
+---
+
+## Step 3 — Aggregate findings
+
+The orchestrator returns `| page | role | status | hard_hits | soft_hits | fixes_applied | needs_human_reason |`, where `ok` = clean, `fixed` = fixes applied and Hard rules pass, `needs_human` = a fix was rolled back (rubric §4.2) or the violation needs a brand/structure decision, `render_failed` = iteration-0 sanity failed, `prereq_failed` = static checker not run — plus `<project>/.review/brand_review.json` when §1.1 escalations occurred, reviewed once at the end.
+
+---
+
+## Step 4 — Decide next move
+
+`ok` / `fixed` — nothing to do; the SVG was updated in place with originals at `<project>/.review/backup/<page>.iter<N>.svg`. `needs_human` — read `needs_human_items[].suggested_fix_summary` and decide with the user. `render_failed` — re-run `visual_review.py --pages <token>`; if it persists, hand off to manual review. `prereq_failed` — run `svg_quality_checker.py`. A non-empty `brand_review.json` is one deck-wide decision (e.g. bump a footer token deck-wide); apply it once, then optionally re-review the affected pages. When the table is clean, continue to [`generate-pptx`](../generate-pptx.md) Step 7.
+
+---
+
+## Notes & invariants
+
+- The rubric is the single source of rules; this file is orchestration only and never restates them.
+- Don't-touch (rubric §3) is hard-enforced: a brand color change is out of scope — make it manually, then re-render and re-review.
+- The rubric catches collisions, drift, and rhythm errors, not a fundamentally weak layout; if 80%+ of pages come back `needs_human`, the root cause is the Design Spec's pattern selection or Executor geometry.
+- Direct playwright MCP `browser_take_screenshot` resolves `filename` against the CWD (usually the repo root): always pass an absolute path — `/tmp/probe-<topic>-<n>.png` for ad-hoc probes, `<project_path>/.preview/<page>.png` for project artifacts; never write under the repository. `visual_review.py` handles its own paths.
+
+---
+
+## Appendix: Iteration loop (opt-in)
+
+Default is one iteration. With budget 2 in the orchestrator prompt (a prompt-level instruction; neither the script nor the harness enforces it): iteration 1 scan + fix → re-render via `visual_review.py --pages <token>` → iteration 2 re-verify changed elements and scan for new Hard hits, rolling back any fix that introduced one (rubric §4.1–§4.2). Each added iteration roughly doubles render cost and triples token cost; reserve for final-cut runs.

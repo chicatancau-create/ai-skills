@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+"""Propagate a spec_lock.md value change to both the lock file and svg_output/*.svg.
+
+Examples:
+    python3 update_spec.py <project_path> primary=#0066AA
+    python3 update_spec.py <project_path> colors.text=#111111
+    python3 update_spec.py <project_path> \\
+        typography.font_family='Arial, "Microsoft YaHei", sans-serif'
+
+v2 scope:
+- `colors.*` — HEX value replacement across svg_output/*.svg (case-insensitive match).
+- `typography.font_family` — replaces the inner value of every `font-family="..."`
+  / `font-family='...'` attribute in svg_output/*.svg. This is a global replace:
+  every text element becomes the new family, regardless of role, and every
+  existing `typography.*_family` lock row is updated to the same value.
+
+Bare `key=value` (no dot) is treated as `colors.key=value` for backward compat.
+
+Other keys as independent targets (typography sizes, per-role
+`typography.*_family` overrides, icons, images, canvas, forbidden) are
+intentionally NOT supported — they involve attribute-scoped or semantic
+replacements whose risk/benefit does not warrant bulk propagation. For
+per-role family changes, edit spec_lock.md and re-author the affected pages.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+
+from console_encoding import configure_utf8_stdio
+from project_management.project_specs import parse_spec_lock as parse_lock
+from stamp_native_fallbacks import (
+    NativeFallbackStampError,
+    prepare_native_fallback_baselines,
+)
+
+configure_utf8_stdio()
+
+HEX_RE = re.compile(r"^#(?:[0-9A-Fa-f]{3,4}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$")
+FONT_FAMILY_RE = re.compile(r"""(font-family\s*=\s*)(["'])(.*?)\2""")
+
+
+def plan_lock_values(
+    lock_path: Path, section: str, updates: dict[str, str]
+) -> str:
+    """Return a lock rewrite only after every target row validates."""
+    lines = lock_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    in_section = False
+    found: set[str] = set()
+    for i, raw in enumerate(lines):
+        stripped = raw.rstrip("\r\n")
+        line_ending = raw[len(stripped) :]
+        if stripped.startswith("## "):
+            in_section = stripped[3:].strip() == section
+            continue
+        if not in_section:
+            continue
+        m = re.match(r"^(-\s+)([A-Za-z0-9_]+)(\s*:\s*)(.+?)(\s*)$", stripped)
+        if not m or m.group(2) not in updates:
+            continue
+        key = m.group(2)
+        if key in found:
+            raise ValueError(
+                f"duplicate key {key!r} under section {section!r} in {lock_path}"
+            )
+        found.add(key)
+        lines[i] = (
+            f"{m.group(1)}{key}{m.group(3)}{updates[key]}{m.group(5)}"
+            f"{line_ending}"
+        )
+
+    missing = set(updates) - found
+    if missing:
+        missing_list = ", ".join(sorted(missing))
+        raise KeyError(
+            f"key(s) {missing_list} not found under section {section!r} in {lock_path}"
+        )
+    return "".join(lines)
+
+
+def _plan_color_updates(
+    svg_dir: Path,
+    old_hex: str,
+    new_hex: str,
+) -> list[tuple[Path, str, int]]:
+    """Return planned color rewrites without touching the SVG files."""
+    if not HEX_RE.match(old_hex) or not HEX_RE.match(new_hex):
+        raise ValueError(f"not a HEX color: old={old_hex!r} new={new_hex!r}")
+    pattern = re.compile(
+        rf"{re.escape(old_hex)}(?![0-9A-Fa-f])",
+        re.IGNORECASE,
+    )
+    planned: list[tuple[Path, str, int]] = []
+    for svg in sorted(svg_dir.glob("*.svg")):
+        text = svg.read_text(encoding="utf-8")
+        new_text, count = pattern.subn(new_hex, text)
+        if count > 0:
+            planned.append((svg, new_text, count))
+    return planned
+
+
+def _plan_font_family_updates(
+    svg_dir: Path,
+    new_value: str,
+) -> list[tuple[Path, str, int]]:
+    """Return planned font-family rewrites without touching the SVG files."""
+

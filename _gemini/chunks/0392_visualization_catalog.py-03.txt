@@ -1,0 +1,108 @@
+        raise VisualizationCatalogError(
+            f"no visualization entries are available for family selection {shown}"
+        )
+    return VisualizationCatalog(entries=entries, aliases=aliases)
+
+
+def load_visualization_entries(
+    families: Iterable[str] | None = None,
+) -> dict[str, VisualizationEntry]:
+    """Return canonical entries keyed by ``family/key``."""
+    return load_visualization_catalog(families).entries
+
+
+def _require_svg(entry: VisualizationEntry) -> VisualizationEntry:
+    if entry.kind != VISUALIZATION_SVG_KIND:
+        raise VisualizationCatalogError(
+            f"{entry.family}/{entry.key} has unsupported kind {entry.kind!r}"
+        )
+    if entry.path is None:
+        raise VisualizationCatalogError(f"{entry.reference!r} has no SVG asset path")
+    if entry.path.suffix.casefold() != ".svg" or not entry.path.is_file():
+        raise VisualizationCatalogError(
+            f"{entry.reference!r} has no SVG asset at {entry.path}"
+        )
+    return entry
+
+
+def resolve_visualization_reference(
+    value: str,
+    *,
+    allow_legacy_bare: bool = False,
+) -> VisualizationEntry:
+    """Resolve one live ``family/key`` or supported legacy bare key.
+
+    Legacy Structure intents are accepted only when ``allow_legacy_bare`` is
+    true. A qualified ``structure/<key>`` is never a live reference.
+    """
+    normalized = str(value).strip().casefold()
+    if not normalized:
+        raise VisualizationCatalogError("visualization reference must not be empty")
+
+    catalog = load_visualization_catalog()
+    if "/" in normalized:
+        family, separator, key = normalized.partition("/")
+        if (
+            not separator
+            or family not in _FAMILY_SPECS
+            or _KEY_RE.fullmatch(key) is None
+            or "/" in key
+        ):
+            raise VisualizationCatalogError(
+                f"invalid canonical visualization reference {value!r}"
+            )
+        reference = f"{family}/{key}"
+        entry = catalog.entries.get(reference)
+        if entry is None:
+            if reference in catalog.aliases:
+                raise VisualizationCatalogError(
+                    f"{value!r} is a legacy alias; use {catalog.aliases[reference]!r}"
+                )
+            raise VisualizationCatalogError(
+                f"canonical visualization reference {value!r} is not registered"
+            )
+        return _require_svg(entry)
+
+    if not allow_legacy_bare:
+        raise VisualizationCatalogError(
+            f"{value!r} must use canonical family/key grammar"
+        )
+    if _KEY_RE.fullmatch(normalized) is None:
+        raise VisualizationCatalogError(f"invalid legacy visualization key {value!r}")
+
+    matches = [
+        entry
+        for entry in catalog.entries.values()
+        if entry.key == normalized
+    ]
+    for alias_reference, target_reference in catalog.aliases.items():
+        _, alias = alias_reference.split("/", 1)
+        if alias == normalized:
+            matches.append(catalog.entries[target_reference])
+    if normalized in _LEGACY_STRUCTURE_INTENT_KEYS:
+        matches.append(
+            VisualizationEntry(
+                family="structure",
+                key=normalized,
+                summary=(
+                    "Frozen legacy page_charts Structure intent; author the "
+                    "page structure from its semantic relationships."
+                ),
+                path=None,
+                kind=LEGACY_STRUCTURE_INTENT_KIND,
+            )
+        )
+    unique_matches = {
+        (entry.kind, entry.family, entry.key): entry
+        for entry in matches
+    }
+    if not unique_matches:
+        raise VisualizationCatalogError(
+            f"legacy visualization key {value!r} is not registered"
+        )
+    if len(unique_matches) > 1:
+        candidates = ", ".join(
+            f"{family}/{key} ({kind})"
+            for kind, family, key in sorted(unique_matches)
+        )
+        raise VisualizationCatalogError(

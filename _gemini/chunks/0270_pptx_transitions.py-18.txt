@@ -1,0 +1,117 @@
+    source_bytes = slide_xml.encode("utf-8")
+    if LET is not None:
+        parser = LET.XMLParser(
+            remove_blank_text=False,
+            resolve_entities=False,
+            no_network=True,
+        )
+        root = LET.fromstring(source_bytes, parser)
+        uses_timings = apply_slide_motion(
+            root,
+            enter=enter,
+            advance=advance,
+        )
+        output = _serialize_lxml_like(root, slide_xml)
+    else:
+        root = parse_source_xml(source_bytes)
+        uses_timings = apply_slide_motion(
+            root,
+            enter=enter,
+            advance=advance,
+        )
+        output = serialize_source_xml(root, source_bytes).decode("utf-8")
+
+    expected_transition = read_slide_transition(root)
+    errors = validate_slide_transition_xml(output)
+    if read_slide_transition_xml(output) != expected_transition:
+        errors.append("slide transition changed during XML serialization")
+    if errors:
+        raise ValueError("; ".join(errors))
+    return output, uses_timings
+
+
+def read_slide_transition_xml(slide_xml: str | bytes) -> TransitionSummary:
+    """Read a transition summary from raw slide XML."""
+    data = (
+        slide_xml.encode("utf-8")
+        if isinstance(slide_xml, str)
+        else slide_xml
+    )
+    if LET is not None:
+        root = LET.fromstring(data)
+    else:
+        root = parse_source_xml(data)
+    return read_slide_transition(root)
+
+
+def validate_generated_transition_xml(
+    slide_xml: str | bytes,
+    *,
+    effect: str | None,
+    duration: object,
+    advance_on_click: bool | None,
+    advance_after: object | None,
+    effect_options: Mapping[str, object] | None = None,
+    sound: Mapping[str, object] | None = None,
+) -> TransitionSummary:
+    """Validate a generated transition against its resolved settings."""
+    data = slide_xml.encode("utf-8") if isinstance(slide_xml, str) else slide_xml
+    root = LET.fromstring(data) if LET is not None else parse_source_xml(data)
+    errors = validate_slide_transition_structure(root) + validate_mce_prefixes(data)
+    summary = read_slide_transition(root)
+    normalized_effect, normalized_options = normalize_transition_effect_request(
+        effect,
+        effect_options,
+    )
+    normalized_sound = _normalize_transition_sound(sound)
+    expected_click = True if advance_on_click is None else advance_on_click
+    if not isinstance(expected_click, bool):
+        errors.append("transition advance_on_click must be a boolean or None")
+    expected_after_ms = (
+        _seconds_to_ms(
+            advance_after,
+            "transition advance_after",
+            allow_zero=True,
+        )
+        if advance_after is not None
+        else None
+    )
+    expects_carrier = (
+        normalized_effect is not None
+        or expected_after_ms is not None
+        or expected_click is False
+        or normalized_sound is not None
+    )
+
+    if not expects_carrier:
+        if summary.logical_count != 0:
+            errors.append("generated slide unexpectedly contains a transition carrier")
+    else:
+        expected_duration_ms = (
+            _seconds_to_ms(
+                duration,
+                "transition duration",
+                allow_zero=False,
+            )
+            if normalized_effect is not None
+            else None
+        )
+        expected_carrier = "direct"
+        expected_effect = None
+        expected_namespace = None
+        expected_fallback = None
+        expected_fallback_namespace = None
+        expected_attrs: dict[str, Any] = {}
+        expected_sound_relationship_id = (
+            normalized_sound["relationship_id"]
+            if normalized_sound is not None
+            else None
+        )
+        expected_sound_name = (
+            normalized_sound["name"]
+            if normalized_sound is not None
+            else None
+        )
+        expected_fallback_sound_relationship_id = None
+        expected_fallback_sound_name = None
+        if normalized_effect is not None:

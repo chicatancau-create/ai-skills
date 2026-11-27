@@ -1,0 +1,84 @@
+            (project_path / rel_path).mkdir(parents=True, exist_ok=True)
+
+        if not quick_generate:
+            canvas_summary = (
+                f"- Canvas format: {normalized_format}\n"
+                if normalized_format is not None
+                else f"- {DEFERRED_CANVAS_MESSAGE}\n"
+            )
+            readme_path = project_path / "README.md"
+            readme_path.write_text(
+                (
+                    f"# {project_name}\n\n"
+                    f"{canvas_summary}"
+                    f"- Created: {date_str}\n\n"
+                    "## Directories\n\n"
+                    "- `svg_output/`: raw SVG output\n"
+                    "- `svg_final/`: self-contained SVG visual preview; may be inserted manually as an SVG image, but PowerPoint Convert to Shape is unsupported\n"
+                    "- `images/`: runtime image pool; converter assets keep their original short filenames when possible\n"
+                    "- `icons/`: project icon set — selected library icons copied in (via icon_sync.py) plus any custom icons you add; embedded from here at export\n"
+                    "- `notes/`: speaker notes\n"
+                    "- `templates/`: project templates\n"
+                    "- `live_preview/`: browser preview runtime files and history (lock.json, server.log, edits.jsonl, annotations.jsonl)\n"
+                    "- `sources/`: source materials and normalized markdown\n"
+                    "- `analysis/`: machine-extracted intermediate analysis (PPTX intake, image_analysis.csv) — the pipeline's canonical must-read source/asset facts\n"
+                    "- `validation/`: cold workflow audit log, SVG quality reports, and PPTX postflight audit reports\n"
+                    "- `exports/`: final native DrawingML pptx deliverables only (timestamped); `_native_charts_tables.pptx` name with `--native-charts-and-tables`, `_narrated.pptx` name when narration audio is embedded\n"
+                    "- `backup/<timestamp>/`: svg_output/ archive (always written in default-flow mode; safe to delete old timestamps)\n"
+                ),
+                encoding="utf-8",
+            )
+
+        print(f"Project created: {project_path}")
+        if normalized_format is None:
+            print(DEFERRED_CANVAS_MESSAGE)
+        else:
+            canvas_info = self.CANVAS_FORMATS[normalized_format]
+            print(f"Canvas: {canvas_info['name']} ({canvas_info['dimensions']})")
+        return str(project_path)
+
+    def _source_dir(self, project_path: Path) -> Path:
+        sources_dir = project_path / SOURCE_DIRNAME
+        sources_dir.mkdir(parents=True, exist_ok=True)
+        return sources_dir
+
+    def _analysis_dir(self, project_path: Path) -> Path:
+        analysis_dir = project_path / "analysis"
+        analysis_dir.mkdir(parents=True, exist_ok=True)
+        return analysis_dir
+
+    def _ensure_unique_path(self, path: Path) -> Path:
+        if not path.exists():
+            return path
+
+        suffix = path.suffix
+        stem = path.stem
+        counter = 2
+        while True:
+            candidate = path.with_name(f"{stem}_{counter}{suffix}")
+            if not candidate.exists():
+                return candidate
+            counter += 1
+
+    def _copy_or_move_file(self, source: Path, destination: Path, move: bool) -> Path:
+        try:
+            if source.resolve() == destination.resolve():
+                return destination
+        except FileNotFoundError:
+            pass
+
+        destination = self._ensure_unique_path(destination)
+        if move:
+            shutil.move(str(source), str(destination))
+        else:
+            shutil.copy2(source, destination)
+        return destination
+
+    def _copy_or_move_tree(self, source: Path, destination: Path, move: bool) -> Path:
+        try:
+            if source.resolve() == destination.resolve():
+                return destination
+        except FileNotFoundError:
+            pass
+
+        destination = self._ensure_unique_path(destination)

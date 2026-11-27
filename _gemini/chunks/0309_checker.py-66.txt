@@ -1,0 +1,93 @@
+                    continue
+                try:
+                    root = ET.fromstring(content)
+                except ET.ParseError:
+                    continue
+                self._undeclared_size_occurrences.update(
+                    self._count_undeclared_size_occurrences(
+                        root,
+                        locked_sizes=locked_sizes,
+                        anchor_sizes=anchor_sizes,
+                        prototype_sizes=prototype_sizes,
+                    )
+                )
+        finally:
+            self._active_prototype_path = previous_prototype
+            self._undeclared_size_counts_ready = True
+
+    def _check_spec_lock_alignment(
+        self,
+        content: str,
+        svg_path: Path,
+        result: Dict,
+        *,
+        root: ET.Element,
+    ):
+        """Compare SVG values with reusable anchors in spec_lock.md.
+
+        Covers colors (fill / stroke / stop-color / flood-color / pattern
+        metadata), font-family, and font-size.
+        Additional colors and font families are valid contextual authoring and
+        are recorded as information. A valid undeclared display size may occur
+        at most twice across generated pages; its third occurrence makes it a
+        recurring role and blocks ``svg_output`` until the role is declared.
+        Structural text still maps to declared role bands. Exact mirror-
+        prototype values remain inherited information. Exact values are
+        accumulated in self._anchor_value_summary for end-of-run aggregation.
+        When spec_lock.md is missing, silently skip this local comparison; the
+        Generate route's required-artifact gate owns whether execution may begin.
+        """
+        lock = self._get_spec_lock(svg_path)
+        if lock is None:
+            return
+        prototype_colors, prototype_fonts, prototype_sizes = (
+            self._prototype_drift_allowances()
+        )
+
+        # Build allow-sets from the lock
+        allowed_colors = set()
+        for v in lock.get('colors', {}).values():
+            if _parse_export_color is not None:
+                color, _alpha = _parse_export_color(v)
+                if color:
+                    allowed_colors.add(color)
+            else:
+                color = _normalize_hex_rgb(v)
+                if color:
+                    allowed_colors.add(color)
+
+        # A validated compact preset may contain registry-derived darken/lighten
+        # layer colors.  Their base paint still comes from spec_lock; the exact
+        # child HEX values are deterministic compiler evidence, not color drift.
+        if (
+            _authored_preset_encoding is not None
+            and _validate_authored_preset_group is not None
+        ):
+            for group in root.iter():
+                if (
+                    _authored_preset_encoding(group) != 'compact'
+                    or _validate_authored_preset_group(group)
+                ):
+                    continue
+                for child in group:
+                    for attribute in ('fill', 'stroke'):
+                        raw_value = child.get(attribute)
+                        if raw_value is None:
+                            continue
+                        if _parse_export_color is not None:
+                            color, _alpha = _parse_export_color(raw_value)
+                        else:
+                            color = _normalize_hex_rgb(raw_value)
+                        if color:
+                            allowed_colors.add(color)
+        locked_colors = set(allowed_colors)
+        allowed_colors.update(prototype_colors)
+
+        typo, locked_sizes, anchor_sizes, invalid_lock_sizes = (
+            self._declared_typography_size_anchors(lock)
+        )
+        if invalid_lock_sizes:
+            shown = ', '.join(invalid_lock_sizes[:5])
+            more = len(invalid_lock_sizes) - 5
+            suffix = f" (+{more} more)" if more > 0 else ""
+            result['errors'].append(

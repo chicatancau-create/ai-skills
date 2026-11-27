@@ -1,0 +1,106 @@
+        design_sections = parse_markdown_artifact(design_path)
+    except (OSError, ValueError) as exc:
+        raise PageContextError(str(exc)) from exc
+    lock_sections = _section_index(lock_sections_raw)
+    part, brief = _slide_block(design_sections, page_number)
+    warnings: list[str] = []
+    rhythm_fields = _section_fields(lock_sections, "page_rhythm")
+    rhythm = rhythm_fields.get(page)
+    if rhythm is None:
+        rhythm = "dense"
+        warnings.append(f"page_rhythm has no {page}; using compatibility default dense")
+    visualization_value = _section_fields(
+        lock_sections,
+        "page_visualizations",
+    ).get(page)
+    legacy_chart_key = _section_fields(lock_sections, "page_charts").get(page)
+    if visualization_value is not None and legacy_chart_key is not None:
+        raise PageContextError(
+            f"{page} is declared in both page_visualizations and legacy "
+            "page_charts; keep only page_visualizations"
+        )
+    try:
+        structure_lock = load_pptx_structure_lock(project_path)
+    except TemplateStructureError as exc:
+        raise PageContextError(str(exc)) from exc
+    template, prototype_path = _page_template(
+        project_path,
+        structure_lock,
+        page_number,
+    )
+    prototype_refs = (
+        _prototype_image_refs(prototype_path)
+        if prototype_path is not None
+        else []
+    )
+    table_assigned_filenames, assigned_filenames = _page_image_filenames(
+        design_sections,
+        page_number,
+    )
+    locked_images = _section_fields(lock_sections, "images")
+    resolved_filenames = (
+        {_locked_image_basename(value) for value in locked_images.values()}
+        if structure_lock is not None
+        and structure_lock.template_reuse_scope == "mirror"
+        else table_assigned_filenames
+        | _outline_image_assignments(design_sections, locked_images)
+    )
+    image_selection, selected_images = _page_images(
+        locked_images,
+        brief,
+        (
+            prototype_refs
+            if structure_lock is not None
+            and structure_lock.template_reuse_scope == "mirror"
+            else []
+        ),
+        assigned_filenames,
+        resolved_filenames,
+    )
+    inputs = [lock_path, design_path]
+    reference_set: list[dict[str, str]] = [
+        _reference_payload(
+            "design-spec",
+            design_path,
+            scope="project",
+            display_path="design_spec.md",
+            same_context_edit_policy="targeted-readback-and-rebind",
+        ),
+    ]
+    template_design_path = project_path / "templates" / "design_spec.md"
+    if template_design_path.is_file():
+        inputs.append(template_design_path)
+        reference_set.append(
+            _reference_payload(
+                "template-design-spec",
+                template_design_path,
+                scope="project",
+                display_path="templates/design_spec.md",
+            )
+        )
+    if prototype_path is not None:
+        inputs.append(prototype_path)
+        reference_set.append(
+            _reference_payload(
+                "prototype-svg",
+                prototype_path,
+                scope="project",
+                display_path=_relative_project_path(project_path, prototype_path),
+            )
+        )
+    visualization_entry: VisualizationEntry | None = None
+    selected_visualization = (
+        visualization_value
+        if visualization_value is not None
+        else legacy_chart_key
+    )
+    if selected_visualization is not None:
+        visualization_reference, visualization_path, visualization_entry = (
+            _visualization_reference(
+                selected_visualization,
+                allow_legacy_bare=visualization_value is None,
+            )
+        )
+        if visualization_path is not None and visualization_reference is not None:
+            inputs.append(visualization_path)
+            reference_set.append(visualization_reference)

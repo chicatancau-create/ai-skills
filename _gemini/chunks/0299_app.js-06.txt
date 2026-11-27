@@ -1,0 +1,75 @@
+    // ---- DOM refs ---------------------------------------------------
+    var slideListEl       = document.getElementById("slide-list");
+    var svgPlaceholder    = document.getElementById("svg-placeholder");
+    var svgContent        = document.getElementById("svg-content");
+    var selectedElementEl = document.getElementById("selected-element");
+    var annotationInput   = document.getElementById("annotation-input");
+    var annotationQuickActions = document.getElementById("annotation-quick-actions");
+    var annotationText    = document.getElementById("annotation-text");
+    var btnAddAnnotation  = document.getElementById("btn-add-annotation");
+    var annotationsEl     = document.getElementById("annotations");
+    var btnUndo           = document.getElementById("btn-undo");
+    var btnSave           = document.getElementById("btn-save");
+    var btnExitPreview    = document.getElementById("btn-exit-preview");
+    var modalOverlay      = document.getElementById("modal-overlay");
+    var modalMessage      = document.getElementById("modal-message");
+    var modalConfirm      = document.getElementById("modal-confirm");
+    var modalCancel       = document.getElementById("modal-cancel");
+    var elementPropsEl    = document.getElementById("element-props");
+    var pendingStatusEl   = document.getElementById("pending-status");
+
+    var navFirstBtn       = document.getElementById("nav-first");
+    var navPrevBtn        = document.getElementById("nav-prev");
+    var navNextBtn        = document.getElementById("nav-next");
+    var navLastBtn        = document.getElementById("nav-last");
+    var navCounterEl      = document.getElementById("nav-counter");
+    var navNameEl         = document.getElementById("nav-name");
+
+    // ---- State ------------------------------------------------------
+    var currentSlide      = null;   // filename, e.g. "slide_01.svg"
+    var waitingForSlide   = null;   // current slide is temporarily unreadable in live mode
+    var slideNames        = [];     // ordered slide filenames for navigation
+    var selectedElementIds = new Set(); // id attrs of selected SVG elements
+    var slideAnnotations  = {};     // {element_id: annotation_text} for current slide
+    var liveMode          = false;
+    var slidePollTimer    = null;
+    var pendingModalAction = "submit";
+    var slideMtimes       = {};     // {name: mtime} — last-seen mtime for each slide
+    var reloadBannerEl    = null;   // singleton banner element shown when currentSlide mtime drifts
+    var editStackCount    = {};     // {name: staged edit count} — mirrors backend PENDING_EDITS
+    var savedHintShown    = false;  // show the "staged edit" hint once per session
+    var matrixHintShown   = false;  // show transform-matrix export hint once per session
+    var matrixEditSlides  = {};     // {name: true} when a staged edit wrote transform=matrix(...)
+    var annotationsDirty  = false;  // unsaved annotations added/removed this session
+    var annotationEditSlides = {};  // {name: true} when annotations changed this session
+
+    function pendingDirectEditCount() {
+        return Object.keys(editStackCount).reduce(function (total, name) {
+            return total + Math.max(0, editStackCount[name] || 0);
+        }, 0);
+    }
+
+    function pendingDirectEditSlides() {
+        return Object.keys(editStackCount).filter(function (name) {
+            return (editStackCount[name] || 0) > 0;
+        });
+    }
+
+    function pendingAnnotationSlides() {
+        return Object.keys(annotationEditSlides).filter(function (name) {
+            return !!annotationEditSlides[name];
+        });
+    }
+
+    function pendingAnnotationChangeCount() {
+        return pendingAnnotationSlides().length;
+    }
+
+    function pendingSlideNames() {
+        var seen = {};
+        pendingDirectEditSlides().concat(pendingAnnotationSlides()).forEach(function (name) {
+            seen[name] = true;
+        });
+        return Object.keys(seen).sort();
+    }
+

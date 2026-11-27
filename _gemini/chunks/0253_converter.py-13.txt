@@ -1,0 +1,94 @@
+                os.replace(output_dir, backup_dir)
+                os.replace(candidate_dir, output_dir)
+            except BaseException as publish_error:
+                try:
+                    if _path_lexists(backup_dir):
+                        if _path_lexists(output_dir):
+                            failed_output = transaction_dir / "failed-publish"
+                            os.replace(output_dir, failed_output)
+                        os.replace(backup_dir, output_dir)
+                except BaseException as restore_error:
+                    if (
+                        not _path_lexists(backup_dir)
+                        and _path_lexists(output_dir)
+                    ):
+                        raise publish_error
+                    preserve_backup = _path_lexists(backup_dir)
+                    raise RuntimeError(
+                        "Failed to publish the new workspace and restore the "
+                        "previous workspace; recovery directory: "
+                        f"{transaction_dir}"
+                    ) from restore_error
+                raise
+        else:
+            os.replace(candidate_dir, output_dir)
+    finally:
+        if not preserve_backup:
+            shutil.rmtree(transaction_dir, ignore_errors=True)
+
+
+def _write_artifact_tree(
+    output_dir: Path,
+    result: ConvertResult,
+    options: ConvertOptions,
+) -> None:
+    """Write a complete converter roster into an empty staging directory.
+
+    Layout:
+      - normal conversion uses ``svg/`` and optional ``svg-flat/``
+      - round-trip conversion keeps immutable SVG backing under ``analysis/``
+        and publishes only ``authoring-svg-flat/`` as the editable page source
+      - ``images/``     shared image assets, referenced by both views
+      - semantic resource directories for sounds, audio, video, and opaque
+        native payloads when the source package contains them
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    svg_dir = output_dir / (
+        ROUNDTRIP_LAYERED_SVG_DIR if options.roundtrip else Path("svg")
+    )
+    svg_dir.mkdir(parents=True, exist_ok=True)
+    media_dir = output_dir / options.images_subdir
+    sound_dir = output_dir / options.sound_subdir
+    media_written: dict[str, bytes] = {}
+    sounds_written: dict[str, bytes] = {}
+
+    def _svg_for_target(svg: str, target_dir: Path) -> str:
+        """Rebase generated local hrefs from the normal one-level SVG root."""
+        source_dir = output_dir / "svg"
+        project_root = output_dir.resolve()
+
+        def replace_href(match: re.Match[str]) -> str:
+            raw = unescape(match.group("value"))
+            parsed = urlsplit(raw)
+            if (
+                not raw
+                or raw.startswith("#")
+                or parsed.scheme
+                or parsed.netloc
+                or not parsed.path
+            ):
+                return match.group(0)
+            resolved = (source_dir / unquote(parsed.path)).resolve()
+            try:
+                resolved.relative_to(project_root)
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"Generated SVG resource escapes the workspace: {raw!r}"
+                ) from exc
+            relative = os.path.relpath(resolved, target_dir).replace(os.sep, "/")
+            rebased = urlunsplit(("", "", relative, parsed.query, parsed.fragment))
+            return f"{match.group('prefix')}{quoteattr(rebased)}"
+
+        return _SVG_HREF_ATTRIBUTE_RE.sub(replace_href, svg)
+
+    def _collect_media(media: dict[str, bytes]) -> None:
+        for filename, blob in media.items():
+            _validate_media_filename(filename)
+            if filename in media_written:
+                if media_written[filename] != blob:
+                    raise RuntimeError(
+                        f"Asset filename collision with different bytes: {filename}"
+                    )
+                continue
+            media_written[filename] = blob
+

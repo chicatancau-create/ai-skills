@@ -1,0 +1,69 @@
+            patch.object(web_to_md.socket, 'socket', side_effect=AssertionError('Unexpected socket')),
+        ):
+            guard.start()
+            self.addCleanup(guard.stop)
+
+    def test_ambiguous_urls_are_refused_before_either_transport_is_created(self) -> None:
+        urls = (
+            'http://127.0.0.1\\@example.com/',
+            'http://8.8.8.8/path\\name',
+            ' http://8.8.8.8/',
+            'http://8.8.8.8/a b',
+            'http://8.8.8.8/\tpath',
+            'http://8.8.8.8/\r\npath',
+            'http://8.8.8.8/\x00path',
+            'http://8.8.8.8/\x7fpath',
+            'http://8.8.8.8/\x85path',
+            'http://%65xample.com/',
+        )
+        for use_curl in (False, True):
+            for allow_private in (False, True):
+                for url in urls:
+                    backend = Mock()
+                    with self.subTest(curl=use_curl, private=allow_private, url=url), \
+                            patch.dict(web_to_md.CONFIG, allow_private_hosts=allow_private), \
+                            patch.object(web_to_md, 'curl_requests', backend if use_curl else None), \
+                            patch.object(web_to_md.requests, 'Session') as session:
+                        with self.assertRaises(web_to_md._UnsafeUrlError):
+                            web_to_md._http_get(url)
+                        backend.get.assert_not_called()
+                        session.assert_not_called()
+                        socket.socket.assert_not_called()
+
+    def test_ambiguous_image_urls_are_refused_before_transport(self) -> None:
+        for use_curl in (False, True):
+            for src in ('http://127.0.0.1\\@example.com/', 'http://8.8.8.8/&#9;image.png'):
+                content = web_to_md.BeautifulSoup(f'<img src="{src}">', 'html.parser')
+                backend = Mock()
+                with self.subTest(curl=use_curl, src=src), tempfile.TemporaryDirectory() as tmp, \
+                        patch.object(web_to_md, 'curl_requests', backend if use_curl else None), \
+                        patch.object(web_to_md.requests, 'Session') as session:
+                    with self.assertRaises(web_to_md._UnsafeUrlError):
+                        web_to_md.download_and_rewrite_images(content, PUBLIC_URL, tmp, 'images')
+                    self.assertEqual(list(Path(tmp).iterdir()), [])
+                    backend.get.assert_not_called()
+                    session.assert_not_called()
+                    socket.socket.assert_not_called()
+
+    def test_every_redirect_rejects_ambiguous_locations_even_with_private_opt_in(self) -> None:
+        middle = 'https://8.8.8.8/middle'
+        for use_curl in (False, True):
+            for allow_private in (False, True):
+                for location in ('http://127.0.0.1\\@example.com/', '/\tpath', 'http://%65xample.com/'):
+                    routes = {PUBLIC_URL: (302, {'Location': middle}), middle: (302, {'Location': location})}
+                    with self.subTest(curl=use_curl, private=allow_private, location=location), \
+                            patch.dict(web_to_md.CONFIG, allow_private_hosts=allow_private), \
+                            _offline_transport(routes, use_curl) as (visited, responses):
+                        with self.assertRaises(web_to_md._UnsafeUrlError):
+                            web_to_md._http_get(PUBLIC_URL)
+                        self.assertEqual(visited, [PUBLIC_URL, middle])
+                        self.assertTrue(responses[-1].raw.closed)
+                        socket.socket.assert_not_called()
+
+    def test_both_backends_send_the_prepared_url_on_every_public_hop(self) -> None:
+        start = 'http://public.example/~start'
+        final = 'http://public.example/~end'
+        routes = {start: (302, {'Location': '/%7eend'}), final: (200, {})}
+        for use_curl in (False, True):
+            with self.subTest(curl=use_curl), \
+                    patch.object(socket, 'getaddrinfo', return_value=_dns_answer('8.8.8.8')), \

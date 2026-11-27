@@ -1,0 +1,109 @@
+        stroke = _line_color(point_shape.line, "#FFFFFF")
+        line = point_shape.line
+        styles.append(
+            SeriesVisualStyle(
+                fill=fill,
+                fill_opacity=point_shape.fill_opacity,
+                stroke=stroke,
+                stroke_opacity=line.opacity if line is not None else 1.0,
+                stroke_width=line.width if line is not None else 1.0,
+                line_cap=line.cap if line is not None else "round",
+                marker_fill=fill,
+                marker_stroke=stroke,
+            )
+        )
+    return styles
+
+
+def _chart_visual_styles(
+    payload: dict[str, Any],
+    plot: ET.Element,
+    palette: ColorPalette | None,
+) -> list[SeriesVisualStyle]:
+    chart_type = payload["type"]
+    series_nodes = plot.findall("c:ser", C_NS)
+    if chart_type in {"pie", "doughnut", "of_pie"}:
+        if len(series_nodes) != 1:
+            raise _UnsupportedChart("unsupported-chart-series-style")
+        styles = _pie_visual_styles(payload, series_nodes[0], palette)
+    else:
+        if any(series.find("c:dPt", C_NS) is not None for series in series_nodes):
+            raise _UnsupportedChart("unsupported-chart-series-style")
+        styles = []
+        for index, series in enumerate(series_nodes):
+            auto = _automatic_color(palette, index)
+            shape = _resolved_shape_paint(series.find("c:spPr", C_NS), palette)
+            marker = _resolved_marker(series.find("c:marker", C_NS), palette)
+            styles.append(
+                _series_visual_style(
+                    shape,
+                    marker,
+                    chart_type=chart_type,
+                    auto_color=auto,
+                )
+            )
+    colors = [
+        style.fill or style.stroke or style.marker_fill or _automatic_color(palette, index)
+        for index, style in enumerate(styles)
+    ]
+    if colors:
+        payload["style"] = {"colors": colors}
+    return styles
+
+
+def _representative_gradient_color(
+    gradient: ET.Element,
+    palette: ColorPalette | None,
+) -> tuple[str, float] | None:
+    """Collapse a chart gradient to one representative tolerant-mode color."""
+    resolved: list[tuple[str, float]] = []
+    for stop in gradient.findall("a:gsLst/a:gs", C_NS):
+        try:
+            color, opacity = resolve_color(
+                find_color_elem(stop),
+                palette,
+                strict=False,
+            )
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if color is not None:
+            resolved.append((color, opacity))
+    if not resolved:
+        return None
+    channels = [
+        tuple(int(color[offset:offset + 2], 16) for offset in (1, 3, 5))
+        for color, _opacity in resolved
+    ]
+    averaged = tuple(
+        round(sum(channel[index] for channel in channels) / len(channels))
+        for index in range(3)
+    )
+    color = "#" + "".join(f"{value:02X}" for value in averaged)
+    opacity = sum(value for _color, value in resolved) / len(resolved)
+    return color, max(0.0, min(1.0, opacity))
+
+
+def _representative_fill(
+    container: ET.Element | None,
+    palette: ColorPalette | None,
+) -> tuple[str | None, float, bool]:
+    """Return a flat color approximation for one chart fill container."""
+    if container is None:
+        return None, 1.0, False
+    if container.find("a:noFill", C_NS) is not None:
+        return None, 1.0, True
+    solid = container.find("a:solidFill", C_NS)
+    if solid is not None:
+        try:
+            color, opacity = resolve_color(
+                find_color_elem(solid),
+                palette,
+                strict=False,
+            )
+        except (TypeError, ValueError, OverflowError):
+            color = None
+            opacity = 1.0
+        if color is not None:
+            return color.upper(), max(0.0, min(1.0, opacity)), True
+    gradient = container.find("a:gradFill", C_NS)
+    if gradient is not None:

@@ -1,0 +1,91 @@
+    def shape_images(record: dict[str, Any] | None) -> set[str]:
+        if record is None:
+            return set()
+        if "shapeImageAssets" in record:
+            return {
+                asset
+                for asset in record.get("shapeImageAssets", [])
+                if asset
+            }
+        background = record.get("backgroundAsset")
+        return {
+            asset
+            for asset in record.get("imageAssets", [])
+            if asset and asset != background
+        }
+
+    assets = shape_images(layout_record)
+    if layout_record is None or layout_record.get("showMasterShapes", True):
+        assets.update(shape_images(master_record))
+    return assets
+
+
+def build_manifest(
+    pptx_path: Path,
+    output_dir: Path,
+    *,
+    include_flat_svg: bool = False,
+) -> dict[str, Any]:
+    with zipfile.ZipFile(pptx_path, "r") as zf:
+        presentation_root = load_xml_from_zip(zf, "ppt/presentation.xml")
+        if presentation_root is None:
+            raise RuntimeError("Invalid PPTX: missing ppt/presentation.xml")
+
+        slide_size = {"width_emu": 0, "height_emu": 0, "width_px": 0, "height_px": 0}
+        sld_sz = presentation_root.find("p:sldSz", NS)
+        if sld_sz is not None:
+            width_emu = int(sld_sz.attrib.get("cx", "0"))
+            height_emu = int(sld_sz.attrib.get("cy", "0"))
+            slide_size = {
+                "width_emu": width_emu,
+                "height_emu": height_emu,
+                "width_px": emu_to_pixels(width_emu),
+                "height_px": emu_to_pixels(height_emu),
+            }
+
+        presentation_rels = parse_relationships(zf, "ppt/presentation.xml")
+        slide_parts: list[str] = []
+        for sld_id in presentation_root.findall("p:sldIdLst/p:sldId", NS):
+            rel_id = sld_id.attrib.get(f"{{{NS['r']}}}id")
+            rel = presentation_rels.get(rel_id or "")
+            if rel and rel["type"] == SLIDE_REL:
+                slide_parts.append(rel["target"])
+
+        master_parts: list[str] = []
+        for master_id in presentation_root.findall("p:sldMasterIdLst/p:sldMasterId", NS):
+            rel_id = master_id.attrib.get(f"{{{NS['r']}}}id")
+            rel = presentation_rels.get(rel_id or "")
+            if rel and rel["type"] == MASTER_REL and rel["target"] not in master_parts:
+                master_parts.append(rel["target"])
+
+        master_roots: dict[str, ET.Element | None] = {}
+        master_rels_map: dict[str, dict[str, dict[str, str]]] = {}
+        master_theme_path: dict[str, str | None] = {}
+        layout_parts: list[str] = []
+        layout_parent: dict[str, str | None] = {}
+        for master_path in master_parts:
+            master_root = load_xml_from_zip(zf, master_path)
+            master_rels = parse_relationships(zf, master_path)
+            master_roots[master_path] = master_root
+            master_rels_map[master_path] = master_rels
+            master_theme_path[master_path] = resolve_first_rel(master_rels, THEME_REL)
+            if master_root is None:
+                continue
+            for layout_id in master_root.findall("p:sldLayoutIdLst/p:sldLayoutId", NS):
+                rel_id = layout_id.attrib.get(f"{{{NS['r']}}}id")
+                rel = master_rels.get(rel_id or "")
+                if not rel or rel["type"] != LAYOUT_REL:
+                    continue
+                layout_path = rel["target"]
+                if layout_path not in layout_parent:
+                    layout_parent[layout_path] = master_path
+                    layout_parts.append(layout_path)
+
+        resource_inventory = inventory_package_resources(zf)
+        write_workspace_resources(output_dir, resource_inventory)
+        copied_assets = resource_inventory.image_name_map()
+
+        slide_records: list[SlideRecord] = []
+        asset_usage: Counter[str] = Counter()
+        layout_usage: defaultdict[str, list[int]] = defaultdict(list)
+        master_usage: defaultdict[str, list[int]] = defaultdict(list)

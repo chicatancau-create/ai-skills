@@ -1,0 +1,111 @@
+        value for value in set(ctn_ids) if ctn_ids.count(value) > 1
+    )
+    if duplicates:
+        errors.append(
+            'duplicate p:cTn@id values: ' + ', '.join(map(str, duplicates))
+        )
+
+    roots = [
+        node for node in timing.iter(_qn(PML_NS, 'cTn'))
+        if node.get('nodeType') == 'tmRoot'
+    ]
+    if len(roots) != 1:
+        errors.append(
+            f'p:timing must contain exactly one tmRoot time node; found {len(roots)}'
+        )
+
+    shape_index, shape_errors = _shape_index(slide_root)
+    errors.extend(shape_errors)
+    for target in timing.iter(_qn(PML_NS, 'spTgt')):
+        shape_id = _int_attribute(
+            target,
+            'spid',
+            'p:spTgt@spid',
+            errors,
+            minimum=1,
+            maximum=MAX_OOXML_UNSIGNED_INT,
+        )
+        if shape_id is not None and shape_id not in shape_index:
+            errors.append(f'p:spTgt references missing shape id {shape_id}')
+
+    build_keys: list[tuple[int, int]] = []
+    for build in timing.iter(_qn(PML_NS, 'bldP')):
+        shape_id = _int_attribute(
+            build,
+            'spid',
+            'p:bldP@spid',
+            errors,
+            minimum=1,
+            maximum=MAX_OOXML_UNSIGNED_INT,
+        )
+        group_id = _int_attribute(
+            build,
+            'grpId',
+            'p:bldP@grpId',
+            errors,
+            maximum=MAX_OOXML_UNSIGNED_INT,
+        )
+        if shape_id is None or group_id is None:
+            continue
+        build_keys.append((shape_id, group_id))
+        kind, has_text = shape_index.get(shape_id, ('missing', False))
+        if kind == 'missing':
+            errors.append(f'p:bldP references missing shape id {shape_id}')
+        elif require_supported_effects and (kind != 'sp' or not has_text):
+            errors.append(
+                f'p:bldP shape id {shape_id} must reference a text-bearing p:sp; '
+                f'found {kind}'
+            )
+    if len(build_keys) != len(set(build_keys)):
+        errors.append('p:bldP (spid, grpId) pairs must be unique')
+
+    animation_nodes = [
+        node for node in timing.iter(_qn(PML_NS, 'cTn'))
+        if node.get('presetClass') in set(_PRESET_CLASS_BY_CATEGORY.values())
+    ]
+    if require_supported_effects:
+        rows = _animation_rows(
+            slide_root,
+            errors,
+            require_behavior_signatures=True,
+        )
+        if not rows and animation_nodes:
+            errors.append('generated object-animation rows could not be read back')
+    else:
+        rows = []
+    if rows:
+        regular_rows = [
+            row for row in rows if row.trigger_shape_id is None
+        ]
+        interactive_rows = [
+            row for row in rows if row.trigger_shape_id is not None
+        ]
+        main_sequences = [
+            node for node in timing.iter(_qn(PML_NS, 'cTn'))
+            if node.get('nodeType') == 'mainSeq'
+        ]
+        expected_main_sequences = 1 if regular_rows else 0
+        if len(main_sequences) != expected_main_sequences:
+            errors.append(
+                'generated object-animation rows require '
+                f'{expected_main_sequences} mainSeq time node(s); found '
+                f'{len(main_sequences)}'
+            )
+        interactive_sequences = [
+            node for node in timing.iter(_qn(PML_NS, 'cTn'))
+            if node.get('nodeType') == 'interactiveSeq'
+        ]
+        if len(interactive_sequences) != len(interactive_rows):
+            errors.append(
+                'each generated trigger-shape animation must have one '
+                'interactiveSeq time node'
+            )
+        for row in rows:
+            if (
+                row.trigger_shape_id is not None
+                and row.trigger != 'on-click'
+            ):
+                errors.append(
+                    'trigger-shape animation must use the on-click Start mode '
+                    f'for shape {row.shape_id}'
+                )

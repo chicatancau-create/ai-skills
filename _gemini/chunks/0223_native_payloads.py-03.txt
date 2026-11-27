@@ -1,0 +1,88 @@
+def externalize_native_payloads(
+    root: ET.Element,
+    payloads: dict[str, bytes],
+) -> NativePayloadStats:
+    """Move supported large inline native payloads into ``payloads``.
+
+    Repeated restoration attributes are handled separately by
+    ``externalize_native_attribute_records``. The supported opaque payload
+    classes are:
+
+    - ``metadata[data-pptx-part="txbody"]``
+    - ``data-pptx-shape-style``
+    - ``data-pptx-custgeom``
+    """
+    stats = NativePayloadStats()
+    for element in root.iter():
+        if (
+            _local_name(element.tag) == "metadata"
+            and element.get("data-pptx-part") == "txbody"
+        ):
+            has_reference = TXBODY_REF_ATTRIBUTE in element.attrib
+            reference = element.get(TXBODY_REF_ATTRIBUTE) or ""
+            encoded = (element.text or "").strip()
+            encoding = element.get("data-pptx-encoding")
+            if has_reference:
+                if not reference:
+                    raise NativePayloadError(
+                        "txbody metadata has an empty payload reference"
+                    )
+                raise NativePayloadError(
+                    "txbody metadata is already externalized; source payload "
+                    "must be hydrated before building a new store"
+                )
+            elif encoded:
+                if encoding != "base64":
+                    raise NativePayloadError(
+                        "txbody metadata must use base64 before externalization"
+                    )
+                raw = _decode_base64(encoded, context="txbody metadata")
+                element.text = None
+                element.attrib.pop("data-pptx-encoding", None)
+                element.set(TXBODY_REF_ATTRIBUTE, _register_payload(payloads, raw))
+                stats.txbody_count += 1
+                stats.inline_bytes += len(encoded)
+            else:
+                raise NativePayloadError(
+                    "txbody metadata requires inline base64 data or a payload reference"
+                )
+
+        has_shape_reference = SHAPE_STYLE_REF_ATTRIBUTE in element.attrib
+        shape_reference = element.get(SHAPE_STYLE_REF_ATTRIBUTE) or ""
+        shape_encoded = element.get(SHAPE_STYLE_ATTRIBUTE)
+        if has_shape_reference and not shape_reference:
+            raise NativePayloadError("shape-style metadata has an empty payload reference")
+        if has_shape_reference:
+            raise NativePayloadError(
+                "shape-style metadata is already externalized; source payload "
+                "must be hydrated before building a new store"
+            )
+        if shape_encoded:
+            raw = _decode_base64(shape_encoded, context="shape-style metadata")
+            element.attrib.pop(SHAPE_STYLE_ATTRIBUTE, None)
+            element.set(
+                SHAPE_STYLE_REF_ATTRIBUTE,
+                _register_payload(payloads, raw),
+            )
+            stats.shape_style_count += 1
+            stats.inline_bytes += len(shape_encoded)
+
+        has_geometry_reference = CUSTOM_GEOMETRY_REF_ATTRIBUTE in element.attrib
+        geometry_reference = element.get(CUSTOM_GEOMETRY_REF_ATTRIBUTE) or ""
+        geometry_encoded = element.get(CUSTOM_GEOMETRY_ATTRIBUTE)
+        if has_geometry_reference and not geometry_reference:
+            raise NativePayloadError(
+                "custom-geometry metadata has an empty payload reference"
+            )
+        if has_geometry_reference:
+            raise NativePayloadError(
+                "custom-geometry metadata is already externalized; source payload "
+                "must be hydrated before building a new store"
+            )
+        if geometry_encoded:
+            raw = _decode_base64(geometry_encoded, context="custom-geometry metadata")
+            element.attrib.pop(CUSTOM_GEOMETRY_ATTRIBUTE, None)
+            element.set(
+                CUSTOM_GEOMETRY_REF_ATTRIBUTE,
+                _register_payload(payloads, raw),
+            )

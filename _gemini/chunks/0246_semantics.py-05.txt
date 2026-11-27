@@ -1,0 +1,93 @@
+        raise PresetShapeDataError(
+            f"{label} contains unsupported fields: {', '.join(unknown)}"
+        )
+
+
+def _require_list(value: object, label: str) -> list[object]:
+    if not isinstance(value, list):
+        raise PresetShapeDataError(f"{label} must be a JSON array")
+    return value
+
+
+def _require_string(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise PresetShapeDataError(f"{label} must be a non-empty string")
+    return value.strip()
+
+
+def _require_bool(value: object, label: str) -> bool:
+    if not isinstance(value, bool):
+        raise PresetShapeDataError(f"{label} must be a boolean")
+    return value
+
+
+def _require_choice(value: object, label: str, choices: Sequence[str]) -> str:
+    text = _require_string(value, label)
+    if text not in choices:
+        raise PresetShapeDataError(
+            f"{label} must be one of {', '.join(choices)}; got {text!r}"
+        )
+    return text
+
+
+def _require_choices(
+    value: object,
+    label: str,
+    choices: Sequence[str],
+) -> tuple[str, ...]:
+    values = _require_string_list(value, label)
+    if not values:
+        raise PresetShapeDataError(f"{label} must not be empty")
+    unknown = sorted(set(values) - set(choices))
+    if unknown:
+        raise PresetShapeDataError(
+            f"{label} contains unsupported values: {', '.join(unknown)}"
+        )
+    return values
+
+
+def _require_string_list(value: object, label: str) -> tuple[str, ...]:
+    items = _require_list(value, label)
+    values = tuple(
+        _require_string(item, f"{label}[{index}]")
+        for index, item in enumerate(items)
+    )
+    if len(values) != len(set(values)):
+        raise PresetShapeDataError(f"{label} contains duplicate values")
+    return values
+
+
+def _merge_strings(first: object, second: object) -> tuple[str, ...]:
+    merged: list[str] = []
+    for values in (first, second):
+        assert isinstance(values, tuple)
+        for value in values:
+            if value not in merged:
+                merged.append(value)
+    return tuple(merged)
+
+
+def _query_tokens(query: str) -> tuple[str, ...]:
+    normalized = _CAMEL_BOUNDARY_RE.sub(" ", query).casefold()
+    return tuple(
+        token
+        for token in _QUERY_TOKEN_RE.findall(normalized)
+        if token not in _QUERY_STOP_WORDS
+    )
+
+
+def _search_text(value: object) -> str:
+    if isinstance(value, str):
+        return _CAMEL_BOUNDARY_RE.sub(" ", value).casefold()
+    if isinstance(value, (list, tuple)):
+        return " ".join(_search_text(item) for item in value)
+    if isinstance(value, dict):
+        return " ".join(_search_text(item) for item in value.values())
+    return ""
+
+
+def _matches_query(details: dict[str, object], query_tokens: Sequence[str]) -> bool:
+    if not query_tokens:
+        return True
+    haystack = _search_text(details)
+    return all(token in haystack for token in query_tokens)

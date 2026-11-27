@@ -1,0 +1,101 @@
+            f'{field} must be one concrete PowerPoint font name: {value!r}'
+        )
+    normalized = value.strip()
+    if len(normalized) > 255:
+        raise ValueError(f'{field} exceeds 255 characters')
+    if ',' in normalized:
+        raise ValueError(
+            f'{field} must be one concrete PowerPoint font name, '
+            f'not a CSS font stack: {value!r}'
+        )
+    if normalized.casefold() in _NON_CONCRETE_FONT_NAMES:
+        raise ValueError(
+            f'{field} must be one concrete PowerPoint font name, '
+            f'not a generic family or CSS-wide keyword: {value!r}'
+        )
+    return normalized
+
+
+def normalize_animation_effect_options(
+    effect: str,
+    options: object = None,
+) -> dict[str, object]:
+    """Validate effect-specific PowerPoint EffectParameters values."""
+    if effect not in NATIVE_ANIMATIONS:
+        if options in (None, {}):
+            return {}
+        raise ValueError(
+            'animation effect_options require one explicit canonical effect; '
+            f'found {effect!r}'
+        )
+    if options is None:
+        options = {}
+    if not isinstance(options, Mapping):
+        raise ValueError(f'animation effect_options must be an object: {options!r}')
+
+    option_specs = NATIVE_ANIMATIONS[effect]['effectOptions']
+    unknown = set(options) - set(option_specs)
+    if unknown:
+        unsupported = ', '.join(sorted(unknown))
+        supported = ', '.join(option_specs) or '(none)'
+        raise ValueError(
+            f'animation effect {effect!r} does not support effect option(s): '
+            f'{unsupported}; supported options: {supported}'
+        )
+    missing_required = sorted(
+        name
+        for name, spec in option_specs.items()
+        if spec.get('required') and name not in options
+    )
+    if missing_required:
+        required_fields = ', '.join(
+            f'effect_options.{name}' for name in missing_required
+        )
+        raise ValueError(
+            f'animation effect {effect!r} requires {required_fields}'
+        )
+
+    normalized: dict[str, object] = {}
+    for name, value in options.items():
+        spec = option_specs[name]
+        option_type = spec['type']
+        field = f'animation effect_options.{name}'
+        if option_type == 'enum':
+            key = str(value)
+            if isinstance(value, bool) or key not in spec['values']:
+                valid = ', '.join(spec['values'])
+                raise ValueError(
+                    f'{field} for {effect!r} must be one of {valid}: {value!r}'
+                )
+            normalized[name] = (
+                int(key)
+                if name == 'amount' and re.fullmatch(r'\d+', key)
+                else key
+            )
+        elif option_type == 'number':
+            number = _finite_number(value, field)
+            minimum = spec.get('minimum')
+            maximum = spec.get('maximum')
+            if minimum is not None and number < float(minimum):
+                raise ValueError(
+                    f'{field} for {effect!r} must be at least {minimum}: {value!r}'
+                )
+            if maximum is not None and number > float(maximum):
+                raise ValueError(
+                    f'{field} for {effect!r} must be at most {maximum}: {value!r}'
+                )
+            normalized[name] = number
+        elif option_type == 'string':
+            if name == 'font_name':
+                normalized[name] = _normalize_powerpoint_font_name(value, field)
+            else:
+                if not isinstance(value, str) or not value.strip():
+                    raise ValueError(
+                        f'{field} must be a non-empty string: {value!r}'
+                    )
+                normalized_value = value.strip()
+                if len(normalized_value) > 255:
+                    raise ValueError(f'{field} exceeds 255 characters')
+                normalized[name] = normalized_value
+        elif option_type == 'boolean':
+            if not isinstance(value, bool):

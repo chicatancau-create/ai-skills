@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+"""
+PPT Master - Beautify Inventory Builder
+
+Mechanically merge a source deck's extracts into one per-slide ledger for the
+beautify-pptx profile: text blocks + tables + charts + SmartArt structure (from a
+`<stem>.slide_library.json` produced by `pptx_intake.py`) joined with the images
+bound to each slide (from a `ppt_to_md.py` image_manifest.json). The deterministic
+join only — `ignored` and `needs_confirmation` are emitted empty for the agent
+to fill with judgment (hidden shapes, combo charts, overcrowded pages, ...).
+
+Usage:
+    python3 scripts/beautify_inventory.py <slide_library.json> [--images <image_manifest.json>] [-o inventory.json]
+    python3 scripts/beautify_inventory.py <inventory.json> --summary
+    python3 scripts/beautify_inventory.py <inventory.json> --page N [--with-geometry]
+    python3 scripts/beautify_inventory.py <inventory.json> --verify <exported.pptx>
+
+Examples:
+    python3 scripts/beautify_inventory.py projects/x/analysis/<stem>.slide_library.json \
+        --images projects/x/images/image_manifest.json -o projects/x/analysis/beautify_inventory.json
+    python3 scripts/beautify_inventory.py projects/x/analysis/beautify_inventory.json --summary
+    python3 scripts/beautify_inventory.py projects/x/analysis/beautify_inventory.json --page 7
+
+Dependencies:
+    None (standard library only).
+
+See workflows/profiles/beautify-pptx.md Step 4 for how the inventory is consumed.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from collections import Counter
+from pathlib import Path
+from typing import Any, Optional
+
+from console_encoding import configure_utf8_stdio
+
+configure_utf8_stdio()
+
+
+_GEOMETRY_KEYS = {
+    "geometry",
+    "display_ratio",
+    "display_left_emu",
+    "display_top_emu",
+    "display_width_emu",
+    "display_height_emu",
+}
+
+
+def _images_by_slide(manifest: list) -> dict[int, list[dict]]:
+    """Map slide_index -> [image entries on that slide], from ppt_to_md occurrences."""
+    by_slide: dict[int, list[dict]] = {}
+    for entry in manifest:
+        filename = entry.get("filename")
+        for occ in entry.get("occurrences", []):
+            idx = occ.get("slide_index")
+            if idx is None:
+                continue
+            by_slide.setdefault(idx, []).append({
+                "filename": filename,
+                "shape_name": occ.get("shape_name"),
+                "pixel_width": entry.get("pixel_width"),
+                "pixel_height": entry.get("pixel_height"),
+                "display_ratio": occ.get("display_ratio"),
+                "display_left_emu": occ.get("display_left_emu"),
+                "display_top_emu": occ.get("display_top_emu"),
+                "display_width_emu": occ.get("display_width_emu"),
+                "display_height_emu": occ.get("display_height_emu"),
+                "usage_count": entry.get("usage_count"),
+            })
+    return by_slide
+
+
+def _table_cells(table: dict) -> list[list[str]]:
+    """Row-major 2D grid of cell text from a slide_library table."""
+    grid = []
+    for row in table.get("rows", []):
+        grid.append([c.get("text", "") for c in row.get("cells", [])])
+    return grid
+
+
+def build_inventory(slide_library: dict, images_by_slide: dict[int, list[dict]]) -> dict:
+    """Join slide_library slides with per-slide images into one ledger."""
+    slides_out = []
+    for slide in slide_library.get("slides", []):
+        idx = slide.get("slide_index")
+        text_blocks = [
+            {
+                "slot_id": s.get("slot_id"),
+                "role": s.get("role"),
+                "text": s.get("text", ""),
+                "paragraph_count": s.get("paragraph_count"),
+                "geometry": s.get("geometry"),
+            }
+            for s in slide.get("slots", [])
+        ]
+        tables = [
+            {
+                "table_id": t.get("table_id"),
+                "row_count": t.get("row_count"),
+                "column_count": t.get("column_count"),

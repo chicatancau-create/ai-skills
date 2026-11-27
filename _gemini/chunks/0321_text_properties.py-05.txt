@@ -1,0 +1,105 @@
+def resolve_project_letter_spacings(
+    root: ET.Element,
+    font_sizes: dict[int, float] | None = None,
+) -> dict[int, float]:
+    """Resolve tracking at its declaration site before it is inherited."""
+    effective_font_sizes = font_sizes or resolve_project_font_sizes(root)
+    resolved: dict[int, float] = {}
+
+    def walk(elem: ET.Element, parent_spacing: float) -> None:
+        declarations, _ = _iter_style_declarations(elem)
+        style = dict(declarations)
+        direct_raw = elem.get('letter-spacing')
+        style_raw = style.get('letter-spacing')
+        effective_spacing = parent_spacing
+        if style_raw is not None:
+            effective_spacing = float(parse_project_letter_spacing(
+                style_raw,
+                font_size=effective_font_sizes[id(elem)],
+            ).value)
+        elif direct_raw is not None:
+            effective_spacing = float(parse_project_letter_spacing(
+                direct_raw,
+                font_size=effective_font_sizes[id(elem)],
+            ).value)
+        resolved[id(elem)] = effective_spacing
+        for child in elem:
+            walk(child, effective_spacing)
+
+    walk(root, 0.0)
+    return resolved
+
+
+def materialize_project_text_metrics(root: ET.Element) -> int:
+    """Lower relative text metrics before positional tspan restructuring."""
+    font_sizes = resolve_project_font_sizes(root)
+    letter_spacings = resolve_project_letter_spacings(root, font_sizes)
+    materialized = 0
+    for elem in root.iter():
+        canonical_font_size = _format_decimal(font_sizes[id(elem)])
+        canonical_letter_spacing = _format_decimal(letter_spacings[id(elem)])
+        if elem.get('font-size') is not None:
+            elem.set('font-size', canonical_font_size)
+            materialized += 1
+        if elem.get('letter-spacing') is not None:
+            elem.set('letter-spacing', canonical_letter_spacing)
+            materialized += 1
+
+        style = elem.get('style')
+        if not style:
+            continue
+        retained: list[str] = []
+        changed = False
+        for raw_fragment in style.split(';'):
+            fragment = raw_fragment.strip()
+            if not fragment:
+                continue
+            if ':' not in fragment:
+                retained.append(fragment)
+                continue
+            raw_name, _ = fragment.split(':', 1)
+            name = raw_name.strip().lower()
+            if name == 'font-size':
+                retained.append(f'font-size:{canonical_font_size}')
+                changed = True
+                materialized += 1
+            elif name == 'letter-spacing':
+                retained.append(
+                    f'letter-spacing:{canonical_letter_spacing}'
+                )
+                changed = True
+                materialized += 1
+            else:
+                retained.append(fragment)
+        if changed:
+            elem.set('style', '; '.join(retained))
+    return materialized
+
+
+def _diagnose_text_declaration(
+    elem: ET.Element,
+    *,
+    tag: str,
+    source: str,
+    name: str,
+    raw: str,
+    font_size: float,
+) -> tuple[bool, TextPropertyDiagnostic | None]:
+    """Return whether a declaration belongs to the text contract and its issue."""
+    label = _element_label(elem)
+    if name == 'xml:space':
+        if source != 'attribute' or tag not in {'text', 'tspan'}:
+            return True, TextPropertyDiagnostic(
+                'error', label, source, name, raw,
+                f'{label} can use xml:space only as a direct attribute on '
+                '<text> or <tspan>',
+            )
+        if raw not in _PROJECT_XML_SPACE_VALUES:
+            return True, TextPropertyDiagnostic(
+                'error', label, source, name, raw,
+                f'{label} attribute xml:space={raw!r}: expected exactly '
+                "'default' or 'preserve'",
+            )
+        return True, None
+    if name == 'baseline-shift':
+        if source != 'attribute':

@@ -1,0 +1,91 @@
+        raise ValueError("frame values must be finite")
+    width, height = values[2], values[3]
+    if object_kind == "connector":
+        if width < 0 or height < 0 or (width == 0 and height == 0):
+            raise ValueError(
+                "connector frame dimensions must be non-negative and not both zero"
+            )
+    elif width <= 0 or height <= 0:
+        raise ValueError("shape frame width and height must be positive")
+    validate_ooxml_xfrm(
+        round(values[0] * EMU_PER_PX),
+        round(values[1] * EMU_PER_PX),
+        round(width * EMU_PER_PX),
+        round(height * EMU_PER_PX),
+    )
+    return values
+
+
+def _parse_frame(
+    raw: str | None,
+    object_kind: str,
+) -> tuple[float, float, float, float]:
+    if raw is None:
+        raise ValueError("authored preset requires data-pptx-frame")
+    parts = re.split(r"[\s,]+", raw.strip())
+    if len(parts) != 4:
+        raise ValueError("data-pptx-frame must contain four numbers")
+    return _validate_frame(tuple(float(part) for part in parts), object_kind)
+
+
+def _validate_style(style: Mapping[str, str]) -> dict[str, str]:
+    unknown = sorted(set(style) - set(_STYLE_ATTRS))
+    if unknown:
+        raise ValueError(f"Unsupported authored preset style attributes: {unknown}")
+    normalized = {name: str(value).strip() for name, value in style.items()}
+    if not normalized:
+        raise ValueError("Authored preset requires explicit fill and/or stroke")
+    if normalized.get("fill", "none") == "none" and normalized.get(
+        "stroke", "none"
+    ) == "none":
+        raise ValueError("Authored preset cannot have both fill and stroke set to none")
+    for name in ("fill", "stroke"):
+        value = normalized.get(name, "none")
+        if _PAINT_RE.fullmatch(value) is None:
+            raise ValueError(f"{name} must be none or a six-digit HEX color")
+        normalized[name] = value.upper() if value != "none" else value
+    if normalized.get("stroke", "none") == "none":
+        unused_stroke_attrs = sorted(
+            name for name in normalized
+            if name.startswith("stroke-")
+        )
+        if unused_stroke_attrs:
+            raise ValueError(
+                "Stroke presentation attributes require a visible stroke: "
+                + ", ".join(unused_stroke_attrs)
+            )
+    if normalized.get("stroke-linecap") not in {None, "butt", "round", "square"}:
+        raise ValueError("stroke-linecap must be butt, round, or square")
+    if normalized.get("stroke-linejoin") not in {None, "miter", "round", "bevel"}:
+        raise ValueError("stroke-linejoin must be miter, round, or bevel")
+    for name in ("fill-opacity", "stroke-opacity"):
+        if name not in normalized:
+            continue
+        value = float(normalized[name])
+        if not math.isfinite(value) or value < 0 or value > 1:
+            raise ValueError(f"{name} must be between 0 and 1")
+        normalized[name] = fmt_num(value, 6)
+    if "stroke-width" in normalized:
+        width = float(normalized["stroke-width"])
+        if not math.isfinite(width) or width < 0:
+            raise ValueError("stroke-width must be finite and non-negative")
+        validate_ooxml_line_width(round(width * EMU_PER_PX))
+        normalized["stroke-width"] = fmt_num(width, 6)
+    if normalized.get("fill", "none") == "none" and "fill-opacity" in normalized:
+        raise ValueError("fill-opacity requires a visible fill paint")
+    if not _has_visible_fill(normalized) and not _has_visible_stroke(normalized):
+        raise ValueError(
+            "Authored preset requires at least one non-transparent visible paint"
+        )
+    return normalized
+
+
+def _validate_filter_reference(
+    raw_filter: str | None,
+    object_kind: str,
+) -> str | None:
+    """Validate one canonical authored-preset effect reference."""
+    if raw_filter is None:
+        return None
+    if object_kind != "shape":
+        raise ValueError("Authored preset filters are supported only for shapes")

@@ -1,0 +1,101 @@
+        self._layouts: dict[str, PartRef] = {}
+        self._masters: dict[str, PartRef] = {}
+        self._themes: dict[str, PartRef] = {}
+        self._table_styles: PartRef | None = None
+        self._table_styles_loaded = False
+
+    # ------------------- context manager -------------------
+
+    def __enter__(self) -> "OoxmlPackage":
+        self.open()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+    def open(self) -> None:
+        if self.zip is not None:
+            return
+        self.zip = zipfile.ZipFile(self.path, "r")
+        self._load_presentation()
+        self._load_slides()
+
+    def close(self) -> None:
+        if self.zip is not None:
+            self.zip.close()
+            self.zip = None
+
+    # ------------------- low-level helpers -------------------
+
+    def _load_part(self, part_path: str) -> PartRef | None:
+        assert self.zip is not None
+        xml = _load_xml(self.zip, part_path)
+        if xml is None:
+            return None
+        rels = _parse_rels(self.zip, _rels_path_for(part_path))
+        return PartRef(path=part_path, xml=xml, rels=rels)
+
+    def load_part(self, part_path: str) -> PartRef | None:
+        """Load an arbitrary XML part by package path."""
+        return self._load_part(part_path)
+
+    def read_part_bytes(self, part_path: str) -> bytes | None:
+        """Return the unchanged bytes of one internal package part."""
+        assert self.zip is not None
+        if part_path not in self.zip.namelist():
+            return None
+        return self.zip.read(part_path)
+
+    def read_media(self, part_path: str) -> bytes | None:
+        """Return raw bytes of an embedded media part (e.g. ppt/media/image1.png)."""
+        return self.read_part_bytes(part_path)
+
+    def media_filename(self, part_path: str) -> str:
+        """Last segment of the media path, e.g. 'image1.png'."""
+        return PurePosixPath(part_path).name
+
+    # ------------------- loading sequence -------------------
+
+    def _load_presentation(self) -> None:
+        assert self.zip is not None
+        # /_rels/.rels -> presentation.xml
+        package_rels = _parse_rels(self.zip, PACKAGE_REL)
+        pres_path = None
+        for info in package_rels.values():
+            if info.get("type") == REL_TYPES["presentation"]:
+                pres_path = info["target"]
+                break
+        if pres_path is None:
+            pres_path = "ppt/presentation.xml"
+
+        self.presentation = self._load_part(pres_path)
+        if self.presentation is None:
+            raise RuntimeError(f"presentation.xml missing in {self.path}")
+
+        raw_first_slide_number = self.presentation.xml.attrib.get("firstSlideNum")
+        if raw_first_slide_number is not None:
+            first_slide_token = raw_first_slide_number.strip(" \t\r\n")
+            if re.fullmatch(r"[+-]?[0-9]+", first_slide_token) is None:
+                raise RuntimeError(
+                    f"Invalid presentation firstSlideNum: {raw_first_slide_number!r}"
+                )
+            digits = first_slide_token.lstrip("+-").lstrip("0") or "0"
+            if len(digits) > 10:
+                raise RuntimeError("Presentation firstSlideNum is outside xsd:int")
+            first_slide_number = int(digits)
+            if first_slide_token.startswith("-"):
+                first_slide_number = -first_slide_number
+            if not -(2**31) <= first_slide_number <= 2**31 - 1:
+                raise RuntimeError(
+                    f"Presentation firstSlideNum is outside xsd:int: {first_slide_number}"
+                )
+            self.first_slide_number = first_slide_number
+
+        # slide size
+        size = self.presentation.xml.find("p:sldSz", NS)
+        if size is not None:
+            cx = int(size.attrib.get("cx", "12192000"))
+            cy = int(size.attrib.get("cy", "6858000"))
+            self.slide_size_emu = (cx, cy)
+            self.slide_size_px = (cx / 9525.0, cy / 9525.0)
+

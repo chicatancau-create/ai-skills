@@ -1,0 +1,112 @@
+            ET.tostring(clone, encoding='unicode'),
+        )
+
+    @staticmethod
+    def _roundtrip_edited_text_ids(
+        root: ET.Element,
+        source_document,
+        baseline_root: ET.Element,
+        current_assets,
+        baseline_assets,
+    ) -> set[int]:
+        """Return edited text carrier identities for compatibility callers."""
+        included, _unchanged = SVGQualityChecker._roundtrip_text_diff_ids(
+            root,
+            source_document,
+            baseline_root,
+            current_assets,
+            baseline_assets,
+        )
+        return included
+
+    @staticmethod
+    def _roundtrip_text_scope_content(
+        root: ET.Element,
+        included_text_ids: set[int],
+    ) -> str:
+        """Serialize only edited text and its inherited presentation chain."""
+        def clone_relevant(element: ET.Element) -> ET.Element | None:
+            if (
+                _local_name(element) == 'text'
+                and id(element) in included_text_ids
+            ):
+                return copy.deepcopy(element)
+            children = [
+                clone
+                for child in list(element)
+                if (clone := clone_relevant(child)) is not None
+            ]
+            if element is not root and not children:
+                return None
+            clone = ET.Element(element.tag, dict(element.attrib))
+            for child in children:
+                clone.append(child)
+            return clone
+
+        scoped_root = clone_relevant(root)
+        if scoped_root is None:
+            return ''
+        return ET.tostring(scoped_root, encoding='unicode')
+
+    @staticmethod
+    def _roundtrip_resolved_font_family(
+        element: ET.Element,
+        parent_by_id: Dict[int, ET.Element],
+    ) -> str | None:
+        """Resolve inherited SVG font-family at one text carrier."""
+        current: ET.Element | None = element
+        while current is not None:
+            style_values = (
+                _parse_inline_style(current.get('style'))
+                if _parse_inline_style is not None
+                else {}
+            )
+            value = style_values.get('font-family')
+            if value is None:
+                value = current.get('font-family')
+            if isinstance(value, str) and value.strip():
+                normalized = value.strip()
+                if normalized.casefold() not in {'inherit', 'unset'}:
+                    return normalized
+            current = parent_by_id.get(id(current))
+        return None
+
+    @staticmethod
+    def _roundtrip_relative_path(
+        element: ET.Element,
+        ancestor: ET.Element,
+        parent_by_id: Dict[int, ET.Element],
+    ) -> tuple[int, ...] | None:
+        """Return child indices from one source-ref owner to a descendant."""
+        reverse_path: List[int] = []
+        current = element
+        while current is not ancestor:
+            parent = parent_by_id.get(id(current))
+            if parent is None:
+                return None
+            reverse_path.append(
+                next(
+                    index
+                    for index, child in enumerate(list(parent))
+                    if child is current
+                )
+            )
+            current = parent
+        return tuple(reversed(reverse_path))
+
+    @staticmethod
+    def _roundtrip_baseline_context(
+        current_owner: ET.Element,
+        baseline_owner: ET.Element,
+        path: tuple[int, ...],
+    ) -> ET.Element:
+        """Follow a matching relative path, stopping at the closest context."""
+        current = current_owner
+        baseline = baseline_owner
+        for index in path:
+            current_children = list(current)
+            baseline_children = list(baseline)
+            if index >= len(current_children) or index >= len(baseline_children):
+                break
+            current_child = current_children[index]
+            baseline_child = baseline_children[index]

@@ -1,0 +1,100 @@
+    directories = roundtrip_manifest.get("directories")
+    if not isinstance(directories, dict):
+        raise AuthoringRoundtripError(
+            "Round-trip workspace manifest directories must be an object"
+        )
+    flat_root_raw = directories.get("flatSvg")
+    layered_root_raw = directories.get("layeredSvg")
+    proxy_root_raw = directories.get("sourceObjectPreviews")
+    if not isinstance(flat_root_raw, str) or not flat_root_raw:
+        raise AuthoringRoundtripError(
+            "Round-trip workspace manifest has no flat SVG backing directory"
+        )
+    if not isinstance(layered_root_raw, str) or not layered_root_raw:
+        raise AuthoringRoundtripError(
+            "Round-trip workspace manifest has no layered SVG backing directory"
+        )
+    if not isinstance(proxy_root_raw, str) or not proxy_root_raw:
+        raise AuthoringRoundtripError(
+            "Round-trip workspace manifest has no source-object preview directory"
+        )
+    flat_root = _resolve_inside(
+        project_path,
+        flat_root_raw,
+        context="round-trip flat SVG backing directory",
+    )
+    layered_root = _resolve_inside(
+        project_path,
+        layered_root_raw,
+        context="round-trip layered SVG backing directory",
+    )
+    proxy_root = _resolve_inside(
+        project_path,
+        proxy_root_raw,
+        context="round-trip source-object preview directory",
+    )
+    if source_root != flat_root:
+        raise AuthoringRoundtripError(
+            "Authoring manifest source_root does not match the round-trip flat "
+            "SVG backing directory"
+        )
+    if not layered_root.is_dir():
+        raise AuthoringRoundtripError(
+            f"Round-trip layered SVG backing directory is missing: {layered_root}"
+        )
+
+    source_svg_names = _roundtrip_source_svg_names(roundtrip_manifest)
+    source_slide_by_name = {
+        name: index
+        for index, name in source_svg_names.items()
+    }
+
+    documents_raw = manifest.get("documents")
+    if not isinstance(documents_raw, list):
+        raise AuthoringRoundtripError(
+            "authoring_manifest.json documents must be an array"
+        )
+    documents: dict[str, AuthoringDocument] = {}
+    for index, raw in enumerate(documents_raw):
+        if not isinstance(raw, dict):
+            raise AuthoringRoundtripError(f"documents[{index}] must be an object")
+        authoring_name = raw.get("authoring")
+        source_name = raw.get("source")
+        if not isinstance(authoring_name, str) or not authoring_name:
+            raise AuthoringRoundtripError(
+                f"documents[{index}].authoring must be a non-empty string"
+            )
+        if not isinstance(source_name, str) or not source_name:
+            raise AuthoringRoundtripError(
+                f"documents[{index}].source must be a non-empty string"
+            )
+        if authoring_name in documents:
+            raise AuthoringRoundtripError(
+                f"Duplicate authoring manifest document: {authoring_name}"
+            )
+        source_slide = source_slide_by_name.get(authoring_name)
+        if source_slide is None:
+            raise AuthoringRoundtripError(
+                "Authoring manifest document is not registered by the round-trip "
+                f"source roster: {authoring_name}"
+            )
+        authoring_path = _resolve_inside(
+            authoring_dir,
+            authoring_name,
+            context=f"documents[{index}].authoring",
+        )
+        flat_source_path = _resolve_inside(
+            source_root,
+            source_name,
+            context=f"documents[{index}].source",
+        )
+        layered_source_path = _resolve_inside(
+            layered_root,
+            source_name,
+            context=f"documents[{index}] layered source",
+        )
+        for label, path in (
+            ("authoring SVG", authoring_path),
+            ("flat backing SVG", flat_source_path),
+            ("layered backing SVG", layered_source_path),
+        ):

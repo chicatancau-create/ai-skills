@@ -1,0 +1,100 @@
+        if idle_timeout is None:
+            idle_timeout = 7200 if args.live else 900
+        cmd = [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            str(project_path),
+            '--port',
+            str(port),
+            '--timeout',
+            str(idle_timeout),
+            '--no-browser',
+        ]
+        if args.live:
+            cmd.append('--live')
+        try:
+            with log_path.open('a', encoding='utf-8') as log:
+                proc = _popen_detached(
+                    cmd,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    logger=logger,
+                )
+        except OSError as exc:
+            logger.error('cannot write live preview log: %s (%s)', log_path, exc)
+            return 1
+        url = _server_url(port)
+        server_pid = _wait_for_ready(port, proc, project_path)
+        if not server_pid:
+            if proc.poll() is None:
+                proc.terminate()
+            logger.error('live preview failed to become reachable: %s (log: %s)', url, log_path)
+            return 1
+        logger.info('started live preview in background: %s (pid=%s)', url, server_pid)
+        logger.info('log: %s', log_path)
+        if not args.no_browser and not _open_browser(url):
+            logger.info('browser did not auto-open; open %s manually', url)
+        return 0
+
+    # Pick a free port: another project's preview/confirm server may already
+    # hold the default, so bind the next free one instead of crashing — each
+    # project then serves its own data on its own port (no cross-project mix-up).
+    try:
+        port = args.port if args.port is not None else _find_free_port(DEFAULT_PORT)
+    except RuntimeError as exc:
+        logger.error('%s', exc)
+        return 1
+
+    # Per-project mutual exclusion. The major driver of orphaned servers is
+    # --live mode (which used to disable idle timeout entirely) combined with
+    # silent restarts; reusing the running server on duplicate launches catches
+    # the accumulation at its source. Stale locks (dead pid) are overwritten
+    # by _claim_lock.
+    try:
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logger.error('cannot create live preview runtime directory: %s (%s)', runtime_dir, exc)
+        return 1
+    existing = _claim_lock(lock_file, port)
+    if existing:
+        return _reuse_running_server(
+            existing,
+            open_browser=not args.no_browser,
+            requested_port=args.port,
+        )
+    # atexit covers normal interpreter shutdown (Ctrl+C / SystemExit);
+    # /api/shutdown and idle timeout call _release_lock directly before
+    # os._exit since atexit handlers do not run on os._exit.
+    atexit.register(_release_lock, lock_file)
+
+    # SIGTERM would otherwise terminate without running atexit, leaving a
+    # stale lock that future launches have to recover from. Translate it
+    # into SystemExit so the atexit handler above runs. SIGINT (Ctrl+C) is
+    # already handled by werkzeug's reloader-free shutdown path.
+    def _on_sigterm(signum: int, _frame) -> None:
+        logger.info('received signal %s, exiting', signum)
+        sys.exit(0)
+    try:
+        signal.signal(signal.SIGTERM, _on_sigterm)
+    except (ValueError, OSError):
+        # ValueError: not in main thread; OSError: unsupported on platform.
+        pass
+
+    idle_timeout = args.timeout
+    if idle_timeout is None:
+        # Long but finite default for --live so a forgotten preview eventually
+        # dies. Set --timeout 0 to keep the historical never-expire behavior.
+        idle_timeout = 7200 if args.live else 900
+
+    app = create_app(
+        str(project_path),
+        idle_timeout=idle_timeout,
+        live=args.live,
+        lock_file=lock_file,
+    )
+
+    url = _server_url(port)
+    if not args.no_browser:
+        _open_browser_async(url)
+

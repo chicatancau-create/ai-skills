@@ -1,0 +1,80 @@
+            if (q) { delete nudgeQueued[key]; sendNudge(key, q.el, q.single, q.slide, q.payload); }
+        }).catch(function (err) {
+            nudgeFlight[key] = false;
+            delete nudgeQueued[key];
+            // Re-sync the preview to the last confirmed position so it can't show
+            // a move the server never staged (only meaningful on the live slide).
+            if (payload.promote_tspan && el.__promotionRollback) {
+                var restored = el.__promotionRollback();
+                if (single && restored) refreshGeoInputs(restored, elementPropsEl);
+            } else if (nudgeLastOk[key] && slide === currentSlide && el.isConnected) {
+                applyAttrSnapshot(el, nudgeLastOk[key]);
+                if (single) refreshGeoInputs(el, elementPropsEl);
+            }
+            showError(t("err_edit") + err.message);
+        });
+    }
+
+    function stageNudge(el, single, slide, payload) {
+        var key = nudgeKey(slide, el);
+        if (nudgeFlight[key]) {
+            nudgeQueued[key] = { el: el, single: single, slide: slide, payload: payload };
+            return;
+        }
+        sendNudge(key, el, single, slide, payload);
+    }
+
+    function nudgeSelection(dxScreen, dyScreen) {
+        // Keyboard arrow micro-move: same geometry path as drag. The DOM updates
+        // immediately; staging is serialized per element (see sendNudge), and
+        // consecutive same-direction nudges coalesce into one undo step.
+        var els = topLevelSelectedElements(Array.from(selectedElementIds));
+        if (els.length === 0) return;
+        var slide = currentSlide;
+        var single = els.length === 1;
+        var lastSingleEl = null;
+        els.forEach(function (el) {
+            var key = nudgeKey(slide, el);
+            if (!nudgeFlight[key] && !nudgeQueued[key]) {
+                // Fresh burst: re-capture the pre-move baseline from the current
+                // DOM, so a failed nudge rolls back to *this* burst's start rather
+                // than a stale position left by an earlier drag/edit/undo.
+                try { nudgeLastOk[key] = attrsForMove(el, 0, 0); }
+                catch (err) { delete nudgeLastOk[key]; }
+            }
+            var d = screenDeltaToLocal(el, dxScreen, dyScreen);
+            var attrs;
+            try { attrs = attrsForMove(el, d.x, d.y); } catch (err) { attrs = null; }
+            if (!attrs) return;
+            applyElementAttrs(el, attrs);
+            var payload = payloadForMovedElement(el, attrs);
+            if (payload.promote_tspan) {
+                el = promoteTspanDom(el, payload.promote_tspan) || el;
+            }
+            lastSingleEl = el;
+            stageNudge(el, single, slide, payload);
+        });
+        if (single && lastSingleEl) refreshGeoInputs(lastSingleEl, elementPropsEl);
+    }
+
+    // ---- Overlap picker (right-click → list every selectable element here) ----
+    // Left-click stays a fast "select the topmost" gesture; right-click is the
+    // opt-in disambiguator for stacked elements, so it never pops on normal use.
+    var overlapPickerEl = null;
+
+    function collectSelectableAt(clientX, clientY) {
+        var svg = svgContent.querySelector("svg");
+        if (!svg || !document.elementsFromPoint) return [];
+        var out = [];
+        var seen = {};
+        document.elementsFromPoint(clientX, clientY).forEach(function (node) {
+            if (!svg.contains(node) || node === svg) return;
+            if (node.closest && node.closest("defs, style, title, desc")) return;
+            // Resolve to the disk-backed selectable entity, mirroring the click
+            // handler: prefer an enclosing data-icon group, else nearest id.
+            var picked = (node.closest && node.closest("[data-icon][id]")) ||
+                         (node.closest && node.closest("[id]"));
+            if (!picked || picked === svg || !picked.id || seen[picked.id]) return;
+            seen[picked.id] = true;
+            out.push(picked);
+        });

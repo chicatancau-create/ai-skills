@@ -1,0 +1,119 @@
+            rewritten = _rebase_css_urls(
+                value,
+                source_dir,
+                output_dir,
+                resource_root,
+            )
+            if _local(attr_name) == "href" and tag in {"image", "feImage", "use"}:
+                rewritten = _rebase_reference(
+                    rewritten,
+                    source_dir,
+                    output_dir,
+                    resource_root,
+                )
+            if rewritten != value:
+                elem.set(attr_name, rewritten)
+        if elem.text:
+            elem.text = _rebase_css_urls(
+                elem.text,
+                source_dir,
+                output_dir,
+                resource_root,
+            )
+
+
+def _asset_root_attributes(source_root: ET.Element, bounds: Bounds) -> dict[str, str]:
+    attrs = {
+        name: value
+        for name, value in source_root.attrib.items()
+        if _local(name) not in GEOMETRY_ROOT_ATTRS
+    }
+    attrs.update(
+        {
+            "viewBox": f"0 0 {_fmt(bounds.width)} {_fmt(bounds.height)}",
+            "width": _fmt(bounds.width),
+            "height": _fmt(bounds.height),
+        }
+    )
+    return attrs
+
+
+def _build_asset(
+    source: Path,
+    resource_root: Path,
+    root: ET.Element,
+    target: ET.Element,
+    bounds: Bounds,
+    parents: dict[ET.Element, ET.Element],
+) -> tuple[bytes, list[str], list[str]]:
+    visual, included = _visual_clone(root, target, parents)
+    dependencies = _dependency_elements(root, target, visual, included, parents)
+    styles = [
+        elem
+        for elem in root.iter()
+        if _local(elem.tag) == "style"
+        and not _is_descendant(target, elem)
+        and not any(_is_descendant(dependency, elem) for dependency in dependencies)
+    ]
+    asset_root = ET.Element(root.tag, _asset_root_attributes(root, bounds))
+    if styles or dependencies:
+        defs = ET.SubElement(asset_root, f"{{{SVG_NS}}}defs")
+        for style in styles:
+            defs.append(copy.deepcopy(style))
+        for dependency in dependencies:
+            if _local(dependency.tag) != "style":
+                defs.append(copy.deepcopy(dependency))
+    translated = ET.SubElement(
+        asset_root,
+        f"{{{SVG_NS}}}g",
+        {"transform": f"translate({_fmt(-bounds.x)} {_fmt(-bounds.y)})"},
+    )
+    translated.append(visual)
+    embedded = _embed_external_resources(asset_root, source.parent, resource_root)
+    ET.indent(asset_root, space="  ")
+    payload = ET.tostring(asset_root, encoding="utf-8", xml_declaration=True)
+    dependency_ids = sorted(filter(None, (elem.get("id") for elem in dependencies)))
+    return payload, dependency_ids, embedded
+
+
+def _safe_asset_name(source: Path, selector: str) -> str:
+    safe_id = re.sub(r"[^A-Za-z0-9._-]+", "-", selector).strip(".-") or "asset"
+    safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "-", source.stem).strip(".-") or "source"
+    return f"{safe_stem}__{safe_id}.svg"
+
+
+def _validate_asset_name(name: str, selector: str) -> str:
+    path = Path(name)
+    if path.name != name or path.suffix.lower() != ".svg":
+        raise SvgPictureError(f"Asset name for {selector!r} must be one .svg basename")
+    return name
+
+
+def _replacement_image(target: ET.Element, bounds: Bounds, href: str) -> ET.Element:
+    attrs = {
+        name: value
+        for name, value in target.attrib.items()
+        if _local(name) in PRESERVED_IMAGE_ATTRS
+    }
+    attrs.update(
+        {
+            "href": href,
+            "x": _fmt(bounds.x),
+            "y": _fmt(bounds.y),
+            "width": _fmt(bounds.width),
+            "height": _fmt(bounds.height),
+            "preserveAspectRatio": "none",
+        }
+    )
+    return ET.Element(f"{{{SVG_NS}}}image", attrs)
+
+
+def _prepare_plans(
+    source: Path,
+    resource_root: Path,
+    output: Path,
+    images_dir: Path,
+    root: ET.Element,
+    targets: dict[str, ET.Element],
+    resolved_bounds: dict[str, tuple[Bounds, str]],
+    names: dict[str, str],

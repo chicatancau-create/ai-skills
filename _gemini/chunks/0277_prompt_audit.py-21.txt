@@ -1,0 +1,111 @@
+        manifest_label,
+        registry_members,
+    )
+    findings.extend(load_findings)
+
+    coverage, coverage_findings = audit_load_coverage(
+        token_counts.keys(),
+        covered_paths,
+        manifest.get("coverage", {}),
+        manifest_label,
+    )
+    findings.extend(coverage_findings)
+
+    duplicate_config = manifest.get("duplicates", {})
+    accepted_config = duplicate_config.get("accepted", [])
+    accepted_used: set[tuple[str, str, tuple[str, ...]]] = set()
+    paragraphs = extract_paragraphs(documents, duplicate_config)
+    registry_blocks = extract_registry_blocks(documents)
+    exact, _ = find_exact_duplicates(paragraphs)
+    exact, exact_accepted = _partition_accepted(
+        exact,
+        "exact",
+        accepted_config,
+        accepted_used,
+    )
+    exact_total = len(exact)
+    exact = exact[: int(duplicate_config.get("max_exact_results", 100))]
+    if include_near_duplicates:
+        near, _ = find_near_duplicates(paragraphs, duplicate_config)
+        near, near_accepted = _partition_accepted(
+            near,
+            "near",
+            accepted_config,
+            accepted_used,
+        )
+        near_total = len(near)
+        near = near[: int(duplicate_config.get("max_near_results", 100))]
+    else:
+        near, near_total, near_accepted = [], None, []
+
+    scanned_duplicate_kinds = {"exact"}
+    if include_near_duplicates:
+        scanned_duplicate_kinds.add("near")
+    for entry in accepted_config:
+        identity = _accepted_identity(
+            entry["kind"],
+            entry["fingerprint"],
+            entry["paths"],
+        )
+        if entry["kind"] in scanned_duplicate_kinds and identity not in accepted_used:
+            findings.append(
+                Finding(
+                    severity="error",
+                    code="DUPLICATE_ACCEPTED_STALE",
+                    message=(
+                        "duplicates.accepted entry matches no current duplicate; "
+                        f"remove or update {entry['kind']} {entry['fingerprint']} "
+                        f"for {entry['paths']}"
+                    ),
+                    path=manifest_label,
+                )
+            )
+
+    if exact_total:
+        findings.append(
+            Finding(
+                severity="warning",
+                code="DUPLICATE_EXACT_CANDIDATES",
+                message=f"Found {exact_total} cross-file exact paragraph groups",
+            )
+        )
+
+    references, reference_findings = extract_references(root, documents)
+    findings.extend(reference_findings)
+    reference_cycles = _strongly_connected_components(
+        (edge.source, edge.target)
+        for edge in references
+        if edge.source.endswith(".md") and edge.target.endswith(".md")
+    )
+    authority_candidates = [edge for edge in references if edge.authority_candidate]
+    authority_candidate_cycles = _strongly_connected_components(
+        (edge.source, edge.target) for edge in authority_candidates
+    )
+    authority_edges, authority_cycles, authority_findings = audit_authority_graph(
+        root,
+        manifest.get("authority_edges", []),
+    )
+    findings.extend(authority_findings)
+    reference_pairs = {(edge.source, edge.target) for edge in references}
+    for edge in authority_edges:
+        if (edge["from"], edge["to"]) not in reference_pairs:
+            findings.append(
+                Finding(
+                    severity="error",
+                    code="AUTHORITY_EDGE_UNREFERENCED",
+                    message=(
+                        f"Declared authority edge has no Markdown reference: "
+                        f"{edge['from']} -> {edge['to']}"
+                    ),
+                    path=manifest_label,
+                )
+            )
+
+    registries, registry_findings = audit_registries(
+        root,
+        registry_configs,
+        registry_blocks,
+        documents,
+    )
+    findings.extend(registry_findings)
+    schema_grammars, schema_findings = audit_schema_grammars(

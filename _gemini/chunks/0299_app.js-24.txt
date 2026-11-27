@@ -1,0 +1,66 @@
+    // ================================================================
+    //  Property extraction & rendering
+    // ================================================================
+    // Editable property panel for a single selected element: computed geometry,
+    // text content where safe, and the element's own SVG attributes.
+    function renderEditableProps(el) {
+        var tag = localName(el);
+        var isGroup = tag === "g";
+        var html = '<div class="prop-caption">' +
+            escapeHtml(isGroup ? t("label_group_edit") : t("label_direct_edit")) + '</div>';
+
+        var parentGroup = nearestParentGroup(el);
+        if (parentGroup && !isGroup) {
+            html += '<table class="prop-table"><tr><td class="prop-key">group</td><td class="prop-val">' +
+                '<button type="button" class="btn-select-group" data-group-id="' +
+                escapeHtml(parentGroup.id) + '">' + escapeHtml(t("btn_select_group")) +
+                '</button></td></tr></table>';
+        }
+
+        html += '<div class="prop-section">' + escapeHtml(t("section_geometry")) + '</div>';
+        html += '<table class="prop-table">';
+        // Geometry: position + size in render coords — editable, folded into
+        // the element's transform matrix on commit (works for any element type).
+        try {
+            var rb = computeRenderBox(el);
+            html += '<tr><td class="prop-key">position</td><td class="prop-val geo-cell">' +
+                '<input type="number" class="prop-edit prop-edit-geo" data-geo="x" value="' + Math.round(rb.x) + '">' +
+                '<input type="number" class="prop-edit prop-edit-geo" data-geo="y" value="' + Math.round(rb.y) + '">' +
+                '</td></tr>';
+            html += '<tr><td class="prop-key">size</td><td class="prop-val geo-cell">' +
+                '<input type="number" class="prop-edit prop-edit-geo" data-geo="w" min="1" value="' + Math.round(rb.w) + '">' +
+                '<input type="number" class="prop-edit prop-edit-geo" data-geo="h" min="1" value="' + Math.round(rb.h) + '">' +
+                '</td></tr>';
+        } catch (e) { /* no geometry */ }
+        html += '</table>';
+
+        var textStyleTargets = textStyleTargetsForSelection(el);
+
+        // L1: text content + computed text styles. When a textbox/group is
+        // selected, style controls target its descendant text leaves.
+        if (tag === "text" || tag === "tspan" || textStyleTargets.length > 0) {
+            html += '<div class="prop-section">' + escapeHtml(t("section_text_style")) + '</div>';
+            html += '<table class="prop-table">';
+            if ((tag === "text" || tag === "tspan") && el.querySelector("tspan")) {
+                html += '<tr><td class="prop-key">content</td><td class="prop-val prop-note">' +
+                    escapeHtml(t("prop_multiline_hint")) + '</td></tr>';
+            } else if (tag === "text" || tag === "tspan") {
+                html += '<tr><td class="prop-key">content</td><td class="prop-val">' +
+                    '<textarea class="prop-edit prop-edit-content" rows="2">' +
+                    escapeHtml(el.textContent || "") + '</textarea></td></tr>';
+            }
+            if (textStyleTargets.length > 0) {
+                textStyleSpecs(textStyleTargets).forEach(function (spec) {
+                    html += '<tr><td class="prop-key">' + escapeHtml(spec.key) + '</td><td class="prop-val">';
+                    html += renderTextStyleControl(spec, textStyleTargets);
+                    html += '</td></tr>';
+                });
+            }
+            html += '</table>';
+        }
+
+        html += '<div class="prop-section">' + escapeHtml(t("section_raw_attrs")) + '</div>';
+        html += '<table class="prop-table">';
+        ownAttributeSpecs(el).forEach(function (spec) {
+            html += '<tr><td class="prop-key">' + escapeHtml(spec.key) + '</td><td class="prop-val">';
+            if (!spec.editable) {

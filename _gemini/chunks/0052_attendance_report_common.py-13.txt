@@ -1,0 +1,129 @@
+    print(f"[文件] {abs_path}")
+    print(f"[粒度] {granularity_label}")
+    print(f"[用户] {user_count} 人（共 {stats.user_batches} 批）")
+    print(f"[时间] {start.strftime(DATE_FMT)} ~ {end.strftime(DATE_FMT)}"
+          f"（共 {stats.date_slices} 个时间片）")
+    print(f"[调用] 共调用 dws 接口：{stats.total_dws_calls} 次"
+          + (f"（其中 {stats.failed_calls} 次失败）" if stats.failed_calls else ""))
+    print(f"[字段] {' / '.join(column_names) if column_names else '（默认）'}")
+    print(f"[行数] {rows_count} 行")
+    if stats.warnings:
+        print()
+        print("[警告]")
+        for w in stats.warnings[:10]:
+            print(f"  - {w}")
+        if len(stats.warnings) > 10:
+            print(f"  - ...（共 {len(stats.warnings)} 条警告）")
+    if extra_tail:
+        print()
+        print(extra_tail)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 图片下载 + Excel 嵌入（detail 报表的"打卡图片"列专用）
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 全局缓存：URL → 本地 PNG 文件路径，避免同一张图重复下载/转换
+_IMAGE_CACHE_DIR = os.path.join(
+    tempfile.gettempdir(), "dws_attendance_report_images"
+)
+_image_url_to_local: dict[str, str] = {}
+# 下载/转换失败的 URL 黑名单，避免反复重试
+_image_failed_urls: set[str] = set()
+
+
+def _ensure_image_cache_dir() -> str:
+    """确保图片缓存目录存在并返回路径。"""
+    os.makedirs(_IMAGE_CACHE_DIR, exist_ok=True)
+    return _IMAGE_CACHE_DIR
+
+
+def _is_likely_url(value: Any) -> bool:
+    """简单判断一个值是不是 http(s) URL。"""
+    if not isinstance(value, str):
+        return False
+    s = value.strip()
+    return s.startswith("http://") or s.startswith("https://")
+
+
+def download_and_convert_image(
+    url: str,
+    *,
+    timeout: int = 10,
+) -> str | None:
+    """
+    下载图片 URL → PIL 转 PNG → 缓存到本地，返回本地 PNG 文件路径。
+
+    特性：
+      - 磁盘缓存（同一 URL 只下载一次）
+      - 支持 webp/jpg/jpeg/png 等格式（PIL 自动识别）
+      - 失败的 URL 加黑名单，避免反复重试
+      - 失败返回 None，调用方应保留原 URL 文本
+
+    依赖: requests + Pillow（PIL）
+    """
+    if url in _image_url_to_local:
+        return _image_url_to_local[url]
+    if url in _image_failed_urls:
+        return None
+
+    cache_dir = _ensure_image_cache_dir()
+    url_hash = hashlib.md5(url.encode("utf-8")).hexdigest()
+    local_path = os.path.join(cache_dir, f"{url_hash}.png")
+
+    if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
+        _image_url_to_local[url] = local_path
+        return local_path
+
+    try:
+        import requests
+    except ImportError:
+        warn("缺少 requests 依赖，无法下载图片，请执行: pip install requests")
+        _image_failed_urls.add(url)
+        return None
+    try:
+        from PIL import Image as PILImage
+    except ImportError:
+        warn("缺少 Pillow 依赖，无法转换图片格式，请执行: pip install Pillow")
+        _image_failed_urls.add(url)
+        return None
+
+    try:
+        resp = requests.get(url, timeout=timeout)
+        resp.raise_for_status()
+        raw_bytes = resp.content
+        if not raw_bytes:
+            raise ValueError("下载结果为空")
+    except Exception as e:
+        warn(f"[image] 下载失败: {url[:80]}... 原因: {e}")
+        _image_failed_urls.add(url)
+        return None
+
+    try:
+        from io import BytesIO
+        with PILImage.open(BytesIO(raw_bytes)) as img:
+            # webp 等可能是 RGBA / P 模式，统一转 RGB 再存 PNG
+            if img.mode not in ("RGB", "RGBA"):
+                img = img.convert("RGBA")
+            img.save(local_path, format="PNG")
+    except Exception as e:
+        warn(f"[image] 转换失败: {url[:80]}... 原因: {e}")
+        _image_failed_urls.add(url)
+        return None
+
+    _image_url_to_local[url] = local_path
+    return local_path
+
+
+def _set_image_hyperlink(ws, excel_row: int, col_idx: int, url: str) -> None:
+    """把单元格设为可点击的超链接，文案显示"打卡图片"，避免直接暴露裸 URL。"""
+    from openpyxl.styles import Font
+    cell = ws.cell(row=excel_row, column=col_idx)
+    cell.value = "打卡图片"
+    cell.hyperlink = url
+    cell.font = Font(color="0563C1", underline="single")
+
+
+def _replace_all_image_urls_with_hyperlinks(
+    ws, headers: list[str], rows: list[list[Any]],
+    image_column_names: list[str], first_data_row: int,

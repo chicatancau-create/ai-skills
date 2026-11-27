@@ -1,0 +1,125 @@
+            return DEFAULT
+        adj = int(min(r / (shorter / 2), 1.0) * 50000)
+        return (
+            f'<a:prstGeom prst="roundRect"><a:avLst>'
+            f'<a:gd name="adj" fmla="val {adj}"/>'
+            f'</a:avLst></a:prstGeom>'
+        )
+
+    # --- Path → custGeom ---
+    if shape_tag == 'path':
+        d = shape.get('d', '')
+        if not d:
+            return DEFAULT
+        commands = parse_svg_path(d)
+        commands = svg_path_to_absolute(commands)
+        commands = normalize_path_commands(commands)
+        if not commands:
+            return DEFAULT
+        return _clip_commands_to_geom(
+            commands, raw_x, raw_y, raw_w, raw_h, is_obb,
+        )
+
+    # --- Polygon → custGeom ---
+    if shape_tag == 'polygon':
+        pts = parse_svg_points(shape.get('points', ''), min_points=3)
+        commands = [PathCommand('M', [pts[0][0], pts[0][1]])]
+        for px_, py_ in pts[1:]:
+            commands.append(PathCommand('L', [px_, py_]))
+        commands.append(PathCommand('Z', []))
+        return _clip_commands_to_geom(
+            commands, raw_x, raw_y, raw_w, raw_h, is_obb,
+        )
+
+    return DEFAULT
+
+
+# ---------------------------------------------------------------------------
+# image
+# ---------------------------------------------------------------------------
+
+def _picture_xfrm_from_rect(
+    ctx: ConvertContext,
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+) -> tuple[str, int, int, int, int, tuple[int, int, int, int]]:
+    """Build DrawingML xfrm data for a picture rectangle.
+
+    Coordinates ``x``, ``y``, ``w``, ``h`` MUST already be in ctx-resolved
+    space (i.e. callers have applied ``ctx_x`` / ``ctx_w`` upstream). When
+    ``ctx.use_transform_matrix`` is set, raw SVG-space coordinates are
+    expected and the matrix path applies the transform itself.
+    """
+    if ctx.use_transform_matrix:
+        return rect_to_dml_xfrm(x, y, w, h, ctx.transform_matrix)
+
+    off_x = px_to_emu(x)
+    off_y = px_to_emu(y)
+    ext_cx = px_to_emu(w)
+    ext_cy = px_to_emu(h)
+    return '', off_x, off_y, ext_cx, ext_cy, (off_x, off_y, off_x + ext_cx, off_y + ext_cy)
+
+
+def _picture_xfrm_from_svg_rect(
+    ctx: ConvertContext,
+    raw_x: float,
+    raw_y: float,
+    raw_w: float,
+    raw_h: float,
+    resolved_x: float,
+    resolved_y: float,
+    resolved_w: float,
+    resolved_h: float,
+    transform: str | None,
+) -> tuple[str, int, int, int, int, tuple[int, int, int, int]]:
+    """Build picture xfrm data, honoring element-level SVG transforms.
+
+    ``raw_*`` values stay in the element's source SVG coordinate space for
+    matrix decomposition; ``resolved_*`` values are the existing scalar path.
+    """
+    if ctx.use_transform_matrix:
+        matrix = ctx.transform_matrix
+        if transform:
+            matrix = matrix_multiply(matrix, parse_transform_matrix(transform))
+        return rect_to_dml_xfrm(raw_x, raw_y, raw_w, raw_h, matrix)
+
+    if transform:
+        context_matrix = (
+            ctx.scale_x, 0.0,
+            0.0, ctx.scale_y,
+            ctx.translate_x, ctx.translate_y,
+        )
+        matrix = matrix_multiply(context_matrix, parse_transform_matrix(transform))
+        return rect_to_dml_xfrm(raw_x, raw_y, raw_w, raw_h, matrix)
+
+    return _picture_xfrm_from_rect(ctx, resolved_x, resolved_y, resolved_w, resolved_h)
+
+
+def _picture_rendered_frame_size(
+    ctx: ConvertContext,
+    raw_x: float,
+    raw_y: float,
+    raw_w: float,
+    raw_h: float,
+    resolved_x: float,
+    resolved_y: float,
+    resolved_w: float,
+    resolved_h: float,
+    transform: str | None,
+) -> tuple[float, float]:
+    """Return final DrawingML picture-axis lengths in rendered SVG pixels."""
+    _attr, _x, _y, ext_cx, ext_cy, _bounds = _picture_xfrm_from_svg_rect(
+        ctx,
+        raw_x,
+        raw_y,
+        raw_w,
+        raw_h,
+        resolved_x,
+        resolved_y,
+        resolved_w,
+        resolved_h,
+        transform,
+    )
+    emu_per_px = px_to_emu(1.0)

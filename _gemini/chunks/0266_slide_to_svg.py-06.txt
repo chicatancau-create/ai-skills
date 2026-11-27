@@ -1,0 +1,104 @@
+                    node,
+                    ctx,
+                    top_level=top_level,
+                    source_proxy=True,
+                )
+            _diagnose_picture_result(ctx, blip_result)
+            if blip_result.svg:
+                blip_image = _clip_blip_image(blip_result.svg, geom, ctx)
+                ctx.media.update(blip_result.media)
+
+    # Text body (a:txBody)
+    source_tx_body = node.xml.find("p:txBody", NS)
+    tx_body = _effective_placeholder_tx_body(
+        source_tx_body,
+        node.inherited_body_properties,
+    )
+    is_vertical = is_vertical_txbody(tx_body, node.xfrm)
+    block_formula = _block_formula_zone(tx_body)
+    block_formula_failed = False
+    if block_formula is not None and not is_vertical:
+        try:
+            carrier_error = _block_formula_carrier_error(
+                node,
+                top_level=top_level,
+            )
+            if carrier_error is not None:
+                raise FormulaImportError(carrier_error)
+            imported_formula = import_formula(block_formula, display=True)
+        except FormulaImportError as exc:
+            _diagnose_formula_fallback(ctx, exc)
+            block_formula_failed = True
+        else:
+            return _render_block_formula(
+                node,
+                ctx,
+                imported_formula,
+                top_level=top_level,
+            )
+    inline_formula_resolver = _prepare_inline_formula_resolver(
+        tx_body,
+        ctx,
+        allow_native=not is_vertical,
+        force_opaque=block_formula_failed,
+    )
+    local_has_run_effects = txbody_has_run_effects(source_tx_body)
+    inherited_has_run_effects = txbody_has_run_effects(
+        *node.inherited_lst_styles
+    )
+    metadata_tx_body, inherited_styles_materialized = (
+        _materialize_inherited_list_styles(
+            tx_body,
+            node.inherited_lst_styles,
+        )
+    )
+    export_tx_body = (
+        source_tx_body
+        if (
+            ctx.preserve_placeholder_inheritance
+            and node.placeholder is not None
+            and source_tx_body is not None
+        )
+        else metadata_tx_body
+    )
+    has_run_effects = local_has_run_effects or inherited_has_run_effects
+    if geom is not None and has_run_effects:
+        if is_vertical:
+            geom.attrs.update(unsupported_effect_metadata(
+                "unsupported-run-effect-route:vertical-text"
+            ))
+        elif tx_body is not None and has_relationship_attributes(tx_body):
+            geom.attrs.update(unsupported_effect_metadata(
+                "unsupported-run-effect-route:relationship-bearing-text"
+            ))
+        elif inherited_has_run_effects and not inherited_styles_materialized:
+            geom.attrs.update(unsupported_effect_metadata(
+                "unsupported-run-effect-route:inherited-text-style"
+            ))
+
+    # Geometry (fill is "none" when blipFill is present, so only stroke draws)
+    geom_xml = _build_geometry_xml(node, sp_pr, ctx, geom=geom)
+
+    try:
+        text_default_fill = _resolve_text_style_default(node, ctx)
+        if tx_body is not None and is_vertical:
+            text_result = convert_vertical_txbody(
+                tx_body, node.xfrm, ctx.palette,
+                theme_fonts=ctx.theme_fonts,
+                slide_number=ctx.slide_number,
+                default_fill=text_default_fill,
+                default_font_size_px=DEFAULT_FONT_SIZE_PX,
+                fallback_lst_styles=node.inherited_lst_styles,
+                id_prefix=f"{ctx.group_id_prefix}txt",
+                id_seq=ctx.grad_seq,
+                hyperlink_resolver=lambda rid, action: _resolve_svg_hyperlink(
+                    ctx,
+                    rid,
+                    action,
+                ),
+                inline_formula_resolver=inline_formula_resolver,
+                strict=ctx.strict,
+                diagnostic_sink=ctx.diagnose,
+            )
+        else:
+            text_result = convert_txbody(

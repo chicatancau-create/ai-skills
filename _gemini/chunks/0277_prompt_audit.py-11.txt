@@ -1,0 +1,101 @@
+            raise AuditError("authority_edges require non-empty from, to, and concern")
+        for path in (source, target):
+            if not (root / path).is_file():
+                raise AuditError(f"Authority edge references missing file: {path}")
+        normalized.append({"from": source, "to": target, "concern": concern})
+        by_concern[concern].append((source, target))
+
+    cycles: list[list[str]] = []
+    for concern, concern_edges in sorted(by_concern.items()):
+        for component in _strongly_connected_components(concern_edges):
+            labeled = [f"{concern}:{path}" for path in component]
+            cycles.append(labeled)
+            findings.append(
+                Finding(
+                    severity="error",
+                    code="AUTHORITY_CYCLE",
+                    message=f"Authority cycle for concern {concern}: " + " -> ".join(component),
+                )
+            )
+    normalized.sort(key=lambda item: (item["concern"], item["from"], item["to"]))
+    return normalized, cycles, findings
+
+
+def _structured_registry_expected_order(config: dict[str, Any]) -> list[str]:
+    """Build the canonical browse order for one structured registry."""
+    prefix_counts = config.get("prefix_counts")
+    sequence_width = config.get("sequence_width")
+    if (
+        not isinstance(prefix_counts, dict)
+        or not prefix_counts
+        or not all(
+            isinstance(prefix, str)
+            and re.fullmatch(r"[PMAC][1-9]\d*", prefix)
+            and isinstance(count, int)
+            and count > 0
+            for prefix, count in prefix_counts.items()
+        )
+    ):
+        raise AuditError(
+            f"Registry {config.get('name')} needs positive prefix_counts"
+        )
+    if not isinstance(sequence_width, int) or sequence_width < 1:
+        raise AuditError(
+            f"Registry {config.get('name')} needs a positive sequence_width"
+        )
+    return [
+        f"{prefix}-{sequence:0{sequence_width}d}"
+        for prefix, count in prefix_counts.items()
+        for sequence in range(1, count + 1)
+    ]
+
+
+def _registry_ids(
+    root: Path,
+    config: dict[str, Any],
+) -> tuple[set[Any], str, list[Any], list[Any] | None]:
+    kind = config.get("kind")
+    source = config.get("source")
+    if not isinstance(source, str) or not (root / source).is_file():
+        raise AuditError(f"Registry has missing source: {source}")
+
+    if kind == "structured_markdown":
+        pattern = config.get("entry_pattern")
+        if not isinstance(pattern, str):
+            raise AuditError(f"Registry {config.get('name')} needs entry_pattern")
+        try:
+            regex = re.compile(pattern, re.MULTILINE)
+        except re.error as exc:
+            raise AuditError(f"Invalid registry entry_pattern: {exc}") from exc
+        if "id" not in regex.groupindex:
+            raise AuditError(
+                f"Registry {config.get('name')} entry_pattern needs an id group"
+            )
+        matched_ids = [
+            match.group("id")
+            for match in regex.finditer(_read_utf8(root / source))
+        ]
+        duplicates = sorted(
+            item for item, count in Counter(matched_ids).items() if count > 1
+        )
+        return set(matched_ids), source, duplicates, matched_ids
+
+    if kind == "directory":
+        pattern = config.get("glob")
+        excludes = config.get("exclude", [])
+        if not isinstance(pattern, str):
+            raise AuditError(f"Registry {config.get('name')} needs glob")
+        paths = [path for path in root.glob(pattern) if path.is_file()]
+        ids = {
+            path.stem
+            for path in paths
+            if not _matches_any(_relative_path(root, path), excludes)
+        }
+        return ids, source, [], None
+
+    if kind == "json_collection":
+        key = config.get("key")
+        if not isinstance(key, str):
+            raise AuditError(f"Registry {config.get('name')} needs key")
+        try:
+            value: Any = json.loads(_read_utf8(root / source))

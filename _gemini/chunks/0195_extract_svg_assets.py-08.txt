@@ -1,0 +1,91 @@
+    min_decoration_bytes: int,
+    inplace: bool,
+    id_prefix: str = "",
+    rewritten_dir: Path | None = None,
+    reusable_assets: dict[str, dict] | None = None,
+) -> list[dict]:
+    """Extract qualifying groups from one SVG. Returns inventory entries."""
+    ET.register_namespace("", SVG_NS)
+    tree = ET.parse(svg_path)
+    root = tree.getroot()
+    fresh_native_markers = _fresh_native_fallback_markers(root)
+    view_box = root.get("viewBox")
+    width = root.get("width")
+    height = root.get("height")
+    definitions_changed = any(_optimize_definitions(root))
+
+    # A namespaced projection is an all-at-once readability pass. Once it owns
+    # an asset reference, reruns inventory the existing placeholders instead of
+    # progressively factoring their remaining parent/sibling geometry.
+    if _has_namespace_placeholder(root, icon_namespace):
+        if definitions_changed or not inplace:
+            _normalize_authoring_tree(root, fresh_native_markers)
+            rewritten = _rewritten_path(svg_path, rewritten_dir, inplace)
+            rewritten.parent.mkdir(parents=True, exist_ok=True)
+            ET.register_namespace("", SVG_NS)
+            ET.register_namespace("xlink", XLINK_NS)
+            tree.write(rewritten, encoding="utf-8", xml_declaration=True)
+        return []
+
+    targets: list[tuple[ET.Element, list[ET.Element]]] = []
+    parents = {child: parent for parent in root.iter() for child in parent}
+    group_targets = _find_extractable(root, min_drawables, min_bytes)
+    selected_groups = set(group_targets)
+
+    def inside_selected_group(elem: ET.Element) -> bool:
+        current = elem
+        while current in parents:
+            current = parents[current]
+            if current in selected_groups:
+                return True
+        return False
+
+    for group in group_targets:
+        parent = parents.get(group)
+        if parent is not None:
+            targets.append((parent, [group]))
+
+    for parent, run in _find_extractable_runs(root, min_drawables, min_bytes, min_decoration_bytes):
+        if (
+            parent not in selected_groups
+            and not inside_selected_group(parent)
+            and not any(child in selected_groups for child in run)
+            and all(child in parent for child in run)
+        ):
+            targets.append((parent, run))
+
+    if not targets:
+        if definitions_changed or not inplace:
+            _normalize_authoring_tree(root, fresh_native_markers)
+            rewritten = _rewritten_path(svg_path, rewritten_dir, inplace)
+            rewritten.parent.mkdir(parents=True, exist_ok=True)
+            ET.register_namespace("", SVG_NS)
+            ET.register_namespace("xlink", XLINK_NS)
+            tree.write(rewritten, encoding="utf-8", xml_declaration=True)
+        return []
+
+    asset_dir = icons_dir / icon_namespace if icon_namespace else icons_dir
+    asset_dir.mkdir(parents=True, exist_ok=True)
+    entries = []
+
+    for index, (parent, nodes) in enumerate(targets, start=1):
+        if not nodes or not all(node in parent for node in nodes):
+            continue
+        asset_id = _asset_id(svg_path, index, id_prefix)
+        icon_reference = _icon_reference(icon_namespace, asset_id)
+        asset = _asset_relative_path(icon_namespace, asset_id)
+        pos = list(parent).index(nodes[0])
+        group = nodes[0] if len(nodes) == 1 and _local(nodes[0].tag) == "g" else _asset_group(nodes)
+
+        dependencies = [copy.deepcopy(elem) for elem in _dependency_elements(root, group)]
+        dependency_source_ids = sorted({
+            elem_id
+            for dependency in dependencies
+            for elem in dependency.iter()
+            if (elem_id := elem.get("id"))
+        })
+        source_sha256 = _source_sha256(group, dependencies, view_box, width, height)
+        source_refs = _source_references(group)
+        reusable = (reusable_assets or {}).get(source_sha256)
+        if reusable is not None:
+            reused_icon = str(reusable["icon"])

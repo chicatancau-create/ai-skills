@@ -1,0 +1,100 @@
+    text = re.sub(r'^(?:[-*+]|\d+[.)])[ \t]+', '', raw.strip())
+    if not text or re.fullmatch(r'[|:\- \t]+', text):
+        return ''
+    text = re.sub(r'!\[([^]]*)\]\([^)]*\)', r'\1', text)
+    text = re.sub(r'\[([^]]+)\]\([^)]*\)', r'\1', text)
+    text = text.replace('**', '').replace('__', '').replace('`', '')
+    return ' '.join(text.split())
+
+
+_JOINED_BLOCK_SEPARATOR_RE = re.compile(r'\s+[·•|/]\s+|；|;(?=\s|[^\x00-\x7f])')
+
+
+def _split_joined_blocks(text: str) -> list[str]:
+    """Split one outline value joined by spaced separators into planned lines.
+
+    A brief-depth Content field lists a page's blocks as ``A · B · C`` or
+    ``A；B；C`` on one line; each block is a planned line, not the whole list.
+    Unspaced ``·`` inside a name (``让·努维尔``) is left alone.
+    """
+    parts = [part.strip() for part in _JOINED_BLOCK_SEPARATOR_RE.split(text)]
+    return [part for part in parts if part]
+
+
+def _slide_id(token: str) -> str:
+    return 'PNN' if token.upper() == 'NN' else f'P{int(token):02d}'
+
+
+def _outline_candidates(
+    design_path: Path,
+    role_names: set[str],
+) -> dict[str, list[tuple[str, str]]]:
+    candidates = {name: [] for name in role_names}
+    if not design_path.is_file():
+        return candidates
+    sections = parse_markdown_artifact(design_path)
+    outline = next(
+        (
+            str(section.get('body', ''))
+            for section in sections
+            if re.match(
+                r'^IX\.[ \t]+Content Outline\b',
+                str(section.get('heading', '')),
+                flags=re.IGNORECASE,
+            )
+        ),
+        '',
+    )
+    slide_matches = list(_SLIDE_HEADING_RE.finditer(outline))
+    for slide_index, slide_match in enumerate(slide_matches):
+        block_end = (
+            slide_matches[slide_index + 1].start()
+            if slide_index + 1 < len(slide_matches)
+            else len(outline)
+        )
+        slide = _slide_id(slide_match.group(1))
+        lines = outline[slide_match.end():block_end].splitlines()
+        field_matches = [match for line in lines if (match := _OUTLINE_FIELD_RE.match(line))]
+        if not field_matches:
+            continue
+        base_indent = min(len(match.group('indent').expandtabs()) for match in field_matches)
+        line_index = 0
+        while line_index < len(lines):
+            field_match = _OUTLINE_FIELD_RE.match(lines[line_index])
+            if (
+                field_match is None
+                or len(field_match.group('indent').expandtabs()) != base_indent
+            ):
+                line_index += 1
+                continue
+            label = field_match.group('label').casefold()
+            value = _clean_planned_line(field_match.group('value'))
+            if label == 'title':
+                if value and 'title' in candidates:
+                    candidates['title'].extend(
+                        (slide, part) for part in _split_joined_blocks(value)
+                    )
+                line_index += 1
+                continue
+            if label == 'core message':
+                role = 'subtitle' if 'subtitle' in candidates else 'body'
+                if value and role in candidates:
+                    candidates[role].extend(
+                        (slide, part) for part in _split_joined_blocks(value)
+                    )
+                line_index += 1
+                continue
+
+            content_lines = _split_joined_blocks(value) if value else []
+            next_index = line_index + 1
+            while next_index < len(lines):
+                next_field = _OUTLINE_DATA_LINE_RE.match(lines[next_index])
+                if (
+                    next_field is not None
+                    and len(next_field.group('indent').expandtabs()) <= base_indent
+                ):
+                    break
+                planned_line = _clean_planned_line(lines[next_index])
+                if planned_line:
+                    content_lines.extend(_split_joined_blocks(planned_line))
+                next_index += 1

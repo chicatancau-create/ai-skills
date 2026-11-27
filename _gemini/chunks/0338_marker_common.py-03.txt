@@ -1,0 +1,116 @@
+        tag = _local_tag(elem)
+        elem_id = elem.get("id")
+        label = f"<{tag} id={elem_id!r}>" if elem_id else f"<{tag}>"
+        raise RuntimeError(
+            f"Native PPTX fallback {label} {attribute}={raw!r}: {exc}"
+        ) from exc
+
+
+def _powerpoint_emu_value(
+    emu: int,
+    field_name: str,
+    *,
+    positive: bool = False,
+) -> int:
+    """Validate an already-resolved EMU value for a PowerPoint coordinate."""
+    lower_bound = 1 if positive else _POWERPOINT_COORD_MIN
+    if emu < lower_bound or emu > _POWERPOINT_COORD_MAX:
+        qualifier = "positive " if positive else ""
+        raise RuntimeError(
+            f"Native PPTX object {field_name} must resolve to a {qualifier}"
+            "32-bit PowerPoint coordinate"
+        )
+    return emu
+
+
+def _powerpoint_emu(value: Any, field_name: str, *, positive: bool = False) -> int:
+    """Convert SVG px to an EMU value that PowerPoint can represent."""
+    number = _number(value, field_name)
+    scaled = number * EMU_PER_PX
+    if not math.isfinite(scaled):
+        raise RuntimeError(f"Native PPTX object {field_name} exceeds PowerPoint coordinates")
+    return _powerpoint_emu_value(round(scaled), field_name, positive=positive)
+
+
+def _powerpoint_line_width_emu(value: Any, field_name: str) -> int:
+    """Convert SVG px to a legal DrawingML ``ST_LineWidth`` value."""
+    emu = _powerpoint_emu(value, field_name, positive=True)
+    if emu > _POWERPOINT_LINE_WIDTH_MAX:
+        raise RuntimeError(
+            f"Native PPTX object {field_name} exceeds DrawingML line-width range"
+        )
+    return emu
+
+
+def native_marker_transform(transform: str | None) -> tuple[float, float, float, float]:
+    """Return a strict native-marker transform as ``dx, dy, sx, sy``."""
+    raw = (transform or "").strip()
+    if not raw:
+        return 0.0, 0.0, 1.0, 1.0
+
+    try:
+        operations = parse_transform_operations(raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            "Native PPTX replacement markers support translate/scale transforms only"
+        ) from exc
+    if any(name not in {"translate", "scale"} for name, _args in operations):
+        raise RuntimeError(
+            "Native PPTX replacement markers support translate/scale transforms only"
+        )
+
+    a, b, c, d, e, f = parse_transform_matrix(raw)
+    components = (a, b, c, d, e, f)
+    if not all(math.isfinite(value) for value in components):
+        raise RuntimeError("Native PPTX marker transform exceeds finite coordinates")
+    if b != 0.0 or c != 0.0:
+        raise RuntimeError(
+            "Native PPTX replacement markers support translate/scale transforms only"
+        )
+    return e, f, a, d
+
+
+def _native_marker_validation_context(
+    elem: ET.Element,
+    ancestors: Iterable[ET.Element] = (),
+) -> ConvertContext:
+    """Build the scalar context used by native export for one marker path."""
+    ctx = ConvertContext()
+    for current in (*ancestors, elem):
+        dx, dy, sx, sy = native_marker_transform(current.get("transform"))
+        ctx = ctx.child(
+            dx=ctx.scale_x * dx,
+            dy=ctx.scale_y * dy,
+            sx=sx,
+            sy=sy,
+        )
+    return ctx
+
+
+def _bbox_union(
+    first: tuple[float, float, float, float] | None,
+    second: tuple[float, float, float, float] | None,
+) -> tuple[float, float, float, float] | None:
+    if first is None:
+        return second
+    if second is None:
+        return first
+    return (
+        min(first[0], second[0]),
+        min(first[1], second[1]),
+        max(first[2], second[2]),
+        max(first[3], second[3]),
+    )
+
+
+def _bbox_from_points(points: list[tuple[float, float]]) -> tuple[float, float, float, float] | None:
+    if not points:
+        return None
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _apply_matrix_bbox(
+    bbox: tuple[float, float, float, float],
+    matrix: tuple[float, float, float, float, float, float],

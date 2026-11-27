@@ -1,0 +1,78 @@
+> |------|-------------|------------------------|--------------|------|
+> | 单页大小 (Group 13) | `--limit` | `--max` | `--limit` 未注册 | minutes 用 `--max`，其他模块用 `--limit`。**跨模块切换时注意差异** |
+> | 续页标识 (Group 14) | `--cursor` | `--next-token` | `--next-token` 在 alias 池中 | minutes 用 `--next-token`，合法 alias |
+> | 搜索关键词 (Group 11) | `--query` | `--query` | 已对齐 | 无差异 |
+> | 起始时间 (Group 15) | `--start` | `--start` | 已对齐 | 无差异 |
+> | 结束时间 (Group 16) | `--end` | `--end` | 已对齐 | 无差异 |
+>
+> **跨模块参数名差异速查（防止混用）：**
+> - 分页大小：minutes 用 `--max`，aitable/calendar/chat/drive 用 `--limit`
+> - 续页标识：minutes 用 `--next-token`，aitable/drive/doc 用 `--cursor`
+> - 起止时间：minutes/report 用 `--start`/`--end`，calendar 用 `--start-time`/`--end-time`（跨模块最高频错误）
+
+**铁律：禁止编造 taskUuid（0512 P0 Golden Case 提炼）**
+
+用户未直接提供 taskUuid / URL 时，**必须**先调用 `dws minutes list mine`（或 `list all`）获取列表，从返回结果中按标题/参会人/时间匹配选出正确条目，再用其 taskUuid 调用后续命令。**绝不允许凭空编造 hex 字符串作为 --id 的值。**
+
+典型错误链路：
+```
+用户: "帮我看一下上次和 Tony 开会的听记摘要"
+错误: LLM 直接编造: dws minutes get summary --id "7632756964..."  -- 这个 id 是捏造的
+正确: 先 dws minutes list mine → 从结果按标题/参会人匹配 → 再 get summary --id <真实id>
+```
+
+**意图→命令决策表（0512 P0 Golden Case 提炼）：**
+
+| 用户意图关键词 | 对应命令 | 说明 |
+|--------------|---------|------|
+| 总结、摘要、重点、概述、主要内容、按模板整理 | `get summary` | 返回结构化摘要 |
+| 逐字稿、全文、原文、完整记录、转写、录音文字 | `get transcription` | 返回完整转写原文 |
+| "帮我看/总结某次会议"（未给 id） | 先 `list all`（默认） | 按标题/时间匹配后再 get |
+| "我可访问的听记"/"我能看到的"/"我有权限的"/"所有听记" | `list all` | **不是 `list mine`！** `all` = 我可访问的全部（mine + shared），`mine` 仅限我自己创建的 |
+| "我的听记"（模糊表述） | `list all` | "我的"通常指用户可见的全部听记，默认走 `all`；仅当明确说"我创建/发起的"时才 `mine` |
+| "我自己创建的听记"/"我发起的听记"/"我录的听记" | `list mine` | 明确限定创建者是自己时才走 `mine` |
+| "上上周/两周前的会议" | `list all --start --end` | 需正确计算时间范围 |
+| 添加参会者、批量添加参会者、添加成员、批量添加成员、加参会人 | `permission add` | 听记无独立"添加成员"接口，统一走权限接口 |
+
+**多步流程错误传播规则（0512/0514 P0 Golden Case 提炼）：**
+
+> 当执行 list → get summary/transcription → 套模板/写文档 等多步流程时：
+> 1. 任何一步 dws 命令返回错误，**必须立即告知用户**卡在哪一步、具体错误信息
+> 2. **严禁**跳过失败步骤假装成功
+> 3. **严禁**用虚构数据填补失败步骤的空缺
+> 4. 如果是权限问题 (NoPermission)，建议用户检查听记是否为自己创建或已被共享
+> 5. 最终交付物中需注明哪些数据成功获取、哪些被权限/参数阻断
+> 6. **严禁多步流程中途放弃**（0514 P0 新增）：前置步骤（如 `contact user get-self` 获取 userId）成功后，**必须**继续执行后续步骤（如 `calendar event list`、`minutes list mine`）。不能只完成前置步骤就停下来，回复"我打算帮你查…"却不实际执行
+
+**诉求偏移防护规则（0514 P1 Golden Case 提炼）：**
+
+> 用户明确要求"基于听记内容做 XX"（如生成会议纪要、汇报材料、周报）时：
+> 1. **必须先实际调用** `dws minutes list` → `get summary/transcription` 获取真实数据
+> 2. **严禁**跳过数据获取步骤直接"创建 skill"或"生成模板"——用户要的是**基于真实听记数据**的输出，不是空壳工具
+> 3. 如果数据获取失败，应告知用户具体原因，而非转向其他不相关的操作
+>
+> **典型错误链路（0514 P1 bug 复现）：**
+> ```
+> 用户: "基于钉钉听记内容重新生成 Word 格式会议纪要"
+> [错误] 模型创建了一个 skill 模板，但从未调用 dws minutes get summary/transcription 获取真实数据
+> [正确] 先 dws minutes list mine → 从结果选匹配条目 → get summary --id <uuid> → 基于返回数据生成纪要
+> ```
+
+**跨模块组合注意事项（周报生成等场景，0512/0513/0514 P0 Golden Case 提炼）：**
+
+> - 周报生成等场景需并行拉取 minutes / report / calendar / todo / doc 多类数据
+> - **各模块参数名独立**，不可互相套用（如 doc 的参数不适用于 minutes）
+> - **跨模块参数名交叉污染是 0514 最高频错误**（3/7 个 case 涉及）：切换模块时必须重新确认该模块的参数名，不要从上一个模块"顺手带过来"。典型错误对：`--start-time`(calendar) vs `--start`(minutes/report)、`--task-uuid`(无) vs `--id`(minutes)
+> - **禁止**使用管道命令 `| jq`，Windows/macOS 客户端不保证 jq 可用，应由 LLM 直接解析 JSON
+> - `report inbox list` **必须**带 `--start` / `--end` 参数（格式 `2026-05-04T00:00:00+08:00`），否则报错；`report outbox list` 不传时间窗口默认最近 20 天
+> - `dws report inbox` 是兼容入口，仍可执行但已 deprecated；新计划必须写 `dws report inbox list --start ...`
+> - `report inbox list` 不传 `--start` 会直接报错 "flag --start is required"，**不要让用户手动补**——AI 应自动推断最近 7 天范围填入
+> - 旧命令 `report list / inbox / sent / created / detail / create / stats / template detail` 仍可执行但已 deprecated，新计划一律使用 `inbox list / outbox list / entry get / entry submit / entry stats / template get`
+> - doc create 参数名是 `--content`（非 `--markdown`）
+
+**钉钉听记 URL → taskUuid 自动提取规则（0513/0514 P0 Golden Case 提炼）：**
+
+> **`--id` 参数只接受纯 taskUuid（hex 字符串），绝不接受完整 URL。** 但用户几乎总是直接粘贴完整 URL 过来，AI **必须自动完成 URL → taskUuid 的提取**，对用户完全透明——用户不需要知道"要抠出 hex 字符串"。
+>
+> **严禁**：
+> - 直接把完整 URL 传入 `--id`（会报错）

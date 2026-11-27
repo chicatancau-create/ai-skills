@@ -1,0 +1,102 @@
+        SVGQualityChecker()._check_text_bounds(page_root, page_result)
+        page_error = next(
+            error
+            for error in page_result['errors']
+            if 'exceeds the root viewBox on the horizontal axis' in error
+        )
+        self.assertTrue(
+            page_error.endswith(
+                '≈24.0 px per CJK char at 24px without headroom; '
+                '≈22 chars fit in 540 px'
+            ),
+            page_error,
+        )
+
+    def test_root_module_overlap_is_error_with_minimal_exemptions(self) -> None:
+        cases = (
+            (
+                'overlap_above_tolerance',
+                _parse_svg(
+                    '<g id="first" data-pptx-bounds="0 0 100 100"/>'
+                    '<g id="second" data-pptx-bounds="98.9 0 100 100"/>'
+                ),
+                True,
+            ),
+            (
+                'overlap_at_tolerance',
+                _parse_svg(
+                    '<g id="first" data-pptx-bounds="0 0 100 100"/>'
+                    '<g id="second" data-pptx-bounds="99 0 100 100"/>'
+                ),
+                False,
+            ),
+            (
+                'static_page_frame',
+                _parse_svg(
+                    '<g id="background" data-pptx-role="background" '
+                    'data-pptx-bounds="0 0 1000 1000"/>'
+                    '<g id="content" data-pptx-bounds="100 100 200 200"/>'
+                ),
+                False,
+            ),
+            (
+                'structured_slots',
+                _parse_svg(
+                    '<g id="picture" data-pptx-placeholder="picture" '
+                    'data-pptx-bounds="0 0 500 500"/>'
+                    '<g id="title" data-pptx-placeholder="title" '
+                    'data-pptx-bounds="100 100 300 100"/>',
+                    'data-pptx-master="master" '
+                    'data-pptx-master-name="Master" '
+                    'data-pptx-layout="layout" '
+                    'data-pptx-layout-name="Layout"',
+                ),
+                False,
+            ),
+            (
+                'structured_ordinary_modules',
+                _parse_svg(
+                    '<g id="first" data-pptx-bounds="0 0 100 100"/>'
+                    '<g id="second" data-pptx-bounds="50 0 100 100"/>',
+                    'data-pptx-master="master" '
+                    'data-pptx-master-name="Master" '
+                    'data-pptx-layout="layout" '
+                    'data-pptx-layout-name="Layout"',
+                ),
+                True,
+            ),
+            (
+                'off_canvas_morph_staging',
+                _parse_svg(
+                    '<g id="morph-a" data-pptx-morph-staging="true" '
+                    'data-pptx-bounds="1100 0 100 100"/>'
+                    '<g id="morph-b" data-pptx-morph-staging="true" '
+                    'data-pptx-bounds="1100 0 100 100"/>'
+                ),
+                False,
+            ),
+        )
+        checker = SVGQualityChecker()
+        for name, root, expects_overlap_error in cases:
+            with self.subTest(name=name):
+                result = _empty_result()
+                checker._check_module_bounds_contract(root, result)
+                overlap_errors = [
+                    error
+                    for error in result['errors']
+                    if 'data-pptx-bounds overlaps' in error
+                ]
+                self.assertEqual(bool(overlap_errors), expects_overlap_error)
+
+
+if __name__ == '__main__':
+    unittest.main()
+
+
+class NoCropStretchMeasurementTests(unittest.TestCase):
+    def test_nested_crop_frame_geometry_and_measured_deviation(self) -> None:
+        root = ET.fromstring(
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720">'
+            '<svg x="140" y="60" width="180" height="180" '
+            'viewBox="0.6 0.3 0.24 0.16" preserveAspectRatio="none" '
+            'overflow="hidden">'

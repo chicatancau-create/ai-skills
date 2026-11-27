@@ -1,0 +1,95 @@
+                    f'Duplicate top-level group id {group_id!r} at visible '
+                    f'positions {positions}; animation target ids must be unique'
+                )
+
+        if ungrouped:
+            samples = ', '.join(ungrouped[:3])
+            if len(ungrouped) > 3:
+                samples += ', ...'
+            message = (
+                f'{len(ungrouped)} ungrouped top-level Slide-local element(s) '
+                f'in svg_output ({samples}); group only logical content units '
+                'in a top-level <g id="...">. Keep genuine static page framing '
+                'as a root primitive and declare a supported data-pptx-role such '
+                'as "background" or "decoration"'
+            )
+            prototype_root = self._active_prototype_root()
+            prototype_ungrouped = (
+                self._ungrouped_slide_local_facts(prototype_root)
+                if prototype_root is not None
+                else ([], [])
+            )
+            if (
+                prototype_root is not None
+                and ungrouped == prototype_ungrouped[0]
+                and ungrouped_signatures == prototype_ungrouped[1]
+            ):
+                self._append_inherited_info(
+                    result,
+                    'animation_anchor',
+                    message,
+                )
+            else:
+                result['warnings'].append(message)
+
+    @staticmethod
+    def _prototype_element_signature(
+        element: ET.Element,
+    ) -> Tuple[object, ...]:
+        """Compare warning-owned topology/style while ignoring visible text."""
+        return (
+            _local_name(element),
+            tuple(sorted(element.attrib.items())),
+            tuple(
+                SVGQualityChecker._prototype_element_signature(child)
+                for child in element
+            ),
+        )
+
+    def _ungrouped_slide_local_facts(
+        self,
+        root: ET.Element,
+    ) -> Tuple[List[str], List[Tuple[object, ...]]]:
+        """Describe and fingerprint top-level non-group Slide-local atoms."""
+        non_visual = {'defs', 'title', 'desc', 'metadata', 'style'}
+        descriptors: List[str] = []
+        signatures: List[Tuple[object, ...]] = []
+        visual_index = 0
+        for child in root:
+            if _effective_top_level is not None:
+                child = _effective_top_level(child)
+            tag = _local_name(child)
+            if tag in non_visual:
+                continue
+            visual_index += 1
+            if tag == 'g' or child.get('data-pptx-layer') is not None:
+                continue
+            if (
+                _is_static_page_frame is not None
+                and _is_static_page_frame(
+                    child.get('data-pptx-role'),
+                    child.get('data-pptx-placeholder'),
+                )
+            ):
+                continue
+            if visual_index == 1 and self._is_full_canvas_root_rect(root, child):
+                continue
+            child_id = (child.get('id') or '').strip()
+            descriptors.append(
+                f'<{tag} id="{child_id}">'
+                if child_id else f'<{tag}> #{visual_index}'
+            )
+            signatures.append(self._prototype_element_signature(child))
+        return descriptors, signatures
+
+    # OOXML ST_PresetPatternVal enum — anything outside this set produces a
+    # PPTX schema violation ("PowerPoint found a problem with the content").
+    _OOXML_PATTERN_PRESETS = frozenset({
+        'pct5', 'pct10', 'pct20', 'pct25', 'pct30', 'pct40', 'pct50', 'pct60',
+        'pct70', 'pct75', 'pct80', 'pct90',
+        'horz', 'vert', 'ltHorz', 'ltVert', 'dkHorz', 'dkVert',
+        'narHorz', 'narVert', 'dashHorz', 'dashVert',
+        'cross', 'dnDiag', 'upDiag', 'ltDnDiag', 'ltUpDiag', 'dkDnDiag',
+        'dkUpDiag', 'wdDnDiag', 'wdUpDiag',
+        'dashDnDiag', 'dashUpDiag', 'diagCross',
+        'smCheck', 'lgCheck', 'smGrid', 'lgGrid', 'dotGrid', 'smConfetti',

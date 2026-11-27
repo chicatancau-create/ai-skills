@@ -1,0 +1,93 @@
+            if 'body' in candidates:
+                candidates['body'].extend((slide, text) for text in content_lines)
+            line_index = next_index
+    return candidates
+
+
+def _truncate_planned_line(text: str, limit: int = 40) -> str:
+    clusters = split_project_text_clusters(text)
+    return text if len(clusters) <= limit else ''.join(clusters[:limit - 1]) + '…'
+
+
+def _longest_planned_lines(
+    project_path: Path,
+    roles: list[tuple[str, str, float]],
+    weights: dict[str, str] | None = None,
+) -> dict[str, dict[str, object] | None]:
+    weights = weights or {}
+    candidates = _outline_candidates(
+        project_path / 'design_spec.md',
+        {name for name, _family, _size in roles},
+    )
+    longest: dict[str, dict[str, object] | None] = {}
+    for name, family, size in roles:
+        best: tuple[float, str, str] | None = None
+        for slide, planned_line in candidates[name]:
+            width = measure_text(
+                planned_line, size=size, family=family,
+                weight=weights.get(name, 'normal'),
+            )
+            if best is None or width > best[0]:
+                best = (width, slide, planned_line)
+        longest[name] = None if best is None else {
+            'px': round(best[0], 1),
+            'slide': best[1],
+            'text': _truncate_planned_line(best[2]),
+        }
+    return longest
+
+
+def _calibration_payload(
+    roles: list[tuple[str, str, float]],
+    *,
+    project_path: Path,
+    source: str,
+    include_outline: bool,
+    weights: dict[str, str] | None = None,
+    samples: list[str] | None = None,
+    previous_samples: dict[str, str] | None = None,
+) -> dict[str, object]:
+    weights = weights or {}
+    longest = (
+        _longest_planned_lines(project_path, roles, weights)
+        if include_outline
+        else {name: None for name, _family, _size in roles}
+    )
+    planned_texts = list(samples or [])
+    outline_candidates = _outline_candidates(
+        project_path / 'design_spec.md',
+        {name for name, _family, _size in roles},
+    )
+    planned_texts.extend(text for rows in outline_candidates.values() for _slide, text in rows)
+    script_samples = _script_rate_samples(planned_texts)
+    # Retained rates refer to these exact samples; new roles use them too.
+    script_samples.update(previous_samples or {})
+    cjk_length = len(split_project_text_clusters(_CALIBRATION_CJK_SAMPLE))
+    latin_length = len(split_project_text_clusters(_CALIBRATION_LATIN_SAMPLE))
+    digits_length = len(split_project_text_clusters(_CALIBRATION_DIGITS_SAMPLE))
+    citation_length = len(split_project_text_clusters(_CALIBRATION_CITATION_SAMPLE))
+    role_rows = {}
+    for name, family, size in roles:
+        weight = weights.get(name, 'normal')
+        style = dict(size=size, family=family, weight=weight)
+        cjk_width = measure_text(_CALIBRATION_CJK_SAMPLE, **style)
+        latin_width = measure_text(_CALIBRATION_LATIN_SAMPLE, **style)
+        caps_width = measure_text(_CALIBRATION_CAPS_SAMPLE, **style)
+        digits_width = measure_text(_CALIBRATION_DIGITS_SAMPLE, **style)
+        citation_width = measure_text(_CALIBRATION_CITATION_SAMPLE, **style)
+        role_rows[name] = {
+            'family': family,
+            'size': size,
+            'weight': weight,
+            'cjk_chars_per_100px': round(100.0 * cjk_length / cjk_width, 1),
+            'latin_chars_per_100px': round(100.0 * latin_length / latin_width, 1),
+            'caps_chars_per_100px': round(100.0 * latin_length / caps_width, 1),
+            'digits_chars_per_100px': round(100.0 * digits_length / digits_width, 1),
+            'citation_chars_per_100px': round(100.0 * citation_length / citation_width, 1),
+            'script_clusters_per_100px': {
+                label: round(
+                    100.0 * len(split_project_text_clusters(sample))
+                    / measure_text(sample, **style),
+                    1,
+                )
+                for label, sample in script_samples.items()

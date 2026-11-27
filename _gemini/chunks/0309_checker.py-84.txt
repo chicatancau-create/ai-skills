@@ -1,0 +1,100 @@
+                _parse_inline_style(element.get('style'))
+                if _parse_inline_style is not None
+                else {}
+            )
+            fill = style_values.get('fill') or element.get('fill') or ''
+            match = re.match(r'\s*url\(\s*[\'"]?#([^)\'"\s]+)', fill)
+            if match and match.group(1) in patterns:
+                used.add(match.group(1))
+        return [
+            image
+            for pattern_id in used
+            for image in patterns[pattern_id].iter(f'{{{SVG_NS}}}image')
+        ]
+
+    @staticmethod
+    def _image_frame_geometry(
+        image: ET.Element,
+        root: ET.Element,
+        parent_by_id: Dict[int, ET.Element],
+    ) -> Tuple[float, float, float, float] | None:
+        """Return (frame width, frame height, source fraction w, h) of one instance.
+
+        Inside the nested-``<svg>`` crop transport the frame is the wrapper and
+        the ``viewBox`` selects a unit-coordinate fraction of the source; a
+        plain ``<image>`` shows the whole source in its own box.
+        """
+        def _number(raw: str | None) -> float | None:
+            if raw is None:
+                return None
+            try:
+                value = float(raw.strip().removesuffix('px'))
+            except (TypeError, ValueError):
+                return None
+            return value if math.isfinite(value) and value > 0 else None
+
+        parent = parent_by_id.get(id(image))
+        if (
+            parent is not None
+            and parent is not root
+            and _local_name(parent) == 'svg'
+            and parent.get('viewBox')
+        ):
+            parts = [
+                part for part in re.split(r'[\s,]+', parent.get('viewBox', '').strip())
+                if part
+            ]
+            if len(parts) != 4:
+                return None
+            width = _number(parent.get('width'))
+            height = _number(parent.get('height'))
+            fraction_width = _number(parts[2])
+            fraction_height = _number(parts[3])
+            if None in (width, height, fraction_width, fraction_height):
+                return None
+            return (width, height, fraction_width, fraction_height)
+        width = _number(image.get('width'))
+        height = _number(image.get('height'))
+        if width is None or height is None:
+            return None
+        return (width, height, 1.0, 1.0)
+
+    def _measure_image_pixels(
+        self,
+        paths: set[Path] | None,
+    ) -> Tuple[int, int] | None:
+        """Return the EXIF-oriented pixel size of the first readable file."""
+        for path in sorted(paths or ()):
+            cached = self._image_pixel_sizes.get(path)
+            if cached is not None:
+                return cached
+            try:
+                from PIL import Image, ImageOps  # type: ignore
+                with Image.open(path) as image:
+                    oriented = ImageOps.exif_transpose(image)
+                    size = (int(oriented.width), int(oriented.height))
+            except Exception:  # noqa: BLE001 - unreadable files are reported elsewhere
+                continue
+            if size[0] > 0 and size[1] > 0:
+                self._image_pixel_sizes[path] = size
+                return size
+        return None
+
+    @staticmethod
+    def _stretch_deviation(
+        geometry: Tuple[float, float, float, float] | None,
+        source_size: Tuple[int, int] | None,
+    ) -> float | None:
+        """Return how far a ``none`` placement departs from the source aspect."""
+        if geometry is None or source_size is None:
+            return None
+        frame_width, frame_height, fraction_width, fraction_height = geometry
+        expected = (fraction_width * source_size[0]) / (fraction_height * source_size[1])
+        if expected <= 0:
+            return None
+        return abs((frame_width / frame_height) / expected - 1.0)
+
+    @staticmethod
+    def _image_crop_mechanisms(
+        image: ET.Element,
+        root: ET.Element,

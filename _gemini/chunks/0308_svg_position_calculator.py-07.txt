@@ -1,0 +1,130 @@
+    row: int
+    col: int
+    index: int  # 1-based index
+    x: float
+    y: float
+    width: float
+    height: float
+    center_x: float
+    center_y: float
+
+
+class GridLayoutCalculator:
+    """Grid layout calculator"""
+
+    def __init__(self, coord_system: CoordinateSystem):
+        self.coord = coord_system
+
+    def calculate(self, rows: int, cols: int,
+                  padding: float = 20,
+                  gap: float = 20) -> List[GridCell]:
+        """
+        Calculate grid layout
+
+        Args:
+            rows: Number of rows
+            cols: Number of columns
+            padding: Chart area inner padding
+            gap: Cell spacing
+        """
+        area = self.coord.chart_area
+
+        # Calculate available area
+        available_width = area.width - 2 * padding - (cols - 1) * gap
+        available_height = area.height - 2 * padding - (rows - 1) * gap
+
+        cell_width = available_width / cols
+        cell_height = available_height / rows
+
+        results = []
+        index = 1
+
+        for row in range(rows):
+            for col in range(cols):
+                x = area.x_min + padding + col * (cell_width + gap)
+                y = area.y_min + padding + row * (cell_height + gap)
+
+                results.append(GridCell(
+                    row=row + 1,
+                    col=col + 1,
+                    index=index,
+                    x=round(x, 1),
+                    y=round(y, 1),
+                    width=round(cell_width, 1),
+                    height=round(cell_height, 1),
+                    center_x=round(x + cell_width / 2, 1),
+                    center_y=round(y + cell_height / 2, 1)
+                ))
+                index += 1
+
+        return results
+
+    def format_table(self, cells: List[GridCell]) -> str:
+        """Format as table output"""
+        lines = []
+        area = self.coord.chart_area
+        lines.append(f"Chart area: ({area.x_min}, {area.y_min}) - ({area.x_max}, {area.y_max})")
+        lines.append("")
+        lines.append("Index Row   Col   X        Y       Width    Height  CenterX  CenterY")
+        lines.append("----  ----  ----  -------  -------  -------  -------  -------  -------")
+
+        for c in cells:
+            lines.append(
+                f"{c.index:4d}  {c.row:4d}  {c.col:4d}  {c.x:>7.1f}  {c.y:>7.1f}  "
+                f"{c.width:>7.1f}  {c.height:>7.1f}  {c.center_x:>7.1f}  {c.center_y:>7.1f}"
+            )
+
+        return "\n".join(lines)
+
+
+# =============================================================================
+# SVG Validator
+# =============================================================================
+
+@dataclass
+class ValidationResult:
+    """Validation result"""
+    element_type: str
+    element_id: str
+    attribute: str
+    expected: float
+    actual: float
+    deviation: float
+    passed: bool
+
+
+class SVGPositionValidator:
+    """SVG position validator"""
+
+    def __init__(self, tolerance: float = 1.0):
+        """
+        Initialize the validator
+
+        Args:
+            tolerance: Allowed deviation (pixels)
+        """
+        self.tolerance = tolerance
+
+    def validate_from_file(self, svg_file: str,
+                           expected_coords: Dict[str, Dict[str, float]]) -> List[ValidationResult]:
+        """
+        Validate coordinates from file
+
+        Args:
+            svg_file: SVG file path
+            expected_coords: Expected coordinates {element_ID: {attribute: value}}
+        """
+        svg_path = Path(svg_file)
+        if not svg_path.exists():
+            raise FileNotFoundError(f"SVG file does not exist: {svg_file}")
+
+        with open(svg_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        return self.validate_content(content, expected_coords)
+
+    def validate_content(self, svg_content: str,
+                        expected_coords: Dict[str, Dict[str, float]]) -> List[ValidationResult]:
+        """Validate coordinates in SVG content"""
+        results = []
+

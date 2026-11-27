@@ -1,0 +1,101 @@
+    """Write one converter-owned sidecar and return report metadata/paths."""
+    _validate_bundle(bundle)
+    bundle_dir = output_root.joinpath(*FONT_BUNDLE_DIR.parts)
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    part_entries: list[dict[str, str]] = []
+    managed_paths: list[str] = []
+    for part in bundle.parts:
+        relative_path = (FONT_BUNDLE_DIR / part.filename).as_posix()
+        (output_root / relative_path).write_bytes(part.payload)
+        managed_paths.append(relative_path)
+        part_entries.append({
+            "relationshipId": part.relationship_id,
+            "path": relative_path,
+            "sha256": hashlib.sha256(part.payload).hexdigest(),
+        })
+    manifest = {
+        "schemaVersion": 1,
+        "fontListOoxml": {
+            "encoding": "base64",
+            "sha256": hashlib.sha256(bundle.font_list_xml).hexdigest(),
+            "payload": base64.b64encode(bundle.font_list_xml).decode("ascii"),
+        },
+        "parts": part_entries,
+    }
+    manifest_relative = FONT_MANIFEST_PATH.as_posix()
+    (output_root / manifest_relative).write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    managed_paths.append(manifest_relative)
+    descriptor: dict[str, object] = {
+        "manifest": manifest_relative,
+        "partCount": len(bundle.parts),
+        "typefaces": list(embedded_font_typefaces(bundle)),
+    }
+    return descriptor, tuple(managed_paths)
+
+
+def _safe_workspace_path(project_root: Path, value: object) -> Path:
+    if not isinstance(value, str) or not value.strip():
+        raise EmbeddedFontError("Embedded font sidecar path must be a string")
+    path = PurePosixPath(value)
+    if path.is_absolute() or ".." in path.parts:
+        raise EmbeddedFontError(
+            f"Embedded font sidecar path escapes the project: {value!r}"
+        )
+    expected_prefix = FONT_BUNDLE_DIR.parts
+    if path.parts[:len(expected_prefix)] != expected_prefix:
+        raise EmbeddedFontError(
+            f"Embedded font sidecar path must stay under {FONT_BUNDLE_DIR}: "
+            f"{value!r}"
+        )
+    resolved_root = project_root.resolve()
+    resolved = (project_root / Path(*path.parts)).resolve()
+    try:
+        resolved.relative_to(resolved_root)
+    except ValueError as exc:
+        raise EmbeddedFontError(
+            f"Embedded font sidecar path escapes the project: {value!r}"
+        ) from exc
+    if not resolved.is_file():
+        raise EmbeddedFontError(
+            f"Embedded font sidecar file is missing: {value}"
+        )
+    return resolved
+
+
+def load_embedded_font_bundle(
+    project_root: Path,
+    descriptor: object,
+) -> EmbeddedFontBundle | None:
+    """Load and verify a font bundle referenced by conversion-report.json."""
+    if descriptor is None:
+        return None
+    if not isinstance(descriptor, dict):
+        raise EmbeddedFontError(
+            "sourceDocument.embeddedFonts must be an object"
+        )
+    manifest_path = _safe_workspace_path(
+        project_root,
+        descriptor.get("manifest"),
+    )
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise EmbeddedFontError(
+            f"Cannot read embedded font manifest {manifest_path}: {exc}"
+        ) from exc
+    if not isinstance(manifest, dict) or manifest.get("schemaVersion") != 1:
+        raise EmbeddedFontError(
+            "Embedded font manifest requires schemaVersion 1"
+        )
+    ooxml = manifest.get("fontListOoxml")
+    if not isinstance(ooxml, dict) or ooxml.get("encoding") != "base64":
+        raise EmbeddedFontError(
+            "Embedded font manifest requires base64 fontListOoxml"
+        )
+    payload_value = ooxml.get("payload")
+    digest = ooxml.get("sha256")
+    if not isinstance(payload_value, str) or not isinstance(digest, str):
+        raise EmbeddedFontError(

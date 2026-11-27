@@ -1,0 +1,109 @@
+# logos. Warn about downscaling only when the source also has material on-disk
+# weight, because PPTX embeds the compressed source asset rather than raw pixels.
+# 1280px=96 SVG px/in; at 1.5 device px/SVG px on 1080p, 2x becomes ~3x on-screen—visibly soft; smaller is not warned.
+IMAGE_UPSCALE_WARN_RATIO = 2.0
+IMAGE_DOWNSIZE_WARN_RATIO = 4.0
+IMAGE_DOWNSIZE_WARN_MIN_BYTES = 1024 * 1024
+
+_TEMPLATE_SPEC_NAME_RE = re.compile(
+    r'design_spec\.(?P<kind>brand|style|layout|deck)\.(?P<id>[^/\\]+)\.md'
+)
+
+
+def _template_spec_paths(directory: Path) -> list[Path]:
+    """Return every template Design Spec directly inside one directory.
+
+    A library workspace keeps the exact ``design_spec.md`` because its parent
+    directory already names the kind and id. A project workspace root shares one
+    ``templates/`` across kinds, so it keeps ``design_spec.<kind>.<id>.md`` and
+    may hold one spec per kind side by side.
+    """
+    if not directory.is_dir():
+        return []
+    exact = directory / 'design_spec.md'
+    qualified = sorted(
+        path
+        for path in directory.glob('design_spec.*.md')
+        if _TEMPLATE_SPEC_NAME_RE.fullmatch(path.name)
+    )
+    if exact.is_file():
+        # Mixing both shapes hides one of them from every reader that stops at
+        # the first match, so it is reported rather than silently resolved.
+        return [exact] + qualified
+    return qualified
+
+
+def _spec_declared_kind(spec_path: Path) -> str | None:
+    """Return one spec's kind, from its filename when it carries one."""
+    match = _TEMPLATE_SPEC_NAME_RE.fullmatch(spec_path.name)
+    if match is not None:
+        return match.group('kind')
+    return _design_spec_kind(spec_path)
+
+
+def _roster_spec_paths(directory: Path) -> list[Path]:
+    """Return every spec in one directory that owns an SVG roster."""
+    roster = []
+    for spec in _template_spec_paths(directory):
+        match = _TEMPLATE_SPEC_NAME_RE.fullmatch(spec.name)
+        if match is not None:
+            if match.group('kind') in {'layout', 'deck'}:
+                roster.append(spec)
+        elif _design_spec_kind(spec) not in {'brand', 'style'}:
+            roster.append(spec)
+    return roster
+
+
+def _roster_spec_path(directory: Path) -> Path | None:
+    """Return the effective spec that owns this directory's SVG roster.
+
+    A project root may carry both Layout and Deck. Layout owns reusable
+    structure when present; Deck owns it only when no Layout is installed.
+    """
+    roster = _roster_spec_paths(directory)
+    for spec in roster:
+        if spec.name == 'design_spec.md':
+            return spec
+    for kind in ('layout', 'deck'):
+        for spec in roster:
+            if _spec_declared_kind(spec) == kind:
+                return spec
+    return None
+
+
+def _design_spec_kind(spec_path: Path) -> str | None:
+    """Return ``kind`` declared in Design Spec frontmatter.
+
+    Lightweight detector that does not require PyYAML — scans only the
+    frontmatter block (``---`` delimited).
+    """
+    try:
+        text = spec_path.read_text(encoding='utf-8')
+    except OSError:
+        return None
+    if not text.startswith('---\n'):
+        return None
+    end = text.find('\n---\n', 4)
+    if end == -1:
+        return None
+    fm_block = text[4:end]
+    for line in fm_block.splitlines():
+        stripped = line.strip()
+        match = re.fullmatch(
+            r'''kind\s*:\s*(?:(['"])(brand|style|layout|deck)\1|'''
+            r'''(brand|style|layout|deck))'''
+            r'''(?:\s+#.*)?\s*''',
+            stripped,
+        )
+        if match:
+            return match.group(2) or match.group(3)
+    return None
+
+
+def _declared_template_structure_mode(target_path: Path) -> str | None:
+    """Return a template directory's explicit native structure mode."""
+    directory = target_path.parent if target_path.is_file() else target_path
+    spec_path = _roster_spec_path(directory)
+    if spec_path is None:
+        return None
+    try:

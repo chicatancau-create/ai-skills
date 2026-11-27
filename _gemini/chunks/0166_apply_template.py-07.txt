@@ -1,0 +1,72 @@
+            _validate_root(record)
+    plan = _plan(project, roots)
+    plan.root_snapshots = _root_snapshots(roots)
+    selection_file = project / "confirm_ui" / "template_selection.json"
+    if selection_file.is_file():
+        selection = json.loads(selection_file.read_text(encoding="utf-8"))
+        if selection.get("mode") != "templates" or selection.get("root_snapshots") != plan.root_snapshots:
+            raise ApplyTemplateError("Selected roots or source bytes differ from the Stage-1 confirmation")
+        plan.selection_sha256 = selection["selection_sha256"]
+    _preflight(plan)
+    if not dry_run:
+        _write(plan)
+    return plan
+
+
+def main(argv: list[str] | None = None) -> int:
+    require_skill_integrity()
+    parser = argparse.ArgumentParser(
+        description=(
+            "Install selected Brand/Style/Layout/Deck workspaces into a "
+            "project's templates/, images/, and icons/ (apply-template-workspace §4)."
+        ),
+    )
+    parser.add_argument("project_path", help="Initialized project root")
+    parser.add_argument(
+        "--root",
+        action="append",
+        default=[],
+        metavar="WORKSPACE_ROOT",
+        help="Workspace root to install; repeat for several kinds (one root per kind)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate, plan, and print the mapping and receipt without writing",
+    )
+    parser.add_argument(
+        "--skip-validation",
+        action="store_true",
+        help="Skip the per-root svg_quality_checker --template-mode run (already validated in this turn)",
+    )
+    args = parser.parse_args(argv)
+    try:
+        plan = apply_templates(
+            args.project_path,
+            args.root,
+            dry_run=args.dry_run,
+            validate=not args.skip_validation,
+        )
+    except (OSError, ValueError) as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 1
+    verb = "would install" if args.dry_run else "installed"
+    for path in plan.removals:
+        print(f"[remove] {path}")
+    same = 0
+    for mapping in plan.mappings:
+        if mapping.status == "identical":
+            same += 1
+        label = "[same]" if mapping.status == "identical" else "[copy]"
+        print(f"{label} {mapping.dst}")
+    copied = len(plan.mappings) - same
+    note = f", {same} already present" if same else ""
+    print(f"[OK] {verb} {copied} file(s) into {plan.project}{note}")
+    if not args.dry_run:
+        print(f"[receipt] {plan.project / INSTALL_RECEIPT_NAME}")
+    print(_receipt(plan))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

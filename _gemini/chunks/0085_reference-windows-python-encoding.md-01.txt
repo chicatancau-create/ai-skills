@@ -1,0 +1,73 @@
+---
+name: reference-windows-python-encoding
+description: 本机 Windows 的 Python/Java/curl 控制台编码与路径坑：python3 是 rc=49 坏存根、stdout 默认 GBK、比对 UTF-8 必须 -X utf8、bash 风格路径不认、heredoc 压反斜杠、Git Bash 的 curl -d 会把中文 JSON 转码成 400。
+metadata:
+  type: reference
+---
+
+本机（Windows 10 28000 + Git Bash）实测，2026-09-28：
+
+- `python` = `D:\PyCharm\Python\python.exe` → **3.14.2**；`python3` 解析到 `WindowsApps\python3.exe` 的 AppInstaller 存根，
+  **零输出、退出码 49**。任何脚本一律用 `python`。
+- **Python 的 stdout 默认按 GBK 编码**（实测 `sys.stderr.encoding=gbk`、`locale` preferred `cp936`）。
+  同一段印中文的脚本做 A/B：`python x.py` 被按 UTF-8 读取得到 `"ż\ufffd\ufffd\ufffd\ufffd = 2550"`（首字符变 `ż` + 四个替换符），
+  `python -X utf8 x.py` 才得到 `"偶数和 = 2550"`。**只要把 stdout 与 UTF-8 文本逐字比对（写门禁、写回归、写 expectedOutput），就必须带 `-X utf8`**，
+  否则程序没错、判据却必然报差行。
+- `javac` / `java` 的中文诊断在这台 Git Bash 里同样是 GBK 乱码（原始字节 `b4 ed ce f3` = GBK「错误」）；
+  要读原文用 `javac -J-Dstderr.encoding=UTF-8 …` / `java -Dstderr.encoding=UTF-8 …`。取到的原始字节可留档当证据，别说「没报错」。
+- gcc（MinGW 15.2.0）报错里的中文路径名也是 GBK 字节（`d6 d0 ce c4 c4 bf c2 bc`），按 Latin-1 直读会显示成 `ÖÐÎÄÄ¿Â¼`。
+- 写 markdown/JSON 仍**不要用 PowerShell**（BOM/CRLF/GBK 会坏字节），见 [[feedback-windows-config-json-encoding]]；用 Write/Edit 工具或 Python 的 utf-8。
+- `grep` 遇 GBK 文件会截断，要 `-a`；见 [[reference-powershell-through-bash-and-recyclebin]]。
+
+## heredoc 里写 Windows 路径的坑（2026-10-08 反复踩）
+
+即使用 `<<'PY'`（单引号定界，关掉变量/命令替换），**我自己在正文里写的双反斜杠仍会被压成单个**，
+于是 python 侧出现三类静默破坏：
+
+- `'D:\\npm-global'` → 落到 python 变成 `'D:\npm-global'` → `\n` 被解释成换行，
+  写出的 `.cmd` 里 `set "PATH=D:` 换行 `pm-global;..."`，脚本语法没报错但整行报废。
+- `r'C:\'` → **原始字符串不能以反斜杠结尾** → `SyntaxError: unterminated string literal`
+  （这就是让 Gemini CLI 扫描脚本静默秒死的真因，提权跑时 stdout 没接走，报错看不见）。
+- 文档字符串里写 `C:\Users` → `\U` 触发 `unicodeescape` 解码错。
+
+**做法**：路径一律用 `os.path.join` / `os.environ[...]` / `chr(92)` 拼，**不要在 heredoc 里手写反斜杠串**；
+含中文的 `.ps1` 用 `encoding='utf-8-sig'` 写（PowerShell 5.1 无 BOM 会按 GBK 解析整段失败），
+纯 ASCII 脚本才用 `encoding='ascii'`；写文件走 `.new` + `os.replace`（见
+[[feedback-destructive-file-ops]] 第 7 条）。
+
+**同一类坑还有“写 JS 字符串里的 `\n`”**（2026-11-09 连吃两回合）：用 Python heredoc 做替换、
+生成 `JSON.stringify(...) + '\\n'` 这一行时，反斜杠被压成真换行，Node 直接报
+`SyntaxError: Invalid or unexpected token`；改成 `String.fromCharCode(10)` 或用**按行重写**整段尾部才通过。
+⇒ 生成含转义序列的 JS/JSON 时，优先用 Write 工具直写，或按行拼接；不要用 Python 字符串替换去插 `\n`。
+同时替换失败时不要只改一处：残留的 `} finally {` 会让语法错继续指向同一行，要整段重写而不是局部补。
+
+**压完不等于报错——最坏的一支是「静默写进文件变成不可见控制字符」（2026-11-15 实测两次）。**
+`\\2026` 被压成 `\2026` 后，Python 按**八进制**消费 `\202` → **U+0082**、`\01` → U+0001、`\02` → U+0002；
+`\node_modules` 里的 `\n` 直接把一行劈成两行。全程**不报任何错、文件仍能 UTF-8 解码、Read 显示完全正常**，
+只有 `repr()` 或按码点正则 `[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]` 才现形（放行 `\t\n\r`）。
+另一支：`printf`/`echo -e` 里 `\e` → **ESC U+001B**（手册 README 第 91 行就躺着一个，原文本意是 `\encryption.data`）。
+
+三个反直觉点：① **替换用的"正确字符串"同样会被吃**——我第一次修复就是把损坏原样写回去还多加了 U+0001；
+② **校验语句本身也会被吃**——`for c in "\u0080-\u009f"` 实际只遍历几个字面字符（含 `-`），
+对干净文件报出「残留 218」，假阳性与假阴性同源；
+③ 所以改文件必须三件套齐了才落盘：**改前备份 → 匹配数断言 → 写盘后按码点复检**。
+正解仍是 `chr(92)`/`chr(10)` 拼，或干脆走 Write/Edit 工具（字面写入、不经解释层）。
+正文与完整证据见手册 `03-通用/03-调试与验证/踩坑-Bash内联传参吞PowerShell变量与反斜杠.md` 的 2026-11-15 追加节。
+
+**反斜杠被压掉的不止 heredoc —— 工具调用参数那一层也会（2026-10-19 连踩三次）。**
+我在 Bash/Write 参数里写 `r'E:\nodejs'` 或 JS 里的 `'D:\\Work…'`，经 JSON 解码后 `\\`→`\`，
+于是出现三类静默破坏：`cwd=r'E:\nodejs'` 变成含换行的路径 → `NotADirectoryError [WinError 267] 目录名称无效`
+（看着像"目录被删了"，我因此差点误判用户删了仓库目录）；JS 里 `'\W'`→`W` → 拼出的 Windows 路径丢掉所有分隔符，
+让一次"带环境变量"的测试整组作废、我差点据此得出错误结论；`'…\U…'` → `unicodeescape` SyntaxError。
+⇒ **跨工具传 Windows 路径只有三条安全路**：正斜杠（`E:/nodejs`，Python/PowerShell 都吃）、
+`os.path.join` / JS `path.join`、或运行时用 `chr(92)` 拼。**别在任何参数里手写反斜杠字面量**，
+且凡是"路径不存在"的报错先 `os.path.isdir` 复核再下结论。
+
+**还有一条同源错误**：同一轮里我反复把脚本文件名敲错（`claude-purge.ps1` vs 实际的 `purge.ps1`），
+于是把「找不到文件」误判成「脚本没执行/静默失败」。凡是报错说路径不存在，**先用 `ls`/glob 拿真实文件名**
+（`f=$(ls *purge*.py | head -1); python "$f"`）再继续，别凭记忆重敲。另外 `open(p,'w')` 会**先截断**再抛编码错，
+失败一次就把原文件清空了 —— 改内容必须写临时文件 + `os.replace`。
+
+## bash 风格路径在 Windows Python 里必然失败（2026-10-30 连踩两次）
+
+Bash 工具里 `/d/foo`、`/g/AIrenwu`、`/tmp/x` 是 MSYS 视图，**Windows 版 python 完全不认**：

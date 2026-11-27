@@ -1,0 +1,102 @@
+    if result.returncode != 0:
+        details = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"Unable to decode audio for verification: {path}\n{details}")
+    return np.frombuffer(result.stdout, dtype="<f4").astype(np.float64)
+
+
+def _sound_mix_correlation(
+    *,
+    raw_video_path: Path,
+    mixed_video_path: Path,
+    stem_path: Path,
+    cues: list[SoundCue],
+    duration_ms: int,
+    ffmpeg_path: str,
+) -> float:
+    """Correlate the added final-audio component with the rendered SFX stem."""
+    try:
+        import numpy as np
+    except ImportError as exc:
+        raise RuntimeError(
+            "Video sound verification requires numpy. Install it with: "
+            "python3 -m pip install numpy"
+        ) from exc
+
+    target_samples = int(round(duration_ms * _VERIFICATION_SAMPLE_RATE / 1000))
+    decoded = [
+        _decode_audio_f32(path, ffmpeg_path)
+        for path in (raw_video_path, mixed_video_path, stem_path)
+    ]
+    arrays: list[Any] = []
+    for samples in decoded:
+        if len(samples) < target_samples:
+            samples = np.pad(samples, (0, target_samples - len(samples)))
+        arrays.append(samples[:target_samples])
+    raw_audio, mixed_audio, stem_audio = arrays
+
+    cue_mask = np.zeros(target_samples, dtype=bool)
+    for cue in cues:
+        start = int(round(cue.video_time_ms * _VERIFICATION_SAMPLE_RATE / 1000))
+        end = int(
+            round(
+                (cue.video_time_ms + cue.source_duration_ms)
+                * _VERIFICATION_SAMPLE_RATE
+                / 1000
+            )
+        )
+        cue_mask[max(0, start):min(target_samples, end)] = True
+    cue_indices = np.flatnonzero(cue_mask)
+    if len(cue_indices) < _MIN_VERIFICATION_WINDOW_SAMPLES:
+        raise RuntimeError("SFX cue windows are too short for mix verification")
+
+    background = ~cue_mask
+    raw_background = raw_audio[background]
+    mixed_background = mixed_audio[background]
+    denominator = float(np.dot(raw_background, raw_background))
+    narration_scale = (
+        float(np.dot(mixed_background, raw_background)) / denominator
+        if denominator > 1e-12
+        else 1.0
+    )
+    added_audio = mixed_audio - narration_scale * raw_audio
+
+    best_correlation = -1.0
+    maximum_lag = max(1, _VERIFICATION_SAMPLE_RATE // 200)
+    for lag in range(-maximum_lag, maximum_lag + 1):
+        shifted_indices = cue_indices + lag
+        valid = (shifted_indices >= 0) & (shifted_indices < target_samples)
+        if not valid.any():
+            continue
+        observed = added_audio[shifted_indices[valid]]
+        expected = stem_audio[cue_indices[valid]]
+        observed = observed - observed.mean()
+        expected = expected - expected.mean()
+        norm = float(np.linalg.norm(observed) * np.linalg.norm(expected))
+        if norm <= 1e-12:
+            continue
+        correlation = float(np.dot(observed, expected) / norm)
+        best_correlation = max(best_correlation, correlation)
+    if best_correlation < _MIN_SOUND_MIX_CORRELATION:
+        raise RuntimeError(
+            "Mixed-video audio does not reliably contain the rendered SFX stem: "
+            f"correlation={best_correlation:.3f}, "
+            f"required>={_MIN_SOUND_MIX_CORRELATION:.2f}"
+        )
+    return best_correlation
+
+
+def _trace_slides(trace: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+    raw_slides = trace.get("slides")
+    if not isinstance(raw_slides, list) or not raw_slides:
+        raise ValueError("Conversion trace must contain a non-empty slides array")
+    slide_count = trace.get("slide_count")
+    if slide_count != len(raw_slides):
+        raise ValueError(
+            "Conversion trace slide_count does not match its slides array"
+        )
+
+    slides: list[dict[str, Any]] = []
+    slide_names: list[str] = []
+    for expected_number, raw_slide in enumerate(raw_slides, 1):
+        if not isinstance(raw_slide, dict):
+            raise ValueError(

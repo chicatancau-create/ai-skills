@@ -1,0 +1,98 @@
+            group_id = str(group["id"])
+            if group_id in group_ids:
+                raise PresetShapeDataError(
+                    f"Duplicate preset semantic group: {group_id!r}"
+                )
+            group_ids.add(group_id)
+            self._groups.append(group)
+            presets = group["presets"]
+            assert isinstance(presets, dict)
+            for preset_name, preset_details in presets.items():
+                if preset_name in self._preset_semantics:
+                    raise PresetShapeDataError(
+                        f"Preset appears in multiple semantic groups: {preset_name!r}"
+                    )
+                details = dict(group)
+                details.pop("presets")
+                details["preset"] = preset_name
+                details.update(preset_details)
+                details["recommended_for"] = _merge_strings(
+                    group["recommended_for"],
+                    preset_details.get("recommended_for", ()),
+                )
+                details["avoid_for"] = _merge_strings(
+                    group["avoid_for"],
+                    preset_details.get("avoid_for", ()),
+                )
+                self._preset_semantics[preset_name] = details
+
+        expected = set(expected_names)
+        actual = set(self._preset_semantics)
+        missing = sorted(expected - actual)
+        extra = sorted(actual - expected)
+        if missing or extra:
+            raise PresetShapeDataError(
+                "Preset semantic catalog differs from ShapeTypeValues: "
+                f"missing={missing}, extra={extra}"
+            )
+
+    @classmethod
+    def bundled(cls) -> PresetShapeSemantics:
+        """Load the semantic catalog shipped with PPT Master."""
+
+        try:
+            payload = json.loads(BUNDLED_SEMANTICS_PATH.read_text(encoding="utf-8"))
+        except OSError as exc:
+            raise PresetShapeDataError(
+                f"Cannot read preset semantic catalog: {exc}"
+            ) from exc
+        except json.JSONDecodeError as exc:
+            raise PresetShapeDataError(
+                "Invalid preset semantic JSON at "
+                f"line {exc.lineno}, column {exc.colno}: {exc.msg}"
+            ) from exc
+        return cls(payload, get_preset_registry().names)
+
+    @property
+    def preset_count(self) -> int:
+        """Return the number of catalogued presets."""
+
+        return len(self._preset_semantics)
+
+    def describe(self, preset: str) -> dict[str, object]:
+        """Return the resolved semantic record for one preset."""
+
+        try:
+            return dict(self._preset_semantics[preset])
+        except KeyError as exc:
+            raise UnknownPresetShapeError(
+                f"Unknown DrawingML preset shape: {preset!r}"
+            ) from exc
+
+    def grouped(self, search: str = "") -> dict[str, object]:
+        """Return a compact Office/group index and matching preset names."""
+
+        query_tokens = _query_tokens(search)
+        category_payloads: list[dict[str, object]] = []
+        for category in self._categories:
+            group_payloads: list[dict[str, object]] = []
+            for group in self._groups:
+                if group["office_category"] != category["id"]:
+                    continue
+                presets = group["presets"]
+                assert isinstance(presets, dict)
+                matching_presets = []
+                group_matches = _matches_query(
+                    {
+                        key: value
+                        for key, value in group.items()
+                        if key != "presets"
+                    },
+                    query_tokens,
+                )
+                for name, details in presets.items():
+                    if query_tokens and not group_matches and not _matches_query(
+                        {"preset": name, **details},
+                        query_tokens,
+                    ):
+                        continue

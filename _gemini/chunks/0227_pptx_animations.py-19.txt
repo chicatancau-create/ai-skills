@@ -1,0 +1,88 @@
+                    <p:stCondLst><p:cond delay="{elapsed_ms}"/></p:stCondLst>
+                    <p:childTnLst>
+                      <p:par>
+                        {row_xml}
+                      </p:par>
+                    </p:childTnLst>
+                  </p:cTn>
+                </p:par>''')
+                elapsed_ms += target.delay_ms + target.playback_duration_ms
+
+        inner_xml = '\n                '.join(inner_steps)
+        if main_trigger == 'with-previous':
+            # Match PowerPoint's native "Start: With Previous" export:
+            # one delay=0 wrapper begins on slide entry, and all withEffect
+            # rows live under that wrapper so they truly start in parallel.
+            inner_xml = f'''<p:par>
+                      <p:cTn id="{with_wrapper_id}" fill="hold">
+                        <p:stCondLst><p:cond delay="0"/></p:stCondLst>
+                        <p:childTnLst>
+                          {inner_xml}
+                        </p:childTnLst>
+                      </p:cTn>
+                    </p:par>'''
+        if main_trigger in ('with-previous', 'after-previous'):
+            # Match PowerPoint's native slide-entry export: the wrapper waits
+            # for mainSeq to begin, then child nodes resolve their Start modes.
+            outer_start_conditions = (
+                '<p:cond delay="indefinite"/>'
+                '<p:cond evt="onBegin" delay="0"><p:tn val="2"/></p:cond>'
+            )
+        else:
+            outer_start_conditions = '<p:cond delay="0"/>'
+        all_steps = f'''<p:par>
+                <p:cTn id="{outer_id}" fill="hold">
+                  <p:stCondLst>{outer_start_conditions}</p:stCondLst>
+                  <p:childTnLst>
+                    {inner_xml}
+                  </p:childTnLst>
+                </p:cTn>
+              </p:par>'''
+
+    if main_targets:
+        main_sequence_xml = f'''<p:seq concurrent="1" nextAc="seek">
+              <p:cTn id="2" dur="indefinite" nodeType="mainSeq">
+                <p:childTnLst>
+              {all_steps}
+                </p:childTnLst>
+              </p:cTn>
+              <p:prevCondLst><p:cond evt="onPrev" delay="0"><p:tgtEl><p:sldTgt/></p:tgtEl></p:cond></p:prevCondLst>
+              <p:nextCondLst><p:cond evt="onNext" delay="0"><p:tgtEl><p:sldTgt/></p:tgtEl></p:cond></p:nextCondLst>
+            </p:seq>'''
+    else:
+        main_sequence_xml = ''
+        next_id = 2
+
+    interactive_sequences: list[str] = []
+    for target in interactive_targets:
+        sequence_id = next_id
+        wrapper_id = next_id + 1
+        inner_id = next_id + 2
+        row_id = next_id + 3
+        row_xml, next_id = _build_animation_row_xml(
+            target,
+            'on-click',
+            row_id,
+            next_id + 4,
+        )
+        trigger_shape_id = target.trigger_shape_id
+        interactive_sequences.append(f'''<p:seq concurrent="1" nextAc="seek">
+              <p:cTn id="{sequence_id}" restart="whenNotActive" fill="hold" evtFilter="cancelBubble" nodeType="interactiveSeq">
+                <p:stCondLst><p:cond evt="onClick" delay="0"><p:tgtEl><p:spTgt spid="{trigger_shape_id}"/></p:tgtEl></p:cond></p:stCondLst>
+                <p:endSync evt="end" delay="0"><p:rtn val="all"/></p:endSync>
+                <p:childTnLst>
+                  <p:par>
+                    <p:cTn id="{wrapper_id}" fill="hold">
+                      <p:stCondLst><p:cond delay="0"/></p:stCondLst>
+                      <p:childTnLst>
+                        <p:par>
+                          <p:cTn id="{inner_id}" fill="hold">
+                            <p:stCondLst><p:cond delay="0"/></p:stCondLst>
+                            <p:childTnLst><p:par>{row_xml}</p:par></p:childTnLst>
+                          </p:cTn>
+                        </p:par>
+                      </p:childTnLst>
+                    </p:cTn>
+                  </p:par>
+                </p:childTnLst>
+              </p:cTn>

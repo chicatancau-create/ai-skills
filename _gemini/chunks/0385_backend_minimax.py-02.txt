@@ -1,0 +1,112 @@
+                continue
+            previous_span = span
+            boundaries.append(
+                {
+                    "text": word,
+                    "offset": start,
+                    "duration": end - start,
+                }
+            )
+    return boundaries
+
+
+def _download_subtitle(
+    url: str,
+    text: str,
+    max_chars: int,
+) -> str:
+    try:
+        raw = json.loads(get_bytes(url).decode("utf-8-sig"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("MiniMax subtitle response is not valid UTF-8 JSON") from exc
+    return format_word_timed_srt(
+        text,
+        _word_boundaries(raw),
+        max_chars,
+        provider_label="MiniMax",
+    )
+
+
+def generate(
+    text: str,
+    output_path: Path,
+    *,
+    api_key: str,
+    voice_id: str,
+    model: str,
+    audio_format: str,
+    sample_rate: int,
+    bitrate: int,
+    channel: int,
+    speed: float,
+    volume: float,
+    pitch: int,
+    language_boost: str,
+    base_url: str | None,
+    subtitle_path: Path | None = None,
+    subtitle_max_chars: int = DEFAULT_SUBTITLE_MAX_CHARS,
+) -> None:
+    payload = {
+        "model": model,
+        "text": text,
+        "stream": False,
+        "language_boost": language_boost,
+        "output_format": "hex",
+        "voice_setting": {
+            "voice_id": voice_id,
+            "speed": speed,
+            "vol": volume,
+            "pitch": pitch,
+        },
+        "audio_setting": {
+            "sample_rate": sample_rate,
+            "bitrate": bitrate,
+            "format": audio_format,
+            "channel": channel,
+        },
+    }
+    if subtitle_path is not None:
+        payload["subtitle_enable"] = True
+        payload["subtitle_type"] = "word"
+
+    data = post_json(
+        resolve_url(base_url),
+        headers={"Authorization": f"Bearer {api_key}"},
+        payload=payload,
+        timeout=180,
+    )
+    base_resp = data.get("base_resp") or {}
+    if base_resp.get("status_code") not in (None, 0, "0"):
+        raise RuntimeError(f"MiniMax TTS failed: {data}")
+
+    response_data = data.get("data") or {}
+    audio_hex = response_data.get("audio")
+    if not audio_hex:
+        raise RuntimeError(f"MiniMax response missing audio data: {data}")
+    try:
+        audio = binascii.unhexlify(audio_hex)
+    except (binascii.Error, ValueError) as exc:
+        raise RuntimeError("MiniMax response audio is not valid hex data") from exc
+
+    if subtitle_path is None:
+        publish_audio_bytes(audio, output_path)
+        return
+
+    subtitle_url = response_data.get("subtitle_file")
+    if not isinstance(subtitle_url, str) or not subtitle_url.strip():
+        trace_id = data.get("trace_id") or "unknown"
+        raise RuntimeError(
+            f"MiniMax response missing subtitle file (trace_id={trace_id})"
+        )
+    subtitle = _download_subtitle(
+        subtitle_url,
+        text,
+        subtitle_max_chars,
+    )
+    publish_audio_subtitle(audio, output_path, subtitle, subtitle_path)
+
+
+def print_voices() -> None:
+    print("MiniMax TTS voices are selected by voice_id.")
+    print("Use a system voice ID or a cloned voice_id from MiniMax Voice Clone.")
+    print("Example domestic system voice from MiniMax docs: male-qn-qingse")

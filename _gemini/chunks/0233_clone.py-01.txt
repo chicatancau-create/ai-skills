@@ -1,0 +1,115 @@
+"""Clone a page-plan slide and its structured private dependency parts.
+
+When the same source slide is reused for several output slides, copying its
+relationships verbatim leaves every clone pointing at one shared set of private
+parts — custom-data tags, per-slide theme overrides, SmartArt diagrams. The
+pages are not really independent: editing one output slide's structure would
+bleed into its siblings.
+
+This helper gives each cloned slide its own copy of every private dependency and
+rewrites the relationship targets. Cloning is recursive, so a private part's
+own sub-parts (e.g. a diagram data part's drawing) are cloned too.
+
+Two classes of target are deliberately left shared:
+
+* **Shared structure** — slide layout / master / theme / notes master.
+* **Media blobs** — targets under ``ppt/media/`` remain shared. Embeddings,
+  model3d, customXml, tags, comments, ink, notes, charts, diagrams, and their
+  dependency graphs remain private even when a ``Default`` extension rule
+  supplies their content type.
+
+Slide relationships are remapped separately after the final page roster is
+known, so recursive private-part cloning skips only that back-reference type.
+"""
+
+from __future__ import annotations
+
+import copy
+import posixpath
+import tempfile
+import zipfile
+from pathlib import Path
+from typing import Callable
+from xml.parsers import expat
+from xml.etree import ElementTree as ET
+
+from hyperlink_contract import SLIDE_JUMP_ACTION
+from pptx_opc_validation import (
+    canonical_opc_part_path,
+    resolve_internal_opc_target,
+    verify_internal_relationships,
+)
+
+from .ooxml import (
+    CT_NS,
+    NS,
+    NOTES_SLIDE_CONTENT_TYPE,
+    REL_NS,
+    SLIDE_REL_TYPE,
+    SlideRef,
+    _normalize_part,
+    _parse_slide_refs,
+    _qn,
+    _rels_name_for_part,
+    _xml_bytes,
+)
+from .package import (
+    _add_content_type_override,
+    _add_slide_override,
+    _content_type_root,
+    _empty_relationships_root,
+    _max_numeric_rid,
+    _prune_unreferenced_parts,
+    _relative_target,
+    unreferenced_slide_relationships,
+)
+from .slideshow import custom_show_problems, reset_slide_show_selection
+
+_REL_TYPE_BASE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
+
+# Structure shared across every slide: never cloned, target kept as-is. Note that
+# ``themeOverride`` is a distinct, per-slide private type and is NOT listed here.
+SHARED_REL_TYPES = frozenset(
+    _REL_TYPE_BASE + name
+    for name in ("slideLayout", "slideMaster", "notesMaster", "theme")
+)
+
+# Slide relationships are remapped against the complete page plan separately.
+SKIPPED_REL_TYPES = frozenset({SLIDE_REL_TYPE})
+
+
+def _make_part_allocator(entries: dict[str, bytes]) -> Callable[[str], str]:
+    """Return a function that mints a fresh part name beside a source part.
+
+    Names keep the source extension (so a content-type ``Default`` still covers
+    media) and are unique against both existing entries and earlier allocations.
+    """
+    used = set(entries)
+
+    def allocate(source_part: str) -> str:
+        directory = posixpath.dirname(source_part)
+        stem, ext = posixpath.splitext(posixpath.basename(source_part))
+        index = 1
+        while True:
+            candidate = posixpath.join(directory, f"{stem}_tf{index}{ext}")
+            if candidate not in used:
+                used.add(candidate)
+                return candidate
+            index += 1
+
+    return allocate
+
+
+def _override_content_type(content_root: ET.Element, part: str) -> str | None:
+    """Return the part's explicit content-type ``Override``, or ``None``."""
+    part_pn = "/" + part.lstrip("/")
+    for override in content_root.findall(_qn(CT_NS, "Override")):
+        if override.attrib.get("PartName") == part_pn:
+            return override.attrib.get("ContentType")
+    return None
+
+
+def _part_content_type(content_root: ET.Element, part: str) -> str | None:
+    override = _override_content_type(content_root, part)
+    if override is not None:
+        return override

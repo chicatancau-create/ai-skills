@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""
+SVG Image Aspect Ratio Fix Tool
+
+Fixes the dimensions of <image> elements in SVG to match the original image aspect ratio.
+This prevents images from being stretched by PowerPoint SVG rendering paths that do not
+honor preserveAspectRatio consistently.
+
+Principle:
+    Some PowerPoint SVG rendering paths ignore the preserveAspectRatio attribute and directly
+    stretch the image to fill the area specified by width/height.
+
+    This tool reads the actual image aspect ratio and recalculates the x, y, width, height of
+    <image> elements so that images are centered and maintain their original aspect ratio.
+
+Usage:
+    python3 scripts/svg_finalize/fix_image_aspect.py <svg_file> [svg_file2] ...
+    python3 scripts/svg_finalize/fix_image_aspect.py projects/xxx/svg_output/*.svg
+
+    # Preview mode
+    python3 scripts/svg_finalize/fix_image_aspect.py --dry-run projects/xxx/svg_output/*.svg
+
+Examples:
+    python3 scripts/svg_finalize/fix_image_aspect.py projects/demo/svg_output/slide_06_current_overview.svg
+"""
+
+import os
+import re
+import sys
+import base64
+import argparse
+from pathlib import Path
+from xml.etree import ElementTree as ET
+
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from console_encoding import configure_utf8_stdio  # noqa: E402
+
+configure_utf8_stdio()
+
+# Try to import PIL for getting image dimensions
+try:
+    from PIL import Image, ImageOps
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
+    print("[WARN] PIL not installed. Install with: pip install Pillow")
+    print("       Will try to use basic method for JPEG/PNG files.")
+
+
+def get_image_dimensions_pil(image_path: str) -> tuple[int | None, int | None]:
+    """Get image dimensions using PIL."""
+    try:
+        with Image.open(image_path) as img:
+            return ImageOps.exif_transpose(img).size
+    except Exception as e:
+        print(f"  [WARN] Cannot read image with PIL: {e}")
+        return None, None
+
+
+def get_image_dimensions_basic(image_path: str) -> tuple[int | None, int | None]:
+    """Get image dimensions using basic parsing without PIL."""
+    try:
+        with open(image_path, 'rb') as f:
+            data = f.read(64)  # Read header information
+        
+        # PNG
+        if data[:8] == b'\x89PNG\r\n\x1a\n':
+            w = int.from_bytes(data[16:20], 'big')
+            h = int.from_bytes(data[20:24], 'big')
+            return w, h
+        
+        # JPEG
+        if data[:2] == b'\xff\xd8':
+            # Need to read full file to parse JPEG
+            with open(image_path, 'rb') as f:
+                f.seek(2)
+                while True:
+                    marker = f.read(2)
+                    if not marker or len(marker) < 2:
+                        break
+                    if marker[0] != 0xff:
+                        break
+                    m = marker[1]
+                    # SOF0, SOF2 markers contain dimensions
+                    if m in (0xC0, 0xC2):
+                        f.read(3)  # Skip length and precision
+                        h = int.from_bytes(f.read(2), 'big')
+                        w = int.from_bytes(f.read(2), 'big')
+                        return w, h
+                    elif m == 0xD9:  # EOI
+                        break
+                    elif m == 0xD8:  # SOI
+                        continue
+                    elif 0xD0 <= m <= 0xD7:  # RST
+                        continue
+                    else:
+                        length = int.from_bytes(f.read(2), 'big')
+                        f.seek(length - 2, 1)
+        
+        return None, None
+    except Exception as e:
+        print(f"  [WARN] Cannot read image dimensions: {e}")
+        return None, None
+
+
+def get_image_dimensions_from_base64(data_uri: str) -> tuple[int | None, int | None]:
+    """Get image dimensions from a Base64 data URI."""
+    import io
+    try:
+        # Parse data URI

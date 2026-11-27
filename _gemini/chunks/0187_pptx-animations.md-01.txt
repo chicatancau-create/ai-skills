@@ -1,0 +1,67 @@
+# PPTX Animation Core
+
+The shared animation core owns the object-effect vocabulary, trigger
+semantics, OOXML timing writer, semantic read-back, and package validation for
+PowerPoint OOXML. Per-element animation remains opt-in: generated PPTX export
+defaults to `none`, exactly as before this validation upgrade.
+
+## 1. Ownership
+
+| Concern | Owner |
+|---|---|
+| Effect registry, timing writer, and read-back | `scripts/pptx_animations.py` |
+| Sidecar parsing and SVG target discovery | `svg_to_pptx/animation_config.py` |
+| SVG group-to-shape mapping | `svg_to_pptx/drawingml/converter.py` |
+| Generated PPTX resolution and validation | `svg_to_pptx/pptx_package/builder.py` |
+| Narration timing merge | `svg_to_pptx/pptx_package/narration.py` |
+| Public authoring contract | `references/animations.md` |
+| Customization stage | `workflows/stages/customize-animations.md` |
+
+**Hard rule**: only the generated SVG-to-PPTX route writes object
+animations. Direct-PPTX routes preserve source animations and run structural
+package validation; they do not resolve or author animation effects.
+
+---
+
+## 2. Domain Model
+
+`groups.<id>` accepts either one backward-compatible effect object or one
+non-empty `effects[]` array; the forms are exclusive and every array row names
+`effect`. Both expand into the same row model, so repeated shape targets are
+valid. Legacy rows also accept `trigger`; omitted row settings inherit the
+resolved slide animation.
+
+One resolved row contains these fields:
+
+| Field | Meaning |
+|---|---|
+| Target | Positive PowerPoint shape id written to `p:spTgt@spid` |
+| Effect | One canonical PowerPoint-authored preset class / id / subtype / behavior-tree signature |
+| Trigger | Row-specific `on-click`, `with-previous`, or `after-previous`; omitted values inherit the resolved slide Start mode |
+| Trigger shape | Optional different top-level group; maps to PowerPoint `On Click of` |
+| Duration | Finite positive schedule duration; scalable native behavior trees preserve their internal timing ratios |
+| Delay | Finite non-negative row offset; shape-trigger rows use it as `TriggerDelayTime` |
+| Order | Positive integer sidecar order; ties retain stable SVG group order, then `effects[]` index; a group with no sidecar `order` follows the nearest listed group before it in SVG order (and precedes every listed group when none precedes it), so a headline above the numbered body enters first |
+| Effect options | Effect-specific `direction`, `amount`, `color`, `font_name` (one installed PowerPoint face, required for Change Font; not a CSS list), `relative`, or `size` values from PowerPoint `EffectParameters`; an edge `direction` (`up` / `right` / `down` / `left`) names the side the effect starts from, PowerPoint's From Top / From Right / From Bottom / From Left |
+| Timing options | Repeat count/span, auto-reverse, rewind, accelerate/decelerate, bounce-end ratio, and restart policy |
+| Completion / cue | Optional dim/hide behavior and packaged `.m4a`/`.mp3`/`.wav` sound |
+
+Modes resolve before XML writing:
+
+| Mode | Resolution |
+|---|---|
+| `auto` | Generic entrance only: deterministic semantic mapping from the SVG group id |
+| `mixed` | Generic entrance only: deterministic cycle over canonical PowerPoint entrance presets |
+| `random` | Generic entrance only: stable seeded choice from the same canonical entrance pool |
+| `none` | No object-animation sequence |
+
+The same effective input produces the same `random` choices. When enabled,
+`--conversion-trace` records each resolved row and effect, so a generated deck
+can be audited without replaying the resolver.
+
+`animation_config.py scaffold` is neutral: object defaults are `none`, and
+empty `{}` group placeholders inherit no motion until populated.
+
+Bundled sound discovery/materialization is a workflow concern, not part of the
+animation core. After the SVG and object-motion solution are complete,
+`sound_sync.py` may copy only selected namespaced ids into

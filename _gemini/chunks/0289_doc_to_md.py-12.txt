@@ -1,0 +1,101 @@
+    markdown = re.sub(r"\n{3,}", "\n\n", markdown).strip() + "\n"
+    out_file.write_text(markdown, encoding="utf-8")
+    _write_generic_image_manifest(media_dir, rel_media_dir, markdown, "html_image")
+
+    if not any(media_dir.iterdir()):
+        media_dir.rmdir()
+        media_dir = None  # type: ignore[assignment]
+
+    _report_result(out_file, media_dir)
+    return markdown
+
+
+# ─────────────────────────────────────────────────────────────
+# EPUB → Markdown (ebooklib + markdownify)
+# ─────────────────────────────────────────────────────────────
+
+def _sanitize_epub_manifest(src: Path) -> tuple[Path, bool]:
+    """Return an EPUB path that ebooklib can read.
+
+    Some EPUBs contain OPF manifest entries pointing at files that are missing
+    from the ZIP archive. ebooklib reads every manifest item eagerly, so one
+    stale entry can abort the whole conversion. When broken entries are found,
+    this writes a temporary EPUB with those manifest items and matching spine
+    refs removed.
+    """
+    OPF_NS = "http://www.idpf.org/2007/opf"
+    CONT_NS = "urn:oasis:names:tc:opendocument:xmlns:container"
+
+    try:
+        with zipfile.ZipFile(src, "r") as zin:
+            names = set(zin.namelist())
+            if "META-INF/container.xml" not in names:
+                return src, False
+
+            container_root = ET.fromstring(zin.read("META-INF/container.xml"))
+            rootfile_el = container_root.find(f".//{{{CONT_NS}}}rootfile")
+            if rootfile_el is None:
+                return src, False
+
+            opf_path = rootfile_el.get("full-path")
+            if not opf_path or opf_path not in names:
+                return src, False
+
+            opf_root = ET.fromstring(zin.read(opf_path))
+            manifest_el = opf_root.find(f"{{{OPF_NS}}}manifest")
+            if manifest_el is None:
+                return src, False
+
+            opf_dir = posixpath.dirname(opf_path)
+            bad_ids: list[str] = []
+            bad_hrefs: list[str] = []
+            for item_el in list(manifest_el.findall(f"{{{OPF_NS}}}item")):
+                href = item_el.get("href", "")
+                if not href:
+                    continue
+                rel = unquote(href)
+                zpath = posixpath.normpath(
+                    posixpath.join(opf_dir, rel) if opf_dir else rel
+                )
+                if zpath in names:
+                    continue
+
+                item_id = item_el.get("id", "")
+                if item_id:
+                    bad_ids.append(item_id)
+                bad_hrefs.append(href)
+                manifest_el.remove(item_el)
+
+            if not bad_hrefs:
+                return src, False
+
+            spine_el = opf_root.find(f"{{{OPF_NS}}}spine")
+            if spine_el is not None and bad_ids:
+                for itemref in list(spine_el.findall(f"{{{OPF_NS}}}itemref")):
+                    if itemref.get("idref") in bad_ids:
+                        spine_el.remove(itemref)
+
+            ET.register_namespace("", OPF_NS)
+            ET.register_namespace("dc", "http://purl.org/dc/elements/1.1/")
+            new_opf = ET.tostring(opf_root, encoding="utf-8", xml_declaration=True)
+
+            tmp = tempfile.NamedTemporaryFile(suffix=".epub", delete=False)
+            tmp.close()
+            out_path = Path(tmp.name)
+
+            with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zout:
+                if "mimetype" in names:
+                    zout.writestr(
+                        zipfile.ZipInfo("mimetype"),
+                        zin.read("mimetype"),
+                        compress_type=zipfile.ZIP_STORED,
+                    )
+                for name in zin.namelist():
+                    if name == "mimetype":
+                        continue
+                    if name == opf_path:
+                        zout.writestr(name, new_opf)
+                    else:
+                        zout.writestr(name, zin.read(name))
+
+            preview = ", ".join(bad_hrefs[:3])

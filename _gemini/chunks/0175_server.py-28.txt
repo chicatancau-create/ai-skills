@@ -1,0 +1,95 @@
+    parser.add_argument('project_dir', help='Path to project directory')
+    parser.add_argument(
+        '--port', type=int, default=None,
+        help=f'Exact port to listen on (default: first free port from {DEFAULT_PORT})',
+    )
+    parser.add_argument('--no-browser', action='store_true', help='Do not auto-open browser')
+    parser.add_argument(
+        '--daemon', action='store_true',
+        help='Start the server in the background; combine with --wait to block until confirmation',
+    )
+    parser.add_argument(
+        '--wait', action='store_true',
+        help='With --daemon, wait until the active result.json stage is written',
+    )
+    parser.add_argument(
+        '--wait-only', action='store_true',
+        help='Attach to the confirm server for this project and wait for an '
+             'already-open page to write the requested receipt. If it is '
+             'already persisted, return without recovery; otherwise recover a '
+             'dead server on the recorded/default port so browser polling can resume.',
+    )
+    parser.add_argument(
+        '--wait-stage', default='final', metavar='{stage1,final}',
+        help='Wait for this result.json stage (default: final). Use stage1 '
+             'after opening the combined template/communication page.',
+    )
+    parser.add_argument(
+        '--wait-timeout', type=int, default=WAIT_TIMEOUT_DEFAULT,
+        help=f'Seconds the wait caller blocks before returning (default: {WAIT_TIMEOUT_DEFAULT}; '
+             '0 = no limit). Kept under the caller\'s tool timeout; the detached server lives on.',
+    )
+    parser.add_argument(
+        '--timeout', type=int, default=900,
+        help='Server idle timeout in seconds (default: 900; 0 = disabled)',
+    )
+    parser.add_argument(
+        '--shutdown', action='store_true',
+        help='Stop a confirm server left running for this project, then exit '
+             '(idempotent). Run at the end of Step 4 so the page never lingers '
+             'on its selected port before live preview starts.',
+    )
+    return parser
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format='[%(asctime)s] [%(levelname)s] confirm_ui: %(message)s',
+        datefmt='%H:%M:%S',
+    )
+
+    if args.port is not None:
+        try:
+            args.port = _validate_port(args.port)
+        except ValueError as exc:
+            logger.error('%s', exc)
+            return 2
+
+    project_path = Path(args.project_dir).resolve()
+    if not project_path.is_dir():
+        logger.error('%s is not a directory', project_path)
+        return 1
+    wait_stage = _stage_key(str(args.wait_stage).strip().lower())
+    if wait_stage not in {'stage1', 'final'}:
+        logger.error('--wait-stage must be stage1 or final')
+        return 2
+
+    # Step 4 cleanup: stop any lingering confirm server and exit. Independent of
+    # recommendation files (the page may never have been confirmed).
+    if args.shutdown:
+        return _shutdown_existing(project_path / LOCK_FILE_NAME)
+
+    # Staged wait: attach to the server launched by --daemon and block until
+    # the page writes the requested Strategist receipt.
+    if args.wait_only:
+        lock_file = project_path / LOCK_FILE_NAME
+        confirm_dir = project_path / CONFIRM_DIR_NAME
+        result_file = confirm_dir / RESULT_NAME
+        wait_status = _wait_result_status(result_file, wait_stage)
+        if wait_status is not None:
+            return wait_status
+        if wait_stage == 'stage1':
+            readiness_error = _stage1_ready_error(confirm_dir)
+        else:
+            recommendations_file = _active_recommendations_path(confirm_dir)
+            readiness_error = _stage2_ready_error(
+                project_path,
+                confirm_dir,
+                recommendations_file,
+            )
+        if readiness_error:
+            logger.error(

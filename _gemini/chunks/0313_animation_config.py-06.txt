@@ -1,0 +1,100 @@
+        except ValueError as exc:
+            errors.append(str(exc))
+    if repeat_count is not None and repeat_duration is not None:
+        errors.append(
+            f'animations.json {label} repeat_count and repeat_duration '
+            'are mutually exclusive'
+        )
+
+    for field in ('auto_reverse', 'rewind'):
+        if field in value and not isinstance(value[field], bool):
+            errors.append(
+                f'animations.json {label} {field} must be a boolean: '
+                f'{value[field]!r}'
+            )
+    ratios: dict[str, float] = {}
+    for field in ('accelerate', 'decelerate', 'bounce_end'):
+        if field not in value:
+            continue
+        raw_ratio = value[field]
+        if (
+            isinstance(raw_ratio, bool)
+            or not isinstance(raw_ratio, (int, float))
+            or not math.isfinite(float(raw_ratio))
+            or not 0 <= float(raw_ratio) <= 1
+        ):
+            errors.append(
+                f'animations.json {label} {field} must be between 0 and 1: '
+                f'{raw_ratio!r}'
+            )
+        else:
+            ratios[field] = float(raw_ratio)
+    if ratios.get('accelerate', 0) + ratios.get('decelerate', 0) > 1:
+        errors.append(
+            f'animations.json {label} accelerate + decelerate must not exceed 1'
+        )
+    if ratios.get('bounce_end', 0) and ratios.get('decelerate', 0):
+        errors.append(
+            f'animations.json {label} bounce_end and decelerate are '
+            'mutually exclusive in PowerPoint'
+        )
+
+    if 'restart' in value and value['restart'] not in ANIMATION_RESTARTS:
+        errors.append(
+            f'animations.json {label} restart must be one of '
+            f'{", ".join(ANIMATION_RESTARTS)}: {value["restart"]!r}'
+        )
+
+    if 'after_effect' in value:
+        after_effect = value['after_effect']
+        if isinstance(after_effect, str):
+            after_type = after_effect
+            after_color = None
+        elif isinstance(after_effect, dict):
+            unknown = set(after_effect) - {'type', 'color'}
+            for field in sorted(unknown):
+                errors.append(
+                    f'animations.json {label} after_effect has unknown field: {field}'
+                )
+            after_type = after_effect.get('type', 'none')
+            after_color = after_effect.get('color')
+        else:
+            after_type = None
+            after_color = None
+            errors.append(
+                f'animations.json {label} after_effect must be a string or object'
+            )
+        if after_type is not None and after_type not in ANIMATION_AFTER_EFFECTS:
+            errors.append(
+                f'animations.json {label} after_effect.type must be one of '
+                f'{", ".join(ANIMATION_AFTER_EFFECTS)}: {after_type!r}'
+            )
+        elif after_type == 'dim':
+            if after_color is None:
+                errors.append(
+                    f'animations.json {label} dim after_effect requires color'
+                )
+            else:
+                try:
+                    normalize_animation_effect_options(
+                        'emphasis_change_fill_color',
+                        {'color': after_color},
+                    )
+                except ValueError as exc:
+                    errors.append(f'animations.json {label}: {exc}')
+        elif after_color is not None:
+            errors.append(
+                f'animations.json {label} after_effect.color is valid only '
+                'with type "dim"'
+            )
+
+    if 'sound' in value:
+        sound = value['sound']
+        if sound_is_path and (
+            not isinstance(sound, str) or not sound.strip()
+        ):
+            errors.append(
+                f'animations.json {label} sound must be a non-empty path string'
+            )
+        elif sound_is_path and Path(sound).suffix.lower() not in AUDIO_CONTENT_TYPES:
+            errors.append(

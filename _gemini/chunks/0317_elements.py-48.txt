@@ -1,0 +1,116 @@
+    if vb_w <= 0 or vb_h <= 0:
+        raise ValueError('nested crop viewBox width and height must be positive')
+    src_l = round(vb_x * 100000)
+    src_t = round(vb_y * 100000)
+    src_r = round((1.0 - vb_x - vb_w) * 100000)
+    src_b = round((1.0 - vb_y - vb_h) * 100000)
+    src_values = (src_l, src_t, src_r, src_b)
+    if (
+        any(
+            value < _DRAWINGML_PERCENTAGE_MIN
+            or value > _DRAWINGML_PERCENTAGE_MAX
+            for value in src_values
+        )
+        or src_l + src_r >= 100000
+        or src_t + src_b >= 100000
+    ):
+        raise ValueError(
+            'nested crop viewBox cannot be represented as a DrawingML '
+            'srcRect with a positive visible region within the signed '
+            'percentage range'
+        )
+    if not any(src_values):
+        raise ValueError(
+            'nested crop viewBox="0 0 1 1" is redundant; use a plain <image>'
+        )
+
+    required_image_values = {
+        'x': '0',
+        'y': '0',
+        'width': '1',
+        'height': '1',
+        'preserveAspectRatio': 'none',
+    }
+    invalid_image_values = [
+        f'{name}={image_elem.get(name)!r}'
+        for name, expected in required_image_values.items()
+        if image_elem.get(name) != expected
+    ]
+    if invalid_image_values:
+        raise ValueError(
+            'nested crop <image> must use x="0", y="0", width="1", '
+            'height="1", and preserveAspectRatio="none"; got '
+            + ', '.join(invalid_image_values)
+        )
+
+    return NestedSvgCropSpec(
+        image=image_elem,
+        x=frame_values['x'],
+        y=frame_values['y'],
+        width=frame_values['width'],
+        height=frame_values['height'],
+        view_box_x=vb_x,
+        view_box_y=vb_y,
+        view_box_width=vb_w,
+        view_box_height=vb_h,
+        src_l=src_l,
+        src_t=src_t,
+        src_r=src_r,
+        src_b=src_b,
+    )
+
+
+def project_nested_svg_crop_errors(root: ET.Element) -> list[str]:
+    """Return contract errors for every nested SVG transport wrapper."""
+    errors: list[str] = []
+    parent_by_id = {
+        id(child): parent
+        for parent in root.iter()
+        for child in list(parent)
+    }
+    for elem in root.iter():
+        if elem is root or elem.tag.rsplit('}', 1)[-1] != 'svg':
+            continue
+        elem_id = (elem.get('id') or '').strip()
+        label = f'<svg id="{elem_id}">' if elem_id else '<svg>'
+        ancestor = parent_by_id.get(id(elem))
+        invalid_ancestor: ET.Element | None = None
+        while ancestor is not None and ancestor is not root:
+            if (
+                ancestor.tag != f'{{{SVG_NS}}}g'
+                or ancestor.get('data-pptx-part') is not None
+            ):
+                invalid_ancestor = ancestor
+                break
+            ancestor = parent_by_id.get(id(ancestor))
+        if invalid_ancestor is not None:
+            errors.append(
+                f'{label} invalid imported crop wrapper: visual ancestor chain '
+                'may contain only ordinary <g> elements'
+            )
+            continue
+        try:
+            parse_project_nested_svg_crop(elem)
+        except ValueError as exc:
+            errors.append(f'{label} invalid imported crop wrapper: {exc}')
+    return sorted(errors)
+
+
+def _resolve_nested_svg_clip_geometry(
+    crop: NestedSvgCropSpec,
+    image_elem: ET.Element,
+    ctx: ConvertContext,
+) -> str:
+    """Resolve a preview-safe inner-image clip into picture geometry."""
+    default = '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>'
+    clip_id = resolve_url_id(image_elem.get('clip-path', ''))
+    if not clip_id or clip_id not in ctx.defs:
+        return default
+    clip_elem = ctx.defs[clip_id]
+    shapes = _visible_clip_shapes(clip_elem, ctx.parent_by_id)
+    if not shapes:
+        return default
+    if len(shapes) != 1:
+        raise ValueError('clipPath must contain exactly one direct supported shape')
+    shape = shapes[0]
+    if (

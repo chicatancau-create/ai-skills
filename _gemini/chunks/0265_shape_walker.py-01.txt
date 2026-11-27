@@ -1,0 +1,124 @@
+"""Shape tree walker.
+
+Reads <p:spTree> from a slide / layout / master and emits a normalized
+ShapeNode tree that downstream converters can dispatch on.
+
+Handles:
+- <p:sp>           -> SHAPE
+- <p:pic>          -> PICTURE
+- <p:cxnSp>        -> CONNECTOR
+- <p:grpSp>        -> GROUP (recurses; resolves a:chOff/a:chExt frame)
+- <p:graphicFrame> -> GRAPHIC (table / chart / SmartArt — emitted as opaque
+                     placeholder for v1 so callers can decide a fallback)
+- <mc:AlternateContent> -> supported Choice shape with the baked Fallback
+                           preview retained for graphic frames
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from xml.etree import ElementTree as ET
+
+from .emu_units import NS, Xfrm, ooxml_bool, parse_xfrm
+
+
+# ---------------------------------------------------------------------------
+# ShapeNode
+# ---------------------------------------------------------------------------
+
+SHAPE = "sp"
+PICTURE = "pic"
+CONNECTOR = "cxnSp"
+GROUP = "grpSp"
+GRAPHIC = "graphicFrame"
+
+_TITLE_PLACEHOLDER_TYPES = {"title", "ctrTitle"}
+_BODY_PLACEHOLDER_TYPES = {
+    "body",
+    "chart",
+    "clipArt",
+    "dgm",
+    "media",
+    "obj",
+    "pic",
+    "subTitle",
+    "tbl",
+}
+_DEFAULT_PLACEHOLDER_TYPE = "obj"
+_DEFAULT_PLACEHOLDER_INDEX = "0"
+_TX_STYLE_TITLE_KEY = ("__txStyleTitle", None)
+_TX_STYLE_BODY_KEY = ("__txStyleBody", None)
+_TX_STYLE_OTHER_KEY = ("__txStyleOther", None)
+
+
+@dataclass
+class PlaceholderInfo:
+    """Resolved <p:ph> attributes for a shape if any."""
+
+    type: str | None = None  # title / body / ctrTitle / subTitle / ftr / dt / ...
+    idx: str | None = None
+    sz: str | None = None  # full / half / quarter
+    orient: str | None = None
+
+
+@dataclass
+class ShapeNode:
+    """Normalized shape entry produced by the walker."""
+
+    kind: str  # one of SHAPE / PICTURE / CONNECTOR / GROUP / GRAPHIC
+    xml: ET.Element  # original element
+    xfrm: Xfrm  # resolved geometry in absolute slide pixel space
+    name: str = ""
+    spid: str = ""
+    hidden: bool = False
+    hyperlink_rid: str = ""
+    hyperlink_action: str = ""
+    placeholder: PlaceholderInfo | None = None
+    inherited_lst_styles: tuple[ET.Element, ...] = ()
+    inherited_body_properties: tuple[ET.Element, ...] = ()
+    # Local plus ancestor group rotation; used for effect-fidelity decisions
+    # without applying the group transform twice to the rendered geometry.
+    effective_rotation: float = 0.0
+    # GROUP only: children, in z-order
+    children: list["ShapeNode"] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Walker
+# ---------------------------------------------------------------------------
+
+def _read_nv_sp_pr(
+    parent: ET.Element,
+    nv_tag: str,
+) -> tuple[str, str, bool, PlaceholderInfo | None, str, str]:
+    """Extract name/id/hidden/placeholder from an nvXXXPr container.
+
+    nv_tag is one of nvSpPr / nvPicPr / nvCxnSpPr / nvGrpSpPr / nvGraphicFramePr.
+    """
+    container = parent.find(f"p:{nv_tag}", NS)
+    name = ""
+    spid = ""
+    hidden = False
+    ph: PlaceholderInfo | None = None
+    hyperlink_rid = ""
+    hyperlink_action = ""
+    if container is None:
+        return name, spid, hidden, ph, hyperlink_rid, hyperlink_action
+
+    cnv = container.find("p:cNvPr", NS)
+    if cnv is not None:
+        name = cnv.attrib.get("name", "")
+        spid = cnv.attrib.get("id", "")
+        if ooxml_bool(cnv.attrib.get("hidden")):
+            hidden = True
+        hyperlink = cnv.find("a:hlinkClick", NS)
+        if hyperlink is not None:
+            hyperlink_rid = hyperlink.attrib.get(f"{{{NS['r']}}}id", "")
+            hyperlink_action = hyperlink.attrib.get("action", "")
+
+    nv_pr = container.find("p:nvPr", NS)
+    if nv_pr is not None:
+        ph_elem = nv_pr.find("p:ph", NS)
+        if ph_elem is not None:
+            ph = PlaceholderInfo(
+                type=ph_elem.attrib.get("type"),

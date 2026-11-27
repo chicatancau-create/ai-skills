@@ -1,0 +1,118 @@
+                if definition.prototype_slide_num is not None
+                else _relative_project_path(
+                    project_path,
+                    definition.prototype_svg_path,
+                )
+            ),
+        },
+        "master": {
+            "key": master.master_key,
+            "name": master.master_name,
+        },
+    }
+    return template, prototype.svg_path
+
+
+def _reference_payload(
+    kind: str,
+    path: Path,
+    *,
+    scope: str,
+    display_path: str,
+    same_context_edit_policy: str | None = None,
+) -> dict[str, str]:
+    """Describe one large reference without injecting its contents per page."""
+    payload = {
+        "kind": kind,
+        "scope": scope,
+        "path": display_path,
+        "sha256": _file_sha256(path),
+        "load_policy": "once-per-execution-context",
+    }
+    if same_context_edit_policy is not None:
+        payload["same_context_edit_policy"] = same_context_edit_policy
+    return payload
+
+
+def _visualization_reference(
+    value: str,
+    *,
+    allow_legacy_bare: bool,
+) -> tuple[dict[str, str] | None, Path | None, VisualizationEntry]:
+    """Resolve one live asset or one legacy intent-only Structure key."""
+    source_section = "page_charts" if allow_legacy_bare else "page_visualizations"
+    try:
+        entry = resolve_visualization_reference(
+            value,
+            allow_legacy_bare=allow_legacy_bare,
+        )
+    except VisualizationCatalogError as exc:
+        raise PageContextError(
+            f"{source_section} value {value!r} cannot resolve a visualization: {exc}"
+        ) from exc
+    if entry.kind == LEGACY_STRUCTURE_INTENT_KIND:
+        if not allow_legacy_bare or entry.path is not None:
+            raise PageContextError(
+                f"{source_section} value {value!r} has an invalid legacy "
+                "Structure intent resolution"
+            )
+        return None, None, entry
+    if entry.kind != VISUALIZATION_SVG_KIND or entry.path is None:
+        raise PageContextError(
+            f"{source_section} value {value!r} resolves to unsupported kind "
+            f"{entry.kind!r}"
+        )
+    path = Path(entry.path).resolve()
+    try:
+        display_path = path.relative_to(_SKILL_DIR.resolve()).as_posix()
+    except ValueError as exc:
+        raise PageContextError(
+            f"{source_section} value {value!r} resolves outside the Skill: {path}"
+        ) from exc
+    payload = _reference_payload(
+        entry.kind,
+        path,
+        scope="skill",
+        display_path=display_path,
+    )
+    payload.update(
+        {
+            "reference": entry.reference,
+            "family": entry.family,
+            "key": entry.key,
+        }
+    )
+    return payload, path, entry
+
+
+def build_page_context(project: str | Path, raw_page: str) -> PageContextResult:
+    """Build one current per-page projection without writing the project."""
+    project_path = Path(project).resolve()
+    if not project_path.is_dir():
+        raise PageContextError(f"project directory not found: {project_path}")
+    page, page_number = normalize_page_key(raw_page)
+    lock_path = project_path / "spec_lock.md"
+    design_path = project_path / "design_spec.md"
+    for required in (lock_path, design_path):
+        if not required.is_file():
+            raise PageContextError(f"required artifact not found: {required.name}")
+    preflight_errors, _preflight_warnings = validate_project_artifacts(
+        project_path,
+        include_design=False,
+    )
+    if preflight_errors:
+        preview = "; ".join(preflight_errors[:8])
+        suffix = (
+            ""
+            if len(preflight_errors) <= 8
+            else f"; +{len(preflight_errors) - 8} more"
+        )
+        raise PageContextError(
+            "spec_lock/template preflight failed before page generation: "
+            f"{preview}{suffix}"
+        )
+    try:
+        lock_sections_raw = parse_spec_lock_artifact(
+            lock_path,
+            report_duplicate_fields=True,
+        )

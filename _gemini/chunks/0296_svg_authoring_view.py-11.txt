@@ -1,0 +1,118 @@
+    asset_element = copy.deepcopy(element)
+    if strip_element_transform:
+        asset_element.attrib.pop("transform", None)
+    asset_root.append(asset_element)
+    for item in asset_root.iter():
+        item.attrib.pop(SOURCE_REF_ATTRIBUTE, None)
+        item.attrib.pop(SOURCE_PROXY_ATTRIBUTE, None)
+    _rewrite_asset_references(
+        asset_root,
+        authoring_dir,
+        proxy_dir,
+        stats,
+    )
+    stats.coordinate_attributes_compacted += compact_svg_tree(
+        asset_root,
+    ).changed_attributes
+    payload = _serialize_svg(asset_root)
+    return payload if payload.endswith(b"\n") else payload + b"\n"
+
+
+def _source_proxy_element(
+    root: ET.Element,
+    source: ET.Element,
+    source_ref: str,
+    asset_path: Path,
+    output_dir: Path,
+) -> ET.Element:
+    proxy = ET.Element(f"{{{SVG_NS}}}image")
+    for name in (
+        "id",
+        "data-pptx-object",
+        "data-pptx-frame",
+        EXTERNAL_LINKED_IMAGE_PROXY_ATTRIBUTE,
+        "data-pptx-prst",
+        "data-pptx-av-adj",
+        "data-pptx-av-adj1",
+        "data-pptx-av-adj2",
+        "data-pptx-import-source",
+        "data-pptx-native-authority",
+        "data-pptx-replacement-status",
+        "data-pptx-replace-with",
+        "data-pptx-placeholder",
+        "data-pptx-placeholder-type",
+        "data-pptx-placeholder-idx",
+        "data-pptx-structure-role",
+    ):
+        value = source.get(name)
+        if value is not None:
+            proxy.set(name, value)
+    proxy.attrib.update(_proxy_canvas_attributes(root))
+    proxy.set(
+        "href",
+        os.path.relpath(asset_path, output_dir).replace(os.sep, "/"),
+    )
+    proxy.set(SOURCE_REF_ATTRIBUTE, source_ref)
+    proxy.set(SOURCE_PROXY_ATTRIBUTE, SOURCE_PROXY_KIND)
+    proxy.tail = source.tail
+    return proxy
+
+
+def _compact_semantic_tables(
+    root: ET.Element,
+    references: list[SourceReference],
+    output_dir: Path,
+    preview_dir: Path,
+    stats: ProjectionStats,
+) -> dict[Path, bytes]:
+    """Keep table data inline while moving only its rendered preview aside."""
+    assets: dict[Path, bytes] = {}
+    reference_by_id = {
+        reference.source_ref: reference
+        for reference in references
+    }
+    for element in list(root.iter()):
+        if element.get(SEMANTIC_OBJECT_ATTRIBUTE) != SEMANTIC_TABLE_KIND:
+            continue
+        source_ref = element.get(SOURCE_REF_ATTRIBUTE)
+        if not source_ref or source_ref not in reference_by_id:
+            raise ValueError("Semantic table has no source reference")
+        payload_metadata = [
+            child
+            for child in element
+            if _local_name(child.tag) == "metadata"
+            and child.get("type") == "application/json"
+        ]
+        if len(payload_metadata) != 1:
+            raise ValueError(
+                f"Semantic table {source_ref} requires exactly one JSON payload"
+            )
+
+        preview_source = copy.deepcopy(element)
+        for child in list(preview_source):
+            if _local_name(child.tag) == "metadata":
+                preview_source.remove(child)
+        payload = _source_proxy_asset_bytes(
+            root,
+            preview_source,
+            output_dir,
+            preview_dir,
+            stats,
+            strip_element_transform=True,
+        )
+        digest = hashlib.sha256(payload).hexdigest()
+        asset_path = preview_dir / f"semantic-table-preview-{digest}.svg"
+        previous = assets.get(asset_path)
+        if previous is not None and previous != payload:
+            raise ValueError(f"Semantic table preview hash collision: {asset_path.name}")
+        assets[asset_path] = payload
+
+        metadata = payload_metadata[0]
+        metadata.tail = None
+        for child in list(element):
+            element.remove(child)
+        element.append(metadata)
+        preview = ET.Element(f"{{{SVG_NS}}}image")
+        preview.attrib.update(_proxy_canvas_attributes(root))
+        preview.set(
+            "href",

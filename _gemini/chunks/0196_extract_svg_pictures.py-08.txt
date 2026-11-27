@@ -1,0 +1,88 @@
+    output.write_bytes(ET.tostring(tree.getroot(), encoding="utf-8", xml_declaration=True))
+    inventory.write_bytes(inventory_bytes)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Extract explicitly selected SVG groups as standalone SVG picture assets.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("svg_file", type=Path, help="Source SVG file")
+    parser.add_argument(
+        "--select",
+        action="append",
+        required=True,
+        metavar="ID",
+        help="Exact <g id> to extract; repeat for multiple groups",
+    )
+    parser.add_argument("--images-dir", required=True, type=Path, help="Destination image asset directory")
+    parser.add_argument(
+        "--resource-root",
+        type=Path,
+        help="Allowed root for local SVG dependencies (default: source directory)",
+    )
+    output = parser.add_mutually_exclusive_group(required=True)
+    output.add_argument("-o", "--output", type=Path, help="Rewritten SVG path")
+    output.add_argument("--inplace", action="store_true", help="Rewrite the source SVG")
+    parser.add_argument(
+        "--bounds",
+        action="append",
+        default=[],
+        metavar="ID=X,Y,W,H",
+        help="Explicit tight bounds for one selector; repeat as needed",
+    )
+    parser.add_argument(
+        "--bounds-mode",
+        choices=("auto", "frame", "measure"),
+        default="auto",
+        help="Bounds source when --bounds is absent (default: auto)",
+    )
+    parser.add_argument("--padding", type=float, default=0.0, help="Non-negative padding in SVG units")
+    parser.add_argument(
+        "--asset-name",
+        action="append",
+        default=[],
+        metavar="ID=NAME.svg",
+        help="Override one generated asset filename",
+    )
+    parser.add_argument("--inventory", type=Path, help="Explicit JSON inventory path")
+    parser.add_argument("--overwrite", action="store_true", help="Replace existing non-identical outputs")
+    return parser
+
+
+def _run(args: argparse.Namespace) -> dict[str, object]:
+    source = args.svg_file.resolve()
+    if not source.is_file():
+        raise SvgPictureError(f"Source SVG does not exist: {source}")
+    if args.padding < 0 or not math.isfinite(args.padding):
+        raise SvgPictureError("--padding must be a finite non-negative number")
+    selectors = [selector.strip() for selector in args.select]
+    if any(not selector for selector in selectors) or len(set(selectors)) != len(selectors):
+        raise SvgPictureError("--select values must be non-empty and unique")
+    print(
+        f"Preparing {len(selectors)} explicit SVG picture asset(s) from {source.name}",
+        file=sys.stderr,
+    )
+
+    output = source if args.inplace else args.output.resolve()
+    if not args.inplace and output == source:
+        raise SvgPictureError("Use --inplace explicitly when the output is the source SVG")
+    images_dir = args.images_dir.resolve()
+    resource_root = args.resource_root.resolve() if args.resource_root else source.parent
+    if not resource_root.is_dir():
+        raise SvgPictureError(f"--resource-root is not a directory: {resource_root}")
+    try:
+        source.relative_to(resource_root)
+    except ValueError as exc:
+        raise SvgPictureError("Source SVG must be inside --resource-root") from exc
+    inventory = (
+        args.inventory.resolve()
+        if args.inventory
+        else output.with_name(f"{output.stem}_picture_asset_inventory.json")
+    )
+    if inventory in {source, output}:
+        raise SvgPictureError("Inventory path must differ from the source and rewritten SVG")
+    bounds_overrides = _parse_key_values(args.bounds, "--bounds")
+    asset_names = _parse_key_values(args.asset_name, "--asset-name")
+    unknown_options = (set(bounds_overrides) | set(asset_names)) - set(selectors)
+    if unknown_options:

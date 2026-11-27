@@ -1,0 +1,119 @@
+        raise RuntimeError(
+            f"{provider_label} word boundaries could not be aligned with the narration text; "
+            "subtitle timing was not generated"
+        )
+
+    mapped: list[_MappedWord] = []
+    key_offset = 0
+    for boundary, word_key in zip(boundaries, boundary_keys):
+        if not word_key:
+            continue
+        key_end = key_offset + len(word_key)
+        mapped.append(
+            _MappedWord(
+                start=boundary["offset"],
+                end=boundary["offset"] + boundary["duration"],
+                source_start=source_positions[key_offset],
+                source_end=source_positions[key_end - 1] + 1,
+            )
+        )
+        key_offset = key_end
+    return mapped
+
+
+def _trim_span(text: str, start: int, end: int) -> tuple[int, int]:
+    while start < end and text[start].isspace():
+        start += 1
+    while end > start and text[end - 1].isspace():
+        end -= 1
+    return start, end
+
+
+def _display_length(text: str, start: int, end: int) -> int:
+    return sum(not character.isspace() for character in text[start:end])
+
+
+def _is_sentence_end(text: str, index: int) -> bool:
+    character = text[index]
+    if character in _SENTENCE_END:
+        return True
+    if character != ".":
+        return False
+    previous = text[index - 1] if index else ""
+    following = text[index + 1] if index + 1 < len(text) else ""
+    return not (previous.isdigit() and following.isdigit())
+
+
+def _sentence_spans(text: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    start = 0
+    index = 0
+    while index < len(text):
+        if not _is_sentence_end(text, index):
+            index += 1
+            continue
+        end = index + 1
+        while end < len(text) and text[end] in _CLOSING_PUNCTUATION:
+            end += 1
+        span = _trim_span(text, start, end)
+        if span[0] < span[1]:
+            spans.append(span)
+        start = end
+        index = end
+    span = _trim_span(text, start, len(text))
+    if span[0] < span[1]:
+        spans.append(span)
+    return spans
+
+
+def _inside_number(text: str, index: int) -> bool:
+    """Return whether a cut at ``index`` would split one written-out number."""
+    if index <= 0 or index >= len(text):
+        return False
+    return text[index - 1] in _NUMERAL_CHARS and text[index] in _NUMERAL_CHARS
+
+
+def _hard_split_span(
+    text: str,
+    span: tuple[int, int],
+    words: list[_MappedWord],
+    max_chars: int,
+) -> list[tuple[int, int]]:
+    start, end = span
+    parts: list[tuple[int, int]] = []
+    while _display_length(text, start, end) > max_chars:
+        remaining_length = _display_length(text, start, end)
+        remaining_parts = (remaining_length + max_chars - 1) // max_chars
+        target_length = (remaining_length + remaining_parts - 1) // remaining_parts
+        candidates = [
+            (word.source_end, _display_length(text, start, word.source_end))
+            for word in words
+            if start < word.source_end < end
+            and _display_length(text, start, word.source_end) <= max_chars
+        ]
+        # Provider word boundaries in Chinese are often per character; prefer
+        # the cuts that keep a number whole and fall back only when no other
+        # cut fits the width.
+        whole_number_candidates = [
+            candidate for candidate in candidates
+            if not _inside_number(text, candidate[0])
+        ]
+        if whole_number_candidates:
+            candidates = whole_number_candidates
+        if candidates:
+            split_at, _ = min(
+                candidates,
+                key=lambda candidate: (
+                    abs(candidate[1] - target_length),
+                    -candidate[1],
+                ),
+            )
+        else:
+            split_at = next(
+                (
+                    word.source_end
+                    for word in words
+                    if start < word.source_end < end
+                ),
+                end,
+            )

@@ -1,0 +1,43 @@
+            sock.connect.assert_called_once_with(('127.0.0.1', 80))
+
+    def test_installed_curl_api_applies_resolve_without_network(self) -> None:
+        try:
+            from curl_cffi import Curl, CurlOpt, requests as curl_requests
+        except ImportError:
+            self.skipTest('optional curl_cffi is not installed')
+        applied = {}
+        original_setopt = Curl.setopt
+
+        def setopt(curl, option, value):
+            applied[option] = value
+            return original_setopt(curl, option, value)
+
+        url = 'https://mp.weixin.qq.com/'
+        response = Mock(url=url, status_code=200)
+        with patch.object(web_to_md, 'CurlOpt', CurlOpt), \
+                patch.object(web_to_md, 'curl_requests', curl_requests), \
+                patch.object(socket, 'getaddrinfo', return_value=_dns_answer('8.8.8.8')), \
+                patch.object(Curl, 'setopt', setopt), patch.object(Curl, 'perform') as perform, \
+                patch.object(curl_requests.Session, '_parse_response', return_value=response):
+            self.assertIs(web_to_md._http_get(url), response)
+            perform.assert_called_once()
+        self.assertEqual(applied[CurlOpt.RESOLVE], ['mp.weixin.qq.com:443:8.8.8.8'])
+        self.assertEqual(applied[CurlOpt.PROXY], '')
+        socket.socket.assert_not_called()
+
+
+class PreparedUrlEdgeTests(unittest.TestCase):
+    """The parser-agreement check compares the prepared URL, and HTML padding is not ambiguity."""
+
+    def test_idn_hosts_are_prepared_to_punycode_not_refused(self) -> None:
+        prepared = web_to_md._prepare_url("https://例子.测试/路径")
+        self.assertTrue(prepared.startswith("https://xn--fsqu00a.xn--0zwm56d/"), prepared)
+
+    def test_padded_image_src_is_stripped_before_the_character_check(self) -> None:
+        soup = web_to_md.BeautifulSoup('<img src=" https://8.8.8.8/a.png ">', "html.parser")
+        self.assertEqual(
+            web_to_md.resolve_content_image_url(soup.img, "https://8.8.8.8/"), "https://8.8.8.8/a.png"
+        )
+        soup = web_to_md.BeautifulSoup('<img src="https://8.8.8.8/a b.png">', "html.parser")
+        with self.assertRaises(web_to_md._UnsafeUrlError):
+            web_to_md.resolve_content_image_url(soup.img, "https://8.8.8.8/")

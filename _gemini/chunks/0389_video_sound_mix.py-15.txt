@@ -1,0 +1,77 @@
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Replace existing mixed video, stem, and report outputs",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    project_path = Path(args.project_path).expanduser().resolve()
+    if not project_path.is_dir():
+        parser.error(f"Project path does not exist: {project_path}")
+
+    pptx_path = _project_input_path(project_path, args.pptx)
+    trace_path = _project_input_path(project_path, args.trace)
+    video_path = _project_input_path(project_path, args.video)
+    audio_dir = _project_output_path(
+        project_path,
+        args.audio_dir,
+        Path("audio"),
+    )
+    subtitle_dir = _project_output_path(
+        project_path,
+        args.subtitle_dir,
+        Path("audio"),
+    )
+    default_output = video_path.with_name(f"{video_path.stem}_mixed.mp4")
+    default_stem = video_path.with_name(f"{video_path.stem}_sfx.wav")
+    default_report = video_path.with_name(f"{video_path.stem}_sound_mix.json")
+    output_path = _project_output_path(project_path, args.output, default_output)
+    stem_path = _project_output_path(
+        project_path,
+        args.stem_output,
+        default_stem,
+    )
+    report_path = _project_output_path(
+        project_path,
+        args.report_output,
+        default_report,
+    )
+
+    try:
+        result = mix_video_sounds(
+            project_path,
+            pptx_path=pptx_path,
+            trace_path=trace_path,
+            video_path=video_path,
+            audio_dir=audio_dir,
+            subtitle_dir=subtitle_dir,
+            output_path=output_path,
+            stem_path=stem_path,
+            report_path=report_path,
+            transition_gain_db=args.transition_gain_db,
+            animation_gain_db=args.animation_gain_db,
+            limiter_dbfs=args.limiter_dbfs,
+            force=args.force,
+        )
+    except (FileNotFoundError, FileExistsError, OSError, RuntimeError, ValueError) as exc:
+        print(f"Video sound mix failed: {exc}", file=sys.stderr)
+        return 1
+
+    print(
+        f"[POSTFLIGHT] status=passed cues={result.cue_count} "
+        "video_stream=preserved audio_mix=verified "
+        f"correlation={result.verification_correlation:.3f} "
+        f"true_peak={result.true_peak_dbfs:.1f}dBFS"
+    )
+    print(f"[Done] Mixed video: {result.output_path}")
+    print(f"[Done] SFX stem: {result.stem_path}")
+    print(f"[REPORT] Video sound mix: {result.report_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

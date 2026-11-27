@@ -1,0 +1,100 @@
+                effect_value = group_value
+            else:
+                group_path = (
+                    f'slides[{json.dumps(slide_name, ensure_ascii=False)}]'
+                    f'.groups[{json.dumps(state.group_id, ensure_ascii=False)}]'
+                )
+                derived_effect_entries = animation_group_effect_entries(
+                    group_value,
+                    path=group_path,
+                )
+                effect_value = derived_effect_entries[state.effect_index][1]
+            effect_value["order"] = state.order
+            effect_value["delay"] = _seconds_from_ms(delay_ms)
+            effect_value["trigger"] = state.trigger
+            previous_start_ms = actual_start_ms
+            previous_row_end_ms = actual_start_ms + state.duration_ms
+            timeline_end_ms = max(timeline_end_ms, previous_row_end_ms)
+            has_previous_row = True
+
+        ignored_cue_count += len(cues) - len(referenced_cues)
+
+        advance_ms = round(
+            (
+                audio_duration
+                + narration_padding
+                + narration_lead_in_ms / 1000
+            )
+            * 1000
+        )
+        if timeline_end_ms > advance_ms:
+            raise ValueError(
+                f'Animations on slide "{slide_name}" end at '
+                f"{_seconds_from_ms(timeline_end_ms):.3f}s, after the recorded "
+                f"slide advance at {_seconds_from_ms(advance_ms):.3f}s"
+            )
+
+    _reject_output_alias(
+        output_path,
+        audio_paths,
+        label="Narration animation config",
+    )
+    _require_replaceable(output_path, force)
+    derived_errors = list(
+        dict.fromkeys(
+            [
+                *validate_transition_config(derived),
+                *validate_animation_config_errors(derived),
+            ]
+        )
+    )
+    if derived_errors:
+        details = "\n".join(f"- {error}" for error in derived_errors)
+        raise ValueError(f"Derived narration animation config is invalid:\n{details}")
+    _atomic_write_text(
+        output_path,
+        json.dumps(derived, ensure_ascii=False, indent=2) + "\n",
+    )
+
+    for warning in drift_warnings:
+        print(f"Warning: {warning}", file=sys.stderr)
+    if positional_slides:
+        print(
+            "Warning: no narration_timing.json found — object reveals were mapped "
+            "positionally (group N -> subtitle cue N). This mistimes any page whose "
+            "narration is longer than its object count: later objects reveal early, "
+            "while the narrator is still on an earlier point. Author "
+            f"{plan_path} mapping each SVG group to the subtitle cue that speaks "
+            "about it (omit a group's cue to keep its canonical delay), then re-run.",
+            file=sys.stderr,
+        )
+        risky = [
+            (name, group_count, cue_count)
+            for name, group_count, cue_count in positional_slides
+            if group_count > 1 and cue_count > group_count + 1
+        ]
+        for name, group_count, cue_count in risky:
+            print(
+                f"Warning:   {name}: {group_count} object(s) but {cue_count} "
+                "subtitle cue(s) — later objects likely reveal too early",
+                file=sys.stderr,
+            )
+    return AnimationBuildResult(
+        slide_count=len(slide_names),
+        group_count=anchored_count + fallback_count,
+        anchored_count=anchored_count,
+        fallback_count=fallback_count,
+        ignored_cue_count=ignored_cue_count,
+        svg_fallback_slide_count=svg_fallback_slide_count,
+        timing_plan_written=False,
+    )
+
+
+def presentation_slide_members(package: zipfile.ZipFile) -> list[str]:
+    """Return slide package members in presentation order."""
+    try:
+        presentation_root = ET.fromstring(package.read("ppt/presentation.xml"))
+        relationships_root = ET.fromstring(
+            package.read("ppt/_rels/presentation.xml.rels")
+        )
+    except KeyError as exc:

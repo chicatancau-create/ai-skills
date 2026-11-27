@@ -1,0 +1,71 @@
+                for offset, (content, language) in enumerate((
+                    (f"{layer.upper()} ENGLISH", "en-US"), (f"中文正文{index}", "zh-CN"),
+                )):
+                    expected[content] = (layer, language)
+                    elements.append(
+                        f'<text id="{layer}-{offset}" x="100" y="{70 + index * 150 + offset * 50}" '
+                        f'font-size="24" fill="#000000"{metadata}>{content}</text>'
+                    )
+            elements.append(
+                '<g id="title-slot" data-pptx-placeholder="title" '
+                'data-pptx-bounds="100 570 900 60" data-pptx-idx="10">'
+                '<text x="100" y="610" font-size="30" fill="#000000" '
+                'data-pptx-carrier="true">占位符正文</text></g>'
+            )
+            svg.write_text(
+                '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" '
+                'font-family="Arial" data-pptx-master="master-default" '
+                'data-pptx-master-name="Default Master" data-pptx-layout="content" '
+                'data-pptx-layout-name="Content">' + "".join(elements) + '</svg>',
+                encoding="utf-8",
+            )
+            pptx = folder / "structured.pptx"
+            self.assertTrue(create_pptx_with_native_svg(
+                [svg], pptx, resource_root=folder, pptx_structure="structured",
+                master_text_style_spec=MasterTextStyleSpec(3000, 1800),
+                primary_language="zh-CN", verbose=False,
+            ))
+            seen = set()
+            default_count = 0
+            with zipfile.ZipFile(pptx) as package:
+                for part in package.namelist():
+                    if not part.endswith(".xml"):
+                        continue
+                    layer = next((name for prefix, name in (
+                        ("ppt/slideMasters/", "master"), ("ppt/slideLayouts/", "layout"),
+                        ("ppt/slides/", "slide"),
+                    ) if part.startswith(prefix)), None)
+                    if layer is None and part != "ppt/presentation.xml":
+                        continue
+                    root = ET.fromstring(package.read(part))
+                    for run in root.findall(".//a:r", NS):
+                        content = run.findtext("a:t", namespaces=NS)
+                        if content in expected:
+                            wanted_layer, wanted_language = expected[content]
+                            self.assertEqual(layer, wanted_layer)
+                            self.assertEqual(run.find("a:rPr", NS).get("lang"), wanted_language)
+                            seen.add(content)
+                    if layer == "slide":
+                        continue
+                    for tag in ("defRPr", "endParaRPr"):
+                        for node in root.findall(f".//a:{tag}", NS):
+                            self.assertEqual(node.get("lang"), "zh-CN", (part, tag))
+                            default_count += 1
+            self.assertEqual(seen, set(expected))
+            self.assertGreater(default_count, 0)
+
+    def test_empty_template_placeholders_receive_the_deck_language(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            for directory, part_name, tag in (
+                ("slideMasters", "slideMaster1.xml", "sldMaster"),
+                ("slideLayouts", "slideLayout1.xml", "sldLayout"),
+            ):
+                path = folder / "ppt" / directory / part_name
+                path.parent.mkdir(parents=True)
+                path.write_text(
+                    f'<p:{tag} xmlns:p="{NS["p"]}" xmlns:a="{NS["a"]}">'
+                    '<p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Empty"/>'
+                    '<p:cNvSpPr/><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr>'
+                    '<p:spPr/><p:txBody><a:bodyPr/><a:lstStyle><a:lvl1pPr>'
+                    '<a:defRPr lang="en-US"/></a:lvl1pPr></a:lstStyle><a:p>'

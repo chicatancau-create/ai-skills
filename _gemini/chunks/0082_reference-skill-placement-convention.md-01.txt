@@ -1,0 +1,51 @@
+---
+name: skill-placement-convention
+description: Where newly authored Skills must live on this machine — D:\QoderToolkit (Qoder's own folder) with a per-skill junction into ~/.qoder/skills, not the shared D:\Skills library.
+metadata:
+  type: reference
+---
+
+Newly authored Skills go to `D:\QoderToolkit\<skill-name>\` (the user calls this folder "你专门的").
+Registration = a **per-skill junction** `C:\Users\Admin\.qoder\skills\<skill-name>` → `D:\QoderToolkit\<skill-name>`,
+so there is exactly one real copy.
+
+**The link is not writable-through — build in this order** (proved 2026-09-23, corrected against what this
+file used to claim):
+
+1. `skill_manage` `create` while `~\.qoder\skills\<name>` does **not** exist. It writes a real dir there.
+   Pre-creating the junction instead makes `create` fail with `SKILL_PATH_INVALID` — it will not traverse
+   a link out of its allowed root.
+2. Copy `SKILL.md` into `D:\QoderToolkit\<name>\`, `md5sum` both sides, only then delete the `.qoder` copy.
+3. `rmdir` the emptied `.qoder\<name>`, then add the junction (`cmd //c rmdir` removes the link only; never
+   `rm -r` a junction). Reading back through the link is the confirmation step.
+4. Additively register the skill in `D:\QoderToolkit\README.md` (tree line + a bullet in 自建技能).
+
+Do **not** add new skills to `D:\Skills` — that is the user's shared multi-agent library
+(`dws`, `fs-*`, `vision-tool`, plus the `qoder-toolkit` entry shim), reached by every agent through
+junctions at `~\.claude\skills`, `~\.agents\skills`, `~\.config\opencode\skills`. Qoder also scans those,
+so a folder dropped in `D:\Skills` becomes visible to Qoder too.
+
+Facts that cost a wrong turn each:
+
+- **`skill_manage` can only write `SKILL.md`.** Schema (read 2026-09-24) is exactly
+  `{action: create|patch|edit|delete, name, content, old_string, new_string}` — `content` is the whole
+  SKILL.md, so there is **no way to bundle `scripts/`, `references/` or `assets/`** through it. A skill that
+  genuinely needs helper files has to be shipped as inline snippets in SKILL.md, or the files written by
+  other tools (which a skill-authoring session will usually forbid). Assume SKILL.md-only when planning.
+  Also: `create` never overwrites an existing skill, `patch` requires exactly one match, `edit` keeps a
+  backup, and built-in/plugin skills cannot be touched.
+- **In a Skill-authoring session `skill_manage` is bound to exactly one skill name.** Measured 2026-09-24:
+  `create`/`patch` for any *other* name returns bare `SKILL_TARGET_MISMATCH`, and `delete` is refused unconditionally.
+  **Re-measured 2026-09-24 (22:5x), so the older "two roots hold a duplicate" explanation does not hold up:** with
+  exactly one plain real dir at `~\.qoder\skills\<name>` (junction dropped, D: copy moved away, no second copy
+  anywhere) `delete` still returned `SKILL_TARGET_MISMATCH`. Deleting a skill is therefore **not possible from an
+  authoring session** — do it from the app UI or an ordinary chat session, and if you have to unwind a
+  half-migration, restore the layout the ledger describes and verify by reading `SKILL.md` through the link.
+  The guard lives in app.asar (`manage()` next to `SKILL_CONFIRMATION_REQUIRED`/`SKILL_HASH_CHANGED`) and compares
+  `e.name !== r.skillName` against the evolution-session record — i.e. **the name in the recommendation JSON is a
+  hard constraint, only the content is free**. So never promise "same content, different name"; if the intended
+  name is taken or would collide, write the agreed content under the bound name and disambiguate in `description`
+  + 适用边界 instead. Re-check `ls ~/.qoder/skills` right before writing — concurrent sessions are actively adding
+  near-duplicate skills (2026-09-24: a same-topic skill appeared mid-session).
+- **`patch`/`edit` return `SKILL_PATH_INVALID` when the target dir is a Junction.** Another session migrating a
+  skill to `D:\QoderToolkit\<name>` + junction mid-task is enough; `skill_manage` will not traverse a link out of

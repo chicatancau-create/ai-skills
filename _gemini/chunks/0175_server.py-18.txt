@@ -1,0 +1,114 @@
+    color_error = _palette_error(color, 'color')
+    color_custom = (
+        isinstance(color, dict)
+        and color.get('name') == 'custom'
+        and str(color.get('custom') or '').strip()
+    )
+    if color_error and not color_custom:
+        return color_error
+
+    typography = result.get('typography')
+    typography_error = _typography_error(
+        typography,
+        'typography',
+        require_sizes=True,
+        main_language=main_language,
+    )
+    if typography_error:
+        return typography_error
+
+    if _uses_ai_images(result):
+        image_strategy = result.get('image_strategy')
+        if not isinstance(image_strategy, dict) or not str(
+            image_strategy.get('rendering') or ''
+        ).strip():
+            return 'image_usage includes ai, so image_strategy.rendering must be non-empty'
+        rendering = image_strategy['rendering'].strip()
+        if rendering != 'custom' and rendering not in _ai_rendering_ids():
+            return f'image_strategy.rendering is not a known preset: {rendering}'
+    return None
+
+
+def _normalize_custom_selections(result: dict) -> None:
+    """Keep custom prose only for the creative choices actually selected."""
+    if result.get('mode') != 'custom':
+        result.pop('mode_behavior', None)
+    if result.get('visual_style') != 'custom':
+        result.pop('visual_style_behavior', None)
+
+    image_strategy = result.get('image_strategy')
+    if not isinstance(image_strategy, dict):
+        return
+    legacy_behavior = image_strategy.pop('custom', None)
+    if image_strategy.get('rendering') == 'custom':
+        if not image_strategy.get('behavior') and legacy_behavior:
+            image_strategy['behavior'] = legacy_behavior
+        return
+    image_strategy.pop('behavior', None)
+
+
+def _expected_result_stage(confirm_dir: Path) -> str:
+    """Return the result stage expected from the current recommendations."""
+    try:
+        _, recommendations = _read_active_recommendations(confirm_dir)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return 'final'
+    return {
+        1: 'stage1',
+        2: 'final',
+    }.get(_recommendation_stage(recommendations), 'final')
+
+
+def _file_version(path: Path) -> Optional[str]:
+    """Return a cheap file version for polling state, or None when absent."""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _read_session(confirm_dir: Path) -> dict:
+    """Read session.json if present, returning an object."""
+    session_file = confirm_dir / SESSION_NAME
+    if not session_file.exists():
+        return {}
+    try:
+        return _read_json_object(session_file)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+
+
+def _build_session_state(
+    confirm_dir: Path,
+    *,
+    server_port: Optional[int] = None,
+    event: Optional[str] = None,
+) -> dict:
+    """Derive the resumable Confirm UI state from disk artifacts."""
+    previous = _read_session(confirm_dir)
+    rec_file = _active_recommendations_path(confirm_dir)
+    result_file = confirm_dir / RESULT_NAME
+
+    rec_stage_number = 0
+    rec_stage = None
+    rec_error = None
+    if rec_file.exists():
+        try:
+            rec_file, rec_data = _read_active_recommendations(confirm_dir)
+            rec_stage_number = _recommendation_stage(rec_data)
+            rec_stage = _stage_name(rec_stage_number)
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            rec_error = str(exc)
+
+    fresh_restart = _fresh_template_restart(confirm_dir)
+    result_stage = None if fresh_restart else _result_stage(result_file)
+    result_stage_number = _result_stage_number(result_stage)
+
+    if result_stage == 'final':
+        expected_stage_number = None
+        status = 'done'
+        current_stage = 'final'
+    elif result_stage == 'stage1':
+        expected_stage_number = 2
+        ready = rec_stage_number == 2
+        status = 'ready_user' if ready else 'waiting_agent'

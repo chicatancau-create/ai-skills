@@ -1,0 +1,143 @@
+UPDATE orders SET currency = 'USD' WHERE currency IS NULL; -- backfill
+
+-- Deploy 2: Add constraint (after all rows backfilled)
+ALTER TABLE orders ALTER COLUMN currency SET NOT NULL;
+ALTER TABLE orders ALTER COLUMN currency SET DEFAULT 'USD';
+```
+
+**Add an index without locking:**
+
+```sql
+-- ✅ CONCURRENTLY: no table lock, can run on live DB
+CREATE INDEX CONCURRENTLY idx_orders_status ON orders(status);
+
+-- ❌ Without CONCURRENTLY: locks table for writes during build
+CREATE INDEX idx_orders_status ON orders(status);
+```
+
+### Migration Safety Checklist
+
+```
+✅ Migration runs in < 30 seconds on production data size
+✅ No exclusive table locks (use CONCURRENTLY for indexes)
+✅ Rollback plan documented and tested
+✅ Backfill runs in batches (not one giant UPDATE)
+✅ New column added as nullable first, constraint added later
+✅ Old column kept until all code references removed
+
+❌ Never rename/drop columns in one deploy
+❌ Never ALTER TYPE on large tables without testing timing
+❌ Never run data backfill in a transaction (OOM on large tables)
+```
+
+### Batch Backfill Template
+
+```sql
+-- Backfill in batches of 10,000 (avoids long-running transactions)
+DO $$
+DECLARE
+  batch_size int := 10000;
+  affected int;
+BEGIN
+  LOOP
+    UPDATE orders
+    SET currency = 'USD'
+    WHERE id IN (
+      SELECT id FROM orders WHERE currency IS NULL LIMIT batch_size
+    );
+    GET DIAGNOSTICS affected = ROW_COUNT;
+    RAISE NOTICE 'Updated % rows', affected;
+    EXIT WHEN affected = 0;
+    PERFORM pg_sleep(0.1);  -- brief pause to reduce load
+  END LOOP;
+END $$;
+```
+
+---
+
+## 5. Multi-Tenant Design (HIGH)
+
+### Three Approaches
+
+| Approach | Isolation | Complexity | When |
+|----------|-----------|------------|------|
+| **Row-level** (shared tables + `tenant_id`) | Low | Low | SaaS MVP, < 1,000 tenants |
+| **Schema-per-tenant** | Medium | Medium | Regulated industries, moderate scale |
+| **Database-per-tenant** | High | High | Enterprise, strict data isolation |
+
+### Row-Level Tenancy (Most Common)
+
+```sql
+-- Every table has tenant_id
+CREATE TABLE orders (
+    id         bigserial PRIMARY KEY,
+    tenant_id  bigint NOT NULL REFERENCES tenants(id),
+    user_id    bigint NOT NULL REFERENCES users(id),
+    total      numeric(10,2) NOT NULL,
+    -- ...
+);
+
+-- Composite index: tenant first (most queries filter by tenant)
+CREATE INDEX idx_orders_tenant_user ON orders(tenant_id, user_id);
+CREATE INDEX idx_orders_tenant_status ON orders(tenant_id, status);
+
+-- Row-Level Security (PostgreSQL)
+ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON orders
+  USING (tenant_id = current_setting('app.tenant_id')::bigint);
+```
+
+**Application-level enforcement:**
+
+```typescript
+// Middleware: set tenant context on every request
+app.use((req, res, next) => {
+  const tenantId = req.headers['x-tenant-id'];
+  if (!tenantId) return res.status(400).json({ error: 'Missing tenant' });
+  req.tenantId = tenantId;
+  next();
+});
+
+// Repository: ALWAYS filter by tenant
+async findOrders(tenantId: string, userId: string) {
+  return db.order.findMany({
+    where: { tenantId, userId },  // ← tenant_id in EVERY query
+  });
+}
+```
+
+### Rules
+
+```
+✅ tenant_id in EVERY table that holds tenant data
+✅ tenant_id as FIRST column in every composite index
+✅ Application middleware enforces tenant context
+✅ Use RLS (PostgreSQL) as defense-in-depth, not sole protection
+✅ Test with 2+ tenants to verify isolation
+
+❌ Never allow cross-tenant queries in application code
+❌ Never skip tenant_id in WHERE clauses (even in admin tools)
+```
+
+---
+
+## 6. Common Schema Patterns (MEDIUM)
+
+### Soft Delete
+
+```sql
+ALTER TABLE orders ADD COLUMN deleted_at timestamptz;
+
+-- All queries filter deleted records
+CREATE VIEW active_orders AS
+SELECT * FROM orders WHERE deleted_at IS NULL;
+
+-- Partial index: only index non-deleted rows
+CREATE INDEX idx_orders_active_status
+ON orders(status, created_at DESC)
+WHERE deleted_at IS NULL;
+```
+
+**ORM integration:**
+
+```typescript

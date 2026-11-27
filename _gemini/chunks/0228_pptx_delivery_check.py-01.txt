@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+"""
+PPT Master - PPTX Delivery Check
+
+Inspect a finished PPTX without modifying it and report package integrity,
+delivery portability, media footprint, hidden slides, and motion presence.
+
+Usage:
+    python3 scripts/pptx_delivery_check.py <presentation.pptx>
+
+Examples:
+    python3 scripts/pptx_delivery_check.py projects/demo/exports/demo.pptx
+
+Dependencies:
+    Same repository dependencies as beautify_identity.py and svg_to_pptx.py.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import mimetypes
+import re
+import sys
+import tempfile
+import unicodedata
+import zipfile
+from collections import Counter, defaultdict
+from pathlib import Path, PurePosixPath
+from xml.etree import ElementTree as ET
+
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from console_encoding import configure_utf8_stdio  # noqa: E402
+
+configure_utf8_stdio()
+
+from beautify_identity import extract_identity  # noqa: E402
+from pptx_ooxml.package import unused_slide_relationship_problems  # noqa: E402
+from pptx_ooxml.slideshow import custom_show_problems  # noqa: E402
+from pptx_opc_validation import (  # noqa: E402
+    canonical_opc_part_path,
+    resolve_internal_opc_target,
+    verify_internal_relationships,
+)
+from pptx_animations import (  # noqa: E402
+    object_animation_fingerprint,
+    read_slide_animation_sequence,
+    validate_pptx_animation_package,
+)
+from pptx_to_svg.ooxml_loader import (  # noqa: E402
+    OoxmlPackage,
+    parse_ooxml_boolean,
+)
+from pptx_transitions import (  # noqa: E402
+    read_slide_transition_xml,
+    validate_slide_transition_xml,
+)
+from svg_to_pptx.drawingml.utils import PPT_SAFE_FONTS  # noqa: E402
+
+
+REPORT_SCHEMA = "ppt-master.pptx-delivery-check.v1"
+PACKAGE_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+CONTENT_TYPES_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
+DRAWINGML_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+PRESENTATION_NS = (
+    "http://schemas.openxmlformats.org/presentationml/2006/main"
+)
+_PRESENTATION_PART_TYPES = {
+    key: f"application/vnd.openxmlformats-officedocument.presentationml.{kind}+xml"
+    for key, kind in (
+        ("slides", "slide"), ("notes", "notesSlide"),
+        ("masters", "slideMaster"), ("layouts", "slideLayout"),
+    )
+}
+_MEDIA_REL_KINDS = frozenset({"audio", "image", "media", "video"})
+_PPT_SAFE_FONT_ALIASES = {
+    "等线": "DengXian",
+    "等线 light": "DengXian Light",
+    "宋体": "SimSun",
+    "新細明體": "PMingLiU",
+    "맑은 고딕": "Malgun Gothic",
+    "ms pゴシック": "MS PGothic",
+}
+_PPT_DELIVERY_SAFE_FONTS = PPT_SAFE_FONTS | frozenset(
+    {"dengxian light", "pmingliu"}
+)
+
+
+def _issue(code: str, message: str, **details: object) -> dict[str, object]:
+    issue: dict[str, object] = {"code": code, "message": message}
+    issue.update(details)
+    return issue
+
+
+def _empty_report(path: Path) -> dict[str, object]:
+    return {
+        "schema": REPORT_SCHEMA,
+        "status": "failed",
+        "file": {
+            "path": str(path),
+            "bytes": path.stat().st_size if path.is_file() else None,
+        },
+        "package": {
+            "zip_integrity": "not-checked",
+            "corrupt_member": None,
+            "duplicate_parts": [],
+            "canonical_part_collisions": [],
+            "parts": {},
+            "relationships": {"problems": []},
+        },
+        "slides": {
+            "count": 0,
+            "hidden_count": 0,
+            "hidden": [],
+        },
+        "fonts": {
+            "theme": {},
+            "declared": {},
+            "embedded_parts": [],
+            "portability_advisory_faces": [],
+        },
+        "media": {
+            "embedded_count": 0,
+            "external_count": 0,
+            "embedded": [],
+            "external": [],
+            "uncompressed_bytes": 0,
+            "archive_compressed_bytes": 0,
+            "share_of_archive": 0.0,

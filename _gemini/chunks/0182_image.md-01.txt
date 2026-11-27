@@ -1,0 +1,97 @@
+# Image Tools
+
+> **Design boundary**: keep provider credentials explicit, keep in-pipeline
+> acquisition manifest-driven, and treat external image references as authoring
+> inputs while delivery writes self-contained SVG previews and native PPTX
+> media.
+
+Image tools cover prompt-based AI generation, web image search, image inspection,
+and Gemini watermark removal. Native formula authoring belongs to the SVG
+pipeline, not the image pipeline.
+
+## Legacy standalone `latex_render.py`
+
+This retained standalone utility renders a user-authored
+`images/formula_manifest.json` to PNG. Neither Default nor Quick Generate calls
+it, and new projects do not create formula manifests or formula images. The
+supported generated-deck path authors a native formula marker in SVG and lets
+`svg_to_pptx.py` compile its LaTeX payload to editable PowerPoint OMML.
+
+```bash
+python3 scripts/latex_render.py <project_path>
+python3 scripts/latex_render.py <project_path> --dry-run
+```
+
+Use it only for an explicitly requested external raster workflow. It is not a
+compatibility fallback for Keynote, WPS, LibreOffice, or another client.
+
+## `image_gen.py`
+
+Unified image generation entry point.
+
+This script is the **Path A** API/proxy executor for generated images. Default
+Generate checks `design_spec.md §I / AI Image Acquisition Path` before manifest
+mode: only `api` / `auto` permits Path A; a missing or unknown value fails
+closed and returns to Step 4 recovery. Quick Generate has no Design Spec: use
+the explicit active-context path when supplied, otherwise `auto` selects the
+A → B chain defined in
+[`image-generator.md`](../../references/image-generator.md) §7 without asking;
+exhausted automation triggers Quick's no-AI replan rather than Offline Manual.
+In either profile, `host-native` uses the host image tool directly and an
+explicit `manual` choice uses the read-only Markdown sidecar.
+
+```bash
+python3 scripts/image_gen.py "A modern futuristic workspace"
+python3 scripts/image_gen.py "Abstract tech background" --aspect_ratio 16:9 --image_size 4K
+python3 scripts/image_gen.py "Concept car" -o projects/demo/images
+python3 scripts/image_gen.py --list-backends
+```
+
+Backends are grouped into Core / Extended / Experimental tiers. Run `python3 scripts/image_gen.py --list-backends` for the current list.
+
+Each backend accepts its own subset of `--aspect_ratio` values; the authority is the `VALID_ASPECT_RATIOS` constant in its `scripts/image_backends/backend_<name>.py`, and `--manifest` rejects an unsupported ratio before any request. Gemini 3.1 image models take `1:1 1:4 1:8 2:3 3:2 3:4 4:1 4:3 4:5 5:4 8:1 9:16 16:9 21:9` (no `3:1`); the `gemini-2.5-flash-image` models take only `1:1 2:3 3:2 3:4 4:3 4:5 5:4 9:16 16:9 21:9` at `1K`.
+
+Backend selection:
+
+```bash
+python3 scripts/image_gen.py "A cat" --backend openai
+python3 scripts/image_gen.py "A cinematic portrait" --backend minimax
+python3 scripts/image_gen.py "A product launch hero image" --backend qwen
+python3 scripts/image_gen.py "科技感背景图" --backend zhipu
+python3 scripts/image_gen.py "A product KV in cinematic style" --backend volcengine
+python3 scripts/image_gen.py "A mountain landscape" --backend tencent
+```
+
+Configuration sources:
+
+1. Current process environment variables
+2. First `.env` found in this order:
+   - Current working directory
+   - Skill directory (e.g. `~/.agents/skills/ppt-master/.env`)
+   - Clone repo root
+   - `~/.ppt-master/.env`
+
+The active backend must always be selected explicitly via `IMAGE_BACKEND`.
+
+Example `.env`:
+
+```env
+IMAGE_BACKEND=openai
+OPENAI_API_KEY=sk-xxx
+OPENAI_MODEL=gpt-image-2
+# Optional proxy
+# OPENAI_BASE_URL=http://127.0.0.1:3000/v1
+# OpenAI-compatible provider knobs:
+# OPENAI_SIZE_PRESET=auto
+# OPENAI_RESPONSE_FORMAT=auto
+# OPENAI_QUALITY=auto
+# Allowed values: png / jpeg / webp
+# OPENAI_OUTPUT_FORMAT=png
+# jpeg/webp only, 0-100
+# OPENAI_OUTPUT_COMPRESSION=80
+# gpt-image-2: auto / opaque
+# OPENAI_BACKGROUND=auto
+# auto / low
+# OPENAI_MODERATION=auto
+```
+

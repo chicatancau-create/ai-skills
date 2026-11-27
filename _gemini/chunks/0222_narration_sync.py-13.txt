@@ -1,0 +1,105 @@
+        raise ValueError(
+            f"Narrated PPTX is missing presentation ordering data: {exc}"
+        ) from exc
+
+    relationship_targets: dict[str, str] = {}
+    for relationship in relationships_root.iter(f"{{{_REL_NS}}}Relationship"):
+        relationship_id = relationship.get("Id")
+        target = relationship.get("Target")
+        if (
+            relationship_id
+            and target
+            and relationship.get("TargetMode", "Internal") != "External"
+        ):
+            relationship_targets[relationship_id] = target.replace("\\", "/")
+
+    slide_list = presentation_root.find(f"{{{_PML_NS}}}sldIdLst")
+    if slide_list is None:
+        raise ValueError("Narrated PPTX presentation has no slide order")
+
+    members: list[str] = []
+    for slide_id in slide_list.findall(f"{{{_PML_NS}}}sldId"):
+        relationship_id = slide_id.get(f"{{{_DOC_REL_NS}}}id")
+        target = relationship_targets.get(relationship_id or "")
+        if target is None:
+            raise ValueError(
+                "Narrated PPTX slide order references a missing relationship: "
+                f"{relationship_id!r}"
+            )
+        if target.startswith("/"):
+            member = posixpath.normpath(target.lstrip("/"))
+        else:
+            member = posixpath.normpath(posixpath.join("ppt", target))
+        if member not in package.namelist():
+            raise ValueError(
+                f"Narrated PPTX slide relationship target is missing: {member}"
+            )
+        members.append(member)
+    return members
+
+
+def _read_powerpoint_timings(
+    pptx_path: Path,
+    slide_count: int,
+) -> list[PowerPointTiming]:
+    timings: list[PowerPointTiming] = []
+    with zipfile.ZipFile(pptx_path) as package:
+        slide_members = presentation_slide_members(package)
+        if len(slide_members) != slide_count:
+            raise ValueError(
+                f"Narrated PPTX has {len(slide_members)} slides, "
+                f"but the project has {slide_count}"
+            )
+        for slide_index, member in enumerate(slide_members, 1):
+            slide_xml = package.read(member)
+            summary = read_slide_transition_xml(slide_xml)
+            if summary.logical_count != 1:
+                raise ValueError(
+                    f"Narrated PPTX slide {slide_index} has "
+                    f"{summary.logical_count} logical transition carriers"
+                )
+            advance_ms = summary.advance_after_ms
+            if advance_ms is None:
+                raise ValueError(
+                    f"Narrated PPTX slide {slide_index} has no recorded advance time"
+                )
+            transition_ms = summary.duration_ms or 0
+            narration_delay_ms = read_narration_start_delay_xml(
+                slide_xml.decode("utf-8")
+            )
+            if (
+                advance_ms <= 0
+                or transition_ms < 0
+                or narration_delay_ms < 0
+                or narration_delay_ms >= advance_ms
+            ):
+                raise ValueError(
+                    f"Narrated PPTX slide {slide_index} has invalid timing values"
+                )
+            timings.append(
+                PowerPointTiming(
+                    transition_ms=transition_ms,
+                    narration_delay_ms=narration_delay_ms,
+                    advance_ms=advance_ms,
+                )
+            )
+    return timings
+
+
+def _powerpoint_audio_starts(
+    timings: list[PowerPointTiming],
+) -> tuple[list[int], int]:
+    """Return theoretical narration starts and the complete PPTX timeline."""
+    audio_starts: list[int] = []
+    timeline_ms = 0
+    for timing in timings:
+        slide_start_ms = timeline_ms
+        audio_start_ms = (
+            slide_start_ms
+            + timing.transition_ms
+            + timing.narration_delay_ms
+        )
+        audio_starts.append(audio_start_ms)
+        timeline_ms = (
+            slide_start_ms + timing.transition_ms + timing.advance_ms
+        )

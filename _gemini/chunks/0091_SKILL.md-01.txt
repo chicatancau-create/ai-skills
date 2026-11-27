@@ -1,0 +1,81 @@
+---
+name: headless-cdp-visual-acceptance
+description: "自起 headless Chromium(Edge/Chrome) 做前端与 MV3 扩展的端到端取证，不装 Playwright，分两条回路：零 CDP 的 msedge --headless 命令行(实拍 + 注入探针取数，适合单文件页面交付后自检)与 spawn+ws/CDP 全量管线(交互、真实视口、扩展、网络 mock)。当需要量布局溢出/几何/计算样式/对比度/键盘焦点顺序/截图、证明「页面真的渲染成了什么样」、复核自己上一轮「看着没问题」、判定「到底修好了没」，或 mock 不可达的第三方接口(在网络层用 Fetch.fulfillRequest 拦 Service Worker 的 fetch)时使用。也在这些症状下使用：实拍命令没报错但目录里零产物、相对路径截图报「拒绝访问」却返回退出码 0、--dump-dom 读不到异步或动效后的状态、对 dump grep 数到的是探针自己的源码、入场动画在 JS 报错后永久不可见、截图宽度与探针量到的 px 对不上、连上了错的浏览器/把用户标签页导航走了、脚本跑完 Node 不退出、稳定版 Chrome 加载不了扩展、窄视口截图出现假性溢出、系统深色主题污染截图。不用于单测与组件测试(用 fs-testing)、需要操作用户已登录的可见浏览器或复用其登录态(用 browser-use MCP)、配色与样式规范本身(qoder-toolkit / web-taste)、某个项目专属的取证批次登记(visual-tool-add-section / codeweave-visual-rebuild-rerun)。"
+---
+
+# Headless CDP 视觉与行为取证
+
+## Overview
+
+用 `spawn` 起一个属于自己的 headless Chromium，通过 CDP(纯 `ws`，约 30 行手写客户端)驱动它，把「界面看起来对不对」逼成一组可复跑的数字断言 + 截图证据。适用面：静态页、本地工装页、MV3 扩展的内容脚本/后台。不引 Playwright/Puppeteer，因此不装任何浏览器二进制。
+
+两条前提决定成败：**只连自己启的浏览器**，**只交付会失败断言**。
+
+## 两条回路怎么选
+
+- **零 CDP 命令行回路**(文末那节)：刚交付一个单文件 HTML/静态页，只要一张真图 + 几个数字(溢出、校验态、aria 切换、入场动画是否让内容永久不可见)。三次 `msedge --headless` 调用 + 一段注入脚本，不写 CDP 客户端、不起服务、不开调试端口。
+- **CDP 管线**(下面第 0–8 步)：要点击与多步流程、真实窄视口、hover/焦点环、对比度 WCAG、`@keyframes` 中间帧、MV3 扩展、网络层 mock。
+
+线划在「要不要驱动浏览器」上：不需要驱动就用命令行，需要驱动就别省那 30 行 CDP。
+
+## 何时用 / 何时不用
+
+- 用：要量 `scrollWidth - clientWidth`、`getBoundingClientRect`、计算样式与对比度、Tab 焦点顺序、四态(错误/载入/成功/拒绝)、真实渲染截图；要断言扩展后台的请求顺序；第三方 API 在本机不可达但不能因此跳过测试。
+- 不用：jsdom/Vitest 就能覆盖的逻辑、需要用户登录态或真实账号的页面(走 browser-use MCP)、CI 里长期维护的 E2E 套件(那是 Playwright 的活，见 fs-testing)、配色与排版怎么写(走 qoder-toolkit / web-taste)。
+
+## 五条硬规则
+
+1. **端口只从自己的 profile 读。** 绝不探固定调试端口。本机 `127.0.0.1:9333` 是 Qoder 内置隐藏 Chrome，持有用户的 Code Canvas 等标签页；探到它就等于在导航用户的页面(2026-09-20 踩过)。启动一律 `--remote-debugging-port=0`，真实端口从 `<临时 user-data-dir>/DevToolsActivePort` 第一行读。
+2. **一切端口交给系统分配。** 静态服务用 `srv.listen(0, '127.0.0.1')` 再取 `srv.address().port`，别硬编码 8799 这类数字——撞端口时的失败信息会把你引向错方向。
+3. **不可达的外部接口在网络层 mock，不要 skip。** attach 到 Service Worker 的 session，`Fetch.enable` + `Fetch.fulfillRequest`(响应体 base64)。跳过测试等于没有断言。
+4. **断言必须被证明会失败。** 全绿不等于有牙齿：把修复临时回滚跑一次，确认相关断言变红，再恢复。见「证明断言有牙齿」。
+5. **收尾必须杀进程树 + 显式退出。** 持有 WebSocket 与 HTTP server 的 Node 永远不会自己退出。
+
+## 流程
+
+### 0. 先找现成 harness，别从零写
+
+本机已有两份可抄的实现：`E:\插件（ai）\test-lab\browser-test.js`(MV3 扩展 + 网络层 mock + 滚动位置)、`E:\插件（ai）\login\verify.js`(纯页面 + 对比度/主题)。按当前项目改常量，比新写一份省事且少踩坑。`ws` 依赖可以指到已装好的 `node_modules/ws`。
+
+### 1. 本地静态服务
+
+```js
+const srv = http.createServer(handler);
+await new Promise(r => srv.listen(0, '127.0.0.1', r));
+const BASE = `http://127.0.0.1:${srv.address().port}`;
+```
+
+静态文件路径要 `path.normalize` 后校验仍在 root 目录内，别把工装服务开成任意文件读。被测页面如果需要两份互不干扰的文本(后台常按文本缓存，会污染请求顺序断言)，就生成两份措辞不同的长页。
+
+### 2. 启浏览器：Edge → Chrome
+
+```js
+const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'verify-profile-'));
+const child = spawn(bin, [
+  '--headless=new', '--remote-debugging-port=0', `--user-data-dir=${profile}`,
+  '--no-first-run', '--no-default-browser-check', '--window-size=1280,900'
+], { stdio: 'ignore' });
+```
+
+要测扩展再加 `--disable-extensions-except=<abs-dir>` 与 `--load-extension=<abs-dir>`，并加 `--disable-backgrounding-occluded-windows --disable-renderer-backgrounding`(否则后台标签被节流，断言会超时)。候选顺序固定 **Edge → Chrome**：稳定版 Chrome 137+(本机 153)直接忽略 `--load-extension`，加 `--enable-unsafe-extension-debugging` 也没用，MV3 SW target 永远不出现；Edge 153 能 headless 加载未打包扩展。
+
+### 3. 只认自己的端口
+
+```js
+const ownPort = async () => {
+  for (let i = 0; i < 60; i++) {
+    if (child.exitCode !== null) throw new Error('浏览器进程已退出 code=' + child.exitCode);
+    try {
+      const p = Number(fs.readFileSync(path.join(profile, 'DevToolsActivePort'), 'utf8').split('\n')[0].trim());
+      if (p > 0) return p;
+    } catch (e) { /* 文件还没写出来 */ }
+    await sleep(500);
+  }
+  throw new Error('未能在自己的 profile 里读到 DevToolsActivePort');
+};
+const version = await getJSON(`http://127.0.0.1:${await ownPort()}/json/version`);
+const cdp = new CDP(version.webSocketDebuggerUrl);
+```
+
+先检查 `child.exitCode`：启动失败的浏览器会留下一个永远不出现的端口文件，不检查就只会看到 30 秒超时。
+

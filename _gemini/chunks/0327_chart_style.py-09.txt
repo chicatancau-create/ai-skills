@@ -1,0 +1,100 @@
+        and record.y is not None
+    ]
+    firsts = [record for record in records if record.text == first_text]
+    lasts = [record for record in records if record.text == last_text]
+    if len(firsts) != 1 or len(lasts) != 1 or first_text == last_text:
+        return []
+    first, last = firsts[0], lasts[0]
+    axes = chart_data.get("axes") if isinstance(chart_data.get("axes"), dict) else {}
+    category = axes.get("category") if isinstance(axes.get("category"), dict) else {}
+    resolved = _category_axis_reversed(category, chart_type)
+    if chart_type == "bar":
+        expected = first.y < last.y
+        drawn = "top-down" if expected else "bottom-up"
+    else:
+        expected = first.x > last.x
+        drawn = "right-to-left" if expected else "left-to-right"
+    if expected == resolved:
+        return []
+    return [
+        f"Native PPTX {chart_type} chart fallback lists categories {drawn} "
+        f"({categories[0]!r} before {categories[-1]!r}) but the payload resolves "
+        f"axes.category.reverse to {str(resolved).lower()}; set axes.category.reverse: "
+        f"{str(expected).lower()}"
+    ]
+
+
+def _fallback_bar_clusters(
+    elem: ET.Element,
+    chart_data: dict[str, Any],
+) -> tuple[float, dict[int, list[tuple[float, float]]]] | None:
+    """Fallback bars grouped by category slot: slot size plus (low, high) edges per slot."""
+    chart_type = chart_data.get("type")
+    plot_area = chart_data.get("plot_area")
+    if chart_data.get("kind") != "category" or chart_type not in {"bar", "column"}:
+        return None
+    if not isinstance(plot_area, dict):
+        return None
+    categories = chart_data.get("categories") or []
+    if not categories or not chart_data.get("series"):
+        return None
+    px, py = float(plot_area["x"]), float(plot_area["y"])
+    pw, ph = float(plot_area["width"]), float(plot_area["height"])
+    along = 0 if chart_type == "column" else 1  # axis index that carries the categories
+    origin = px if along == 0 else py
+    extent = pw if along == 0 else ph
+    slot = extent / len(categories)
+    clusters: dict[int, list[tuple[float, float]]] = {}
+    for record in _fallback_data_shapes(elem):
+        if record.tag != "rect" or record.fill is None:
+            continue
+        x0, y0, x1, y1 = record.bounds
+        if (x1 - x0) * (y1 - y0) >= 0.9 * pw * ph:
+            continue
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        if not (px <= cx <= px + pw and py <= cy <= py + ph):
+            continue
+        low, high = (x0, x1) if along == 0 else (y0, y1)
+        index = min(len(categories) - 1, max(0, int((((low + high) / 2) - origin) // slot)))
+        clusters.setdefault(index, []).append((low, high))
+    if not clusters:
+        return None
+    return slot, clusters
+
+
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    return ordered[len(ordered) // 2]
+
+
+def _inferred_bar_gap_width(
+    elem: ET.Element,
+    chart_data: dict[str, Any],
+) -> int | None:
+    """Read the bar/column gap width from fallback bars inside a known plot area.
+
+    PowerPoint's gapWidth is the empty slot share as a percentage of one bar
+    width; the fallback slot is the plot extent divided by the category count.
+    """
+    grouped = _fallback_bar_clusters(elem, chart_data)
+    if grouped is None:
+        return None
+    slot, clusters = grouped
+    cluster = _median([
+        max(high for _, high in edges) - min(low for low, _ in edges)
+        for edges in clusters.values()
+    ])
+    if cluster <= 0:
+        return None
+    if cluster >= slot:
+        return 0
+    clustered = chart_data.get("grouping") == "clustered"
+    bars_per_cluster = len(chart_data.get("series") or []) if clustered else 1
+    bar_width = cluster / bars_per_cluster
+    return max(0, min(500, int(round((slot - cluster) / bar_width * 100))))
+
+
+def _inferred_bar_overlap(
+    elem: ET.Element,
+    chart_data: dict[str, Any],
+) -> int | None:

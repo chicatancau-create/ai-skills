@@ -1,0 +1,108 @@
+                        f'is assigned to both "{previous_key}" and "{resolved.key}"'
+                    )
+                    pair_conflict = True
+                slide_keys = keys.setdefault(slide_name, {})
+                previous_group = slide_keys.setdefault(resolved.key, group_id)
+                if previous_group != group_id:
+                    errors.append(
+                        f'animations.json Morph key "{resolved.key}" maps to both '
+                        f'"{slide_name}/{previous_group}" and '
+                        f'"{slide_name}/{group_id}"'
+                    )
+                    pair_conflict = True
+            if not pair_conflict:
+                pairs.append(resolved)
+
+    for destination_slide, declared_keys in declared_keys_by_destination.items():
+        destination_index = order_by_slide[destination_slide]
+        source_slide = slide_order[destination_index - 1]
+        shared_keys = (
+            set(keys.get(source_slide, {}))
+            & set(keys.get(destination_slide, {}))
+        )
+        unexpected_keys = sorted(shared_keys - declared_keys)
+        if unexpected_keys:
+            errors.append(
+                f'animations.json slide "{destination_slide}" Morph would '
+                'force undeclared adjacent key(s): '
+                + ', '.join(f'"{key}"' for key in unexpected_keys)
+            )
+    return pairs, list(dict.fromkeys(errors))
+
+
+def resolve_morph_pairs(
+    slide_order: list[str],
+    config: dict[str, Any] | None,
+) -> tuple[MorphPair, ...]:
+    """Return validated deterministic Morph pairs in authored order."""
+    if not config:
+        return ()
+    pairs, errors = _resolve_morph_pairs(slide_order, config)
+    if errors:
+        raise ValueError('; '.join(errors))
+    return tuple(pairs)
+
+
+def validate_animation_config_errors(config: dict[str, Any]) -> list[str]:
+    """Return fatal object-animation errors that must block export."""
+    errors = _unknown_field_errors(
+        config,
+        frozenset({'version', 'defaults', 'slides'}),
+        'top level',
+    )
+    defaults = config.get('defaults', {})
+    if not isinstance(defaults, dict):
+        errors.append('animations.json field "defaults" must be an object')
+    else:
+        errors.extend(
+            _unknown_field_errors(
+                defaults,
+                frozenset({'transition', 'animation'}),
+                'defaults',
+            )
+        )
+        errors.extend(_animation_scope_errors(defaults, 'defaults'))
+
+    slides = config.get('slides', {})
+    if not isinstance(slides, dict):
+        errors.append('animations.json field "slides" must be an object')
+        return list(dict.fromkeys(errors))
+
+    for slide_name, slide_cfg in slides.items():
+        if not isinstance(slide_cfg, dict):
+            errors.append(f'animations.json slide "{slide_name}" must be an object')
+            continue
+        errors.extend(
+            _unknown_field_errors(
+                slide_cfg,
+                frozenset({'transition', 'animation', 'groups', 'morph'}),
+                f'slide "{slide_name}"',
+            )
+        )
+        errors.extend(
+            _animation_scope_errors(slide_cfg, f'slide "{slide_name}"')
+        )
+        errors.extend(_animation_group_errors(slide_name, slide_cfg))
+    errors.extend(_resolved_animation_parameter_errors(config))
+    return list(dict.fromkeys(errors))
+
+
+def _animation_scope_errors(scope: dict[str, Any], label: str) -> list[str]:
+    if 'animation' not in scope:
+        return []
+    animation = scope['animation']
+    if not isinstance(animation, dict):
+        return [f'animations.json {label} field "animation" must be an object']
+
+    errors = _unknown_field_errors(
+        animation,
+        frozenset({
+            'effect',
+            'effect_options',
+            'duration',
+            'stagger',
+            'trigger',
+            *ANIMATION_TIMING_OPTION_FIELDS,
+            'after_effect',
+            'sound',
+        }),

@@ -1,0 +1,135 @@
+        return f"{name}({' '.join(compacted)})"
+
+    return _TRANSFORM_FUNCTION_RE.sub(replace, value)
+
+
+def _compact_attribute_value(
+    name: str,
+    value: str,
+    *,
+    compact_native_frames: bool,
+) -> str:
+    if name == "data-pptx-frame":
+        return _compact_coordinate_quad(value) if compact_native_frames else value
+    if name == "data-pptx-bounds":
+        return _compact_coordinate_quad(value)
+    if name == "transform":
+        return _compact_transform(value)
+    return value
+
+
+def _record_change(stats: CoordinateCompactionStats, name: str) -> None:
+    if name == "data-pptx-frame":
+        stats.native_frames += 1
+    elif name == "data-pptx-bounds":
+        stats.bounds += 1
+    elif name == "transform":
+        stats.transforms += 1
+
+
+def compact_svg_tree(
+    root: ET.Element,
+    *,
+    compact_native_frames: bool = True,
+) -> CoordinateCompactionStats:
+    """Compact safe coordinate metadata in one parsed SVG tree."""
+    stats = CoordinateCompactionStats()
+    for element in root.iter():
+        for name in (
+            "data-pptx-frame",
+            "data-pptx-bounds",
+            "transform",
+        ):
+            current = element.get(name)
+            if current is None:
+                continue
+            compacted = _compact_attribute_value(
+                name,
+                current,
+                compact_native_frames=compact_native_frames,
+            )
+            if compacted == current:
+                continue
+            element.set(name, compacted)
+            _record_change(stats, name)
+    return stats
+
+
+def compact_svg_text(
+    text: str,
+    *,
+    compact_native_frames: bool = True,
+) -> tuple[str, CoordinateCompactionStats]:
+    """Compact safe coordinates while preserving unrelated SVG formatting."""
+    stats = CoordinateCompactionStats()
+
+    def replace(match: re.Match[str]) -> str:
+        name = match.group("name")
+        current = match.group("value")
+        compacted = _compact_attribute_value(
+            name,
+            current,
+            compact_native_frames=compact_native_frames,
+        )
+        if compacted == current:
+            return match.group(0)
+        _record_change(stats, name)
+        return (
+            f"{name}{match.group('spacing')}{match.group('quote')}"
+            f"{compacted}{match.group('quote')}"
+        )
+
+    return _COMPACTABLE_ATTRIBUTE_RE.sub(replace, text), stats
+
+
+def _svg_files(input_path: Path) -> list[Path]:
+    if input_path.is_file():
+        return [input_path] if input_path.suffix.lower() == ".svg" else []
+    return sorted(path for path in input_path.rglob("*.svg") if path.is_file())
+
+
+def _write_atomic(path: Path, payload: str) -> None:
+    mode = stat.S_IMODE(path.stat().st_mode)
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        newline="\n",
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+        delete=False,
+    ) as handle:
+        temporary_path = Path(handle.name)
+        handle.write(payload)
+    try:
+        temporary_path.chmod(mode)
+        temporary_path.replace(path)
+    except OSError:
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Diagnose or migrate older page-space SVG coordinates to at most "
+            "two decimal places. Runs as a dry-run unless --inplace is supplied."
+        ),
+    )
+    parser.add_argument("input", type=Path, help="SVG file or directory")
+    parser.add_argument(
+        "--inplace",
+        action="store_true",
+        help="Atomically replace changed SVG files",
+    )
+    parser.add_argument(
+        "--keep-native-frames",
+        action="store_true",
+        help=(
+            "Leave data-pptx-frame unchanged while compacting "
+            "data-pptx-bounds and transform translations"
+        ),
+    )
+    return parser
+
+

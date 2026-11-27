@@ -1,0 +1,106 @@
+            continue
+        if not isinstance(field, dict) or field.get('locked') is not True:
+            continue
+        if 'value' in field:
+            locked_values[key] = field['value']
+    for key, value in locked_values.items():
+        result[key] = value
+    return locked_values
+
+
+def _wait_only_for_result(
+    result_file: Path,
+    lock_file: Path,
+    timeout: int,
+    target_stage: str = 'final',
+) -> int:
+    """Attach to an already-running confirm server and wait for a target stage.
+
+    No child is launched here: the page is open from the preceding ``--daemon``
+    launch, so liveness is tracked via the recorded pid, not a ``proc`` handle.
+    Only the stage guard is used (no mtime gate), because intermediate submits
+    may happen before this wait command is issued.
+    """
+    logger.info('waiting for browser confirmation stage=%s...', target_stage)
+    deadline = None if timeout <= 0 else time.time() + timeout
+    while True:
+        result_status = _wait_result_status(result_file, target_stage)
+        if result_status is not None:
+            return result_status
+
+        confirm_dir = result_file.parent
+        if target_stage == 'stage1':
+            readiness_error = _stage1_ready_error(confirm_dir)
+        else:
+            recommendations_file = _active_recommendations_path(confirm_dir)
+            readiness_error = _stage2_ready_error(
+                confirm_dir.parent,
+                confirm_dir,
+                recommendations_file,
+            )
+        if readiness_error:
+            logger.error(
+                'confirmation stage=%s is not ready: %s',
+                target_stage,
+                readiness_error,
+            )
+            return 1
+
+        lock = _read_lock(lock_file)
+        pid = _lock_pid(lock)
+        if not pid or not _process_alive(pid):
+            logger.error('confirm server is no longer running before stage=%s was confirmed', target_stage)
+            return 1
+
+        if deadline is not None and time.time() >= deadline:
+            logger.error(
+                'timed out waiting for confirmation stage=%s — the page may still '
+                'be open; re-check %s before falling back to chat', target_stage, result_file,
+            )
+            return 124
+
+        time.sleep(0.5)
+
+
+def _wait_result_status(
+    result_file: Path,
+    target_stage: str,
+) -> Optional[int]:
+    """Return a terminal wait status when the persisted result resolves the target."""
+    if _fresh_template_restart(result_file.parent):
+        return None
+    current_stage = _result_stage(result_file)
+    if current_stage == target_stage:
+        if target_stage == 'stage1':
+            try:
+                _read_template_selection(
+                    result_file.parent / TEMPLATE_SELECTION_NAME,
+                )
+            except (OSError, json.JSONDecodeError, ValueError) as exc:
+                logger.error(
+                    'Stage 1 result has no valid template selection: %s',
+                    exc,
+                )
+                return 2
+        logger.info('confirmation stage=%s received: %s', target_stage, result_file)
+        if target_stage == 'stage1':
+            logger.info(
+                '[NEXT] Stage 1 is intermediate: install the selected roots (if any), '
+                'author fresh Stage 2, then wait for final confirmation.'
+            )
+        return 0
+    if _result_stage_number(current_stage) > _result_stage_number(target_stage):
+        logger.error(
+            'confirmation skipped expected stage=%s and advanced to %s',
+            target_stage,
+            current_stage,
+        )
+        return 2
+    return None
+
+
+def _shutdown_existing(lock_file: Path) -> int:
+    """Stop a confirm server left running for this project (idempotent).
+
+    Step 4 always calls this on exit so the page never lingers on its selected
+    port. Tries a graceful ``/api/shutdown`` first, falls back to killing the

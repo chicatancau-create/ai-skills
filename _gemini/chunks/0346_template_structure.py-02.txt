@@ -1,0 +1,141 @@
+    "stroke-width",
+    "style",
+    "text-decoration",
+    "word-spacing",
+})
+_CSS_RULE_RE = re.compile(r"(?s)([^{}]+)\{([^{}]*)\}")
+_CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+_CSS_ID_RE = re.compile(r"#([A-Za-z_][A-Za-z0-9_-]*)")
+_CSS_CLASS_RE = re.compile(r"\.([A-Za-z_][A-Za-z0-9_-]*)")
+_CSS_ATTR_RE = re.compile(
+    r"\[\s*([A-Za-z_:][A-Za-z0-9_.:-]*)"
+    r"(?:\s*(?:[~|^$*]?=)\s*(['\"]?)([^\]'\"]+)\2)?\s*\]"
+)
+_CSS_URL_RE = re.compile(r"url\(\s*(['\"]?)(.*?)\1\s*\)", re.IGNORECASE)
+_CSS_TAG_RE = re.compile(r"(?:^|[\s>+~])([A-Za-z_][A-Za-z0-9_-]*|\*)")
+NATIVE_STRUCTURE_SCHEMA = "ppt-master.native-structure.v1"
+OOXML_UINT32_MAX = (1 << 32) - 1
+
+
+class TemplateStructureError(RuntimeError):
+    """Reject invalid or ambiguous template-structure metadata."""
+
+
+@dataclass(frozen=True)
+class PptxLayoutReference:
+    """One spec_lock page-to-PowerPoint-layout assignment."""
+
+    slide_num: int
+    layout_key: str
+    layout_name: str | None = None
+    master_key: str | None = None
+
+
+@dataclass(frozen=True)
+class PptxLayoutDefinition:
+    """One reusable PowerPoint Layout declared by a structured project lock."""
+
+    layout_key: str
+    master_key: str
+    layout_name: str
+    prototype_slide_num: int | None = None
+    prototype_svg_path: Path | None = None
+
+
+@dataclass(frozen=True)
+class PptxMasterReference:
+    """One named Master declared by the structured project lock."""
+
+    master_key: str
+    master_name: str
+
+
+@dataclass(frozen=True)
+class PptxPrototypeReference:
+    """One spec_lock page-to-template-SVG prototype declaration."""
+
+    slide_num: int
+    template_basename: str
+    svg_path: Path
+    replication_mode: str | None = None
+
+
+@dataclass(frozen=True)
+class PptxStructureLock:
+    """Optional project-level PPTX structure export policy."""
+
+    mode: str
+    template_reuse_scope: str | None = None
+    template_adherence: str | None = None
+    masters: tuple[PptxMasterReference, ...] = ()
+    layout_definitions: tuple[PptxLayoutDefinition, ...] = ()
+    layouts: tuple[PptxLayoutReference, ...] = ()
+    prototypes: tuple[PptxPrototypeReference, ...] = ()
+    source_template: Path | None = None
+    native_structure: Path | None = None
+
+
+@dataclass(frozen=True)
+class NativePlaceholderSpec:
+    """One placeholder exposed by a preserved source layout."""
+
+    semantic_role: str
+    placeholder_type: str
+    idx: int | None
+    geometry: tuple[float, float, float, float] | None = None
+
+    @property
+    def effective_idx(self) -> int:
+        """Return the OOXML index after applying the omitted-value default."""
+        return self.idx if self.idx is not None else 0
+
+
+@dataclass(frozen=True)
+class NativeLayoutSpec:
+    """One named layout retained from the source PPTX package."""
+
+    key: str
+    name: str
+    package_part: str
+    master_key: str
+    placeholders: tuple[NativePlaceholderSpec, ...] = ()
+
+
+@dataclass(frozen=True)
+class NativeSlideSpec:
+    """One source slide retained by index for exact round-trip passthrough."""
+
+    index: int
+    package_part: str
+    layout_key: str
+
+
+@dataclass(frozen=True)
+class NativeStructureContract:
+    """Validated portable contract for a preserved source PPTX package."""
+
+    source_template: Path
+    contract_path: Path
+    source_sha256: str
+    slide_size_emu: tuple[int, int]
+    layouts: tuple[NativeLayoutSpec, ...]
+    slides: tuple[NativeSlideSpec, ...]
+
+    def layout(self, key: str) -> NativeLayoutSpec:
+        for layout in self.layouts:
+            if layout.key == key:
+                return layout
+        raise TemplateStructureError(
+            f"native_structure.json has no layout key {key!r}"
+        )
+
+    def slide(self, index: int) -> NativeSlideSpec:
+        """Return one source slide contract by presentation-order index."""
+        for slide in self.slides:
+            if slide.index == index:
+                return slide
+        raise TemplateStructureError(
+            f"native_structure.json has no source slide {index}"
+        )
+
+

@@ -1,0 +1,110 @@
+                f"(expected {col_count} entries)"
+            )
+        _table_weights(column_widths, "column_widths")
+
+    row_heights = payload.get("row_heights")
+    if row_heights is not None:
+        if not isinstance(row_heights, list) or len(row_heights) != len(table_rows):
+            raise RuntimeError(
+                "Native PPTX table row_heights must match the resolved row count "
+                f"(expected {len(table_rows)} entries, header rows included)"
+            )
+        _table_weights(row_heights, "row_heights")
+
+    return col_count
+
+
+def _validate_table_cell_formatting(payload: dict[str, Any], table_rows: list[list[Any]]) -> None:
+    style = payload.get("style") if isinstance(payload.get("style"), dict) else {}
+    _table_bool(style.get("band_row"), "style.band_row", default=True)
+    if "borders" in style:
+        raise RuntimeError(
+            "Native PPTX table per-side borders are supported on cells only"
+        )
+    for row in table_rows:
+        for cell in row:
+            cell_data = _cell_payload(cell)
+            if "merge_continuation" in cell_data and not isinstance(
+                cell_data["merge_continuation"],
+                bool,
+            ):
+                raise RuntimeError(
+                    "Native PPTX table merge_continuation must be a JSON boolean"
+                )
+            _table_cell_paragraphs(cell_data)
+            if "bold" in cell_data:
+                _table_bool(cell_data["bold"], "cell bold", default=False)
+            for side in ("left", "right", "top", "bottom"):
+                _table_padding_value(cell_data, style, side)
+            for border in _table_border_specs(cell_data, style).values():
+                if border is None or border.style == "none":
+                    continue
+                assert border.width is not None
+                _powerpoint_line_width_emu(
+                    border.width,
+                    "table border_width",
+                )
+            _table_anchor(cell_data, style)
+            _table_cell_extra_attrs(cell_data)
+            _table_fill_opacity(cell_data)
+
+
+def _validate_table_payload(
+    payload: dict[str, Any],
+) -> tuple[
+    dict[str, Any],
+    list[list[Any]],
+    int,
+    dict[tuple[int, int], _TableMergeRegion],
+]:
+    authored_payload = payload
+    authored_rows = _table_rows(authored_payload)
+    payload = expand_semantic_table_payload(payload)
+    table_rows = _table_rows(payload)
+    col_count = _validate_table_lengths(payload, table_rows)
+    for row in table_rows:
+        row.extend([""] * (col_count - len(row)))
+    for row in authored_rows:
+        row.extend([""] * (col_count - len(row)))
+    merge_layout = _resolve_table_merge_layout(
+        authored_payload,
+        authored_rows,
+        col_count,
+    )
+    _table_header_rows(payload, len(table_rows))
+    _validate_table_cell_formatting(payload, table_rows)
+    return payload, table_rows, col_count, merge_layout
+
+
+def _table_cell_text_parts(cell: Any) -> list[str]:
+    """Return normalized paragraph lines for one table cell."""
+    cell_data = _cell_payload(cell)
+    paragraphs = _table_cell_paragraphs(cell_data)
+    values = (
+        [paragraph.text for paragraph in paragraphs]
+        if paragraphs is not None
+        else [cell_data.get("text")]
+    )
+    return [
+        text
+        for text in (
+            _normalized_fallback_text(value)
+            for value in values
+            if value is not None
+        )
+        if text
+    ]
+
+
+def _native_table_metadata_texts(table_rows: list[list[Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in table_rows:
+        for cell in row:
+            parts = _table_cell_text_parts(cell)
+            variants = list(parts)
+            if len(parts) > 1:
+                variants.extend({
+                    _normalized_fallback_text("".join(parts)),
+                    _normalized_fallback_text(" ".join(parts)),
+                })
+            for text in variants:

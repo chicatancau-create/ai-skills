@@ -1,0 +1,105 @@
+        raise MirrorMaterializationError("native_structure.json slideSize is missing")
+    for field in ("width_px", "height_px"):
+        value = slide_size.get(field)
+        if not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+            raise MirrorMaterializationError(f"native slideSize.{field} must be positive")
+    return native
+
+
+def _load_inheritance(workspace: Path) -> dict[str, Any]:
+    return _load_json(workspace / "svg" / "inheritance.json", context="inheritance graph")
+
+
+def _validate_graph_roster(
+    native: dict[str, Any],
+    inheritance: dict[str, Any],
+    retained_master_keys: set[str],
+    retained_layout_keys: set[str],
+) -> set[str]:
+    masters = _require_list(native.get("masters"), context="native masters")
+    layouts = _require_list(native.get("layouts"), context="native layouts")
+    slides = _require_list(native.get("slides"), context="native slides")
+    inheritance_masters_raw = _require_list(
+        inheritance.get("masters"),
+        context="inheritance masters",
+    )
+    retained_masters = [
+        item
+        for item in masters
+        if isinstance(item, dict) and item.get("key") in retained_master_keys
+    ]
+    retained_layouts = [
+        item
+        for item in layouts
+        if isinstance(item, dict) and item.get("key") in retained_layout_keys
+    ]
+    if len(retained_masters) != len(retained_master_keys):
+        raise MirrorMaterializationError(
+            "Reachable Master roster differs from native graph"
+        )
+    if len(retained_layouts) != len(retained_layout_keys):
+        raise MirrorMaterializationError(
+            "Reachable Layout roster differs from native graph"
+        )
+    required_master_parts = {
+        _require_string(
+            master.get("packagePart"),
+            context=f"native Master {master.get('key')!r} packagePart",
+        )
+        for master in retained_masters
+    }
+    master_file_by_part: dict[str, str] = {}
+    for item in inheritance_masters_raw:
+        if not isinstance(item, dict):
+            continue
+        part_path = item.get("partPath")
+        if part_path not in required_master_parts:
+            continue
+        master_file_by_part[_require_string(
+            part_path,
+            context="inheritance Master partPath",
+        )] = _require_string(
+            item.get("file"),
+            context="inheritance Master file",
+        )
+    for index, master in enumerate(masters):
+        if not isinstance(master, dict):
+            raise MirrorMaterializationError(f"native masters[{index}] must be an object")
+        if master.get("key") not in retained_master_keys:
+            continue
+        package_part = _require_string(
+            master.get("packagePart"),
+            context=f"native masters[{index}].packagePart",
+        )
+        svg_file = master_file_by_part.get(package_part)
+        if svg_file is None:
+            raise MirrorMaterializationError(
+                f"Native Master part {package_part!r} has no inheritance SVG file"
+            )
+        master["svgFile"] = svg_file
+    expected_files: set[str] = set()
+    for collection, field in (
+        (
+            retained_masters,
+            "svgFile",
+        ),
+        (
+            retained_layouts,
+            "svgFile",
+        ),
+        (slides, "layeredSvgFile"),
+    ):
+        for index, item in enumerate(collection):
+            if not isinstance(item, dict):
+                raise MirrorMaterializationError(f"native {field}[{index}] must be an object")
+            expected_files.add(
+                _require_string(item.get(field), context=f"native {field}[{index}]")
+            )
+    expected_role_count = len(retained_masters) + len(retained_layouts) + len(slides)
+    if len(expected_files) != expected_role_count:
+        raise MirrorMaterializationError(
+            "Reachable Master/Layout/Slide authoring files must be role-distinct"
+        )
+
+    retained_layout_files = {
+        _require_string(

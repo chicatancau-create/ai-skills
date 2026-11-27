@@ -1,0 +1,104 @@
+    design_spec_depth = recommendations.get('design_spec_depth')
+    design_spec_depth_value = (
+        design_spec_depth.get('value')
+        if isinstance(design_spec_depth, dict)
+        else None
+    )
+    if (
+        not isinstance(design_spec_depth_value, str)
+        or design_spec_depth_value not in _DESIGN_SPEC_DEPTH_VALUES
+    ):
+        return (
+            'Stage 2 recommendations must include design_spec_depth.value as '
+            '"brief" or "complete"'
+        )
+    if design_spec_depth_value == 'brief' and (
+        generation_mode == 'split' or refine_spec['value']
+    ):
+        return (
+            'Stage 2 recommendations must set design_spec_depth.value to '
+            '"complete" when recommend.generation_mode is "split" or '
+            'refine_spec.value is true'
+        )
+    if _uses_ai_images(recommendations):
+        image_ai_path = recommend.get('image_ai_path')
+        if not isinstance(image_ai_path, str) or not image_ai_path.strip():
+            return (
+                'Stage 2 recommendations must include non-empty '
+                'recommend.image_ai_path when image_usage includes ai'
+            )
+    return None
+
+
+def _stage2_production_result_error(result: dict) -> Optional[str]:
+    """Require every user-confirmed production control in the final payload."""
+    generation_mode = result.get('generation_mode')
+    if not isinstance(generation_mode, str) or not generation_mode.strip():
+        return 'final Stage 2 payload must include non-empty generation_mode'
+    if not isinstance(result.get('refine_spec'), bool):
+        return 'final Stage 2 payload must include refine_spec as a boolean'
+    design_spec_depth = result.get('design_spec_depth')
+    if (
+        not isinstance(design_spec_depth, str)
+        or design_spec_depth not in _DESIGN_SPEC_DEPTH_VALUES
+    ):
+        return (
+            'final Stage 2 payload must include design_spec_depth as "brief" '
+            'or "complete"'
+        )
+    if design_spec_depth == 'brief' and (
+        generation_mode == 'split' or result['refine_spec']
+    ):
+        return (
+            'final Stage 2 payload must set design_spec_depth to "complete" '
+            'when generation_mode is "split" or refine_spec is true'
+        )
+    if _uses_ai_images(result):
+        image_ai_path = result.get('image_ai_path')
+        if not isinstance(image_ai_path, str) or not image_ai_path.strip():
+            return (
+                'final Stage 2 payload must include non-empty image_ai_path '
+                'when image_usage includes ai'
+            )
+    return None
+
+
+def _palette_error(color: object, label: str) -> Optional[str]:
+    """Validate one complete user-facing palette."""
+    if not isinstance(color, dict):
+        return f'{label} must be an object'
+    palette = color.get('palette')
+    if not isinstance(palette, dict):
+        palette = color
+    for role in _PALETTE_ROLES:
+        value = palette.get(role)
+        if role == 'body_text' and value is None:
+            value = palette.get('text')
+        if not isinstance(value, str) or not _HEX_COLOR_RE.fullmatch(value.strip()):
+            return f'{label}.palette.{role} must be a HEX color'
+    return None
+
+
+def _positive_number(value: object) -> bool:
+    """Return whether a JSON value is a positive finite number."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return False
+    return number > 0 and number != float('inf')
+
+
+def _is_english_language(language: object) -> bool:
+    """Return whether a recommendation language is an English locale."""
+    if not isinstance(language, str):
+        return False
+    try:
+        return language_base(language) == 'en'
+    except LanguageTagError:
+        return False
+
+
+def _recommendation_language(recommendations: dict) -> object:
+    """Return the deck's main language without conflating it with UI ``lang``."""
+    value = (
+        recommendations.get('primary_language')

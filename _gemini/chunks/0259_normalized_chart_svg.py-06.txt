@@ -1,0 +1,93 @@
+                        ty = y + h / 2 + label_size * 0.32
+                        anchor = "start" if end >= start else "end"
+                    else:
+                        tx = x + w / 2
+                        ty = y1 - 4.0 if end >= start else y1 + label_size + 3.0
+                        anchor = "middle"
+                    parts.append(_text(
+                        tx,
+                        ty,
+                        label,
+                        size=_label_font_size(labels, label_size),
+                        anchor=anchor,
+                        fill=_entry_color(labels, "#444444"),
+                        weight="600" if labels.get("bold") else None,
+                        font_family=str(labels.get("font_family") or "Arial"),
+                    ))
+    return parts
+
+
+def _render_lines_or_areas(
+    payload: dict[str, Any],
+    categories: list[str],
+    series: list[dict[str, Any]],
+    styles: list[SeriesVisualStyle],
+    segments: list[list[tuple[float, float]]],
+    plot: _Rect,
+    lo: float,
+    hi: float,
+    chart_type: str,
+    label_size: float,
+    percent: bool,
+) -> list[str]:
+    parts: list[str] = []
+    count = len(categories)
+    x_positions = [
+        _category_point_x(plot, idx, count)
+        for idx in range(count)
+    ]
+    show_markers = chart_type == "line" and payload.get("line_style") == "lineMarker"
+    for series_index, (item, style, row) in enumerate(zip(series, styles, segments)):
+        fill_color = style.fill or "none"
+        line_color = style.stroke
+        top = [
+            (x_positions[idx], _map(end, lo, hi, plot.y + plot.h, plot.y))
+            for idx, (_start, end) in enumerate(row)
+        ]
+        runs: list[list[int]] = [[]]
+        for idx, value in enumerate(item["values"][:count]):
+            if value is None:
+                if runs[-1]:
+                    runs.append([])
+            else:
+                runs[-1].append(idx)
+        for indices in runs:
+            if not indices:
+                continue
+            points = [top[idx] for idx in indices]
+            if chart_type == "area":
+                bottom = [
+                    (x_positions[idx], _map(row[idx][0], lo, hi, plot.y + plot.h, plot.y))
+                    for idx in indices
+                ]
+                points += list(reversed(bottom))
+                parts.append(
+                    f'<polygon points="{_points(points)}" fill="{fill_color}" '
+                    f'fill-opacity="{_fmt(min(style.fill_opacity, 0.58))}" '
+                    f'stroke="{line_color or "none"}" stroke-opacity="{_fmt(style.stroke_opacity)}" '
+                    f'stroke-width="{_fmt(max(0.7, style.stroke_width))}" '
+                    'stroke-linejoin="round"/>'
+                )
+            elif line_color is not None:
+                parts.append(
+                    f'<polyline points="{_points(points)}" fill="none" stroke="{line_color}" '
+                    f'stroke-opacity="{_fmt(style.stroke_opacity)}" '
+                    f'stroke-width="{_fmt(max(1.0, style.stroke_width))}" '
+                    f'stroke-linecap="{style.line_cap}" stroke-linejoin="round"/>'
+                )
+        if show_markers:
+            for idx, (x, y) in enumerate(top):
+                if item["values"][idx] is None:
+                    continue
+                radius = max(2.0, style.marker_size / 2)
+                parts.append(
+                    f'<circle cx="{_fmt(x)}" cy="{_fmt(y)}" r="{_fmt(radius)}" '
+                    f'fill="{style.marker_fill or "none"}" '
+                    f'fill-opacity="{_fmt(style.marker_fill_opacity)}" '
+                    f'stroke="{style.marker_stroke or "none"}" '
+                    f'stroke-opacity="{_fmt(style.marker_stroke_opacity)}" '
+                    f'stroke-width="{_fmt(max(0.6, style.marker_stroke_width))}"/>'
+                )
+        for idx, (x, y) in enumerate(top):
+            if item["values"][idx] is None:
+                continue

@@ -1,0 +1,94 @@
+                "m:ctrlPr may contain only one optional a:rPr"
+            )
+        return
+    if element_name in _PROPERTY_ORDER:
+        _validate_property_children(element, element_name)
+        return
+    if element_name in _EMPTY_PROPERTY_ELEMENTS:
+        if list(element):
+            raise FormulaCompileError(f"m:{element_name} must be empty")
+        return
+    if element_name in _VALUE_ELEMENTS:
+        if list(element):
+            raise FormulaCompileError(f"m:{element_name} must not contain children")
+        _validate_math_value(element, element_name)
+        return
+    if element_name == "t" and list(element):
+        raise FormulaCompileError("m:t must not contain children")
+
+
+def _validate_matrix_dimensions(root: ET.Element) -> None:
+    for matrix in root.iter(_math_tag("m")):
+        properties = matrix.find(_math_tag("mPr"))
+        columns = properties.find(_math_tag("mcs")) if properties is not None else None
+        if columns is None:
+            raise FormulaCompileError("m:mPr must contain m:mcs")
+        column_count = 0
+        for column in columns:
+            column_properties = column.find(_math_tag("mcPr"))
+            count = (
+                column_properties.find(_math_tag("count"))
+                if column_properties is not None
+                else None
+            )
+            if count is None:
+                raise FormulaCompileError("m:mcPr must contain m:count")
+            column_count += int(_math_value(count))
+        if not 1 <= column_count <= 64:
+            raise FormulaCompileError("matrix column count must be from 1 to 64")
+        for row in matrix.findall(_math_tag("mr")):
+            if len(row.findall(_math_tag("e"))) != column_count:
+                raise FormulaCompileError(
+                    "every matrix row must match the declared column count"
+                )
+
+
+def _validate_xml_tree(root: ET.Element) -> None:
+    namespace, local_name = _qualified_name(root.tag)
+    if namespace != MATH_NS or local_name not in {"oMathPara", "oMath"}:
+        raise FormulaCompileError("OMML root must be m:oMathPara or m:oMath")
+
+    math_roots = 0
+    pending = [root]
+    while pending:
+        element = pending.pop()
+        pending.extend(reversed(element))
+        element_namespace, element_name = _qualified_name(element.tag)
+        if element_namespace == MATH_NS and element_name not in _MATH_ELEMENTS:
+            raise FormulaCompileError(
+                f"OMML contains unsupported math element: {element_name!r}"
+            )
+        if element_namespace == DRAWING_NS and element_name not in _DRAWING_ELEMENTS:
+            raise FormulaCompileError(
+                f"OMML contains unsupported DrawingML element: {element_name!r}"
+            )
+        if element_namespace not in {MATH_NS, DRAWING_NS}:
+            raise FormulaCompileError(
+                f"OMML contains unsupported element namespace: {element_namespace!r}"
+            )
+        if element_namespace == MATH_NS and element_name in {"oMathPara", "oMath"}:
+            math_roots += 1
+        for attribute, value in element.attrib.items():
+            attribute_namespace, attribute_name = _qualified_name(attribute)
+            if (
+                attribute_namespace == MATH_NS
+                and attribute_name == "val"
+                and element_namespace == MATH_NS
+                and element_name in _VALUE_ELEMENTS
+            ):
+                continue
+            if (
+                attribute_namespace in {None, DRAWING_NS}
+                and element_namespace == DRAWING_NS
+                and attribute_name in _DRAWING_ATTRIBUTES
+            ):
+                continue
+            if (
+                attribute_namespace == XML_NS
+                and element_namespace == MATH_NS
+                and element_name == "t"
+                and attribute_name == "space"
+                and value == "preserve"
+            ):
+                continue
+            raise FormulaCompileError(

@@ -1,0 +1,89 @@
+            pptx.write_bytes(b"PK")
+            self.assertEqual(_project_input_path(project, "exports/deck.pptx"), project / "exports" / "deck.pptx")
+            self.assertEqual(_project_input_path(project, str(pptx)), pptx)
+
+    def test_web_to_md_refuses_output_file_for_several_urls(self) -> None:
+        import io
+        from contextlib import redirect_stderr
+        buffer = io.StringIO()
+        with redirect_stderr(buffer):
+            rc = web_to_md.main(["https://example.org/a", "https://example.org/b", "-o", "out.md"])
+        self.assertEqual(rc, 2)
+        self.assertIn("--dir", buffer.getvalue())
+
+
+class PolygonFilterTests(unittest.TestCase):
+    SVG = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720">'
+        '<defs><filter id="paperShadow"><feDropShadow dx="0" dy="6" stdDeviation="6" '
+        'flood-color="#000000" flood-opacity="0.25"/></filter></defs>'
+        '<polygon id="sheet" points="100,100 400,120 380,400 90,380" fill="#E8D9C4" '
+        'filter="url(#paperShadow)"/>'
+        '</svg>'
+    )
+
+    def test_polygon_is_a_public_filter_target(self) -> None:
+        errors = project_filter_errors(ET.fromstring(self.SVG))
+        self.assertEqual([e for e in errors if "cannot use filter" in e], [])
+
+    def test_polygon_exports_its_shadow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            svg_path = root / "page.svg"
+            svg_path.write_text(self.SVG, encoding="utf-8")
+            xml, *_rest = convert_svg_to_slide_shapes(svg_path, resource_root=root)
+        self.assertIn("<a:outerShdw", xml)
+        self.assertIn('name="sheet"', xml)  # named after its SVG id
+
+
+class PresetPaintCompactionTests(unittest.TestCase):
+    SVG = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720">'
+        '<g id="rail-field" data-pptx-role="decoration" data-pptx-bounds="0 0 380 720">'
+        '<rect x="0" y="0" width="300" height="720" fill="#004B20"/>'
+        '<g id="p08-rail-edge" data-pptx-authoring="preset" data-pptx-object="shape" '
+        'data-pptx-prst="rtTriangle" data-pptx-frame="300 0 80 720" fill="#004B20" '
+        'stroke="none" transform="matrix(1 0 0 -1 0 720)">'
+        '<path d="M 300 720 L 300 0 L 380 720 Z"/></g>'
+        '</g></svg>'
+    )
+
+    def test_preset_keeps_local_paint(self) -> None:
+        root = ET.fromstring(self.SVG)
+        stats = compact_svg_style_tree(root)
+        self.assertEqual(stats.changed_declarations, 0)
+        self.assertEqual(validate_authored_preset_tree(root), [])
+
+    def test_parent_paint_is_not_stripped_from_preset(self) -> None:
+        root = ET.fromstring(self.SVG.replace(
+            'data-pptx-bounds="0 0 380 720">',
+            'data-pptx-bounds="0 0 380 720" fill="#004B20">',
+        ))
+        compact_svg_style_tree(root)
+        preset = root.find('.//*[@id="p08-rail-edge"]')
+        self.assertEqual(preset.get("fill"), "#004B20")
+        self.assertEqual(validate_authored_preset_tree(root), [])
+
+    def test_comment_nodes_do_not_crash(self) -> None:
+        parser = ET.XMLParser(target=ET.TreeBuilder(insert_comments=True))
+        root = ET.fromstring(
+            self.SVG.replace('<rect ', '<!-- chart-plot-area --><rect ', 1),
+            parser=parser,
+        )
+        compact_svg_style_tree(root)
+        self.assertEqual(validate_authored_preset_tree(root), [])
+
+
+class BeautifyIntakeTests(unittest.TestCase):
+    def test_prose_mentioning_part_stays_content(self) -> None:
+        text = "涉及的主要扶持措施" + "对新增部分的场地按实际租金给予补贴。" * 10
+        slots = [{}, {}]
+        self.assertEqual(_classify_page_type(8, 16, text, slots), "content_candidate")
+        self.assertEqual(
+            _classify_page_type(3, 16, "第一部分 政府采购基本概念 PART ONE", slots),
+            "chapter_candidate",
+        )
+
+    def test_theme_font_refs_resolve(self) -> None:
+        refs = _theme_font_refs({
+            "title": {"latin": "Verdana", "ea": "微软雅黑"},

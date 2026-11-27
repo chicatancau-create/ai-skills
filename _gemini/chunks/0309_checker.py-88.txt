@@ -1,0 +1,89 @@
+                locked_pattern = entry.get('pattern', '')
+                if locked_pattern and not self._layout_projection_matches(
+                    locked_pattern,
+                    layout_pattern,
+                ):
+                    self._illustration_issues.append((
+                        'error',
+                        'locked_image_pattern_mismatch',
+                        f"{filename} spec_lock pattern="
+                        f"{entry.get('pattern')!r} does not preserve the "
+                        "Design Spec §VIII Image pattern recommendation "
+                        f"{layout_pattern!r}. This Design Spec-to-spec_lock "
+                        "projection check compares ordered catalog ids when "
+                        "present, otherwise normalized text; it does not "
+                        "compare SVG geometry or restrict the Executor's "
+                        "realization.",
+                    ))
+            candidate_paths: List[Path] = []
+            for entry in entries:
+                raw_path = entry.get('path', '')
+                if not raw_path:
+                    continue
+                lock_path = Path(raw_path)
+                legacy_bare_filename = (
+                    not lock_path.is_absolute()
+                    and raw_path not in {'.', '..'}
+                    and '/' not in raw_path
+                    and '\\' not in raw_path
+                    and ':' not in raw_path
+                )
+                if lock_path.is_absolute():
+                    path = lock_path
+                elif legacy_bare_filename:
+                    path = project_path / 'images' / raw_path
+                else:
+                    path = project_path / raw_path
+                resolved_path = path.resolve()
+                try:
+                    resolved_path.relative_to(project_root)
+                except ValueError:
+                    self._illustration_issues.append((
+                        'error',
+                        'locked_image_path_outside_project',
+                        f"{filename} lock path {entry['path']!r} resolves "
+                        "outside the project workspace.",
+                    ))
+                    continue
+                candidate_paths.append(resolved_path)
+
+            distinct_candidate_paths = set(candidate_paths)
+            if len(distinct_candidate_paths) > 1:
+                shown = ', '.join(
+                    str(path.relative_to(project_root))
+                    for path in sorted(distinct_candidate_paths)
+                )
+                self._illustration_issues.append((
+                    'error',
+                    'locked_image_ambiguous_paths',
+                    f"{filename} resolves to multiple locked project paths: "
+                    f"{shown}. One resource must have one authoritative asset.",
+                ))
+
+            expected_paths = {
+                path
+                for path in distinct_candidate_paths
+                if path.is_file()
+            }
+            asset_exists = bool(expected_paths)
+            file_required = status in {
+                'existing',
+                'generated',
+                'sourced',
+                'rendered',
+            }
+            if not asset_exists and file_required:
+                expected = entries[0].get('path') or f"images/{filename}"
+                self._illustration_issues.append((
+                    'error',
+                    'locked_image_file_missing',
+                    f"{filename} is locked and has terminal Status "
+                    f"{row.get('Status', '').strip()!r}, but {expected} "
+                    "does not exist.",
+                ))
+
+            actual_paths = referenced_paths.get(filename, set())
+            unexpected_paths = actual_paths - expected_paths
+            if unexpected_paths:
+                shown = ', '.join(
+                    str(path.relative_to(project_root))

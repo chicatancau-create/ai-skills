@@ -1,0 +1,96 @@
+                self._source_manifest_errors_reported.add(manifest_path)
+            return
+
+        items = manifest.get('items') or []
+        if not items:
+            return
+
+        credit_blocks = self._visible_svg_text_blocks(root)
+        referenced_filenames = self._referenced_image_basenames(root)
+
+        for item in items:
+            if not item.get('attribution_required') and item.get('license_tier') != 'attribution-required':
+                continue
+
+            filename = str(item.get('filename') or '')
+            if not filename or filename not in referenced_filenames:
+                continue
+
+            license_name = str(item.get('license_name') or '').upper()
+            # Only a Creative Commons licence has a token the credit must
+            # repeat; a publisher's own source-credit terms bind the credit to
+            # the author/source name alone.
+            if 'CC' in license_name or 'CREATIVE COMMONS' in license_name:
+                license_token = 'CC BY-SA' if 'BY-SA' in license_name else 'CC BY'
+            else:
+                license_token = None
+            author = str(item.get('author') or '').strip()
+            has_credit = bool(author) and any(
+                author.casefold() in block.casefold()
+                and (license_token is None or license_token in block.upper())
+                for block in credit_blocks
+            )
+            if not has_credit:
+                expected = f"{author or 'unknown author'}"
+                if license_token:
+                    expected += f"; {license_token}"
+                result['errors'].append(
+                    f"Missing image-specific inline attribution for sourced "
+                    f"image {filename} ({expected}). Add compact author + "
+                    f"license credit per references/image-searcher.md §7."
+                )
+
+    @classmethod
+    def _visible_svg_text_blocks(cls, root: ET.Element) -> List[str]:
+        """Return rendered text blocks, excluding hidden/non-visual content."""
+        working_root = copy.deepcopy(root)
+        if (
+            _expand_local_use_references is not None
+            and _UseExpansionError is not None
+        ):
+            try:
+                _expand_local_use_references(working_root)
+            except _UseExpansionError:
+                working_root = copy.deepcopy(root)
+        parent_by_id = {
+            id(child): parent
+            for parent in working_root.iter()
+            for child in list(parent)
+        }
+
+        blocks: List[str] = []
+        for element in working_root.iter(f'{{{SVG_NS}}}text'):
+            if (
+                cls._is_hidden_element(element, parent_by_id)
+                or cls._has_non_visual_ancestor(
+                    element,
+                    working_root,
+                    parent_by_id,
+                )
+                or cls._has_zero_opacity(element, parent_by_id)
+            ):
+                continue
+            text = re.sub(r'\s+', ' ', ' '.join(element.itertext())).strip()
+            if text:
+                blocks.append(text)
+        return blocks
+
+    @staticmethod
+    def _normalize_size(value: str) -> str:
+        """Normalize a font-size value for drift comparison.
+
+        Unit-bearing SVG values are reported as errors before drift checking.
+        The legacy `px` strip remains to avoid a duplicate drift warning after
+        the hard error has already identified the unit problem.
+        """
+        v = value.strip().lower()
+        if v.endswith('px'):
+            v = v[:-2].strip()
+        return v
+
+    @staticmethod
+    def _normalize_font_stack(stack: str) -> str:
+        """Normalize a font-family stack for comparison: split on commas, strip
+        quotes / whitespace, lowercase, rejoin. Collapses cosmetic differences
+        (comma spacing, single vs double quotes, case) so that
+        `Consolas,'Courier New',monospace` matches `Consolas, "Courier New", monospace`."""

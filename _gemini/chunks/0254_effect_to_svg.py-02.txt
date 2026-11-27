@@ -1,0 +1,119 @@
+    if not container.tag.startswith(_DRAWINGML_TAG_PREFIX):
+        return EffectResult.unsupported(
+            f"invalid-effect-container-namespace:{container_name}"
+        )
+    if container_name == "effectDag":
+        return EffectResult.unsupported(
+            "unsupported-effect-container:effectDag",
+            container,
+        )
+    effects = [
+        child
+        for child in container
+        if isinstance(child.tag, str)
+    ]
+    if not effects:
+        return EffectResult()
+    names = [child.tag.split("}", 1)[-1] for child in effects]
+    if len(effects) != 1:
+        return EffectResult.unsupported(
+            "multiple-effects:" + ",".join(names),
+            container,
+        )
+
+    effect = effects[0]
+    effect_name = names[0]
+    if not effect.tag.startswith(_DRAWINGML_TAG_PREFIX):
+        return EffectResult.unsupported(
+            f"invalid-effect-namespace:{effect_name}"
+        )
+    try:
+        if effect_name == "outerShdw":
+            unsupported_attributes = _unsupported_outer_shadow_attributes(
+                effect,
+                target_rotation_degrees=target_rotation_degrees,
+            )
+            if unsupported_attributes:
+                return EffectResult.unsupported(
+                    "unsupported-effect-attributes:outerShdw:"
+                    + ",".join(unsupported_attributes),
+                    container,
+                )
+            primitives = _outer_shadow(effect, palette)
+        elif effect_name == "glow":
+            primitives = _glow(effect, palette)
+        else:
+            return EffectResult.unsupported(
+                f"unsupported-effect:{effect_name}",
+                container,
+            )
+    except (OverflowError, TypeError, ValueError) as exc:
+        return EffectResult.unsupported(
+            f"invalid-effect:{effect_name}:{exc}",
+            container,
+        )
+
+    if id_seq is None:
+        id_seq = [0]
+    id_seq[0] += 1
+    filter_id = f"{id_prefix}{id_seq[0]}"
+
+    # Filter region needs to extend beyond the bounding box to render shadows
+    # and glows; choose generous defaults.
+    filter_x = "-25%"
+    filter_y = "-25%"
+    filter_w = "150%"
+    filter_h = "150%"
+
+    defs_xml = (
+        f'<filter id="{filter_id}" x="{filter_x}" y="{filter_y}" '
+        f'width="{filter_w}" height="{filter_h}">'
+        + primitives
+        + "</filter>"
+    )
+    return EffectResult(filter_id=filter_id, defs=(defs_xml,))
+
+
+def _color_alpha(elem: ET.Element, palette: ColorPalette | None) -> tuple[str, float]:
+    direct_children = [
+        child
+        for child in elem
+        if isinstance(child.tag, str)
+    ]
+    colors = [
+        child
+        for child in direct_children
+        if _local_name(child) in COLOR_TAGS
+    ]
+    if len(colors) != 1:
+        reason = "missing-color" if not colors else "multiple-colors"
+        raise ValueError(reason)
+    if len(direct_children) != 1:
+        extras = [
+            _local_name(child)
+            for child in direct_children
+            if child is not colors[0]
+        ]
+        raise ValueError("unexpected-effect-child:" + ",".join(extras))
+    color = colors[0]
+    if not color.tag.startswith(_DRAWINGML_TAG_PREFIX):
+        raise ValueError(f"invalid-color-namespace:{_local_name(color)}")
+    _validate_color(color, palette)
+    hex_, alpha = resolve_color(color, palette)
+    if hex_ is None:
+        raise ValueError(f"unresolvable-color:{_local_name(color)}")
+    return hex_, alpha
+
+
+def _validate_color(
+    color: ET.Element,
+    palette: ColorPalette | None,
+) -> None:
+    """Validate the color subset resolved into one SVG filter paint."""
+    color_name = _local_name(color)
+    if color_name == "srgbClr":
+        raw = color.get("val", "")
+        if _OOXML_HEX_COLOR_RE.fullmatch(raw) is None:
+            raise ValueError(f"invalid-color:{color_name}")
+    elif color_name == "schemeClr":
+        raw = (color.get("val") or "").strip()

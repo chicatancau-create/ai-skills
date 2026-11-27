@@ -1,0 +1,114 @@
+TABLE_REFERENCE_PROSE_RE = re.compile(
+    r'^\u8868\s*\d+(?:\.\d+)*\s*(?:\u7684|\u5217\u793a|\u6240\u793a|\u4e3a)'
+)
+SECTION_HEADING_RE = re.compile(r'^\d+(?:\.\d+){1,3}\s+\S')
+NUMBER_RE = re.compile(r'[-+]?\d+(?:\.\d+)?')
+MODEL_COLUMN_RE = re.compile(r'^[（(]\d+[）)]$')
+TABLE_NOTE_PREFIX = '\u6ce8'
+TABLE_CONTINUATION_Y_RATIO = 0.88
+TABLE_SCAN_BOTTOM_RATIO = 0.92
+
+
+def should_keep_image(
+    block: dict[str, object],
+    page_rect: fitz.Rect,
+    seen_hashes: set[str] | None = None,
+) -> bool:
+    """Filter out small, decorative, or duplicate images.
+
+    Args:
+        block: Image block extracted from PyMuPDF.
+        page_rect: Current page rectangle.
+        seen_hashes: Optional set used to deduplicate image payloads.
+
+    Returns:
+        Whether the image should be kept in the Markdown output.
+    """
+    w, h = block.get("width", 0), block.get("height", 0)
+    bbox = block.get("bbox", (0, 0, 0, 0))
+    render_w = bbox[2] - bbox[0]
+    render_h = bbox[3] - bbox[1]
+    page_area = page_rect.width * page_rect.height
+    render_area_ratio = (render_w * render_h) / page_area if page_area > 0 else 0
+    visibly_placed = (
+        render_w >= MIN_VISIBLE_IMAGE_WIDTH
+        and render_h >= MIN_VISIBLE_IMAGE_HEIGHT
+        and render_area_ratio >= MIN_VISIBLE_IMAGE_AREA_RATIO
+    )
+
+    # Pixel dimension filter
+    if not visibly_placed and (w < MIN_IMAGE_PIXELS or h < MIN_IMAGE_PIXELS):
+        return False
+
+    # Pixel area filter
+    area = w * h
+    if not visibly_placed and area < MIN_IMAGE_AREA:
+        return False
+
+    image_data = block.get("image", b"")
+    if not visibly_placed and len(image_data) < MIN_IMAGE_BYTES:
+        return False
+
+    # Deduplicate tiny repeats, but preserve visibly placed logos / charts on
+    # distinct pages. Academic PDFs often reuse a small logo on title pages.
+    if seen_hashes is not None:
+        img_hash = hashlib.md5(image_data).hexdigest()
+        if img_hash in seen_hashes and not visibly_placed:
+            return False
+        seen_hashes.add(img_hash)
+
+    # Check render size relative to page
+    page_w = page_rect.width
+    page_h = page_rect.height
+    if page_w > 0 and page_h > 0:
+        if render_w / page_w < MIN_PAGE_RATIO and render_h / page_h < MIN_PAGE_RATIO:
+            return False
+
+    # Filter extreme aspect ratios (decorative bars/separators)
+    aspect = max(w, h) / max(min(w, h), 1)
+    if aspect > MAX_ASPECT_RATIO:
+        return False
+
+    # Filter low-info images: solid color blocks / gradients have very high
+    # compression ratios (low bytes-per-pixel). Only apply to smaller images
+    # to avoid filtering large photos with dark/uniform backgrounds.
+    bpp = len(image_data) / area
+    if bpp < MAX_LOW_INFO_BPP and area < MAX_LOW_INFO_AREA and not visibly_placed:
+        return False
+
+    return True
+
+
+def _clip_rect_to_page(rect: fitz.Rect, page_rect: fitz.Rect) -> fitz.Rect:
+    """Clamp a rectangle to the current PDF page."""
+    return fitz.Rect(
+        max(page_rect.x0, rect.x0),
+        max(page_rect.y0, rect.y0),
+        min(page_rect.x1, rect.x1),
+        min(page_rect.y1, rect.y1),
+    )
+
+
+def _is_rect_contained(inner: fitz.Rect, outer: fitz.Rect, threshold: float = 0.9) -> bool:
+    """Return whether ``inner`` is mostly covered by ``outer``."""
+    inner_area = inner.get_area()
+    if inner_area <= 0:
+        return False
+    return ((inner & outer).get_area() / inner_area) >= threshold
+
+
+def _overlaps_table(rect: fitz.Rect, tab_rects: list[fitz.Rect]) -> bool:
+    """Skip vector regions that are already handled as extracted tables."""
+    rect_area = rect.get_area()
+    if rect_area <= 0:
+        return False
+    for tab_rect in tab_rects:
+        intersection = rect & tab_rect
+        if intersection.get_area() > 0.5 * min(rect_area, tab_rect.get_area()):
+            return True
+    return False
+
+
+def _is_white(color: tuple[float, ...] | None) -> bool:
+    """Return whether a PDF drawing color is visually white."""
+    if color is None:

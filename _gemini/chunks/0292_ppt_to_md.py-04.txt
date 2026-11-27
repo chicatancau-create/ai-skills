@@ -1,0 +1,123 @@
+                return _encode_md_url(url)
+        elif action.action == PP_ACTION.NAMED_SLIDE:
+            target = action.target_slide
+            if target is not None:
+                prs = shape.part.slide.part.package.presentation_part.presentation
+                idx = list(prs.slides).index(target) + 1
+                return f"#slide-{idx}"
+    except (AttributeError, ValueError):
+        print("[WARN] ppt_to_md: could not process shape click_action", file=sys.stderr)
+    return None
+
+
+def _paragraph_has_hyperlink(paragraph: object) -> bool:
+    """True if any run carries an external URL or an internal slide jump."""
+    for run in paragraph.runs:
+        try:
+            if run.hyperlink.address:
+                return True
+        except AttributeError:
+            pass
+        try:
+            rpr = run._r.find(qn("a:rPr"))
+            if rpr is not None and rpr.find(qn("a:hlinkClick")) is not None:
+                return True
+        except AttributeError:
+            continue
+    return False
+
+
+def text_frame_to_markdown(
+    text_frame: object,
+    shape: object = None,
+    *,
+    use_shape_click_action: bool = True,
+) -> str:
+    """Convert a PowerPoint text frame into Markdown, preserving hyperlinks.
+
+    Run-level external URLs and slide-internal jumps are emitted as
+    ``[text](url)`` / ``[text](#slide-N)``; consecutive runs sharing a URL are
+    merged. When no run carries a link, the shape's ``click_action`` is used as
+    a paragraph-level fallback. Pass ``shape`` to enable hyperlink extraction;
+    without it the frame degrades to plain text.
+    """
+    visible_paragraphs = [
+        paragraph for paragraph in text_frame.paragraphs
+        if normalize_text(paragraph.text) or _paragraph_has_hyperlink(paragraph)
+    ]
+    if not visible_paragraphs:
+        return ""
+
+    list_like = any(paragraph.level > 0 for paragraph in visible_paragraphs)
+    if not list_like:
+        list_like = len(visible_paragraphs) > 1
+
+    paragraphs = []
+    for paragraph in visible_paragraphs:
+        text = _escape_readback_control_lines(
+            _paragraph_to_markdown(
+                paragraph,
+                shape,
+                use_shape_click_action=use_shape_click_action,
+            )
+        )
+        if not text:
+            continue
+        if list_like:
+            indent = "  " * max(paragraph.level, 0)
+            paragraphs.append(f"{indent}- {text}")
+        else:
+            paragraphs.append(text)
+
+    if list_like:
+        return "\n".join(paragraphs)
+    return "\n\n".join(paragraphs)
+
+
+def table_to_markdown(table: object, shape: object = None) -> str:
+    """Convert a PowerPoint table to a Markdown table."""
+    rows = []
+    for row in table.rows:
+        cells = [
+            escape_table_cell(
+                text_frame_to_markdown(
+                    cell.text_frame,
+                    shape,
+                    use_shape_click_action=False,
+                )
+            )
+            for cell in row.cells
+        ]
+        rows.append(cells)
+
+    if not rows:
+        return ""
+
+    column_count = max(len(row) for row in rows)
+    normalized_rows = [row + [" "] * (column_count - len(row)) for row in rows]
+    header = normalized_rows[0]
+    separator = ["---"] * column_count
+    body = normalized_rows[1:]
+
+    lines = [
+        "| " + " | ".join(header) + " |",
+        "| " + " | ".join(separator) + " |",
+    ]
+    for row in body:
+        lines.append("| " + " | ".join(row) + " |")
+    return "\n".join(lines)
+
+
+def _format_chart_value(value: object) -> str:
+    """Render a chart data point, trimming whole-number floats."""
+    if value is None:
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _chart_header(chart: object, name: str) -> tuple[str, str]:
+    """Return the Markdown chart header and its best-effort type label."""
+    try:
+        chart_type = str(chart.chart_type)

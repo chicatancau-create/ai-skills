@@ -1,0 +1,85 @@
+        if not source_name.startswith("_"):
+            terms.append(_normalize_paragraph(source_name))
+        nouns = [str(item).lower() for item in config.get("claim_nouns", [])]
+        claims: list[dict[str, Any]] = []
+        seen_claims: set[tuple[str, int, int]] = set()
+        line_claim_keys: set[tuple[str, int]] = set()
+
+        def record_count_claim(path: str, line: int, count: int) -> None:
+            key = (path, line, count)
+            if key in seen_claims:
+                return
+            seen_claims.add(key)
+            claims.append({"path": path, "line": line, "count": count})
+            if count != len(ids):
+                findings.append(
+                    Finding(
+                        severity="error",
+                        code="REGISTRY_COUNT_MISMATCH",
+                        message=f"{name} claims {count} entries; registry contains {len(ids)}",
+                        path=path,
+                        line=line,
+                    )
+                )
+
+        for document in documents:
+            if not document.path.endswith(".md"):
+                continue
+            for line_number, line in enumerate(document.text.splitlines(), start=1):
+                normalized = _normalize_paragraph(line)
+                if document.path != source and not any(term in normalized for term in terms):
+                    continue
+                claim_line = Paragraph(
+                    path=document.path,
+                    line=line_number,
+                    text=line,
+                    normalized=normalized,
+                    words=tuple(_WORD_RE.findall(normalized)),
+                )
+                for count in _registry_count_claims(claim_line, nouns):
+                    line_claim_keys.add((document.path, count))
+                    record_count_claim(document.path, line_number, count)
+
+        for paragraph in paragraphs:
+            registry_context = paragraph.path == source or any(
+                term in paragraph.normalized for term in terms
+            )
+            if registry_context:
+                for count in _registry_count_claims(paragraph, nouns):
+                    if (paragraph.path, count) not in line_claim_keys:
+                        record_count_claim(paragraph.path, paragraph.line, count)
+            kind = config.get("kind")
+            if kind == "structured_markdown":
+                canonical_ids = {str(item) for item in ids}
+                structured_pattern = re.compile(r"#([PMAC][1-9]\d*-\d+)\b")
+                for match in structured_pattern.finditer(paragraph.text):
+                    claimed_id = match.group(1)
+                    if claimed_id not in canonical_ids:
+                        findings.append(
+                            Finding(
+                                severity="error",
+                                code="REGISTRY_ID_MISSING",
+                                message=(
+                                    f"{name} references missing id #{claimed_id}"
+                                ),
+                                path=paragraph.path,
+                                line=paragraph.line,
+                            )
+                        )
+                legacy_named_pattern = re.compile(
+                    r"#(?P<id>"
+                    r"(?:single|canvas|multi|reveal|tone|depth|asset|continuity)_\d+"
+                    r")\b"
+                )
+                for match in legacy_named_pattern.finditer(paragraph.text):
+                    findings.append(
+                        Finding(
+                            severity="error",
+                            code="REGISTRY_ID_LEGACY",
+                            message=(
+                                f"{name} uses removed id #{match.group('id')}"
+                            ),
+                            path=paragraph.path,
+                            line=paragraph.line,
+                        )
+                    )

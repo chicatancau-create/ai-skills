@@ -1,0 +1,112 @@
+- `setting`(object, 可选): `seriousLateMinutes`(严重迟到分钟) `absenteeismLateMinutes`(旷工迟到分钟) `attendDays`(出勤天数) `topRestTimeList`([]object, 仅单段上下班时可用，最多3段: checkType/checkTime("HH:mm")/across)
+
+### 更新班次 (写场景接口，必须走二次确认流程)
+**强制执行流程**：此命令为写操作，Agent 调用时必须遵守以下流程：
+1. 先向用户展示待执行操作的完整参数摘要，包括班次 ID、要修改的字段含义及新值
+2. 使用 `ask_human` 或返回待确认状态，等待用户明确确认
+3. 用户确认后，再传全局 `--yes` 执行命令
+
+**禁止未经用户确认直接执行或自动添加 `--yes`。**
+```
+Usage:
+  dws attendance class update [flags]
+Example:
+  dws attendance class update --class-id 1170996821 --name "新早班" --timeout 10
+  dws attendance class update --class-id 1170996821 --class-vo '{"sections":[{"times":[{"checkType":"OnDuty","checkTime":"08:30","across":0},{"checkType":"OffDuty","checkTime":"17:30","across":0}]}]}' --timeout 10
+  # 带休息时段（12:00-13:00 午休）
+  dws attendance class update --class-id 1170996821 --class-vo '{"sections":[{"times":[{"checkType":"OnDuty","checkTime":"09:00","across":0},{"checkType":"OffDuty","checkTime":"18:00","across":0}]}],"setting":{"topRestTimeList":[{"checkType":"OnDuty","checkTime":"12:00","across":0},{"checkType":"OffDuty","checkTime":"13:00","across":0}]}}' --timeout 10
+Flags:
+      --class-id int     班次 ID (必填)
+      --name string      班次名称 (可选，不传则保持原值)
+      --owner string     班次负责人 userId (可选，不传则保持原值)
+      --class-vo string  完整 TopAtClassVO JSON 字符串，用于修改复杂子对象 (可选)
+```
+
+更新班次配置。`--class-id` 必填，其余均可选，仅需对要修改的字段进行赋值，未传字段会自动从已有配置补充。小改用单字段 flag（如 `--name`）；修改上下班时间、休息时段等复杂子对象时用 `--class-vo` 传入完整 JSON。`--class-vo` 与单字段 flag 同时传入时，单字段 flag 优先级更高。
+
+`checkTime` 字段统一使用 "HH:mm" 格式（如 "09:00"、"17:30"），CLI 自动转换为服务端所需格式。
+
+`--class-vo` 支持字段（均可选，只需包含要修改的字段）：
+- `name`(string) `owner`(string)
+- `sections`([]object): 每个对象含 `times`([]object)，每个 time 含 `checkType`(OnDuty/OffDuty) `checkTime`("HH:mm") `across`(0/1) `freeCheck`(bool) `beginMin`(number, -1不限制) `endMin`(number, -1不限制)
+- `setting`(object): `seriousLateMinutes` `absenteeismLateMinutes` `attendDays` `topRestTimeList`([]object: checkType/checkTime("HH:mm")/across)
+
+由于保存班次耗时较久，建议加 `--timeout 10`。
+
+### 分页查询补卡规则，支持按名称搜素
+```
+Usage:
+  dws attendance adjustment search [flags]
+Example:
+  dws attendance adjustment search --page 1 --limit 20
+  dws attendance adjustment search --query "标准" --page 1 --limit 50
+Flags:
+      --page int     页码, 从 1 开始 (必填, 默认 1)
+      --query string 补卡规则名称关键字, 模糊搜索 (可选)
+      --limit int    每页条数, 200 以内 (必填, 默认 20)
+```
+
+### 查询补卡规则详情
+```
+Usage:
+  dws attendance adjustment get [flags]
+Example:
+  dws attendance adjustment get --adjustment-id 12345
+Flags:
+      --adjustment-id int   补卡规则主键 ID (必填)
+```
+
+根据补卡规则主键 ID 查询对应的补卡规则详情。主键 ID 可从 `adjustment search` 返回结果中提取，也有可能来源于用户手动输入。**注意：已被删除或被更新覆盖的补卡规则无法查询到。**
+
+### 分页查询加班规则，支持按名称搜素
+```
+Usage:
+  dws attendance overtime search [flags]
+Example:
+  dws attendance overtime search --page 1 --limit 20
+  dws attendance overtime search --query "节假日" --page 1 --limit 50
+Flags:
+      --page int     页码, 从 1 开始 (必填, 默认 1)
+      --query string 加班规则名称关键字, 模糊搜索 (可选)
+      --limit int    每页条数, 200 以内 (必填, 默认 20)
+```
+
+### 查询加班规则详情
+```
+Usage:
+  dws attendance overtime get [flags]
+Example:
+  dws attendance overtime get --overtime-id 12345
+Flags:
+      --overtime-id int   加班规则主键 ID (必填)
+```
+
+根据加班规则主键 ID 查询对应的加班规则详情。主键 ID 可从 `overtime search` 返回结果中提取，也有可能来源于用户手动输入。**已被删除或更新覆盖的加班规则也可以查到。**
+
+### 查询考勤组列表
+```
+Usage:
+  dws attendance group search [flags]
+Example:
+  dws attendance group search --query "研发"
+  dws attendance group search --type FIXED --limit 50
+  dws attendance group search --page 1 --limit 20
+Flags:
+      --query string         考勤组名称关键字, 模糊搜索 (可选)
+      --page int             页码, 从 1 开始 (必填, 默认 1)
+      --limit int            每页条数, 200 以内 (必填, 默认 20)
+      --query-ble            是否查询蓝牙设备列表 (可选, 默认 false)
+      --query-position       是否查询地理定位和 Wifi 名称 (可选, 默认 false)
+      --type string          考勤组类型: FIXED 固定班制 / TURN 排班制 / NONE 自由工时 (可选)
+```
+
+### 查询考勤组全量信息
+```
+Usage:
+  dws attendance group get [flags]
+Example:
+  dws attendance group get --group-id 123456
+Flags:
+      --group-id int   考勤组 ID (必填)
+```
+

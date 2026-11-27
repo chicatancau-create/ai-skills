@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""
+Image Size Analysis Tool
+========================
+Reports objective parameters for all images in a folder. It does not resolve a
+canvas, prescribe a layout, or generate Strategist recommendations.
+
+Usage:
+    python scripts/analyze_images.py <images_folder_path>
+    python scripts/analyze_images.py projects/xxx/images
+
+Output:
+    - Analysis report displayed in console
+    - Generates image_analysis.csv under the project's analysis/ directory
+      (sibling of the images folder), alongside the PPTX intake bundle
+"""
+
+import argparse
+import csv
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+from console_encoding import configure_utf8_stdio
+
+configure_utf8_stdio()
+
+try:
+    from PIL import Image, ImageOps
+except ImportError:
+    print("Error: PIL/Pillow not installed. Run: pip install Pillow")
+    sys.exit(1)
+
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".tif"}
+OFFICE_VECTOR_EXTENSIONS = {".emf", ".wmf"}
+REPORT_WIDTH = 100
+CATEGORY_WIDTH = 50
+
+ImageAnalysis = dict[str, object]
+
+
+def _load_image_manifest(images_dir: str) -> dict[str, dict]:
+    """Load optional DOCX image metadata keyed by generated filename."""
+    manifest_path = Path(images_dir) / "image_manifest.json"
+    if not manifest_path.is_file():
+        return {}
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"[WARN] Cannot read image manifest: {exc}")
+        return {}
+    if not isinstance(data, list):
+        return {}
+
+    manifest: dict[str, dict] = {}
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        filename = item.get("filename")
+        if isinstance(filename, str):
+            manifest[filename] = item
+    return manifest
+
+
+def _manifest_ratio(meta: dict | None) -> float | None:
+    """Return a positive display ratio from manifest metadata."""
+    if not meta:
+        return None
+    value = meta.get("display_ratio")
+    if not isinstance(value, (int, float)):
+        return None
+    ratio = float(value)
+    return ratio if ratio > 0 else None
+
+
+def _manifest_display_size(meta: dict, ratio: float) -> tuple[int, int]:
+    """Return a display-sized stand-in for vector media dimensions."""
+    width_in = meta.get("display_width_in")
+    height_in = meta.get("display_height_in")
+    if isinstance(width_in, (int, float)) and isinstance(height_in, (int, float)):
+        width = max(1, int(round(float(width_in) * 96)))
+        height = max(1, int(round(float(height_in) * 96)))
+        return width, height
+
+    width_emu = meta.get("display_width_emu")
+    height_emu = meta.get("display_height_emu")
+    if isinstance(width_emu, int) and isinstance(height_emu, int):
+        width = max(1, int(round(width_emu / 914400 * 96)))
+        height = max(1, int(round(height_emu / 914400 * 96)))
+        return width, height
+
+    width = 960
+    height = max(1, int(round(width / ratio)))
+    return width, height
+
+
+def _manifest_usage_count(meta: dict | None) -> int:
+    """Return how many source occurrences point to one asset."""
+    if not meta:
+        return 1
+    usage_count = meta.get("usage_count")
+    if isinstance(usage_count, int) and usage_count > 0:
+        return usage_count
+    occurrences = meta.get("occurrences")
+    if isinstance(occurrences, list) and occurrences:
+        return len(occurrences)
+    return 1
+
+
+def _manifest_ratio_variants(meta: dict | None) -> str:
+    """Return a compact list of display ratio variants from manifest metadata."""
+    if not meta:
+        return ""
+    variants = meta.get("display_ratio_variants")
+    if not isinstance(variants, list):
+        return ""
+    ratios = [
+        f"{float(value):.2f}"
+        for value in variants
+        if isinstance(value, (int, float)) and value > 0
+    ]
+    return ";".join(ratios)
+
+
+def _apply_manifest_metadata(result: ImageAnalysis, meta: dict | None) -> None:

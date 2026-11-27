@@ -1,0 +1,108 @@
+    """Wait until this project's detached confirm server is accepting requests.
+
+    Returns the server pid recorded in the project lock, or 0 on timeout.
+    ``proc.pid`` is not used for identity: on Windows a venv ``python.exe``
+    may be a launcher whose child is the real interpreter.
+    """
+    deadline = time.time() + timeout
+    last_error = ''
+    health_url = _server_url(port, '/api/health')
+    while time.time() < deadline:
+        returncode = proc.poll()
+        if returncode is not None:
+            logger.error('confirm UI exited during startup (code=%s)', returncode)
+            return 0
+        try:
+            with urllib.request.urlopen(health_url, timeout=1) as resp:
+                data = json.load(resp)
+                lock = _read_lock(project_path / LOCK_FILE_NAME)
+                server_pid = _lock_pid(lock)
+                if (
+                    resp.status == 200
+                    and isinstance(data, dict)
+                    and data.get('service') == 'confirm_ui'
+                    and data.get('project') == str(project_path)
+                    and lock is not None
+                    and lock.get('port') == port
+                    and data.get('pid') == server_pid
+                ):
+                    return server_pid
+                last_error = 'health response belongs to another service or project'
+        except (OSError, ValueError, urllib.error.URLError) as exc:
+            last_error = str(exc)
+        time.sleep(0.2)
+    logger.error(
+        'confirm UI did not become ready at %s within %ss%s',
+        health_url,
+        timeout,
+        f' (last error: {last_error})' if last_error else '',
+    )
+    return 0
+
+
+def _launch_background_server(
+    project_path: Path,
+    *,
+    preferred_port: int,
+    exact_port: bool,
+    idle_timeout: int,
+    open_browser: bool,
+) -> tuple[subprocess.Popen, int, Path]:
+    """Start the confirm server child and wait until it is reachable."""
+    confirm_dir = project_path / CONFIRM_DIR_NAME
+    confirm_dir.mkdir(parents=True, exist_ok=True)
+    log_path = confirm_dir / 'server.log'
+    port = preferred_port if exact_port else _find_free_port(preferred_port)
+    cmd = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        str(project_path),
+        '--port',
+        str(port),
+        '--timeout',
+        str(idle_timeout),
+        '--no-browser',
+    ]
+    with log_path.open('a', encoding='utf-8') as log:
+        proc = _popen_detached(
+            cmd,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            logger=logger,
+        )
+    logger.info('log: %s', log_path)
+    server_pid = _wait_for_server_ready(port, proc, project_path)
+    if not server_pid:
+        if proc.poll() is None:
+            proc.terminate()
+        raise RuntimeError(f'confirm UI failed to become reachable: {_server_url(port)}')
+    _sync_session_state(confirm_dir, server_port=port, event='server-ready')
+    url = _server_url(port)
+    logger.info('started confirm UI in background: %s (pid=%s)', url, server_pid)
+    if open_browser:
+        open_preview_browser(url, logger=logger)
+    return proc, port, log_path
+
+
+def _live_lock(lock_file: Path) -> Optional[dict]:
+    """Return a live lock; stale entries are overwritten by the recovered child."""
+    existing = _read_lock(lock_file)
+    if not existing:
+        return None
+    if _process_alive(_lock_pid(existing)):
+        return existing
+    return None
+
+
+def _preferred_recovery_port(lock_file: Path, fallback: int) -> int:
+    """Prefer a stale lock's port so an already-open browser can reconnect."""
+    existing = _read_lock(lock_file)
+    try:
+        port = int((existing or {}).get('port', 0) or 0)
+        return _validate_port(port) if port else fallback
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _open_browser_async(url: str, delay: float = 0.4) -> None:

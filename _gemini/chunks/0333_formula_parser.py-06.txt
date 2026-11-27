@@ -1,0 +1,86 @@
+        if self.position >= len(self.source):
+            self._fail("Trailing backslash", position=command_start)
+
+        char = self.source[self.position]
+        if not _is_command_letter(char):
+            self.position += 1
+            if char == "\\":
+                self._fail(
+                    "Row separator '\\\\' is only valid inside an environment",
+                    position=command_start,
+                )
+            if char == "|":
+                paired = self._try_symmetric_command_delimiter(command_start)
+                if paired is not None:
+                    return paired
+                return self._styled_text("‖", _ROMAN_STYLE)
+            if char == "(" and self.text_mode_depth:
+                return self._parse_text_embedded_math("\\(", "\\)", opened=True)
+            if char == "{":
+                paired = self._try_escaped_brace_delimiter()
+                if paired is not None:
+                    return paired
+            escaped = {
+                "{": "{",
+                "}": "}",
+                "_": "_",
+                "%": "%",
+                "#": "#",
+                "$": "$",
+                "&": "&",
+            }
+            if char in escaped:
+                return self._styled_text(
+                    escaped[char],
+                    literal=char == "&",
+                )
+            if char in SPACING_COMMANDS:
+                return self._styled_text(SPACING_COMMANDS[char], _SPACING_STYLE)
+            self._fail(f"Unsupported control symbol \\{char}", position=command_start)
+
+        command = self._read_control_word_body()
+        self._skip_whitespace()
+        if command in UNSUPPORTED_COMMANDS:
+            self._fail(f"Unsupported LaTeX command \\{command}", position=command_start)
+        if command in {"vert", "Vert"}:
+            paired = self._try_symmetric_named_delimiter(command)
+            if paired is not None:
+                return paired
+        if command in GREEK_SYMBOLS:
+            style = None
+            if command[:1].isupper() and command not in VARIANT_UPPERCASE_GREEK:
+                style = _ROMAN_STYLE
+            return self._styled_text(GREEK_SYMBOLS[command], style)
+        if command in SYMBOL_COMMANDS:
+            return self._styled_text(SYMBOL_COMMANDS[command], _ROMAN_STYLE)
+        if command in DELIMITER_COMMANDS:
+            paired = self._try_command_delimiter(command, command_start)
+            if paired is not None:
+                return paired
+            return self._styled_text(DELIMITER_COMMANDS[command], _ROMAN_STYLE)
+        if command in NARY_COMMANDS:
+            symbol, category = NARY_COMMANDS[command]
+            return Nary(symbol=symbol, category=category)
+        if command in STANDARD_FUNCTIONS:
+            return Function(name=self._roman_name(command))
+        if command in LIMIT_FUNCTIONS:
+            return Function(name=self._roman_name(command), limit_style=True)
+        if command == "operatorname":
+            name = self._parse_required_argument("operator name", text_mode=True)
+            return Function(name=Sequence((Styled(name, _ROMAN_STYLE),)))
+        if command in {"frac", "dfrac", "tfrac", "cfrac", "ifrac"}:
+            if (
+                command == "cfrac"
+                and self.position < len(self.source)
+                and self.source[self.position] == "["
+            ):
+                self._parse_raw_optional_group("continued-fraction alignment")
+            numerator = self._parse_required_argument("fraction numerator")
+            denominator = self._parse_required_argument("fraction denominator")
+            return Fraction(
+                numerator=numerator,
+                denominator=denominator,
+                kind="skw" if command == "ifrac" else "bar",
+            )
+        if command in {"binom", "dbinom", "tbinom"}:
+            numerator = self._parse_required_argument("binomial numerator")

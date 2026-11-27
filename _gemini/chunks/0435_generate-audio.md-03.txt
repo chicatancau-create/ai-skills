@@ -1,0 +1,40 @@
+## Step 4: Execute (no further interaction)
+
+`notes_to_audio.py` runs a blocking notes preflight (every expected note exists, is readable, and contains spoken text); exit `2` returns the caller to notes generation — never continue with partial audio. Run sequentially, never bundled; if a dependency or API key is missing, fix it and re-run, never swallow the error.
+
+```bash
+# 1. Generate audio (one provider form; flags in narration.md)
+python3 skills/ppt-master/scripts/notes_to_audio.py <project_path> --voice <ShortName> --rate=<rate>
+python3 skills/ppt-master/scripts/notes_to_audio.py <project_path> --provider <elevenlabs|minimax|qwen|cosyvoice> --voice-id <id> [provider model flag]
+
+# 2A. Only when narration-cue sync is selected and page SRT + animations.json exist
+python3 skills/ppt-master/scripts/narration_sync.py animations <project_path> --narration-start-floor 0.8 --narration-padding 0.5 --force
+
+# 2B. Re-export with audio embedded (Quick adds --quick-generate --with-notes; the native-export
+#     mix branch also passes --conversion-trace <final_narrated_trace>)
+python3 skills/ppt-master/scripts/svg_to_pptx.py <project_path> --recorded-narration audio --narration-start-floor 0.8 --narration-padding 0.5 --inherit-motion-from "<base_postflight_report>"
+#     narration-independent custom motion: add --animation-config animations.json; all-motion-off: --no-animations instead of --inherit-motion-from
+
+# 2C. Only when page-local SRT exists
+python3 skills/ppt-master/scripts/narration_sync.py subtitles <project_path> --pptx <final_narrated_pptx> --force
+#     <final_narrated_pptx>: absolute, or an existing path as given, else relative to <project_path>
+
+# 2D. Optional native video through installed Windows PowerPoint
+python3 skills/ppt-master/scripts/powerpoint_video.py <final_narrated_pptx> -o <raw_powerpoint_video.mp4>
+
+# 2E. Only when final resolved motion has sound cues and direct MP4 delivery is selected
+python3 skills/ppt-master/scripts/video_sound_mix.py <project_path> --pptx <final_narrated_pptx> --trace <final_narrated_trace> --video <raw_powerpoint_video.mp4> -o <final_mixed_video.mp4> --stem-output <final_sfx_stem.wav> --report-output <sound_mix_report.json> --force
+
+# 2F. Only when page-local SRT exists: align against the final delivery video (mixed, captured, or raw)
+python3 skills/ppt-master/scripts/video_subtitles.py <project_path> --video <final_delivery_video.mp4> --language <language> --force
+```
+
+**Mandatory when narration-cue sync is selected — semantic animation context**: before writing or refreshing `narration_timing.json`, confirm the active context holds the current top-level SVG group IDs and visible group-content semantics for every affected page; reuse it without rereading when complete and still matching `svg_output/`, otherwise read only the missing or stale pages read-only. Combine those semantics with the page SRT topics/timestamps and `animations.json` — group order alone is not a semantic mapping, and the positional fallback's warning is required repair. Preserve the title reveal decision from the custom-animation pass: assign a title group a `cue` only when the user or the motion plan explicitly chose `narration-cued`; never infer it because notes mention the title.
+
+| Sidecar state | Narrated export |
+|---|---|
+| `narration_animations.json` exists and cue sync is selected | Use it |
+| Only canonical `animations.json` exists and cue sync is selected | Block until synchronization creates the derived sidecar |
+| Canonical `animations.json` exists and motion is narration-independent | `--animation-config animations.json`; claim no object sync |
+| Both absent | No sidecar; inherit the base report's deck motion |
+

@@ -1,0 +1,105 @@
+                "image_sources.json filename casing does not match "
+                f"({provenance_filename!r} vs {filename!r})"
+            )
+        if not target_path.is_file():
+            reasons.append("target file is missing")
+        else:
+            min_width = int(item.get("min_width", default_min_width))
+            min_height = int(item.get("min_height", default_min_height))
+            try:
+                target_is_valid = _validate_downloaded_quality(
+                    target_path,
+                    min_width=min_width,
+                    min_height=min_height,
+                )
+            except RuntimeError as exc:
+                reasons.append(f"target validation unavailable: {exc}")
+            else:
+                if not target_is_valid:
+                    reasons.append(
+                        "target file is unreadable or below requested dimensions"
+                    )
+        if reasons:
+            item["status"] = SEARCH_STATUS_FAILED
+            item["last_error"] = (
+                "Sourced state validation failed: " + "; ".join(reasons)
+            )[:500]
+            repaired_sourced = True
+            print(f"  [RETRY] {filename} — {item['last_error']}")
+    if repaired_sourced:
+        save_search_manifest(manifest_path, manifest)
+
+    if candidate_page > 1:
+        # An explicit page on the command line continues every shortlisted
+        # row; Needs-Selection is otherwise terminal, so without this the
+        # flag would silently do nothing.
+        advanced = 0
+        for item in items:
+            if item["status"] != SEARCH_STATUS_NEEDS_SELECTION:
+                continue
+            item["candidate_page"] = candidate_page
+            item["status"] = SEARCH_STATUS_PENDING
+            advanced += 1
+        if advanced:
+            print(
+                f"[Batch] --candidate-page {candidate_page}: {advanced} "
+                "Needs-Selection row(s) rerun at that page; set one row's "
+                "candidate_page in the manifest instead to advance only it."
+            )
+            save_search_manifest(manifest_path, manifest)
+
+    pending_idx = [
+        i for i, it in enumerate(items)
+        if it["status"] in SEARCH_RETRYABLE_STATUSES
+    ]
+    total = len(pending_idx)
+    skipped = len(items) - total
+
+    if total == 0:
+        print(
+            f"[Batch] Nothing to do — all {len(items)} row(s) already in a "
+            "terminal state (Sourced / Needs-Selection / Needs-Manual)."
+        )
+        return 0, 0, 0, 0, skipped
+
+    print(
+        f"\n[Batch] {total} row(s) to search, {skipped} already done. "
+        f"concurrency={concurrency}\n"
+    )
+
+    sourced_count = 0
+    needs_selection_count = 0
+    needs_manual_count = 0
+    failed_count = 0
+    write_lock = threading.Lock()
+
+    def _one(idx: int):
+        try:
+            manifest_item, error, retryable, selection_required, staged_path, target_path = (
+                _search_one_item(
+                    items[idx],
+                    output_dir=output_dir,
+                    save_candidates=save_candidates,
+                    max_candidates=max_candidates,
+                    default_candidate_page=candidate_page,
+                    default_provider=default_provider,
+                    default_strict=default_strict,
+                    default_min_width=default_min_width,
+                    default_min_height=default_min_height,
+                )
+            )
+            return (
+                idx,
+                manifest_item,
+                error,
+                retryable,
+                selection_required,
+                staged_path,
+                target_path,
+            )
+        except Exception as exc:  # noqa: BLE001 — provider code raises freely
+            return idx, None, str(exc)[:500], True, False, None, None
+
+    futures: list[concurrent.futures.Future] = []
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as ex:

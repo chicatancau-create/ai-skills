@@ -1,0 +1,84 @@
+                        prev_was_list = False
+                    elif is_list:
+                        markdown_content += el["content"] + "\n"
+                        prev_was_list = True
+                    else:
+                        if prev_was_list:
+                            markdown_content += "\n"
+                        markdown_content += el["content"] + "\n\n"
+                        prev_was_list = False
+
+            elif el["type"] == 2:
+                if prev_was_code:
+                    flush_code_block()
+                    prev_was_code = False
+                if prev_was_list:
+                    markdown_content += "\n"
+                markdown_content += el["content"] + "\n\n"
+                prev_was_list = False
+
+            elif el["type"] == 1:
+                if prev_was_code:
+                    flush_code_block()
+                    prev_was_code = False
+                if img_dir:
+                    block = el["content"]
+                    ext = block["ext"]
+                    image_data = block["image"]
+                    safe_filename = filename.replace(" ", "_")
+                    image_name = f"{safe_filename}_p{page_num}_{img_count}.{ext}"
+                    image_path = img_dir / image_name
+
+                    try:
+                        img_dir.mkdir(parents=True, exist_ok=True)
+                        with open(image_path, "wb") as f:
+                            f.write(image_data)
+
+                        if prev_was_list:
+                            markdown_content += "\n"
+                        markdown_content += f"![{image_name}]({rel_img_dir}/{image_name})\n\n"
+                        width = int(block.get("width", 0) or 0)
+                        height = int(block.get("height", 0) or 0)
+                        ratio = width / height if width > 0 and height > 0 else None
+                        image_manifest.append({
+                            "index": len(image_manifest) + 1,
+                            "filename": image_name,
+                            "original_filename": image_name,
+                            "asset_kind": "bitmap",
+                            "svg_renderable": True,
+                            "pptx_native_supported": True,
+                            "source_kind": "pdf_image",
+                            "source_ext": f".{ext}",
+                            "page_index": page_num,
+                            "occurrence_index": img_count + 1,
+                            "pixel_width": width or None,
+                            "pixel_height": height or None,
+                            "pixel_ratio": round(ratio, 6) if ratio else None,
+                            "display_ratio": round(ratio, 6) if ratio else None,
+                            "source_sha256": hashlib.sha256(image_data).hexdigest(),
+                            "bbox": list(block.get("bbox", [])),
+                        })
+                        img_count += 1
+                        prev_was_list = False
+                        print(f"  [OK] Extracted image: {image_name}")
+                    except Exception as e:
+                        print(f"  [WARN] Failed to save image: {e}")
+
+            elif el["type"] == 3:
+                if prev_was_code:
+                    flush_code_block()
+                    prev_was_code = False
+                if img_dir:
+                    figure_rect = el["content"]
+                    safe_filename = filename.replace(" ", "_")
+                    image_name = f"{safe_filename}_p{page_num}_figure_{img_count}.png"
+                    image_path = img_dir / image_name
+
+                    try:
+                        img_dir.mkdir(parents=True, exist_ok=True)
+                        scale = vector_figure_dpi / 72
+                        pix = page.get_pixmap(
+                            matrix=fitz.Matrix(scale, scale),
+                            clip=figure_rect,
+                            alpha=False,
+                        )

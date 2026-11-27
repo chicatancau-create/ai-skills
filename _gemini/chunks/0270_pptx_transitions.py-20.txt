@@ -1,0 +1,107 @@
+            for sound_action in list(transition):
+                if sound_action.tag != _qn(PML_NS, "sndAc"):
+                    continue
+                for start_sound in list(sound_action):
+                    if start_sound.tag != _qn(PML_NS, "stSnd"):
+                        continue
+                    sounds.extend(
+                        child
+                        for child in list(start_sound)
+                        if child.tag == _qn(PML_NS, "snd")
+                    )
+    return sounds
+
+
+def _package_part_content_type(
+    package: zipfile.ZipFile,
+    target_part: str,
+) -> str | None:
+    """Resolve one package part's MIME type from defaults or overrides."""
+    content_types_root = ET.fromstring(package.read(CONTENT_TYPES_PART))
+    normalized_target = "/" + target_part.lstrip("/")
+    for entry in content_types_root:
+        if (
+            entry.tag == _qn(CONTENT_TYPES_NS, "Override")
+            and entry.get("PartName") == normalized_target
+        ):
+            return entry.get("ContentType")
+    extension = Path(target_part).suffix.lstrip(".").lower()
+    for entry in content_types_root:
+        if (
+            entry.tag == _qn(CONTENT_TYPES_NS, "Default")
+            and str(entry.get("Extension") or "").lower() == extension
+        ):
+            return entry.get("ContentType")
+    return None
+
+
+def _validate_transition_sound_package_parts(
+    package: zipfile.ZipFile,
+    package_names: set[str],
+    slide_part: str,
+    slide_xml: bytes,
+) -> list[str]:
+    """Validate transition-sound relationships and embedded WAV targets."""
+    errors: list[str] = []
+    slide_root = (
+        LET.fromstring(slide_xml)
+        if LET is not None
+        else parse_source_xml(slide_xml)
+    )
+    sounds = _transition_sound_elements(slide_root)
+    if not sounds:
+        return errors
+
+    if CONTENT_TYPES_PART not in package_names:
+        return ["transition sound is missing [Content_Types].xml"]
+
+    relationships_part = _slide_relationships_part(slide_part)
+    if relationships_part not in package_names:
+        return [
+            f"transition sound is missing slide relationships: "
+            f"{relationships_part}"
+        ]
+    try:
+        relationships_root = ET.fromstring(package.read(relationships_part))
+    except (KeyError, ET.ParseError) as exc:
+        return [f"unable to read {relationships_part}: {exc}"]
+
+    relationships: dict[str, Any] = {}
+    duplicate_ids: set[str] = set()
+    for relationship in relationships_root:
+        relationship_id = str(relationship.get("Id") or "")
+        if not relationship_id:
+            continue
+        if relationship_id in relationships:
+            duplicate_ids.add(relationship_id)
+        relationships[relationship_id] = relationship
+    if duplicate_ids:
+        errors.append(
+            f"{relationships_part} contains duplicate relationship id(s): "
+            + ", ".join(sorted(duplicate_ids))
+        )
+
+    for sound in sounds:
+        relationship_id = sound.get(_qn(RELATIONSHIPS_NS, "embed"))
+        if not relationship_id:
+            errors.append("p:snd must declare a non-empty r:embed")
+            continue
+        relationship = relationships.get(relationship_id)
+        if relationship is None:
+            errors.append(
+                f"p:snd references missing slide relationship: "
+                f"{relationship_id}"
+            )
+            continue
+        if relationship.get("Type") != AUDIO_REL_TYPE:
+            errors.append(
+                f"transition sound relationship {relationship_id} must use "
+                "the OOXML audio relationship type"
+            )
+        if relationship.get("TargetMode") == "External":
+            errors.append(
+                f"transition sound relationship {relationship_id} must be internal"
+            )
+            continue
+        target = str(relationship.get("Target") or "")
+        target_part = _resolve_slide_relationship_target(slide_part, target)

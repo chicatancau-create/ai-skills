@@ -1,0 +1,111 @@
+        plan_time = _humanize_timestamp(plan_time_raw) if plan_time_raw else ""
+
+        # 打卡结果（OriginUserCheckResultPlug）：英文枚举 → 中文
+        raw_check_result = str(_extract_field(result_rec, (
+            "checkResult", "check_result", "timeResult", "result",
+        )) or "") if result_rec else ""
+        check_result_str = _translate_check_result(raw_check_result)
+
+        # ── 打卡设备（OriginUserDevicePlug）：sourceType 枚举 → 中文 ────────
+        raw_source_type = str(_extract_field(record, (
+            "sourceType", "source_type", "deviceType", "device_type",
+        )) or "")
+        device_str = _translate_source_type(raw_source_type)
+
+        row: dict[str, str] = {
+            # 基础信息
+            "姓名":   info.name or uid,
+            "考勤组": group_name_map.get(uid, ""),
+            "部门":   info.dept_name,
+
+            # termId=8  考勤时间（OriginPlanCheckTimePlug）
+            "考勤日期": _extract_date_str(record),
+            "考勤时间": plan_time,
+
+            # termId=9  打卡时间（OriginUserCheckTimePlug）
+            "打卡时间": actual_time,
+
+            # termId=10 打卡结果（OriginUserCheckResultPlug）
+            "打卡结果": check_result_str,
+
+            # termId=11 打卡地址（OriginUserLocationPlug）
+            # Java 逻辑：spaceName + detailAddr 拼接
+            "打卡地址": _extract_location(record),
+
+            # termId=12 打卡备注（OriginUserRemarkPlug）
+            # Java 逻辑：features.getRemark()
+            "打卡备注": str(_extract_field(record, (
+                "remark", "userRemark", "user_remark",
+            )) or "").strip(),
+
+            # termId=13 异常打卡原因（OriginCheckExceptionReasonPlug）
+            # Java 逻辑：features.getInvalidRecordMsg() → 翻译错误码
+            "异常打卡原因": _extract_exception_reason(record),
+
+            # termId=14 打卡图片1（OriginRemarkPhotoPlug）
+            # Java 逻辑：features.getRemarkPhotos()[0]
+            "打卡图片1": _extract_remark_photo(record),
+
+            # termId=15 打卡图片2（OriginFaceCheckPhotoPlug）
+            # Java 逻辑：features.getFacePhoto()
+            "打卡图片2": _extract_face_check_photo(record),
+
+            # termId=16 打卡设备（OriginUserDevicePlug）
+            # Java 逻辑：SourceType 枚举 → 中文
+            "打卡设备": device_str,
+
+            # termId=17 管理员修改备注（OriginBossCheckRemarkPlug）
+            # Java 逻辑：features.getBossRemark()
+            "管理员修改备注": _extract_boss_remark(record),
+
+            # termId=18/19/20 管理员修改备注图片1/2/3（OriginBossCheckPhoto1/2/3Plug）
+            # Java 逻辑：features.getBossPhotos()[0/1/2]
+            "管理员修改备注图片1": _extract_boss_photo(record, 0),
+            "管理员修改备注图片2": _extract_boss_photo(record, 1),
+            "管理员修改备注图片3": _extract_boss_photo(record, 2),
+        }
+        rows.append(row)
+
+    return rows
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# main
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main() -> int:
+    args = parse_args()
+
+    # 1. 解析参数
+    raw_ids = [u.strip() for u in args.users.split(",") if u.strip()]
+    if not raw_ids:
+        cmn.error("--users 不能为空")
+        return 2
+
+    # 自动识别部门ID并展开为员工userId
+    user_ids = cmn.resolve_users_from_input(raw_ids)
+    if not user_ids:
+        cmn.error("未能解析出任何有效的员工userId")
+        return 2
+    cmn.log(f"[users] 最终用户列表：{len(user_ids)} 人")
+
+    try:
+        start = cmn.parse_datetime_arg(args.start, end_of_day=False)
+        end = cmn.parse_datetime_arg(args.end, end_of_day=True)
+    except ValueError as exc:
+        cmn.error(str(exc))
+        return 2
+
+    if end < start:
+        cmn.error(f"--end ({end}) 早于 --start ({start})")
+        return 2
+
+    # 2. 解析 userId → 用户信息（使用 resolve_user_info，已适配 labels 职位提取）
+    cmn.log(f"[users] 获取 {len(user_ids)} 个用户基础信息")
+    user_info_map = cmn.resolve_user_info(user_ids)
+
+    # 3. 切批 + 切片（明细用 100 人/批、31 天/片）
+    user_batches = cmn.chunk_users(user_ids, size=CHECK_MAX_USERS_PER_BATCH)
+    date_slices = cmn.slice_date_range(start, end, max_days=CHECK_MAX_DAYS_PER_SLICE)
+    stats = cmn.CallStats(
+        user_batches=len(user_batches),

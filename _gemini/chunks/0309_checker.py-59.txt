@@ -1,0 +1,90 @@
+                try:
+                    _parse_pattern_colors(pattern)
+                except ValueError as exc:
+                    result['errors'].append(str(exc))
+
+    def _check_native_object_markers(self, root: ET.Element, result: Dict) -> None:
+        """Validate explicit native replacement markers before PPTX export."""
+        inline_formula_markers = [
+            elem for elem in root.iter()
+            if elem.get(_INLINE_FORMULA_ATTR) is not None
+        ]
+        if inline_formula_markers and _inline_formula_marker_errors is None:
+            result['errors'].append(
+                "Unable to import inline-formula validator; cannot verify "
+                f"{_INLINE_FORMULA_ATTR} markers"
+            )
+        elif _inline_formula_marker_errors is not None:
+            for error in _inline_formula_marker_errors(root):
+                result['errors'].append(f"Invalid inline formula marker: {error}")
+
+        invalid_status_elements: set[ET.Element] = set()
+        for elem in root.iter():
+            marker_id = elem.get('id') or elem.get('data-name') or '<unnamed>'
+            if elem.tag.rsplit('}', 1)[-1] == 'metadata':
+                continue
+            has_status = any(
+                elem.get(name) is not None
+                for name in (
+                    'data-pptx-replace-with',
+                    'data-pptx-native',
+                    'data-pptx-fallback-kind',
+                    'data-pptx-visual-status',
+                    'data-pptx-route-status',
+                    'data-pptx-replacement-status',
+                    'data-pptx-native-status',
+                    'data-pptx-native-authority',
+                    'data-pptx-import-source',
+                    'data-pptx-native-source',
+                )
+            )
+            if not has_status:
+                continue
+            if (
+                _native_marker_status_errors is None
+                or _native_marker_release_block_reason is None
+            ):
+                result['errors'].append(
+                    "Unable to import native-object status validator; "
+                    f"cannot verify PPTX graphic {marker_id}"
+                )
+                continue
+            status_errors = _native_marker_status_errors(elem)
+            for error in status_errors:
+                result['errors'].append(
+                    f"PPTX graphic {marker_id} has invalid status metadata: {error}"
+                )
+            if status_errors:
+                invalid_status_elements.add(elem)
+                continue
+            if _native_marker_legacy_warnings is not None:
+                for warning in _native_marker_legacy_warnings(elem):
+                    result['warnings'].append(
+                        f"PPTX replacement marker {marker_id}: {warning}"
+                    )
+            try:
+                fallback_kind = (
+                    _native_fallback_kind(elem)
+                    if _native_fallback_kind is not None else None
+                )
+                replacement_kind = (
+                    _native_replacement_kind(elem)
+                    if _native_replacement_kind is not None else ''
+                )
+            except ValueError:
+                # The shared status validator reported the alias conflict.
+                continue
+            if fallback_kind == 'placeholder':
+                route = (
+                    "the native Chart/Table route may reconstruct its active marker"
+                    if replacement_kind
+                    else "default export keeps the visible placeholder"
+                )
+                result['warnings'].append(
+                    f"PPTX graphic {marker_id} is a reconstruction-only placeholder; "
+                    f"it has no baked preview and {route}"
+                )
+
+        for elem in root.iter():
+            if elem.tag.rsplit('}', 1)[-1] == 'metadata':
+                continue

@@ -1,0 +1,98 @@
+        except json.JSONDecodeError as exc:
+            raise AuditError(f"Registry source is invalid JSON: {source}: {exc}") from exc
+        for part in key.split("."):
+            if not isinstance(value, dict) or part not in value:
+                raise AuditError(f"Registry key {key} is missing in {source}")
+            value = value[part]
+        if isinstance(value, dict):
+            return set(value), source, [], None
+        if isinstance(value, list):
+            id_field = config.get("id_field")
+            if id_field is not None:
+                if not isinstance(id_field, str) or not id_field:
+                    raise AuditError(
+                        f"Registry {config.get('name')} id_field must be a non-empty string"
+                    )
+                matched_ids: list[str] = []
+                for index, item in enumerate(value):
+                    if not isinstance(item, dict):
+                        raise AuditError(
+                            f"Registry {config.get('name')} item {index} is not an object"
+                        )
+                    item_id = item.get(id_field)
+                    if not isinstance(item_id, str) or not item_id.strip():
+                        raise AuditError(
+                            f"Registry {config.get('name')} item {index} has no "
+                            f"non-empty {id_field!r}"
+                        )
+                    matched_ids.append(item_id.strip())
+                duplicates = sorted(
+                    item
+                    for item, count in Counter(matched_ids).items()
+                    if count > 1
+                )
+                return set(matched_ids), source, duplicates, matched_ids
+            return set(range(len(value))), source, [], None
+        raise AuditError(f"Registry key {key} in {source} is not a collection")
+
+    if kind == "line_collection":
+        values = [
+            line.strip()
+            for line in _read_utf8(root / source).splitlines()
+            if line.strip()
+        ]
+        duplicates = sorted(
+            item for item, count in Counter(values).items() if count > 1
+        )
+        return set(values), source, duplicates, values
+
+    raise AuditError(f"Unsupported registry kind: {kind}")
+
+
+def _registry_projection_ids(
+    root: Path,
+    registry_name: str,
+    config: dict[str, Any],
+) -> tuple[set[str], str, list[str]] | None:
+    """Extract one declared Markdown projection of canonical registry ids."""
+    projection = config.get("projection")
+    if projection is None:
+        return None
+    if not isinstance(projection, dict):
+        raise AuditError(
+            f"Registry {registry_name} projection must be an object"
+        )
+    source = projection.get("source")
+    if not isinstance(source, str) or not (root / source).is_file():
+        raise AuditError(
+            f"Registry {registry_name} projection has missing source: {source}"
+        )
+    pattern = projection.get("entry_pattern")
+    if not isinstance(pattern, str):
+        raise AuditError(
+            f"Registry {registry_name} projection needs entry_pattern"
+        )
+    try:
+        regex = re.compile(pattern, re.MULTILINE)
+    except re.error as exc:
+        raise AuditError(
+            f"Invalid registry projection entry_pattern: {exc}"
+        ) from exc
+    if "id" not in regex.groupindex:
+        raise AuditError(
+            f"Registry {registry_name} projection entry_pattern needs an id group"
+        )
+    matched_ids = [
+        match.group("id")
+        for match in regex.finditer(_read_utf8(root / source))
+    ]
+    duplicates = sorted(
+        item for item, count in Counter(matched_ids).items() if count > 1
+    )
+    return set(matched_ids), source, duplicates
+
+
+def _registry_count_claims(paragraph: Paragraph, nouns: list[str]) -> list[int]:
+    noun_pattern = "|".join(re.escape(noun) for noun in nouns)
+    patterns = (
+        rf"\bcatalog\s*\(\s*(\d+)\s+(?:{noun_pattern})\s*\)",

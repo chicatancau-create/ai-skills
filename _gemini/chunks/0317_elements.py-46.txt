@@ -1,0 +1,146 @@
+    fill_op = get_fill_opacity(elem, ctx)
+    stroke_op = get_stroke_opacity(elem, ctx)
+    fill = build_fill_xml(elem, ctx, fill_op)
+    stroke = build_stroke_xml(elem, ctx, stroke_op)
+
+    geom = preset_geom or '<a:prstGeom prst="ellipse"><a:avLst/></a:prstGeom>'
+
+    transform = elem.get('transform')
+
+    shape_id = _claim_element_shape_id(elem, ctx)
+    if preset_geom is not None:
+        xfrm = _shape_xfrm_from_preset_frame(
+            elem,
+            ctx,
+            (raw_cx - raw_rx, raw_cy - raw_ry, raw_rx * 2, raw_ry * 2),
+            (x, y, w, h),
+            transform,
+        )
+    else:
+        xfrm = _shape_xfrm_from_svg_rect(
+            ctx,
+            raw_cx - raw_rx,
+            raw_cy - raw_ry,
+            raw_rx * 2,
+            raw_ry * 2,
+            x,
+            y,
+            w,
+            h,
+            transform,
+        )
+    xfrm_attr, off_x, off_y, ext_cx, ext_cy, bounds_emu = xfrm
+    return ShapeResult(
+        xml=_wrap_geometry_object(
+            elem,
+            ctx,
+            shape_id, f'Ellipse {shape_id}',
+            off_x, off_y, ext_cx, ext_cy,
+            geom, fill, stroke, xfrm_attr=xfrm_attr,
+        ),
+        bounds_emu=bounds_emu,
+    )
+
+
+# ---------------------------------------------------------------------------
+# nested <svg> sprite (template-import round-trip)
+# ---------------------------------------------------------------------------
+
+# Inverse of pptx_to_svg/pic_to_svg.py:101-113 — that path writes a cropped
+# DrawingML picture as an outer <svg viewBox> wrapping a unit-rectangle <image>.
+# Without this converter, every cropped picture in a template-import SVG is
+# silently dropped on re-export.
+
+@dataclass(frozen=True)
+class NestedSvgCropSpec:
+    """Validated transport fields for one imported cropped picture."""
+
+    image: ET.Element
+    x: float
+    y: float
+    width: float
+    height: float
+    view_box_x: float
+    view_box_y: float
+    view_box_width: float
+    view_box_height: float
+    src_l: int
+    src_t: int
+    src_r: int
+    src_b: int
+
+
+_NESTED_CROP_OUTER_ATTRIBUTES = frozenset({
+    'clip-path',
+    'data-pptx-crop',
+    'data-pptx-editable',
+    EFFECT_REASON_ATTR,
+    EFFECT_STATUS_ATTR,
+    NATIVE_EFFECT_ATTR,
+    NATIVE_EFFECT_SHA256_ATTR,
+    'data-pptx-frame',
+    'data-pptx-layer',
+    'data-pptx-object',
+    'data-pptx-carrier',
+    'data-pptx-prst',
+    'data-pptx-shape-id',
+    'data-pptx-shape-name',
+    'data-pptx-shape-scope',
+    'id',
+    'overflow',
+    'preserveAspectRatio',
+    'transform',
+    'viewBox',
+    'x',
+    'y',
+    'width',
+    'height',
+})
+_NESTED_CROP_IMAGE_ATTRIBUTES = frozenset({
+    'clip-path',
+    'href',
+    f'{{{XLINK_NS}}}href',
+    'opacity',
+    'preserveAspectRatio',
+    'x',
+    'y',
+    'width',
+    'height',
+})
+_DRAWINGML_PERCENTAGE_MIN = -(2 ** 31)
+_DRAWINGML_PERCENTAGE_MAX = 2 ** 31 - 1
+
+
+def _unsupported_nested_crop_attributes(
+    elem: ET.Element,
+    allowed: frozenset[str],
+) -> list[str]:
+    unsupported = []
+    for name in elem.attrib:
+        if name in allowed:
+            continue
+        unsupported.append(name.rsplit('}', 1)[-1])
+    return sorted(unsupported)
+
+
+def parse_project_nested_svg_crop(elem: ET.Element) -> NestedSvgCropSpec:
+    """Parse the closed nested-SVG transport written by ``pptx_to_svg``."""
+    if elem.tag != f'{{{SVG_NS}}}svg':
+        raise ValueError('expected an SVG-namespace nested <svg> crop wrapper')
+
+    unsupported = _unsupported_nested_crop_attributes(
+        elem,
+        _NESTED_CROP_OUTER_ATTRIBUTES,
+    )
+    if unsupported:
+        raise ValueError(
+            'nested crop <svg> has unsupported attribute(s): '
+            + ', '.join(unsupported)
+        )
+    crop_marker = elem.get('data-pptx-crop')
+    overflow = elem.get('overflow')
+    if overflow is not None and overflow != 'hidden':
+        raise ValueError(
+            'nested crop overflow must be exactly "hidden" when present'
+        )
+    if elem.text and elem.text.strip():

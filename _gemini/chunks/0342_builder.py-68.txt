@@ -1,0 +1,102 @@
+            and native_structure_contract is not None
+            and template_specs is not None
+        ):
+            preserved_source_slides = _create_preserved_base_pptx(
+                native_structure_contract,
+                template_specs,
+                base_pptx,
+                (width_emu, height_emu),
+                roundtrip_page_sources=roundtrip_page_sources,
+                package_overrides=page_plan_package_overrides,
+                slide_patches=slide_patches,
+            )
+        else:
+            # Create the standard base PPTX with python-pptx.
+            prs = Presentation()
+            prs.slide_width = width_emu
+            prs.slide_height = height_emu
+            _set_slide_size_type(prs, width_emu, height_emu)
+
+            blank_layout = prs.slide_layouts[6]
+            for _ in svg_files:
+                prs.slides.add_slide(blank_layout)
+            prs.save(str(base_pptx))
+
+        # Extract PPTX
+        extract_dir = temp_dir / 'pptx_content'
+        with zipfile.ZipFile(base_pptx, 'r') as zf:
+            zf.extractall(extract_dir)
+        source_content_types_bytes = (
+            (extract_dir / '[Content_Types].xml').read_bytes()
+            if roundtrip_export
+            else None
+        )
+        roundtrip_source_parts = (
+            frozenset(
+                path.relative_to(extract_dir).as_posix()
+                for path in extract_dir.rglob('*')
+                if path.is_file()
+            )
+            if roundtrip_export
+            else frozenset()
+        )
+        if (
+            use_native_shapes
+            and pptx_structure == "preserve"
+            and not preserved_source_slides
+        ):
+            _clear_preserved_slide_collections(extract_dir)
+        if (
+            passthrough_slides
+            or overlay_slides
+            or roundtrip_resources
+            or page_plan_export
+        ) and not preserved_source_slides:
+            raise TemplateStructureError(
+                "Round-trip export requires the original source package roster"
+            )
+        active_theme_font_spec = (
+            theme_font_spec
+            if use_native_shapes
+            and pptx_structure in {"baseline", "flat", "structured"}
+            else None
+        )
+        if active_theme_font_spec is not None:
+            apply_theme_font_spec(extract_dir, active_theme_font_spec)
+        active_theme_color_spec = (
+            theme_color_spec
+            if use_native_shapes
+            and pptx_structure in {"baseline", "flat", "structured"}
+            else None
+        )
+        if active_theme_color_spec is not None:
+            apply_theme_color_spec(extract_dir, active_theme_color_spec)
+        if (
+            source_theme_xml is not None
+            and native_structure_contract is None
+        ):
+            _install_source_theme_xml(extract_dir, source_theme_xml)
+        if source_embedded_fonts is not None and not roundtrip_export:
+            installed_typefaces = _install_source_embedded_fonts(
+                extract_dir,
+                source_embedded_fonts,
+            )
+            if verbose:
+                print(
+                    "  Embedded fonts: preserved "
+                    f"{len(source_embedded_fonts.parts)} part(s) for "
+                    + ", ".join(installed_typefaces)
+                )
+        structure = _read_slide_layout_targets(extract_dir, len(svg_files))
+
+        media_dir = extract_dir / 'ppt' / 'media'
+        media_dir.mkdir(exist_ok=True)
+
+        prerender_results: dict[int, bool] | None = None
+        if not use_native_shapes and use_compat_mode and PNG_RENDERER is not None:
+            if workers is None:
+                resolved_workers = min(os.cpu_count() or 2, len(svg_files), 8)
+            else:
+                resolved_workers = max(0, workers)
+            if verbose:
+                cache_label = str(cache_dir) if cache_dir else 'disabled'

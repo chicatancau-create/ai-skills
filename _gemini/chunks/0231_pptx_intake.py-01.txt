@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""
+PPT Master - PPTX Intake Enrichment
+
+Extract reusable PPTX intake facts into a standard analysis bundle. This is a
+read-only companion to `ppt_to_md.py`: Markdown remains the content source,
+while this bundle provides canvas, visual identity, slide geometry, tables,
+native chart data, and SmartArt structure for downstream workflows.
+
+Usage:
+    python3 scripts/pptx_intake.py <source.pptx> -o <output_dir>
+
+Examples:
+    python3 scripts/pptx_intake.py deck.pptx -o projects/demo/analysis
+
+Dependencies:
+    None beyond the repository scripts used for PPTX parsing.
+"""
+
+from __future__ import annotations
+
+import argparse
+from contextlib import contextmanager
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+from typing import Any
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
+
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - POSIX
+    msvcrt = None
+
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from console_encoding import configure_utf8_stdio  # noqa: E402
+from beautify_identity import extract_identity  # noqa: E402
+from pptx_ooxml.analyzer import analyze_pptx  # noqa: E402
+
+configure_utf8_stdio()
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        os.replace(temp_name, path)
+    except Exception:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
+
+
+def _chart_summary(slide_library: dict[str, Any]) -> dict[str, Any]:
+    charts: list[dict[str, Any]] = []
+    total_series = 0
+    multi_plot_count = 0
+    for slide in slide_library.get("slides", []):
+        for chart in slide.get("charts", []):
+            series_count = int(chart.get("series_count") or 0)
+            plot_types = chart.get("plot_types") or []
+            if len(plot_types) > 1:
+                multi_plot_count += 1
+            total_series += series_count
+            charts.append(
+                {
+                    "slide_index": slide.get("slide_index"),
+                    "chart_id": chart.get("chart_id"),
+                    "chart_type": chart.get("chart_type"),
+                    "plot_types": plot_types,
+                    "category_count": chart.get("category_count", 0),
+                    "series_count": series_count,
+                    "series_names": [
+                        series.get("name")
+                        for series in chart.get("series", [])
+                        if series.get("name")
+                    ],
+                }
+            )
+    return {
+        "chart_count": len(charts),
+        "series_count": total_series,
+        "multi_plot_chart_count": multi_plot_count,
+        "charts": charts,
+    }
+
+
+def _table_summary(slide_library: dict[str, Any]) -> dict[str, Any]:
+    tables: list[dict[str, Any]] = []
+    for slide in slide_library.get("slides", []):
+        for table in slide.get("tables", []):
+            tables.append(
+                {
+                    "slide_index": slide.get("slide_index"),
+                    "table_id": table.get("table_id"),
+                    "row_count": table.get("row_count", 0),
+                    "column_count": table.get("column_count", 0),
+                }
+            )
+    return {"table_count": len(tables), "tables": tables}
+
+
+def _diagram_summary(slide_library: dict[str, Any]) -> dict[str, Any]:
+    diagrams: list[dict[str, Any]] = []
+    text_item_count = 0
+    unreadable_count = 0
+    warning_count = 0
+    slides_with_diagrams: set[int] = set()

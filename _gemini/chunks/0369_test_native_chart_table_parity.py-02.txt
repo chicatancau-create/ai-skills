@@ -1,0 +1,111 @@
+        for covered_cell in (
+            {"text": "authored"},
+            {"paragraphs": [{"text": ""}]},
+            {"fill": "#F1F4F8"},
+        ):
+            with self.subTest(covered_cell=covered_cell):
+                with self.assertRaisesRegex(RuntimeError, "must be blank"):
+                    _validate_table_payload(self._payload(covered_cell))
+
+
+class NativeChartExTests(unittest.TestCase):
+    @staticmethod
+    def _chart_data(chart_type: str) -> dict:
+        if chart_type in {"sunburst", "treemap"}:
+            return {
+                "type": chart_type,
+                "levels": [["A", "B"]],
+                "values": [1, 2],
+            }
+        if chart_type == "histogram":
+            return {"type": chart_type, "values": [1, 2]}
+        return {
+            "type": chart_type,
+            "categories": ["A", "B"],
+            "values": [1, 2],
+            "subtotals": [],
+        }
+
+    def test_chart_without_title_omits_title_element_and_uses_payload_name(self) -> None:
+        chart_data = self._chart_data("treemap")
+        for payload in (
+            {"name": "Market & <Space>"},
+            {"name": "Market & <Space>", "title": ""},
+            {"name": "Market & <Space>", "title": {"text": " "}},
+        ):
+            with self.subTest(payload=payload):
+                chart_xml = _chart_ex_xml(
+                    payload,
+                    chart_data,
+                    chart_rels_id="rId1",
+                ).decode("utf-8")
+
+                self.assertNotIn("<cx:title", chart_xml)
+                self.assertIn("<cx:v>Market &amp; &lt;Space&gt;</cx:v>", chart_xml)
+                self.assertNotIn("Series 1", chart_xml)
+
+    def test_chart_title_contains_text_and_supplies_series_name(self) -> None:
+        chart_data = self._chart_data("treemap")
+        title_xml = (
+            '<cx:title pos="t" align="ctr" overlay="0">'
+            '<cx:tx><cx:txData><cx:v>Visible &amp; &lt;Title&gt;</cx:v>'
+            '</cx:txData></cx:tx></cx:title>'
+        )
+        for title in ("Visible & <Title>", {"text": "Visible & <Title>"}):
+            with self.subTest(title=title):
+                chart_xml = _chart_ex_xml(
+                    {"name": "internal-name", "title": title},
+                    chart_data,
+                    chart_rels_id="rId1",
+                ).decode("utf-8")
+
+                self.assertIn(title_xml, chart_xml)
+                self.assertGreaterEqual(
+                    chart_xml.count("<cx:v>Visible &amp; &lt;Title&gt;</cx:v>"),
+                    2,
+                )
+
+    def test_chart_ex_series_families_do_not_hardcode_series_one(self) -> None:
+        for chart_type in (
+            "treemap",
+            "sunburst",
+            "histogram",
+            "pareto",
+            "waterfall",
+            "funnel",
+        ):
+            with self.subTest(chart_type=chart_type):
+                series_xml = _chart_ex_series_xml(
+                    {"name": "Native & Series"},
+                    self._chart_data(chart_type),
+                )
+                self.assertNotIn("Series 1", series_xml)
+                self.assertIn("Native &amp; Series", series_xml)
+
+
+class NativeProjectionCheckerTests(unittest.TestCase):
+    EXPECTED_FINDINGS = {
+        "06_1145_completion.svg": (
+            "style.text_color",
+            "data mark fill #C90A4F",
+        ),
+        "07_segment_mix.svg": (
+            "legend label is not visible",
+            "'其他业务'",
+            "style.text_color",
+        ),
+        "10_competitiveness.svg": (
+            "style.text_color",
+            "plot area is visible",
+            "5 countable radial gridlines",
+        ),
+        "11_market_space.svg": (
+            "tile color sequence not projected",
+            "visible text not projected",
+            "'61.57%'",
+        ),
+        "15_signing_target.svg": (
+            "style.text_color",
+        ),
+        "27_business_models.svg": (
+            "fallback row heights are non-uniform",

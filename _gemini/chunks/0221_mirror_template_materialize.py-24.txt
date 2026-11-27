@@ -1,0 +1,106 @@
+        item for item in master.get("placeholders", []) if isinstance(item, dict)
+    ]
+    slots: list[ET.Element] = []
+    slot_extras: list[ET.Element] = []
+    for plan in slot_plans:
+        layout_placeholder = layout_placeholders[plan.shape_id]
+        layout_guide = _element_by_ref(layout_root, f"layout:{plan.shape_id}")
+        master_placeholder = _placeholder_with_semantic_fallback(
+            master_placeholders,
+            layout_placeholder,
+        )
+        master_guide = (
+            _element_by_ref(master_root, f"master:{master_placeholder['shapeId']}")
+            if master_placeholder is not None
+            else _placeholder_guide_by_semantic(
+                master_root,
+                plan.semantic_role,
+            )
+        )
+        source_element = None
+        if slide is not None:
+            slide_placeholder = _matching_slide_placeholder(slide, layout_placeholder)
+            if slide_placeholder is not None:
+                source_element = source_placeholder_elements.get(
+                    f"slide:{slide_placeholder['shapeId']}"
+                )
+                if source_element is None:
+                    raise MirrorMaterializationError(
+                        f"Slide {slide['index']} placeholder {slide_placeholder['shapeId']} "
+                        "is missing from its authoring SVG"
+                    )
+        wrapper, extras = _slot_wrapper(
+            plan,
+            source_element,
+            layout_guide=layout_guide,
+            master_guide=master_guide,
+        )
+        slots.append(wrapper)
+        slot_extras.extend(extras)
+
+    for element in (
+        *master_backgrounds,
+        *layout_backgrounds,
+        *slide_backgrounds,
+        *master_shapes,
+        *layout_shapes,
+        *slide_content,
+        *slot_extras,
+        *slots,
+    ):
+        _strip_source_refs(element)
+        root.append(element)
+    _strip_source_refs(root)
+    return root
+
+
+def _page_type(slide: dict[str, Any]) -> str:
+    raw = str(slide.get("pageType") or "").strip().lower()
+    mapping = {
+        "cover_candidate": "cover",
+        "toc_candidate": "toc",
+        "chapter_candidate": "chapter",
+        "content_candidate": "content",
+        "ending_candidate": "ending",
+    }
+    return mapping.get(raw, "content")
+
+
+def _serialize_svg(root: ET.Element) -> bytes:
+    payload = ET.tostring(root, encoding="utf-8", xml_declaration=False)
+    return payload if payload.endswith(b"\n") else payload + b"\n"
+
+
+def _refresh_preset_preview_hashes(root: ET.Element) -> None:
+    """Rebind imported preset guards after deterministic SVG ID namespacing."""
+    for element in root.iter():
+        if (
+            _local_name(element.tag) == "g"
+            and element.get("data-pptx-object") in {"shape", "connector"}
+            and element.get("data-pptx-prst") is not None
+            and element.get("data-pptx-preview-sha256") is not None
+        ):
+            fingerprint = svg_preset_preview_fingerprint(element)
+            element.set("data-pptx-preview-sha256", fingerprint)
+            for descendant in element.iter():
+                if descendant.get("data-pptx-preview-sha256") is not None:
+                    descendant.set("data-pptx-preview-sha256", fingerprint)
+
+
+def _refresh_fresh_native_fallback_hashes(root: ET.Element) -> None:
+    """Rebind valid guards changed only by deterministic mirror normalization."""
+    for element in root.iter():
+        if element.attrib.pop(_FRESH_NATIVE_FALLBACK_ATTR, None) is None:
+            continue
+        stamp_native_fallback_baseline(element, document_root=root)
+
+
+def _sanitize_connector_references(root: ET.Element) -> int:
+    """Drop endpoint bindings whose native target is absent from this SVG tree."""
+    identities = {
+        (
+            element.get("data-pptx-shape-scope"),
+            element.get("data-pptx-shape-id"),
+        )
+        for element in root.iter()
+        if element.get("data-pptx-shape-scope")

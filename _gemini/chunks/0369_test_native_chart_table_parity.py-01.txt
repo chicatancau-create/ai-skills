@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""Regression tests for native ChartEx and table projection behavior."""
+
+from __future__ import annotations
+
+import json
+import sys
+import unittest
+from pathlib import Path
+from xml.etree import ElementTree as ET
+
+
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from svg_to_pptx.native_objects.chartex import (  # noqa: E402
+    _chart_ex_series_xml,
+    _chart_ex_xml,
+)
+from svg_to_pptx.native_objects import (  # noqa: E402
+    native_object_projection_warnings,
+)
+from svg_to_pptx.native_objects.table import (  # noqa: E402
+    _table_border_specs,
+    _table_border_xml,
+    _validate_table_payload,
+)
+from semantic_table import expand_semantic_table_payload  # noqa: E402
+from svg_to_pptx.pptx_package.cli import (  # noqa: E402
+    _native_object_projection_findings,
+)
+from svg_quality.checker import SVGQualityChecker  # noqa: E402
+
+
+FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "native_projection"
+
+
+def _fixture_root(filename: str) -> ET.Element:
+    return ET.parse(FIXTURES_DIR / filename).getroot()
+
+
+def _fixture_marker(filename: str) -> ET.Element:
+    return next(
+        elem
+        for elem in _fixture_root(filename).iter()
+        if elem.get("data-pptx-replace-with") in {"chart", "table"}
+    )
+
+
+class NativeTableBorderTests(unittest.TestCase):
+    def test_legacy_uniform_border_is_cardinal_only(self) -> None:
+        for cell, style in (
+            ({}, {"border_color": "#DDE3E9", "border_width": 1}),
+            ({"border_color": "#DDE3E9", "border_width": 1}, {}),
+        ):
+            with self.subTest(cell=cell, style=style):
+                specs = _table_border_specs(cell, style)
+                border_xml = _table_border_xml(cell, style, None)
+
+                self.assertTrue(all(specs[side] is not None for side in (
+                    "left", "right", "top", "bottom",
+                )))
+                self.assertIsNone(specs["diagonal_down"])
+                self.assertIsNone(specs["diagonal_up"])
+                self.assertNotIn("lnTlToBr", border_xml)
+                self.assertNotIn("lnBlToTr", border_xml)
+
+    def test_diagonal_borders_require_explicit_cell_overrides(self) -> None:
+        cell = {
+            "borders": {
+                "diagonal_down": {
+                    "style": "solid",
+                    "color": "#C90A4F",
+                    "width": 2,
+                },
+                "diagonal_up": {"style": "none"},
+            },
+        }
+
+        specs = _table_border_specs(cell, {})
+        border_xml = _table_border_xml(cell, {}, None)
+
+        self.assertEqual(specs["diagonal_down"].style, "solid")
+        self.assertEqual(specs["diagonal_up"].style, "none")
+        self.assertIn("lnTlToBr", border_xml)
+        self.assertIn("lnBlToTr", border_xml)
+
+
+class NativeTableMergeTests(unittest.TestCase):
+    @staticmethod
+    def _payload(covered_cell: dict) -> dict:
+        return {
+            "schema": "ppt-master.semantic-table.v2",
+            "defaults": {
+                "cell": {
+                    "color": "#1F2937",
+                    "fill": "#FFFFFF",
+                    "padding": {"left": 8, "right": 8},
+                    "valign": "middle",
+                },
+            },
+            "rows": [[
+                {"text": "Owner", "col_span": 2},
+                covered_cell,
+            ]],
+        }
+
+    def test_merge_blankness_uses_authored_cells_before_defaults(self) -> None:
+        for covered_cell in (
+            {},
+            {"text": ""},
+            {"merge_continuation": True},
+        ):
+            with self.subTest(covered_cell=covered_cell):
+                _payload, rows, col_count, merge_layout = (
+                    _validate_table_payload(self._payload(covered_cell))
+                )
+                self.assertEqual((len(rows), col_count), (1, 2))
+                self.assertIn((0, 1), merge_layout)
+

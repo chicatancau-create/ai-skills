@@ -1,0 +1,129 @@
+        path for path in input_path.rglob("*.svg")
+        if path.is_file()
+    )
+
+
+def _compact_svg_bytes(
+    path: Path,
+) -> tuple[bytes, StyleCompactionStats]:
+    original = path.read_bytes()
+    parser = ET.XMLParser(
+        target=ET.TreeBuilder(insert_comments=True, insert_pis=True),
+    )
+    root = ET.fromstring(original, parser=parser)
+    stats = compact_svg_style_tree(root)
+    if stats.changed_declarations == 0:
+        return original, stats
+    ET.register_namespace("", SVG_NS)
+    ET.register_namespace("xlink", XLINK_NS)
+    payload = ET.tostring(
+        root,
+        encoding="utf-8",
+        xml_declaration=original.lstrip().startswith(b"<?xml"),
+    )
+    if b"<![CDATA[" in original:
+        payload = _restore_json_cdata(payload)
+    if not payload.endswith(b"\n"):
+        payload += b"\n"
+    return payload, stats
+
+
+_JSON_METADATA_RE = re.compile(
+    rb'(<metadata\b[^>]*\btype="application/json"[^>]*>)(.*?)(</metadata>)',
+    re.DOTALL,
+)
+_XML_ENTITY_UNESCAPES = (
+    (b"&lt;", b"<"),
+    (b"&gt;", b">"),
+    (b"&quot;", b'"'),
+    (b"&apos;", b"'"),
+    (b"&amp;", b"&"),
+)
+
+
+def _restore_json_cdata(payload: bytes) -> bytes:
+    """Re-wrap serialized JSON metadata in CDATA.
+
+    ElementTree drops CDATA sections on parse and escapes ``<``/``&`` on
+    write; the native payload examples are authored as CDATA, so a compacted
+    file keeps that form for grep-style readers.
+    """
+
+    def _wrap(match: re.Match[bytes]) -> bytes:
+        body = match.group(2)
+        if body.lstrip().startswith(b"<![CDATA["):
+            return match.group(0)
+        text = body
+        for entity, literal in _XML_ENTITY_UNESCAPES:
+            text = text.replace(entity, literal)
+        if b"]]>" in text:
+            return match.group(0)
+        return match.group(1) + b"<![CDATA[" + text + b"]]>" + match.group(3)
+
+    return _JSON_METADATA_RE.sub(_wrap, payload)
+
+
+def _write_atomic(path: Path, payload: bytes) -> None:
+    mode = stat.S_IMODE(path.stat().st_mode)
+    with tempfile.NamedTemporaryFile(
+        mode="wb",
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+        delete=False,
+    ) as handle:
+        temporary_path = Path(handle.name)
+        handle.write(payload)
+    try:
+        temporary_path.chmod(mode)
+        os.replace(temporary_path, path)
+    except OSError:
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Diagnose or migrate older SVG by promoting a common page font "
+            "and removing redundant inherited presentation declarations."
+        ),
+    )
+    parser.add_argument("input", type=Path, help="SVG file or directory")
+    parser.add_argument(
+        "--inplace",
+        action="store_true",
+        help="Atomically replace changed SVG files",
+    )
+    return parser
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
+    input_path = args.input.resolve()
+    svg_files = _svg_files(input_path)
+    if not svg_files:
+        print(f"[ERROR] No SVG files found: {input_path}", file=sys.stderr)
+        return 1
+
+    prepared: list[tuple[Path, bytes, StyleCompactionStats]] = []
+    total = StyleCompactionStats()
+    try:
+        for path in svg_files:
+            payload, stats = _compact_svg_bytes(path)
+            prepared.append((path, payload, stats))
+            total.merge(stats)
+    except (OSError, ET.ParseError, ValueError) as exc:
+        print(f"[ERROR] SVG style compaction failed: {exc}", file=sys.stderr)
+        return 1
+
+    changed_files = 0
+    if args.inplace:
+        for path, payload, _stats in prepared:
+            if payload == path.read_bytes():
+                continue
+            _write_atomic(path, payload)
+            changed_files += 1
+    else:
+        changed_files = sum(
+            payload != path.read_bytes()

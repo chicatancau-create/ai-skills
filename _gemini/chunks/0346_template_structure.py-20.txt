@@ -1,0 +1,93 @@
+                    f"{spec.svg_path.name}: Master {master_key!r} uses name "
+                    f"{spec.master_name!r}, expected {prototype.master_name!r}"
+                )
+            actual_master = tuple(
+                item.contract_signature() for item in spec.master_elements
+            )
+            if actual_master != expected_master:
+                raise TemplateStructureError(
+                    f"{spec.svg_path.name}: Master {master_key!r} contract differs "
+                    f"from {prototype.svg_path.name}; slides sharing one Master must "
+                    "repeat the same root-level atoms in the same order"
+                )
+
+    by_layout: dict[str, list[TemplateSlideSpec]] = {}
+    for spec in specs:
+        by_layout.setdefault(spec.layout_key, []).append(spec)
+    for layout_key, layout_specs in by_layout.items():
+        prototype = layout_specs[0]
+        template_placeholder_bindings(prototype)
+        for spec in layout_specs[1:]:
+            if spec.layout_name != prototype.layout_name:
+                raise TemplateStructureError(
+                    f"{spec.svg_path.name}: layout {layout_key!r} uses name "
+                    f"{spec.layout_name!r}, expected {prototype.layout_name!r}"
+                )
+            if spec.master_key != prototype.master_key:
+                raise TemplateStructureError(
+                    f"{spec.svg_path.name}: globally unique layout {layout_key!r} "
+                    f"belongs to Master {spec.master_key!r}, expected "
+                    f"{prototype.master_key!r}"
+                )
+            if (
+                spec.layout_show_master_shapes
+                != prototype.layout_show_master_shapes
+            ):
+                raise TemplateStructureError(
+                    f"{spec.svg_path.name}: layout {layout_key!r} uses "
+                    "data-pptx-show-master-shapes="
+                    f"{str(spec.layout_show_master_shapes).lower()}, expected "
+                    f"{str(prototype.layout_show_master_shapes).lower()}"
+                )
+            if spec.layout_contract != prototype.layout_contract:
+                raise TemplateStructureError(
+                    f"{spec.svg_path.name}: layout {layout_key!r} structure differs "
+                    f"from prototype {prototype.svg_path.name}; repeat the same layout "
+                    "layers and placeholder ids/types in the same order"
+                )
+
+
+def parse_template_slides(svg_files: list[Path]) -> list[TemplateSlideSpec]:
+    """Parse a deck and enforce cross-slide master/layout contracts."""
+    specs = [
+        parse_template_slide(svg_path, slide_num)
+        for slide_num, svg_path in enumerate(svg_files, start=1)
+    ]
+    if not specs:
+        raise TemplateStructureError(
+            "Explicit Layout export requires at least one SVG slide"
+        )
+    _validate_template_slide_contracts(specs)
+    return specs
+
+
+def parse_optional_layout_slides(
+    svg_files: list[Path],
+) -> list[TemplateSlideSpec] | None:
+    """Parse an all-or-none structured Layout contract, or return no metadata."""
+    roots: list[tuple[Path, ET.Element]] = []
+    has_structure_metadata = False
+    for svg_path in svg_files:
+        try:
+            root = _parse_svg_root(svg_path)
+        except (OSError, ET.ParseError, NativePayloadError) as exc:
+            raise TemplateStructureError(
+                f"{svg_path.name}: unable to inspect SVG Layout metadata: {exc}"
+            ) from exc
+        roots.append((svg_path, root))
+        has_structure_metadata = has_structure_metadata or any(
+            elem.get(attr) is not None
+            for elem in root.iter()
+            for attr in _STRUCTURE_ATTRS
+        )
+
+    if not has_structure_metadata:
+        return None
+
+    missing_master_keys = [
+        svg_path.name
+        for svg_path, root in roots
+        if not (root.get("data-pptx-master") or "").strip()
+    ]
+    missing_master_names = [
+        svg_path.name

@@ -1,0 +1,67 @@
+                            self.assertIsNotNone(stroke.find('a:solidFill', NS))
+
+    def _motion_project(self, hiding: str, child_attributes: str = '') -> None:
+        self._svg(
+            f'<g id="shape" {hiding} data-pptx-bounds="80 70 300 150">'
+            f'<rect x="100" y="100" width="100" height="50" {child_attributes}/></g>'
+            '<g id="shown"><rect x="400" y="100" width="100" height="50"/></g>'
+        )
+        output = self.root / 'svg_output'
+        output.mkdir(exist_ok=True)
+        for name in ('01', '02'):
+            (output / f'{name}.svg').write_text(self.svg_path.read_text(encoding='utf-8'), encoding='utf-8')
+
+    def test_hidden_animation_groups_are_excluded_from_scan_listing_and_scaffold(self) -> None:
+        for hiding in ('display="none"', 'style="display:none"',
+                       'visibility="hidden"', 'style="visibility:hidden"'):
+            with self.subTest(hiding=hiding):
+                self._motion_project(hiding)
+                targets, anonymous = scan_svg_targets(self.root / 'svg_output/01.svg')
+                self.assertEqual([target.group_id for target in targets], ['shown'])
+                self.assertFalse(anonymous)
+                self.assertEqual(build_group_listing(self.root)[0], [
+                    f'{name}: shown  [hidden, not exported: shape]' for name in ('01', '02')
+                ])
+                for slide in build_scaffold(self.root)['slides'].values():
+                    self.assertEqual(slide['groups'], {'shown': {}})
+
+    def test_hidden_animation_references_fail_validation_before_morph_export(self) -> None:
+        self._motion_project('display="none"')
+        config = {
+            'version': 1,
+            'defaults': {'animation': {'effect': 'none'}},
+            'slides': {
+                '01': {'groups': {
+                    'shape': {'effect': 'fade', 'order': 1},
+                    'shown': {'effect': 'fade', 'trigger': 'on-click', 'trigger_shape': 'shape'},
+                }},
+                '02': {'transition': {'effect': 'morph', 'duration': 1},
+                       'morph': {'from': '01', 'pairs': {'key': {'from': 'shape', 'to': 'shape'}}}},
+            },
+        }
+        messages = validate_animation_config(self.root, config)
+        self.assertEqual(len(messages), 4, messages)
+        self.assertTrue(all('hidden, not exported' in message for message in messages), messages)
+        self.assertTrue(any('trigger_shape' in message for message in messages))
+        self.assertTrue(any('groups["shape"]' in message for message in messages))
+        for name in ('01', '02'):
+            self.assertTrue(any(f'Morph endpoint {name}/shape' in message for message in messages))
+        (self.root / 'animations.json').write_text(json.dumps(config), encoding='utf-8')
+        with redirect_stderr(io.StringIO()) as stderr, redirect_stdout(io.StringIO()):
+            self.assertEqual(animation_config_main(['validate', str(self.root)]), 1)
+        self.assertIn('hidden, not exported', stderr.getvalue())
+
+    def test_visibility_override_remains_an_exported_animation_target(self) -> None:
+        self._motion_project('visibility="hidden"', 'visibility="visible"')
+        targets, _anonymous = scan_svg_targets(self.root / 'svg_output/01.svg')
+        self.assertEqual([target.group_id for target in targets], ['shape', 'shown'])
+        self.assertIn('shape', build_scaffold(self.root)['slides']['01']['groups'])
+        self.assertEqual(len(self._export().findall('.//p:sp', NS)), 2)
+        config = {'slides': {'01': {'groups': {'shape': {'effect': 'fade'}}}}}
+        self.assertEqual(validate_animation_config(self.root, config), [])
+
+    def test_display_none_group_cannot_be_overridden_by_descendants(self) -> None:
+        for hiding in ('display="none"', 'style="display:none"'):
+            with self.subTest(hiding=hiding):
+                self._svg(
+                    f'<g id="hidden-group" {hiding}>'

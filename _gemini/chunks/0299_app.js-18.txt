@@ -1,0 +1,102 @@
+        rubberBandStart = null;
+        if (rubberBandEl) {
+            rubberBandEl.remove();
+            rubberBandEl = null;
+        }
+        var ov = document.getElementById("rubber-band-overlay");
+        if (ov) ov.classList.remove("active");
+        suppressNextSvgClick = false;
+        endDrag();
+        closeOverlapPicker();
+    }
+
+    function selectByRubberBand(screenRect) {
+        var svg = svgContent.querySelector("svg");
+        if (!svg) return;
+
+        var selectableEls = svg.querySelectorAll(".svg-selectable");
+        selectableEls.forEach(function (el) {
+            try {
+                var bbox = el.getBBox();
+                var ctm = el.getScreenCTM();
+                if (!ctm) return;
+
+                // Transform bbox corners to screen coordinates
+                var corners = [
+                    { x: bbox.x, y: bbox.y },
+                    { x: bbox.x + bbox.width, y: bbox.y },
+                    { x: bbox.x, y: bbox.y + bbox.height },
+                    { x: bbox.x + bbox.width, y: bbox.y + bbox.height }
+                ];
+
+                var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+                corners.forEach(function (c) {
+                    var sx = c.x * ctm.a + c.y * ctm.c + ctm.e;
+                    var sy = c.x * ctm.b + c.y * ctm.d + ctm.f;
+                    if (sx < minX) minX = sx;
+                    if (sy < minY) minY = sy;
+                    if (sx > maxX) maxX = sx;
+                    if (sy > maxY) maxY = sy;
+                });
+
+                // AABB intersection
+                if (minX < screenRect.right && maxX > screenRect.left &&
+                    minY < screenRect.bottom && maxY > screenRect.top) {
+                    var eid = el.id;
+                    if (eid) {
+                        selectedElementIds.add(eid);
+                        el.classList.add("svg-selected");
+                    }
+                }
+            } catch (err) {
+                // getBBox can throw for elements with no geometry
+            }
+        });
+
+        updateSelectionPanel();
+    }
+
+    // ================================================================
+    //  Keyboard shortcuts
+    // ================================================================
+    function initKeyboardShortcuts() {
+        document.addEventListener("keydown", function (e) {
+            // Ctrl+Z / Cmd+Z: drop the last staged edit. Let inputs/selects handle
+            // their own native undo when focused.
+            if ((e.ctrlKey || e.metaKey) && (e.key === "z" || e.key === "Z")) {
+                var ae = document.activeElement;
+                if (ae && (ae === annotationText || ae.tagName === "INPUT" ||
+                           ae.tagName === "TEXTAREA" || ae.tagName === "SELECT")) {
+                    return;
+                }
+                e.preventDefault();
+                runUndo();
+                return;
+            }
+
+            // Ctrl+A / Cmd+A: select all elements
+            if ((e.ctrlKey || e.metaKey) && e.key === "a") {
+                // Don't intercept if focus is in textarea
+                if (document.activeElement === annotationText) return;
+
+                e.preventDefault();
+                var svg = svgContent.querySelector("svg");
+                if (!svg) return;
+
+                svg.querySelectorAll(".svg-selectable").forEach(function (el) {
+                    var eid = el.id;
+                    if (eid) {
+                        selectedElementIds.add(eid);
+                        el.classList.add("svg-selected");
+                    }
+                });
+                updateSelectionPanel();
+            }
+
+            // Escape: close the overlap picker first if open, else clear selection.
+            if (e.key === "Escape") {
+                if (document.activeElement === annotationText) return;
+                if (overlapPickerEl) { closeOverlapPicker(); return; }
+                clearSelection();
+            }
+

@@ -1,0 +1,103 @@
+                target_without_anchor = raw_target.split("#", 1)[0].split("?", 1)[0]
+                if not target_without_anchor:
+                    continue
+                target_path = (document.absolute_path.parent / target_without_anchor).resolve()
+                try:
+                    target_relative = _relative_path(root, target_path)
+                except ValueError:
+                    findings.append(
+                        Finding(
+                            severity="error",
+                            code="REFERENCE_OUTSIDE_ROOT",
+                            message=f"Local link escapes repository root: {raw_target}",
+                            path=document.path,
+                            line=line_number,
+                        )
+                    )
+                    continue
+                if not target_path.exists():
+                    findings.append(
+                        Finding(
+                            severity="error",
+                            code="REFERENCE_MISSING",
+                            message=f"Markdown target does not exist: {raw_target}",
+                            path=document.path,
+                            line=line_number,
+                        )
+                    )
+                    continue
+                edges.append(
+                    ReferenceEdge(
+                        source=document.path,
+                        line=line_number,
+                        target=target_relative,
+                        authority_candidate=bool(_AUTHORITY_TERMS_RE.search(line)),
+                    )
+                )
+    edges.sort(key=lambda edge: (edge.source, edge.line, edge.target))
+    return edges, findings
+
+
+def _strongly_connected_components(edges: Iterable[tuple[str, str]]) -> list[list[str]]:
+    graph: dict[str, set[str]] = defaultdict(set)
+    nodes: set[str] = set()
+    for source, target in edges:
+        graph[source].add(target)
+        nodes.update((source, target))
+
+    index = 0
+    stack: list[str] = []
+    indices: dict[str, int] = {}
+    low_links: dict[str, int] = {}
+    on_stack: set[str] = set()
+    components: list[list[str]] = []
+
+    def visit(node: str) -> None:
+        nonlocal index
+        indices[node] = index
+        low_links[node] = index
+        index += 1
+        stack.append(node)
+        on_stack.add(node)
+
+        for neighbor in sorted(graph.get(node, set())):
+            if neighbor not in indices:
+                visit(neighbor)
+                low_links[node] = min(low_links[node], low_links[neighbor])
+            elif neighbor in on_stack:
+                low_links[node] = min(low_links[node], indices[neighbor])
+
+        if low_links[node] != indices[node]:
+            return
+        component: list[str] = []
+        while stack:
+            member = stack.pop()
+            on_stack.remove(member)
+            component.append(member)
+            if member == node:
+                break
+        if len(component) > 1 or node in graph.get(node, set()):
+            components.append(sorted(component))
+
+    for node in sorted(nodes):
+        if node not in indices:
+            visit(node)
+    return sorted(components, key=lambda item: (len(item), item))
+
+
+def audit_authority_graph(
+    root: Path,
+    edges_config: list[dict[str, Any]],
+) -> tuple[list[dict[str, str]], list[list[str]], list[Finding]]:
+    """Validate the explicit concern-level authority DAG."""
+    findings: list[Finding] = []
+    normalized: list[dict[str, str]] = []
+    by_concern: dict[str, list[tuple[str, str]]] = defaultdict(list)
+
+    for edge in edges_config:
+        if not isinstance(edge, dict):
+            raise AuditError("authority_edges entries must be objects")
+        source = edge.get("from")
+        target = edge.get("to")
+        concern = edge.get("concern")
+        if not all(isinstance(value, str) and value for value in (source, target, concern)):

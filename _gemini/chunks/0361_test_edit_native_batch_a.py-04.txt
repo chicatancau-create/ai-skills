@@ -1,0 +1,66 @@
+    def test_a5_full_overlay_preserves_advance_and_explicit_advance_wins(self) -> None:
+        source = self._source(advance=True)
+        project = self._import(source)
+        self._audio(project)
+        output, *_ = self._export(project, '-t', 'none', '--narration-audio-dir', 'audio')
+        transition = self._slide(output).find('p:transition', NS)
+        self.assertEqual((transition.get('advClick'), transition.get('advTm')), ('0', '4200'))
+        self.assertEqual(list(transition), [])
+        self._config(project, slides={'slide_01': {'transition': {'auto_advance': 2.3}}})
+        output, *_ = self._export(project, name='advance.pptx')
+        transition = self._slide(output).find('p:transition', NS)
+        self.assertEqual((transition.get('advClick'), transition.get('advTm')), ('1', '2300'))
+        self.assertIsNotNone(transition.find('p:random', NS))
+
+    def test_a6_repeated_injection_replaces_owned_audio_only(self) -> None:
+        root = self._slide(self._source())
+        xml = ET.tostring(root, encoding='unicode')
+        for number in (1, 2):
+            xml = narration.inject_narration(
+                xml, shape_id=narration.next_shape_id(xml), shape_name='narration1.wav',
+                audio_rid=f'rId{number * 3}', media_rid=f'rId{number * 3 + 1}',
+                poster_rid=f'rId{number * 3 + 2}', start_delay=0.8,
+            )
+        final = ET.fromstring(xml)
+        self.assertEqual(len(final.findall('.//p:pic', NS)), 1)
+        self.assertEqual(len(final.findall('.//p:audio', NS)), 1)
+
+    def test_a6_second_export_does_not_overwrite_source_media(self) -> None:
+        project = self._import(self._source())
+        self._audio(project)
+        narrated, *_ = self._export(project, '--recorded-narration', 'audio')
+        imported = self._import(narrated, 'second')
+        # Keep an unrelated audio shape sharing the original audio part.
+        source = imported / 'sources/source.pptx'
+        with zipfile.ZipFile(source) as archive:
+            entries = {name: archive.read(name) for name in archive.namelist()}
+        root = ET.fromstring(entries['ppt/slides/slide1.xml'])
+        other = copy.deepcopy(root.find('.//p:pic', NS))
+        other.find('p:nvPicPr/p:cNvPr', NS).attrib.update(id='99', name='Unrelated sound')
+        # This shape deliberately has neither the new marker nor the legacy geometry.
+        for ext in other.findall('.//p:ext', NS):
+            if 'ppt-master' in ext.get('uri', ''):
+                other.find('.//p:extLst', NS).remove(ext)
+        other.find('p:spPr/a:xfrm/a:off', NS).set('x', '0')
+        root.find('p:cSld/p:spTree', NS).append(other)
+        other_timing = copy.deepcopy(root.find('.//p:audio', NS))
+        other_timing.find('.//p:cTn', NS).set('id', '99')
+        other_timing.find('.//p:spTgt', NS).set('spid', '99')
+        root.find('.//p:cTn[@nodeType="tmRoot"]/p:childTnLst', NS).append(other_timing)
+        entries['ppt/slides/slide1.xml'] = ET.tostring(root)
+        shared_source = self.root / 'shared_audio.pptx'
+        with zipfile.ZipFile(shared_source, 'w') as archive:
+            for name, data in entries.items():
+                archive.writestr(name, data)
+        shared = self._import(shared_source, 'shared')
+        self._audio(shared, sample=100)
+        output, *_ = self._export(shared, '--recorded-narration', 'audio')
+        with zipfile.ZipFile(output) as archive:
+            self.assertEqual(archive.read('ppt/media/narration1.wav'), entries['ppt/media/narration1.wav'])
+            final = ET.fromstring(archive.read('ppt/slides/slide1.xml'))
+            self.assertEqual(len(final.findall('.//p:pic', NS)), 2)
+            self.assertEqual(len(final.findall('.//p:audio', NS)), 2)
+            retained = next(node for node in final.findall('.//p:audio', NS)
+                            if node.find('.//p:spTgt', NS).get('spid') == '99')
+            self.assertEqual(ET.tostring(retained), ET.tostring(other_timing))
+

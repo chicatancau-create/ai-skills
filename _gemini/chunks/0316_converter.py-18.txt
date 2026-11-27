@@ -1,0 +1,112 @@
+    if tag in _NON_VISUAL_TAGS:
+        trace('skip', reason='non-visual')
+        return None
+
+    trace('unsupported')
+    raise SvgNativeConversionError(f'Unsupported visual SVG element <{tag}>')
+
+
+def _local_tag(elem: ET.Element) -> str:
+    if not isinstance(elem.tag, str):
+        return str(elem.tag)
+    prefix = f'{{{SVG_NS}}}'
+    return elem.tag[len(prefix):] if elem.tag.startswith(prefix) else elem.tag
+
+
+def collect_unsupported_visuals(
+    root: ET.Element,
+    *,
+    allow_data_icon_use: bool = False,
+) -> list[str]:
+    """Return visual element paths that the native converter cannot dispatch."""
+    issues: list[str] = []
+
+    def walk(
+        elem: ET.Element,
+        path: str,
+        in_defs: bool = False,
+        parent_tag: str | None = None,
+    ) -> None:
+        tag = _local_tag(elem)
+        current = f'{path}/{tag}'
+        if in_defs:
+            return
+        if tag in _NON_VISUAL_TAGS:
+            return
+        is_supported_visual_child = (
+            tag in _SUPPORTED_VISUAL_CHILD_TAGS
+            and parent_tag in {'text', 'tspan', 'a'}
+        )
+        is_data_icon_placeholder = (
+            allow_data_icon_use
+            and tag == 'use'
+            and elem.get('data-icon') is not None
+        )
+        if (tag not in _CONVERTERS
+                and tag not in _NON_VISUAL_TAGS
+                and not is_supported_visual_child
+                and not is_data_icon_placeholder):
+            issues.append(current)
+        for idx, child in enumerate(list(elem), start=1):
+            walk(
+                child,
+                f'{current}[{idx}]',
+                in_defs=(tag == 'defs'),
+                parent_tag=tag,
+            )
+
+    for idx, child in enumerate(list(root), start=1):
+        walk(child, f'/svg[{idx}]', parent_tag='svg')
+    return issues
+
+
+def convert_svg_to_slide_shapes(
+    svg_path: str | Path,
+    *,
+    resource_root: Path,
+    slide_num: int = 1,
+    slide_count: int | None = None,
+    verbose: bool = False,
+    merge_paragraphs: bool | None = None,
+    image_optimize: bool = True,
+    image_max_dimension: int | None = 2560,
+    image_sizing: str = 'cap',
+    image_scale: float = 2.0,
+    image_quality: int = 85,
+    native_objects: bool = False,
+    animation_group_overrides: frozenset[str] | None = None,
+    theme_font_spec: ThemeFontSpec | None = None,
+    theme_color_spec: ThemeColorSpec | None = None,
+    primary_language: str | None = None,
+    trace_out: list[dict[str, Any]] | None = None,
+    promote_background: bool = True,
+    text_flow: str | None = None,
+    dangerous_nonconforming_export: bool = False,
+) -> tuple[
+    str,
+    dict[str, bytes],
+    list[dict[str, str]],
+    list,
+    dict[str, bytes],
+    dict[str, str],
+]:
+    """Convert an SVG file to a complete DrawingML slide XML.
+
+    Args:
+        svg_path: Path to the SVG file.
+        slide_num: Slide number (for naming).
+        slide_count: Public deck size used to validate ``#slide-N`` targets.
+        verbose: Print progress info.
+        merge_paragraphs: Legacy compatibility option. True selects reflow;
+            False selects split. Do not combine with ``text_flow``.
+        text_flow: Positional-tspan policy. ``preserve`` keeps authored visual
+            line breaks in one frame, ``reflow`` lets PowerPoint wrap the text,
+            and ``split`` emits one text frame per visual line.
+        image_optimize: Downsample oversized raster images for PPTX export.
+        image_max_dimension: Maximum optimized image dimension in pixels.
+        image_sizing: ``cap`` to only cap source dimensions, ``display`` to
+            size from rendered SVG boxes.
+        image_scale: Target image pixels per SVG display pixel.
+        image_quality: JPEG quality used for opaque optimized rasters.
+        native_objects: Convert opt-in ``data-pptx-replace-with`` chart/table
+            markers to native PowerPoint Chart/Table objects. Formula markers

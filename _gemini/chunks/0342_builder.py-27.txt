@@ -1,0 +1,118 @@
+                if sp_tree is not None and shape_to_remove is not None:
+                    sp_tree.remove(shape_to_remove)
+                    promoted += 1
+
+        for slide_num in slide_nums:
+            state = slide_state[slide_num]
+            _write_xml_tree(state["path"], state["tree"])
+
+    if verbose and promoted:
+        print(
+            "  Baseline layout chrome: "
+            f"promoted {promoted} slide shape(s) across "
+            f"{promoted_roles} shared object(s)"
+        )
+    return promoted
+
+
+_TEMPLATE_PLACEHOLDER_PROMPTS = {
+    "title": "Click to add title",
+    "subtitle": "Click to add subtitle",
+    "body": "Click to add text",
+    "picture": "Click to add picture",
+    "chart": "Click to add chart",
+    "table": "Click to add table",
+    "object": "Click to add content",
+    "media": "Click to add media",
+    "date": "Date",
+    "footer": "Footer",
+}
+
+_PARAGRAPH_BULLET_CHOICE_TAGS = {
+    f"{{{DML_NS}}}buNone",
+    f"{{{DML_NS}}}buAutoNum",
+    f"{{{DML_NS}}}buChar",
+    f"{{{DML_NS}}}buBlip",
+}
+_PARAGRAPH_PROPERTIES_TRAILING_TAGS = {
+    f"{{{DML_NS}}}tabLst",
+    f"{{{DML_NS}}}defRPr",
+    f"{{{DML_NS}}}extLst",
+}
+
+
+def _template_runtime_slides(
+    extract_dir: Path,
+    specs: list[TemplateSlideSpec],
+    conversion_traces: list[dict[str, Any]] | None,
+) -> list[_TemplateRuntimeSlide]:
+    """Load slide XML state and join it with SVG-to-shape trace ids."""
+    if not conversion_traces:
+        raise TemplateStructureError(
+            "Explicit Layout export requires native conversion traces for every slide"
+        )
+    trace_by_slide = {
+        int(trace.get("slide_num", 0)): trace
+        for trace in conversion_traces
+        if trace.get("slide_num") is not None
+    }
+    states: list[_TemplateRuntimeSlide] = []
+    for spec in specs:
+        trace = trace_by_slide.get(spec.slide_num)
+        if trace is None:
+            raise TemplateStructureError(
+                f"{spec.svg_path.name}: missing native conversion trace"
+            )
+        slide_path = extract_dir / "ppt" / "slides" / f"slide{spec.slide_num}.xml"
+        rels_path = (
+            extract_dir
+            / "ppt"
+            / "slides"
+            / "_rels"
+            / f"slide{spec.slide_num}.xml.rels"
+        )
+        tree = ET.parse(slide_path)
+        root = tree.getroot()
+        states.append(_TemplateRuntimeSlide(
+            spec=spec,
+            slide_path=slide_path,
+            rels_path=rels_path,
+            tree=tree,
+            root=root,
+            rels=_read_relationships(rels_path),
+            shapes=_top_level_shapes_by_id(root),
+            shape_ids_by_svg_id=_trace_native_shape_ids(trace),
+        ))
+    return states
+
+
+def _template_shape_for_item(
+    state: _TemplateRuntimeSlide,
+    item: TemplateElementSpec,
+) -> ET.Element | None:
+    """Resolve one metadata item to its generated top-level DrawingML shape."""
+    shape_ids = [
+        shape_id
+        for shape_id in state.shape_ids_by_svg_id.get(item.element_id, [])
+        if shape_id in state.shapes
+    ]
+    if len(shape_ids) == 1:
+        return state.shapes[shape_ids[0]]
+    if not shape_ids and item.layer and item.order == 0 and item.tag in {"rect", "g"}:
+        if _extract_slide_background_xml(
+            state.slide_path.read_text(encoding="utf-8")
+        ):
+            return None
+    if not shape_ids:
+        text_hint = (
+            "; multiline text placeholders require a single-frame text mode "
+            "and cannot use --no-merge"
+            if item.placeholder and item.placeholder_carrier_tag == "text"
+            else ""
+        )
+        raise TemplateStructureError(
+            f"{state.spec.svg_path.name}: metadata element {item.element_id!r} "
+            f"did not produce one top-level native shape{text_hint}"
+        )
+    raise TemplateStructureError(
+        f"{state.spec.svg_path.name}: metadata element {item.element_id!r} "

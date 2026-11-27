@@ -1,0 +1,80 @@
+                            media_files_dict,
+                            rel_entries,
+                            audio_exts_used,
+                            packaged_sounds_by_source,
+                        )
+                        expected_animation_targets = seq_targets
+                        if mixed_count:
+                            mixed_animation_offset += mixed_count
+                        timing_xml = '\n' + create_sequence_timing_xml(
+                            seq_targets, duration=slide_animation_duration,
+                            trigger=slide_animation_trigger,
+                        )
+                        slide_xml = slide_xml.replace(
+                            '</p:sld>',
+                            timing_xml + '\n</p:sld>',
+                        )
+
+                    # Write slide XML
+                    slide_xml_path = extract_dir / 'ppt' / 'slides' / f'slide{slide_num}.xml'
+                    with open(slide_xml_path, 'w', encoding='utf-8') as f:
+                        f.write(slide_xml)
+
+                    # Write media files
+                    media_name_map: dict[str, str] = {}
+                    for media_name, media_data in media_files_dict.items():
+                        ext = media_name.rsplit('.', 1)[-1].lower()
+                        media_hash = hashlib.sha256(media_data).hexdigest()
+                        cache_key = (ext, media_hash)
+                        cached_name = media_cache.get(cache_key)
+
+                        if cached_name is None:
+                            prefix = (
+                                'audio'
+                                if f'.{ext}' in AUDIO_CONTENT_TYPES
+                                else 'image'
+                            )
+                            cached_name = f'{prefix}_{media_hash[:16]}.{ext}'
+                            media_cache[cache_key] = cached_name
+                            with open(media_dir / cached_name, 'wb') as f:
+                                f.write(media_data)
+
+                        media_name_map[media_name] = cached_name
+
+                    for rel in rel_entries:
+                        target = rel.get('target', '')
+                        if not target.startswith('../media/'):
+                            continue
+                        media_name = target.split('../media/', 1)[1]
+                        mapped_name = media_name_map.get(media_name)
+                        if mapped_name:
+                            rel['target'] = f'../media/{mapped_name}'
+
+                    # Write non-media OOXML package parts produced by native
+                    # object converters, e.g. chart XML, chart rels, and
+                    # embedded workbooks.
+                    for part_name, part_data in package_files_dict.items():
+                        if (
+                            part_name.startswith('ppt/charts/')
+                            and part_name.endswith('.xml')
+                        ):
+                            part_data = rewrite_chart_accent_colors(
+                                part_data,
+                                active_theme_color_spec,
+                            )
+                        package_path = extract_dir / part_name
+                        package_path.parent.mkdir(parents=True, exist_ok=True)
+                        with open(package_path, 'wb') as f:
+                            f.write(part_data)
+                        suffix = package_path.suffix.lstrip('.').lower()
+                        if suffix:
+                            package_exts_used.add(suffix)
+                    package_content_overrides.update(content_type_overrides)
+
+                    # Build relationships XML
+                    rels_dir = extract_dir / 'ppt' / 'slides' / '_rels'
+                    rels_dir.mkdir(exist_ok=True)
+                    rels_path = rels_dir / f'slide{slide_num}.xml.rels'
+
+                    extra_rels = ''
+                    for rel in rel_entries:

@@ -1,0 +1,100 @@
+"""Shared OOXML primitives for PPTX intake and source-preserving export.
+
+Read-side helpers only: namespaces and content-type constants, part /
+relationship resolution, EMU unit conversion, slide-shape discovery, and small
+JSON readers / writers. Write-side package plumbing lives in ``package.py``.
+"""
+
+from __future__ import annotations
+
+import json
+import posixpath
+import zipfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+from xml.etree import ElementTree as ET
+
+
+NS = {
+    "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+    "c": "http://schemas.openxmlformats.org/drawingml/2006/chart",
+    "p": "http://schemas.openxmlformats.org/presentationml/2006/main",
+    "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+}
+REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+CT_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
+P14_NS = "http://schemas.microsoft.com/office/powerpoint/2010/main"
+MC_NS = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+C14_NS = "http://schemas.microsoft.com/office/drawing/2007/8/2/chart"
+C16_NS = "http://schemas.microsoft.com/office/drawing/2014/chart"
+C16R2_NS = "http://schemas.microsoft.com/office/drawing/2015/06/chart"
+
+SLIDE_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide"
+NOTES_SLIDE_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide"
+CHART_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart"
+PACKAGE_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/package"
+SLIDE_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.slide+xml"
+NOTES_SLIDE_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"
+CHART_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.drawingml.chart+xml"
+XLSX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+EMU_PER_INCH = 914400
+PX_PER_INCH = 96
+
+
+for prefix, uri in NS.items():
+    ET.register_namespace(prefix, uri)
+ET.register_namespace("", REL_NS)
+ET.register_namespace("mc", MC_NS)
+ET.register_namespace("c14", C14_NS)
+ET.register_namespace("c16", C16_NS)
+ET.register_namespace("c16r2", C16R2_NS)
+ET.register_namespace("p14", P14_NS)
+
+
+@dataclass(frozen=True)
+class SlideRef:
+    """Presentation slide reference resolved from presentation.xml.rels."""
+
+    index: int
+    rel_id: str
+    target: str
+    part_name: str
+    rels_name: str
+
+
+def _qn(namespace: str, tag: str) -> str:
+    return f"{{{namespace}}}{tag}"
+
+
+def _read_xml(zf: zipfile.ZipFile, name: str) -> ET.Element:
+    try:
+        return ET.fromstring(zf.read(name))
+    except KeyError as exc:
+        raise RuntimeError(f"Missing required PPTX part: {name}") from exc
+
+
+def _xml_bytes(root: ET.Element) -> bytes:
+    root_namespace = root.tag[1:].split("}", 1)[0] if root.tag.startswith("{") else ""
+    if root_namespace in {REL_NS, CT_NS}:
+        # OPC relationship/content-type roots conventionally use the default
+        # namespace. ElementTree's global prefix registry can be changed while
+        # parsing source parts; restore the package-root form before writing so
+        # strict consumers such as LibreOffice accept the generated package.
+        ET.register_namespace("", root_namespace)
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+
+def _normalize_part(target: str, base: str = "ppt/presentation.xml") -> str:
+    if target.startswith("/"):
+        return target.lstrip("/")
+    normalized = posixpath.normpath(posixpath.join(posixpath.dirname(base), target))
+    return normalized.lstrip("/")
+
+
+def _rels_name_for_part(part_name: str) -> str:
+    parent = posixpath.dirname(part_name)
+    basename = posixpath.basename(part_name)
+    return posixpath.join(parent, "_rels", f"{basename}.rels")
+
+

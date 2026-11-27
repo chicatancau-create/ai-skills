@@ -1,0 +1,104 @@
+        for plot in plots:
+            plot.pop("categories")
+            plot.pop("category_numeric")
+    payload: dict[str, Any] = {
+        **_bounds_payload(xfrm),
+        "axes": axes,
+        "categories": primary_categories,
+        "plots": plots,
+        "type": "combo",
+    }
+    if primary_categories_are_numeric:
+        payload["category_numeric"] = True
+    if colors:
+        payload["style"] = {"colors": colors}
+    _apply_chart_metadata(
+        payload,
+        chart_root,
+        plot_area,
+        chart_nodes[0],
+        palette=palette,
+        include_plot_labels=False,
+    )
+    return payload, visual_styles
+
+
+def _validate_stock_semantics(
+    plot_area: ET.Element,
+    chart: ET.Element,
+) -> None:
+    allowed_children = {"axId", "dLbls", "hiLowLines", "ser", "upDownBars"}
+    if any(_local_name(child.tag) not in allowed_children for child in chart):
+        raise _UnsupportedChart("unsupported-stock-chart")
+    if plot_area.find("c:dTable", C_NS) is not None:
+        raise _UnsupportedChart("unsupported-chart-data-table")
+    for tag in ("dropLines", "errBars", "trendline"):
+        if chart.find(f".//c:{tag}", C_NS) is not None:
+            raise _UnsupportedChart("unsupported-chart-analysis-features")
+    if _data_labels_payload(chart.find("c:dLbls", C_NS)) is not None:
+        raise _UnsupportedChart("unsupported-chart-data-labels")
+    if len(chart.findall("c:dLbls", C_NS)) > 1:
+        raise _UnsupportedChart("unsupported-stock-chart")
+
+    hi_low_lines = chart.findall("c:hiLowLines", C_NS)
+    up_down_bars = chart.findall("c:upDownBars", C_NS)
+    if len(hi_low_lines) != 1 or len(up_down_bars) != 1:
+        raise _UnsupportedChart("unsupported-stock-chart")
+    hi_low_styles = hi_low_lines[0].findall("c:spPr", C_NS)
+    if (
+        hi_low_lines[0].attrib
+        or len(hi_low_styles) > 1
+        or any(_local_name(child.tag) != "spPr" for child in hi_low_lines[0])
+    ):
+        raise _UnsupportedChart("unsupported-stock-chart")
+    up_down = up_down_bars[0]
+    if up_down.attrib or any(
+        _local_name(child.tag) not in {"downBars", "gapWidth", "upBars"}
+        for child in up_down
+    ):
+        raise _UnsupportedChart("unsupported-stock-chart")
+    gap_widths = up_down.findall("c:gapWidth", C_NS)
+    if (
+        len(gap_widths) != 1
+        or set(gap_widths[0].attrib) != {"val"}
+        or list(gap_widths[0])
+        or _element_val(gap_widths[0]) != "150"
+    ):
+        raise _UnsupportedChart("unsupported-stock-chart")
+    for tag in ("upBars", "downBars"):
+        nodes = up_down.findall(f"c:{tag}", C_NS)
+        styles = nodes[0].findall("c:spPr", C_NS) if nodes else []
+        if (
+            len(nodes) != 1
+            or nodes[0].attrib
+            or len(styles) > 1
+            or any(_local_name(child.tag) != "spPr" for child in nodes[0])
+        ):
+            raise _UnsupportedChart("unsupported-stock-chart")
+
+    allowed_series_children = {
+        "cat", "extLst", "idx", "marker", "order", "smooth", "spPr",
+        "tx", "val",
+    }
+    for series_node in chart.findall("c:ser", C_NS):
+        if any(
+            _local_name(child.tag) not in allowed_series_children
+            for child in series_node
+        ):
+            raise _UnsupportedChart("unsupported-stock-chart")
+        for child_name in allowed_series_children - {"extLst"}:
+            if len(series_node.findall(f"c:{child_name}", C_NS)) > 1:
+                raise _UnsupportedChart("unsupported-stock-chart")
+        marker = series_node.find("c:marker", C_NS)
+        symbol = marker.find("c:symbol", C_NS) if marker is not None else None
+        if (
+            marker is not None
+            and (
+                marker.attrib
+                or len(marker) != 1
+                or symbol is None
+                or set(symbol.attrib) != {"val"}
+                or list(symbol)
+                or _element_val(symbol) != "none"
+            )
+        ):

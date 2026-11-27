@@ -1,0 +1,111 @@
+# ---------------------------------------------------------------------------
+# Marker (arrow-head) support
+# ---------------------------------------------------------------------------
+
+def _marker_size_buckets(w_attr: float, h_attr: float) -> tuple[str, str]:
+    """Map SVG markerWidth / markerHeight to DrawingML (w, len) buckets.
+
+    DrawingML arrow-end sizing is categorical: sm / med / lg.
+    Width (perpendicular to the line) maps from markerHeight;
+    length (along the line) maps from markerWidth.
+    """
+
+    def bucket(v: float) -> str:
+        if v < 6:
+            return 'sm'
+        if v > 12:
+            return 'lg'
+        return 'med'
+
+    return bucket(h_attr), bucket(w_attr)
+
+
+def _classify_marker(marker_elem: ET.Element) -> tuple[str, str, str] | None:
+    """Classify an SVG <marker> into a DrawingML line-end preset.
+
+    Returns (type, w, len) where:
+        type in {'triangle', 'stealth', 'diamond', 'oval', 'arrow'}
+        w, len in {'sm', 'med', 'lg'}
+    or None if the marker cannot be classified.
+
+    Current coverage is the five DrawingML line-end shapes: triangle, stealth,
+    arrow, diamond, and oval. Anything else returns ``None``.
+    """
+    mw = _f(marker_elem.get('markerWidth'), 3.0)
+    mh = _f(marker_elem.get('markerHeight'), 3.0)
+    w_bucket, len_bucket = _marker_size_buckets(mw, mh)
+
+    marker_type = classify_project_marker_shape(marker_elem)
+    if marker_type is None:
+        return None
+    return marker_type, w_bucket, len_bucket
+
+
+def _emit_line_end(
+    elem: ET.Element,
+    ctx: ConvertContext,
+    which: str,
+) -> str:
+    """Build <a:headEnd> or <a:tailEnd> XML for an element's marker reference.
+
+    Args:
+        which: 'head' (SVG marker-start) or 'tail' (SVG marker-end).
+
+    Returns empty string if no marker, cannot resolve, or cannot classify.
+    """
+    attr = 'marker-start' if which == 'head' else 'marker-end'
+    ref = _get_attr(elem, attr, ctx)
+    if not ref or ref == 'none':
+        return ''
+
+    marker_id = resolve_url_id(ref)
+    if not marker_id or marker_id not in ctx.defs:
+        return ''
+
+    marker_elem = ctx.defs[marker_id]
+    tag = marker_elem.tag.replace(f'{{{SVG_NS}}}', '')
+    if tag != 'marker':
+        # ID collision with non-marker defs entry; ignore.
+        return ''
+
+    cls = _classify_marker(marker_elem)
+    if cls is None:
+        print(
+            f'  Warning: marker "{marker_id}" shape cannot be classified; '
+            'skipping (supported: triangle, stealth, arrow, diamond, oval)'
+        )
+        return ''
+
+    typ, w_bucket, len_bucket = cls
+
+    # Reclassify size buckets based on markerUnits semantics:
+    #
+    # markerUnits="strokeWidth" (SVG default):
+    #   markerWidth IS a ratio to stroke-width, and DrawingML headEnd/tailEnd
+    #   also scale proportionally with line width.  We should compare the ratio
+    #   (markerWidth) directly against ratio-based thresholds — do NOT multiply
+    #   by stroke-width, because that double-counts the scaling.
+    #   Empirical DrawingML arrow ratios:
+    #     sm  ≈ 1.5×  stroke-width  →  markerWidth ≤ 2.0
+    #     med ≈ 2.5×  stroke-width  →  markerWidth  2.0 – 3.5
+    #     lg  ≈ 3.5×  stroke-width  →  markerWidth ≥ 3.5
+    #
+    # markerUnits="userSpaceOnUse":
+    #   markerWidth/Height are absolute pixel values – keep the existing
+    #   absolute-pixel thresholds from _marker_size_buckets (6 / 12).
+    marker_units = marker_elem.get('markerUnits', 'strokeWidth')
+    if marker_units != 'userSpaceOnUse':
+        mw = _f(marker_elem.get('markerWidth'), 3.0)
+        mh = _f(marker_elem.get('markerHeight'), 3.0)
+
+        def _ratio_bucket(v: float) -> str:
+            if v <= 2.0:
+                return 'sm'
+            if v >= 3.5:
+                return 'lg'
+            return 'med'
+
+        w_bucket = _ratio_bucket(mh)    # h → perpendicular width
+        len_bucket = _ratio_bucket(mw)  # w → length along line
+
+    dml_tag = 'headEnd' if which == 'head' else 'tailEnd'

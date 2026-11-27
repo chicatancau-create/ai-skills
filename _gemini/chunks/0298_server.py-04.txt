@@ -1,0 +1,110 @@
+def _append_annotation_log(project_path: Path, record: dict) -> None:
+    """Append one annotation lifecycle record to the preview history."""
+    _append_live_preview_log(project_path, ANNOTATION_LOG_NAME, record)
+
+
+def _find_by_id(root: ET.Element, element_id: str) -> Optional[ET.Element]:
+    for elem in root.iter():
+        if elem.get('id') == element_id:
+            return elem
+    return None
+
+
+def _apply_edit_record(root: ET.Element, record: dict) -> tuple[bool, Optional[str]]:
+    element_id = record.get('element_id')
+    if not isinstance(element_id, str):
+        return False, 'invalid-record'
+    promote = record.get('promote_tspan')
+    if promote:
+        if not isinstance(promote, dict):
+            return False, 'invalid-promote'
+        ok, reason = promote_tspan_to_text(
+            root,
+            element_id,
+            str(promote.get('x') or ''),
+            str(promote.get('y') or ''),
+        )
+        if not ok:
+            return ok, reason
+    if 'text' in record:
+        ok, reason = set_text(root, element_id, str(record.get('text') or ''))
+        if not ok:
+            return ok, reason
+    attrs = record.get('attrs')
+    if attrs:
+        target = _find_by_id(root, element_id)
+        if target is None:
+            return False, 'not-found'
+        _strip_edited_inline_geometry(target, attrs.keys())
+        ok, reason = set_attributes(root, element_id, attrs)
+        if not ok:
+            return ok, reason
+    return True, None
+
+
+def _apply_edit_records(root: ET.Element, records: list[dict]) -> tuple[bool, Optional[str]]:
+    for record in records:
+        ok, reason = _apply_edit_record(root, record)
+        if not ok:
+            return ok, reason
+    return True, None
+
+
+def _edit_signature(record: dict) -> tuple:
+    """Identity used to coalesce consecutive staged edits.
+
+    Two edits fold together only when they touch the exact same element and the
+    exact same field set (text flag + sorted attr keys). 'Nudge fill 5×'
+    collapses to one undo step; 'change fill then font-size' stays two.
+    """
+    attr_keys = tuple(sorted((record.get('attrs') or {}).keys()))
+    promote_keys = tuple(sorted((record.get('promote_tspan') or {}).keys()))
+    return (record.get('element_id'), 'text' in record, attr_keys, promote_keys)
+
+
+def _coalesce_into(prev: dict, cur: dict) -> None:
+    """Fold cur's new values into prev, keeping prev's original old values.
+
+    Callers guarantee matching signatures, so prev and cur carry the same
+    (kind, key) change set; only the 'new' side advances. prev's 'old' is the
+    value from before the first edit in the run, which is what undo and the
+    edit log should report.
+    """
+    if 'text' in cur:
+        prev['text'] = cur['text']
+    if cur.get('attrs'):
+        merged = dict(prev.get('attrs') or {})
+        merged.update(cur['attrs'])
+        prev['attrs'] = merged
+    if cur.get('promote_tspan'):
+        prev['promote_tspan'] = cur['promote_tspan']
+    old_by_field = {(c['kind'], c['key']): c['old'] for c in prev['changes']}
+    prev['changes'] = [
+        {
+            'kind': c['kind'], 'key': c['key'],
+            'old': old_by_field.get((c['kind'], c['key']), c['old']),
+            'new': c['new'],
+        }
+        for c in cur['changes']
+    ]
+
+
+def create_app(
+    project_dir: str,
+    idle_timeout: int = 900,
+    live: bool = False,
+    lock_file: Optional[Path] = None,
+) -> Flask:
+    """Create and configure the Flask app for a given project directory."""
+    project_path = Path(project_dir).resolve()
+    svg_dir = project_path / 'svg_output'
+    images_dir = project_path / 'images'
+    icons_dir = icon_dir_for_project(project_path)
+
+    app = Flask(__name__, static_folder='static', static_url_path='/static')
+    app.config['PROJECT_PATH'] = project_path
+    app.config['SVG_DIR'] = svg_dir
+    app.config['LIVE_MODE'] = live
+    app.config['LOCK_FILE'] = lock_file
+
+    # In-memory annotation store: {filename: {element_id: annotation_text}}

@@ -1,0 +1,125 @@
+"""Classify supported chart and table edits before package mutation."""
+
+from __future__ import annotations
+
+from typing import Any
+from xml.etree import ElementTree as ET
+
+from .ooxml import NS, _qn
+
+_XY_PLOTS = frozenset({"bubbleChart", "scatterChart"})
+
+
+def _local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _tag_namespace(tag: str) -> str:
+    if not tag.startswith("{") or "}" not in tag:
+        return ""
+    return tag[1:].split("}", 1)[0]
+
+
+def _chart_reference(frame: ET.Element) -> tuple[str, str]:
+    """Return ``(classic|chartex|unknown, relationship id)`` for a chart frame."""
+    graphic_data = frame.find(".//a:graphicData", NS)
+    if graphic_data is None:
+        return "", ""
+
+    for node in graphic_data.iter():
+        if _local_name(node.tag) != "chart":
+            continue
+        namespace = _tag_namespace(node.tag)
+        rel_id = node.attrib.get(_qn(NS["r"], "id"), "")
+        if namespace == NS["c"]:
+            return "classic", rel_id
+        if "chartex" in namespace.lower():
+            return "chartex", rel_id
+        return "unknown", rel_id
+
+    uri = graphic_data.attrib.get("uri", "").lower()
+    if "chartex" in uri:
+        return "chartex", ""
+    if "chart" in uri:
+        return "unknown", ""
+    return "", ""
+
+
+def _chart_frames(slide_root: ET.Element) -> list[ET.Element]:
+    """Return classic, ChartEx, and unknown chart graphic frames."""
+    return [
+        frame
+        for frame in slide_root.findall(".//p:graphicFrame", NS)
+        if _chart_reference(frame)[0]
+    ]
+
+
+def _unsupported_chart_capability(
+    code: str,
+    message: str,
+    *,
+    plot_type: str | None = None,
+    plot_count: int = 0,
+    data_model: str = "unknown",
+) -> dict[str, Any]:
+    return {
+        "supported": False,
+        "code": code,
+        "message": message,
+        "plot_type": plot_type,
+        "plot_count": plot_count,
+        "data_model": data_model,
+    }
+
+
+def _chart_edit_capability(chart_root: ET.Element) -> dict[str, Any]:
+    """Classify whether the category cache writer can safely edit a chart part."""
+    root_namespace = _tag_namespace(chart_root.tag)
+    if "chartex" in root_namespace.lower():
+        return _unsupported_chart_capability(
+            "chart_edit_chartex_unsupported",
+            "OOXML chart edits do not support ChartEx",
+        )
+    if root_namespace != NS["c"]:
+        return _unsupported_chart_capability(
+            "chart_edit_plot_type_unsupported",
+            "OOXML chart edits require a classic DrawingML chart part",
+        )
+
+    plot_area = chart_root.find(".//c:plotArea", NS)
+    if plot_area is None:
+        return _unsupported_chart_capability(
+            "chart_edit_plot_type_unsupported",
+            "OOXML chart edits require a classic chart plotArea",
+        )
+
+    plot_nodes = [
+        child
+        for child in list(plot_area)
+        if _tag_namespace(child.tag) == NS["c"] and _local_name(child.tag).endswith("Chart")
+    ]
+    if len(plot_nodes) > 1:
+        return _unsupported_chart_capability(
+            "chart_edit_multi_plot_unsupported",
+            "OOXML chart edits do not support multi-plot or combination charts",
+            plot_count=len(plot_nodes),
+        )
+    if not plot_nodes:
+        return _unsupported_chart_capability(
+            "chart_edit_plot_type_unsupported",
+            "OOXML chart edits require exactly one recognized chart plot",
+        )
+
+    plot = plot_nodes[0]
+    plot_type = _local_name(plot.tag)
+    if plot_type == "scatterChart":
+        return _unsupported_chart_capability(
+            "chart_edit_scatter_unsupported",
+            "OOXML chart edits do not support scatter xVal/yVal data",
+            plot_type=plot_type,
+            plot_count=1,
+            data_model="xy",
+        )
+    if plot_type == "bubbleChart":
+        return _unsupported_chart_capability(
+            "chart_edit_bubble_unsupported",

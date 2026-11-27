@@ -1,0 +1,108 @@
+        "--no-image-propagation", action="store_true",
+        help="Keep extracted companion images in sources/ without copying them into images/",
+    )
+    mode = import_sources.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--move",
+        action="store_true",
+        help="Move local sources under projects/; sources elsewhere are copied",
+    )
+    mode.add_argument("--copy", action="store_true", help="Copy local source files")
+
+    scaffold_spec = subparsers.add_parser(
+        "scaffold-spec",
+        help="Create design_spec.md from the versioned scaffold",
+    )
+    scaffold_spec.add_argument("project_path", help="Project directory")
+
+    scaffold_lock = subparsers.add_parser(
+        "scaffold-lock",
+        help="Create spec_lock.md from the versioned scaffold",
+    )
+    scaffold_lock.add_argument("project_path", help="Project directory")
+
+    validate = subparsers.add_parser("validate", help="Validate a project directory")
+    validate.add_argument("project_path", help="Project directory")
+
+    info = subparsers.add_parser("info", help="Print project metadata")
+    info.add_argument("project_path", help="Project directory")
+
+    page_context = subparsers.add_parser(
+        "page-context",
+        help="Print one deterministic per-page execution view",
+    )
+    page_context.add_argument("project_path", help="Project directory")
+    page_context.add_argument("page", help="Positive page key such as P07")
+    page_context.add_argument(
+        "--bundle",
+        action="store_true",
+        help="Deprecated compatibility flag; output remains compact",
+    )
+    page_context.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print the page-context JSON payload",
+    )
+    page_context.add_argument(
+        "--record-usage",
+        action="store_true",
+        help="Write compact-output token telemetry under analysis/page-context/",
+    )
+
+    page_context_report = subparsers.add_parser(
+        "page-context-report",
+        help="Summarize fresh per-page context telemetry",
+    )
+    page_context_report.add_argument("project_path", help="Project directory")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the CLI entry point."""
+    require_skill_integrity()
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    manager = ProjectManager()
+
+    try:
+        if args.command == "init":
+            project_path = manager.init_project(
+                args.project_name,
+                args.format,
+                base_dir=args.dir,
+                quick_generate=args.quick_generate,
+            )
+            print(f"[OK] Project initialized: {project_path}")
+            print("Next:")
+            if args.quick_generate:
+                print("1. Generate SVG files into svg_output/")
+                print("2. Run the Quick Generate final checker and exporter")
+                profile = "quick"
+            else:
+                print("1. Put source files into sources/ (or use import-sources)")
+                print("2. Save your design spec to the project root")
+                print("3. Generate SVG files into svg_output/")
+                profile = "default"
+            try:
+                canvas_note = (
+                    f"; canvas={args.format}"
+                    if args.format is not None
+                    else ""
+                )
+                append_note(
+                    project_path,
+                    f"Project initialized: profile={profile}{canvas_note}; "
+                    f"path={project_path}",
+                )
+            except OSError as exc:
+                print(
+                    f"[WARN] Workflow audit unavailable: {exc}",
+                    file=sys.stderr,
+                )
+            return 0
+
+        if args.command == "import-sources":
+            summary = manager.import_sources(
+                args.project_path,
+                args.sources,
+                move=args.move,

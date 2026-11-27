@@ -1,0 +1,54 @@
+- `--daemon` starts the Flask process in the background and returns after the health check. Every Default UI run launches directly into combined Stage 1 and keeps the same process live through final Stage 2. The wait budget defaults to **590 s** (`--wait-timeout`); on timeout the detached server remains live, and the caller re-checks both Stage-1 receipts before chat fallback.
+- `--wait-only` attaches to the page opened by `--daemon` and blocks until the requested receipt. If it is already persisted, the command returns before recovery, so a fast submit between launch, chat handoff, and wait is not lost. Otherwise, if the recorded server died, it restarts on the recorded/default port. Use `stage1` for the combined communication/template submission and the default/final wait for Stage 2.
+- Stage 2 checks the selected roots and the installer's receipt directly. There is no manual completion command or handoff sidecar.
+- `--shutdown` stops a confirm server left running for this project and exits — **idempotent** (a no-op when nothing is running). Tries a graceful `/api/shutdown`, falls back to killing the recorded pid, then clears the lock. Generate Step 4 runs this on every path so the selected port is released before live preview starts.
+- A run starts with `recommendations.stage1.json` containing `template_options`. The complete recommendation's canonical JSON SHA-256 participates in the option digest. Changing its content starts a new round and invalidates old selections, results, installation receipts and Stage-2 recommendations. To deliberately repeat identical choices in a new round, change a top-level `revision` value; touching timestamps or reformatting JSON does not start a round. Legacy standalone options/handoff files are ignored. Old results without the content binding require Stage 1 again.
+- Per-project lock at `<project_path>/.confirm_ui.lock` — duplicate launches are refused; stale locks (dead pid) are overwritten.
+- Idle auto-shutdown after 900 s by default; `/api/shutdown` exits gracefully and releases the lock.
+- Stage-1 `GET /api/recommendations` embeds the server-built candidate catalog
+  as top-level `template_options`. Its `/api/confirm` submission validates
+  the rendered options digest and current candidate keys, then writes `template_selection.json` beside the pure
+  Strategist `result.json`; there is no independent template-options endpoint,
+  template-confirm endpoint, or template wait stage. The same APIs later serve
+  Stage 2 and strip legacy `template_reuse_scope` / `template_adherence`
+  fields. The completed template handoff is authoritative: `free_design`
+  strips a stray `template_application`, while `templates` exposes that
+  editable natural-language field in Stage 2.
+
+Dependency:
+
+```bash
+pip install flask
+```
+
+## Stage-1 template-selection sidecar contract
+
+Template selection shares the Stage-1 page and submit action but remains a
+separate artifact from the Strategist contract. Its files live under
+`<project_path>/confirm_ui/`; selection keys never enter `result.json`.
+
+### Input — `recommendations.stage1.json.template_options`
+
+```json
+{
+  "stage": "stage1",
+  "primary_language": "en",
+  "revision": 1,
+  "template_options": {
+    "schema_version": 1,
+    "phase": "template",
+    "lang": "en",
+    "default_mode": "templates",
+    "explicit_workspace_roots": ["/absolute/path/to/template-workspace"]
+  }
+}
+```
+
+- `schema_version` is exactly `1`; `phase` is exactly `template`.
+- `lang` is optional, but when present it is a non-empty UI-language string.
+- `default_mode` is required and is exactly `free_design` or `templates`.
+  Ordinary requests use `free_design`; explicit template intent or any supplied
+  exact root uses `templates`. It initializes the UI but never locks the user.
+- `explicit_workspace_roots` is required even when empty. Every item is a
+  unique absolute path resolving to an existing directory with a library
+  `templates/design_spec.md`, one or more project-qualified

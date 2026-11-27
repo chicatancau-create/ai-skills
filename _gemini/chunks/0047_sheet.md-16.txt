@@ -1,0 +1,96 @@
+
+# 1. 基本用法: 写入图片到指定单元格
+dws sheet write-image --node <NODE_ID> --sheet-id <SHEET_ID> --range A1:A1 --file ./chart.png -f json
+
+# 2. 指定显示尺寸
+dws sheet write-image --node <NODE_ID> --sheet-id <SHEET_ID> --range B2:B2 --file ./logo.png --width 200 --height 100 -f json
+
+# 3. 自定义图片名称
+dws sheet write-image --node <NODE_ID> --sheet-id <SHEET_ID> --range C3:C3 --file ./photo.jpg --name "产品图.jpg" -f json
+
+# 4. 完整流程: 创建表格 → 写表头 → 写入图片
+dws sheet create --name "产品目录" -f json
+# 提取 nodeId 后:
+dws sheet range update --node <NODE_ID> --sheet-id Sheet1 --range "A1:B1" --values '[["产品名称","产品图片"]]' -f json
+dws sheet range update --node <NODE_ID> --sheet-id Sheet1 --range "A2:A2" --values '[["MacBook Pro"]]' -f json
+dws sheet write-image --node <NODE_ID> --sheet-id Sheet1 --range B2:B2 --file ./macbook.png --width 150 --height 100 -f json
+```
+
+```bash
+# ── 工作流 11: 筛选视图管理 ──
+
+# 1. 获取工作表列表
+dws sheet list --node <NODE_ID> -f json
+
+# 2. 查看已有筛选视图
+dws sheet filter-view list --node <NODE_ID> --sheet-id <SHEET_ID> -f json
+
+# 3. 创建筛选视图（不带条件）
+dws sheet filter-view create --node <NODE_ID> --sheet-id <SHEET_ID> \
+  --name "我的筛选" --range "A1:E100" -f json
+
+# 4. 为筛选视图设置列条件（按值筛选）
+dws sheet filter-view update-criteria --node <NODE_ID> --sheet-id <SHEET_ID> --filter-view-id <FV_ID> \
+  --column 0 --filter-criteria '{"filterType":"values","visibleValues":["销售部","市场部"]}' -f json
+
+# 5. 为筛选视图设置列条件（按条件筛选）
+dws sheet filter-view update-criteria --node <NODE_ID> --sheet-id <SHEET_ID> --filter-view-id <FV_ID> \
+  --column 2 --filter-criteria '{"filterType":"condition","conditions":[{"operator":"greater","value":"100"}]}' -f json
+
+# 6. 更新筛选视图名称和范围
+dws sheet filter-view update --node <NODE_ID> --sheet-id <SHEET_ID> --filter-view-id <FV_ID> \
+  --name "销售数据筛选" --range "A1:F200" -f json
+
+# 7. 清除某列的筛选条件
+dws sheet filter-view delete-criteria --node <NODE_ID> --sheet-id <SHEET_ID> --filter-view-id <FV_ID> \
+  --column 0 -f json
+
+# 8. 删除筛选视图
+dws sheet filter-view delete --node <NODE_ID> --sheet-id <SHEET_ID> --filter-view-id <FV_ID> -f json
+```
+
+```bash
+# ── 工作流 11b: 创建带条件的筛选视图（一步完成） ──
+
+# 创建筛选视图时直接指定筛选条件
+dws sheet filter-view create --node <NODE_ID> --sheet-id <SHEET_ID> \
+  --name "高销售额视图" --range "A1:E100" \
+  --criteria '[{"column":0,"filterType":"values","visibleValues":["销售部"]},{"column":2,"filterType":"condition","conditions":[{"operator":"greater","value":"50000"}]}]' \
+  -f json
+```
+
+```bash
+# ── 工作流 12: 导出表格为 xlsx（单命令一站式）──
+
+# 场景 A：仅获取下载链接（命令内部自动完成提交+轮询，最终返回 downloadUrl）
+dws sheet export --node <NODE_ID> --format json
+# 传入 URL 也可：
+# dws sheet export --node "https://alidocs.dingtalk.com/i/nodes/<DOC_UUID>" --format json
+
+# 场景 B：导出并自动下载为本地文件
+dws sheet export --node <NODE_ID> --output ./report.xlsx
+
+# 场景 C：下载到目录，自动按链接推断文件名
+dws sheet export --node <NODE_ID> --output ./
+
+# 禁止在 Agent 侧实现任何轮询或重试，CLI 内部已按 2s/5s/10s/15s 渐进式退避自动完成（最多 30 次）。
+# 若命令返回失败或超时，直接告知用户稍后再试，不要自动重调 dws sheet export。
+```
+
+## 上下文传递表
+
+| 操作 | 从返回中提取 | 用于 |
+|------|-------------|------|
+| `create` | `nodeId` | list / info / new / range read / range update / find 的 --node |
+| `list` | 工作表的 `sheetId` | info / range read / range update / find 的 --sheet-id |
+| `new` | 新工作表的 `sheetId` | range read / range update / find 的 --sheet-id |
+| `info` | `rowCount` / `lastNonEmptyRow` | 确定数据范围、追加写入起始行 |
+| `find` | `matchedCells` 中的 `a1Notation` | 定位目标单元格，用于 range read / range update |
+| `append` | `a1Notation` 追加数据所在范围 | 确认追加位置 |
+| `csv-put` | `a1Notation` 实际写入的单元格范围 | 确认写入位置和范围 |
+| `insert-dimension` | `a1Notation` 新插入区域范围 | 确认插入位置和范围 |
+| `delete-dimension` | `a1Notation` 被删除区域范围 | 确认删除位置和范围 |
+| `update-dimension` | `a1Notation` 被更新区域范围、`hidden` 生效的显隐状态、`pixelSize` 生效的尺寸 | 确认更新结果 |
+| `merge-cells` | `a1Notation` 实际被合并的范围、`mergeType` 生效的合并方式 | 确认合并结果 |
+| `media-upload` | `resourceId`、`resourceUrl` | 附件已上传到表格；`resourceUrl` 可用于 `create-float-image` 的 `--src` |
+| `write-image` | `resourceId` | 图片已写入指定单元格 |

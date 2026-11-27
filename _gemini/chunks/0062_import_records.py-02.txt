@@ -1,0 +1,143 @@
+        return False, '记录必须包含非空 cells 对象'
+    return True, ''
+
+
+def run_dws(args: List[str]) -> Optional[Dict[str, Any]]:
+    if not args:
+        print('错误：空命令')
+        return None
+    cmd = ['dws'] + args
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=120
+        )
+        if result.returncode != 0:
+            print(f"错误：{result.stderr.strip()}")
+            return None
+        try:
+            return json.loads(result.stdout)
+        except json.JSONDecodeError as e:
+            print(f"无法解析响应：{result.stdout[:200]}...")
+            print(f"JSON 解析错误：{e}")
+            return None
+    except subprocess.TimeoutExpired:
+        print('错误：命令执行超时（120 秒）')
+        return None
+    except FileNotFoundError:
+        print('错误：未找到 dws 命令，请确认已安装')
+        return None
+
+
+def import_from_csv(
+    base_id: str, table_id: str, csv_file: str,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+) -> bool:
+    try:
+        safe_path = resolve_safe_path(csv_file)
+    except ValueError as e:
+        print(f"路径验证失败：{e}")
+        return False
+
+    if not validate_file_extension(csv_file, ALLOWED_CSV_EXTENSIONS):
+        print(f"错误：只允许 {', '.join(ALLOWED_CSV_EXTENSIONS)} 文件")
+        return False
+    if not safe_path.exists():
+        print(f"错误：文件不存在：{safe_path}")
+        return False
+
+    try:
+        rows = safe_csv_load(safe_path)
+    except ValueError as e:
+        print(f"错误：{e}")
+        return False
+    except csv.Error as e:
+        print(f"错误：CSV 格式无效：{e}")
+        return False
+
+    if not rows:
+        print('错误：CSV 文件为空或没有有效数据行')
+        return False
+
+    records = [
+        normalize_record(row)
+        for row in rows
+        if normalize_record(row)['cells']
+    ]
+    return import_records(base_id, table_id, records, batch_size)
+
+
+def import_from_json(
+    base_id: str, table_id: str, json_file: str,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+) -> bool:
+    try:
+        safe_path = resolve_safe_path(json_file)
+    except ValueError as e:
+        print(f"路径验证失败：{e}")
+        return False
+
+    if not validate_file_extension(json_file, ALLOWED_JSON_EXTENSIONS):
+        print(f"错误：只允许 {', '.join(ALLOWED_JSON_EXTENSIONS)} 文件")
+        return False
+    if not safe_path.exists():
+        print(f"错误：文件不存在：{safe_path}")
+        return False
+
+    try:
+        records = safe_json_load(safe_path)
+    except ValueError as e:
+        print(f"错误：{e}")
+        return False
+    except json.JSONDecodeError as e:
+        print(f"错误：JSON 格式无效：{e}")
+        return False
+
+    if not isinstance(records, list) or not records:
+        print('错误：JSON 文件必须是非空数组')
+        return False
+
+    for i, record in enumerate(records):
+        valid, error = validate_record(record, [])
+        if not valid:
+            print(f"错误：记录 #{i+1} 格式无效：{error}")
+            return False
+
+    return import_records(
+        base_id, table_id,
+        [normalize_record(r) for r in records], batch_size,
+    )
+
+
+def import_records(
+    base_id: str, table_id: str,
+    records: List[Dict[str, Any]], batch_size: int,
+) -> bool:
+    if batch_size <= 0:
+        print('错误：batch_size 必须大于 0')
+        return False
+    if batch_size > MAX_RECORDS_PER_BATCH:
+        batch_size = MAX_RECORDS_PER_BATCH
+
+    total_batches = (len(records) + batch_size - 1) // batch_size
+    success = True
+
+    for i in range(0, len(records), batch_size):
+        batch = records[i:i + batch_size]
+        batch_num = (i // batch_size) + 1
+        records_json = json.dumps(batch, ensure_ascii=False)
+        result = run_dws([
+            'aitable', 'record', 'create',
+            '--base-id', base_id,
+            '--table-id', table_id,
+            '--records', records_json,
+            '--format', 'json',
+        ])
+        if result:
+            print(
+                f"[{batch_num}/{total_batches}] "
+                f"✓ 已提交 {len(batch)} 条记录"
+            )
+        else:
+            print(f"[{batch_num}/{total_batches}] ✗ 导入失败")
+            success = False
+

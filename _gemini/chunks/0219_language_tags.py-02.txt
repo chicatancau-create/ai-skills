@@ -1,0 +1,113 @@
+    if language in _NATURAL_LANGUAGE_NAMES:
+        raise LanguageTagError(
+            "use a BCP-47 language tag such as es-ES, ru-RU, ar-SA, or zh-Hans"
+        )
+    if language == "und":
+        raise LanguageTagError(
+            "und is not a usable primary language; choose the presentation language"
+        )
+
+    normalized = [language]
+    index = 1
+
+    extlang_count = 0
+    while (
+        len(language) <= 3
+        and index < len(parts)
+        and extlang_count < 3
+        and _EXTLANG_RE.fullmatch(parts[index])
+    ):
+        normalized.append(parts[index].lower())
+        index += 1
+        extlang_count += 1
+
+    has_script = False
+    if index < len(parts) and _SCRIPT_RE.fullmatch(parts[index]):
+        normalized.append(parts[index].title())
+        index += 1
+        has_script = True
+
+    has_region = False
+    if index < len(parts) and _REGION_RE.fullmatch(parts[index]):
+        region = parts[index]
+        normalized.append(region.upper() if region.isalpha() else region)
+        index += 1
+        has_region = True
+
+    variants = set()
+    while index < len(parts) and _VARIANT_RE.fullmatch(parts[index]):
+        variant = parts[index].lower()
+        if variant in variants:
+            raise LanguageTagError(f"duplicate BCP-47 variant: {parts[index]!r}")
+        variants.add(variant)
+        normalized.append(variant)
+        index += 1
+
+    singletons = set()
+    while index < len(parts) and _SINGLETON_RE.fullmatch(parts[index]):
+        singleton = parts[index].lower()
+        if singleton in singletons:
+            raise LanguageTagError(f"duplicate BCP-47 extension: {parts[index]!r}")
+        singletons.add(singleton)
+        normalized.append(singleton)
+        index += 1
+        start = index
+        while index < len(parts) and _EXTENSION_RE.fullmatch(parts[index]):
+            normalized.append(parts[index].lower())
+            index += 1
+        if index == start:
+            raise LanguageTagError(
+                f"BCP-47 extension {singleton!r} requires a following subtag"
+            )
+
+    if index < len(parts) and parts[index].casefold() == "x":
+        normalized.append("x")
+        index += 1
+        start = index
+        while index < len(parts) and _PRIVATE_RE.fullmatch(parts[index]):
+            normalized.append(parts[index].lower())
+            index += 1
+        if index == start:
+            raise LanguageTagError("BCP-47 private use requires a following subtag")
+
+    if index != len(parts):
+        raise LanguageTagError(f"invalid BCP-47 subtag: {parts[index]!r}")
+    if language == "zh" and not (has_script or has_region):
+        raise LanguageTagError(
+            "Chinese must declare a script or region, for example zh-Hans, "
+            "zh-Hant, zh-CN, or zh-TW"
+        )
+    return "-".join(normalized)
+
+
+_OFFICE_CHINESE_REGIONS = {
+    "Hans": ("CN", frozenset({"CN", "SG"})),
+    "Hant": ("TW", frozenset({"TW", "HK", "MO"})),
+}
+
+
+def office_language_tag(value: str) -> str:
+    """Return the region-form tag Office writes for one canonical tag.
+
+    PowerPoint's own files tag Chinese text ``zh-CN`` / ``zh-TW`` / ``zh-HK``
+    and match proofing languages by those culture names, so a script-qualified
+    Chinese tag (``zh-Hant-TW``, ``zh-Hans``) is written in that form. Every
+    other tag passes through unchanged.
+    """
+    tag = normalize_language_tag(value)
+    parts = tag.split("-")
+    if parts[0] != "zh" or len(parts) < 2 or parts[1] not in _OFFICE_CHINESE_REGIONS:
+        return tag
+    default_region, regions = _OFFICE_CHINESE_REGIONS[parts[1]]
+    region = parts[2] if len(parts) > 2 and parts[2] in regions else default_region
+    return f"zh-{region}"
+
+
+def language_base(value: str) -> str:
+    """Return the lower-case primary language subtag."""
+    return normalize_language_tag(value).split("-", 1)[0]
+
+
+def language_uses_rtl(value: str) -> bool:
+    """Return whether the canonical language or explicit script is RTL."""
+    tag = normalize_language_tag(value)

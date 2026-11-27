@@ -1,0 +1,109 @@
+            if xfrm_elem is None:
+                continue
+            xfrm = parse_xfrm(xfrm_elem)
+            if xfrm.w <= 0 and xfrm.h <= 0:
+                continue
+            ph_type, ph_idx = _placeholder_identity(
+                ph_elem.attrib.get("type"),
+                ph_elem.attrib.get("idx"),
+            )
+            for key in ((ph_type, ph_idx),
+                        (ph_type, None),
+                        (None, ph_idx)):
+                table.setdefault(key, xfrm)
+    return table
+
+
+def _build_placeholder_lst_style_table(
+    *parts: ET.Element | None,
+) -> dict[tuple[str | None, str | None], list[ET.Element]]:
+    """Index placeholder txBody/lstStyle elements in priority order."""
+    table: dict[tuple[str | None, str | None], list[ET.Element]] = {}
+    for part_xml in parts:
+        if part_xml is None:
+            continue
+        sp_tree = part_xml.find("p:cSld/p:spTree", NS)
+        if sp_tree is None:
+            continue
+        for sp in sp_tree.iter():
+            if not isinstance(sp.tag, str) or sp.tag.split("}", 1)[-1] != "sp":
+                continue
+            ph_elem = sp.find("p:nvSpPr/p:nvPr/p:ph", NS)
+            if ph_elem is None:
+                continue
+            lst_style = sp.find("p:txBody/a:lstStyle", NS)
+            if lst_style is None:
+                continue
+            ph_type, ph_idx = _placeholder_identity(
+                ph_elem.attrib.get("type"),
+                ph_elem.attrib.get("idx"),
+            )
+            for key in ((ph_type, ph_idx),
+                        (ph_type, None),
+                        (None, ph_idx)):
+                table.setdefault(key, []).append(lst_style)
+        _append_master_tx_styles(table, part_xml)
+    return table
+
+
+def _build_placeholder_body_property_table(
+    *parts: ET.Element | None,
+) -> dict[tuple[str | None, str | None], list[ET.Element]]:
+    """Index placeholder txBody/bodyPr elements in priority order."""
+    table: dict[tuple[str | None, str | None], list[ET.Element]] = {}
+    for part_xml in parts:
+        if part_xml is None:
+            continue
+        sp_tree = part_xml.find("p:cSld/p:spTree", NS)
+        if sp_tree is None:
+            continue
+        for sp in sp_tree.iter():
+            if not isinstance(sp.tag, str) or sp.tag.split("}", 1)[-1] != "sp":
+                continue
+            ph_elem = sp.find("p:nvSpPr/p:nvPr/p:ph", NS)
+            body_pr = sp.find("p:txBody/a:bodyPr", NS)
+            if ph_elem is None or body_pr is None:
+                continue
+            ph_type, ph_idx = _placeholder_identity(
+                ph_elem.attrib.get("type"),
+                ph_elem.attrib.get("idx"),
+            )
+            for key in (
+                (ph_type, ph_idx),
+                (ph_type, None),
+                (None, ph_idx),
+            ):
+                table.setdefault(key, []).append(body_pr)
+    return table
+
+
+def _append_master_tx_styles(
+    table: dict[tuple[str | None, str | None], list[ET.Element]],
+    part_xml: ET.Element,
+) -> None:
+    for key, path in (
+        (_TX_STYLE_TITLE_KEY, "p:txStyles/p:titleStyle"),
+        (_TX_STYLE_BODY_KEY, "p:txStyles/p:bodyStyle"),
+        (_TX_STYLE_OTHER_KEY, "p:txStyles/p:otherStyle"),
+    ):
+        style = part_xml.find(path, NS)
+        if style is not None:
+            table.setdefault(key, []).append(style)
+
+
+def walk_sp_tree(
+    slide_xml: ET.Element,
+    *,
+    layout_xml: ET.Element | None = None,
+    master_xml: ET.Element | None = None,
+) -> list[ShapeNode]:
+    """Top-level entry: return shape nodes for a slide / layout / master XML.
+
+    When ``slide_xml`` is a regular slide, pass its ``layout_xml`` and
+    ``master_xml`` so placeholders can inherit geometry, text list styles, and
+    body properties from the layout/master. Layout and master walks pass
+    neither — their own placeholders are the source of truth.
+    """
+    sp_tree = slide_xml.find("p:cSld/p:spTree", NS)
+    if sp_tree is None:
+        return []

@@ -1,0 +1,111 @@
+    print(f"Configuration source: {source}")
+
+
+def _print_backend_list() -> None:
+    """Print supported backends grouped by support tier."""
+    print("Supported image backends:\n")
+    tiers = ("core", "extended", "experimental")
+    for tier in tiers:
+        print(f"{tier.upper()}:")
+        for name, info in sorted(
+            BACKEND_REGISTRY.items(),
+            key=lambda item: (TIER_ORDER[item[1]["tier"]], item[0]),
+        ):
+            if info["tier"] != tier:
+                continue
+            if info["default_model"]:
+                model_label = f"default={info['default_model']}"
+            else:
+                model_label = f"model=required via {info['model_hint']}"
+            print(
+                f"  {name:<12} {info['label']} | "
+                f"{model_label} | "
+                f"size={info['default_image_size']} | keys={info['key_hint']}"
+            )
+        print()
+    print("Recommendation: prefer CORE backends for everyday PPT generation.")
+    _print_backend_resolution()
+
+
+def _check_backend_aspect_ratio(backend_module, aspect_ratio: str) -> None:
+    """Fail before the request when the resolved backend rejects this ratio.
+
+    ``ALL_ASPECT_RATIOS`` is the union across backends; each backend module
+    may narrow it with ``VALID_ASPECT_RATIOS``.
+    """
+    valid = getattr(backend_module, "VALID_ASPECT_RATIOS", None)
+    if valid and aspect_ratio not in valid:
+        name = getattr(backend_module, "__name__", "backend").rsplit(".", 1)[-1]
+        raise ValueError(
+            f"aspect_ratio '{aspect_ratio}' is not supported by {name}. "
+            f"Valid for this backend: {list(valid)}"
+        )
+
+
+def _resolve_backend() -> tuple[object, str]:
+    """
+    Determine which backend to use from explicit configuration.
+
+    Returns:
+        A backend module with a generate() function.
+    """
+    backend_name = os.environ.get("IMAGE_BACKEND", "").strip().lower()
+    if backend_name:
+        canonical = BACKEND_ALIASES.get(backend_name)
+        if not canonical:
+            supported = ", ".join(SUPPORTED_BACKENDS)
+            print(f"Error: Unknown IMAGE_BACKEND='{backend_name}'. Supported: {supported}")
+            sys.exit(1)
+        return _load_backend(canonical)
+
+    supported = ", ".join(SUPPORTED_BACKENDS)
+    print(
+        "Error: No image backend configured for Path A (image_gen.py).\n"
+        "\n"
+        "If your host (Codex / Antigravity / Claude Code / etc.) has a native image\n"
+        "generation tool, do NOT run this script — switch to Path B: invoke the host's\n"
+        "image tool directly with the prompts from images/image_prompts.json and save\n"
+        "the outputs to images/<filename>. See references/image-generator.md §7 Path B.\n"
+        "\n"
+        "To use Path A instead, set IMAGE_BACKEND in one of these places:\n"
+        f"  1. Current process environment\n"
+        f"  2. {ENV_PATH}\n"
+        "\n"
+        f"Supported backends: {supported}\n"
+        "\n"
+        "Example:\n"
+        "  IMAGE_BACKEND=openai\n"
+        "  OPENAI_API_KEY=sk-xxx\n"
+    )
+    sys.exit(1)
+
+
+_AI_IMAGE_PATH_ROW_RE = re.compile(
+    r"^\s*\|\s*AI Image Acquisition Path\s*\|\s*([^|]+?)\s*\|\s*$",
+    re.MULTILINE,
+)
+VALID_AI_IMAGE_ACQUISITION_PATHS = {
+    "api",
+    "auto",
+    "host-native",
+    "manual",
+}
+
+
+def _project_design_spec_for_manifest(manifest_path: str) -> Path | None:
+    """Return a project Design Spec for an images/ manifest, when present."""
+    path = Path(manifest_path).resolve()
+    if path.parent.name != "images":
+        return None
+    design_spec = path.parent.parent / "design_spec.md"
+    return design_spec if design_spec.is_file() else None
+
+
+def _confirmed_image_acquisition_path_for_manifest(
+    manifest_path: str,
+) -> str | None:
+    """Return the Design Spec's AI Image Acquisition Path, if present."""
+    design_spec = _project_design_spec_for_manifest(manifest_path)
+    if design_spec is None:
+        return None
+    try:

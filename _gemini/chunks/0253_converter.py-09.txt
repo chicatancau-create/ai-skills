@@ -1,0 +1,107 @@
+            pkg, layout, palette, options, result.diagnostics, fonts,
+            role="layout", seq=seq, parent_master=parent_master,
+            theme_part=theme,
+        ))
+
+
+def _render_part(
+    pkg: OoxmlPackage,
+    part: PartRef,
+    palette: ColorPalette,
+    options: ConvertOptions,
+    diagnostics: list[ImportDiagnostic],
+    theme_fonts: dict[str, str],
+    *,
+    role: str,
+    seq: int,
+    parent_master: PartRef | None = None,
+    theme_part: PartRef | None = None,
+) -> PartArtifact:
+    """Render a master/layout part, returning a PartArtifact with output filename."""
+    svg, media = assemble_part_solo(
+        pkg, part, palette,
+        role=role,
+        parent_master=parent_master,
+        theme_fonts=theme_fonts,
+        media_subdir=options.images_subdir,
+        embed_images=options.embed_images,
+        keep_hidden=options.keep_hidden,
+        asset_name_map=options.asset_name_map,
+        strict=options.strict,
+        diagnostics=diagnostics,
+    )
+    stem = PurePosixPath(part.path).stem  # e.g. "slideLayout3"
+    safe_stem = re.sub(r"[^A-Za-z0-9_-]+", "_", stem).strip("_") or role
+    filename = f"{role}_{seq:02d}_{safe_stem}.svg"
+    return PartArtifact(
+        role=role,
+        part_path=part.path,
+        filename=filename,
+        svg=svg,
+        media_files=media,
+        parent_master_part_path=parent_master.path if parent_master is not None else None,
+        theme_part_path=theme_part.path if theme_part is not None else None,
+        show_master_shapes=(
+            part_show_master_sp(part) if role == "layout" else True
+        ),
+    )
+
+
+def _path_lexists(path: Path) -> bool:
+    """Return whether a path or symlink exists without following the symlink."""
+    return path.exists() or path.is_symlink()
+
+
+def _managed_svg_paths(output_dir: Path) -> list[Path]:
+    """Return converter-owned SVG files without traversing user directories."""
+    managed: list[Path] = []
+    for relative_dir, filename_re, carries_inheritance in (
+        (Path("svg"), _MANAGED_PRIMARY_SVG_RE, True),
+        (Path("svg-flat"), _MANAGED_FLAT_SVG_RE, False),
+        (ROUNDTRIP_LAYERED_SVG_DIR, _MANAGED_PRIMARY_SVG_RE, True),
+        (ROUNDTRIP_FLAT_SVG_DIR, _MANAGED_FLAT_SVG_RE, False),
+        (AUTHORING_SVG_DIR, _MANAGED_PRIMARY_SVG_RE, False),
+        (AUTHORING_SVG_FLAT_DIR, _MANAGED_FLAT_SVG_RE, False),
+    ):
+        svg_dir = output_dir / relative_dir
+        if svg_dir.is_symlink():
+            managed.append(svg_dir)
+            continue
+        if not svg_dir.is_dir():
+            continue
+        managed.extend(
+            path
+            for path in svg_dir.iterdir()
+            if filename_re.fullmatch(path.name)
+            and (path.is_file() or path.is_symlink())
+        )
+        inheritance = svg_dir / "inheritance.json"
+        if carries_inheritance and _path_lexists(inheritance):
+            managed.append(inheritance)
+        if relative_dir in {AUTHORING_SVG_DIR, AUTHORING_SVG_FLAT_DIR}:
+            for filename in (
+                "authoring_manifest.json",
+                "authoring_summary.json",
+            ):
+                sidecar = svg_dir / filename
+                if _path_lexists(sidecar):
+                    managed.append(sidecar)
+    return managed
+
+
+def _managed_vector_asset_paths(output_dir: Path) -> set[Path]:
+    """Return the previous converter-owned decoration inventory and assets."""
+    managed: set[Path] = set()
+    for authoring_dir in (AUTHORING_SVG_DIR, AUTHORING_SVG_FLAT_DIR):
+        inventory_path = (
+            output_dir / f"{authoring_dir.name}_vector_asset_inventory.json"
+        )
+        if not _path_lexists(inventory_path):
+            continue
+        managed.add(inventory_path)
+        if inventory_path.is_symlink() or not inventory_path.is_file():
+            continue
+        try:
+            payload = json.loads(inventory_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue

@@ -1,0 +1,103 @@
+            item["sizes"] = sizes
+        series.append(item)
+
+    payload: dict[str, Any] = {
+        **_bounds_payload(xfrm),
+        "series": series,
+        "type": chart_type,
+    }
+    return payload
+
+
+def _bar_chart_type(chart: ET.Element) -> str:
+    return "bar" if _element_val(chart.find("c:barDir", C_NS)) == "bar" else "column"
+
+
+def _line_style(chart: ET.Element, series_nodes: list[ET.Element]) -> str:
+    symbols = [
+        _element_val(ser.find("c:marker/c:symbol", C_NS))
+        for ser in series_nodes
+    ]
+    if symbols and all(symbol == "none" for symbol in symbols):
+        return "line"
+    if any(symbol not in {None, "none"} for symbol in symbols):
+        return "lineMarker"
+    marker = chart.find("c:marker", C_NS)
+    if marker is not None and ooxml_bool(marker.attrib.get("val"), True):
+        return "lineMarker"
+    return "line"
+
+
+def _category_values(cat: ET.Element | None) -> list[str]:
+    cache = _first_cache(cat, ("strCache", "strLit"))
+    if cache is not None:
+        return [str(value) if value is not None else "" for value in _cache_point_values(cache)]
+    cache = _first_cache(cat, ("numCache", "numLit"))
+    if cache is None:
+        return []
+    format_code = cache.findtext("c:formatCode", default="", namespaces=C_NS).strip()
+    if format_code and format_code.lower() != "general":
+        raise _UnsupportedChart("unsupported-formatted-category-cache")
+    numbers = _numeric_cache_values(cache)
+    return [str(value) if value is not None else "" for value in numbers]
+
+
+def _category_cache_is_numeric(chart: ET.Element) -> bool:
+    """Return the cache representation shared by every series in one plot."""
+    result: bool | None = None
+    for series in chart.findall("c:ser", C_NS):
+        category = series.find("c:cat", C_NS)
+        has_text = _first_cache(category, ("strCache", "strLit")) is not None
+        has_number = _first_cache(category, ("numCache", "numLit")) is not None
+        if has_text == has_number:
+            raise _UnsupportedChart("unsupported-combo-category-layout")
+        current = has_number
+        if result is not None and current != result:
+            raise _UnsupportedChart("unsupported-combo-category-layout")
+        result = current
+    if result is None:
+        raise _UnsupportedChart("unsupported-combo-category-layout")
+    return result
+
+
+def _numeric_category_cache_format(chart: ET.Element) -> str:
+    """Return one exact numeric category-cache format shared by the plot."""
+    formats: set[str] = set()
+    for series in chart.findall("c:ser", C_NS):
+        cache = _first_cache(
+            series.find("c:cat", C_NS),
+            ("numCache", "numLit"),
+        )
+        if cache is None:
+            raise _UnsupportedChart("unsupported-chart-category-format")
+        number_format = cache.findtext(
+            "c:formatCode",
+            default="",
+            namespaces=C_NS,
+        )
+        if not number_format.strip():
+            raise _UnsupportedChart("unsupported-chart-category-format")
+        formats.add(number_format)
+    if len(formats) != 1:
+        raise _UnsupportedChart("unsupported-chart-category-format")
+    return next(iter(formats))
+
+
+def _series_name(ser: ET.Element, index: int) -> str:
+    tx = ser.find("c:tx", C_NS)
+    values = _text_cache_values(tx)
+    if values:
+        return values[0]
+    direct = tx.findtext("c:v", default="", namespaces=C_NS) if tx is not None else ""
+    return direct or f"Series {index}"
+
+
+def _text_cache_values(parent: ET.Element | None) -> list[str]:
+    cache = _first_cache(parent, ("strCache", "strLit"))
+    if cache is not None:
+        return [str(value) if value is not None else "" for value in _cache_point_values(cache)]
+    cache = _first_cache(parent, ("numCache", "numLit"))
+    return [str(value) if value is not None else "" for value in _cache_point_values(cache)]
+
+
+def _numeric_values(parent: ET.Element | None) -> list[int | float | None]:

@@ -1,0 +1,102 @@
+        )
+
+
+_MIRROR_COEXISTING_SPEC_NAME_RE = re.compile(
+    r"design_spec\.(?P<kind>brand|style|deck)\.[^/\\]+\.md"
+)
+
+
+def _nearest_existing_directory(path: Path) -> Path:
+    candidate = path
+    while not candidate.exists():
+        if candidate.parent == candidate:
+            break
+        candidate = candidate.parent
+    if not candidate.is_dir():
+        raise MirrorMaterializationError(f"Output parent is not a directory: {candidate}")
+    return candidate
+
+
+def _ensure_directory(path: Path, created: list[Path]) -> None:
+    missing: list[Path] = []
+    candidate = path
+    while not candidate.exists():
+        if os.path.lexists(candidate):
+            raise MirrorMaterializationError(
+                f"Output parent is not a directory: {candidate}"
+            )
+        missing.append(candidate)
+        candidate = candidate.parent
+    if not candidate.is_dir():
+        raise MirrorMaterializationError(f"Output parent is not a directory: {candidate}")
+    for directory in reversed(missing):
+        directory.mkdir()
+        created.append(directory)
+
+
+def _publish_files(
+    template_workspace: Path,
+    staged_root: Path,
+    relative_files: list[Path],
+) -> None:
+    created_dirs: list[Path] = []
+    published: list[Path] = []
+    try:
+        for relative in relative_files:
+            target = template_workspace / relative
+            _ensure_directory(target.parent, created_dirs)
+        staging_device = staged_root.stat().st_dev
+        for relative in relative_files:
+            target = template_workspace / relative
+            if target.parent.stat().st_dev != staging_device:
+                raise MirrorMaterializationError(
+                    f"Cannot atomically publish across filesystems: {target}"
+                )
+            if os.path.lexists(target):
+                raise MirrorMaterializationError(
+                    f"Output appeared while mirror files were staged: {target}"
+                )
+        for relative in relative_files:
+            target = template_workspace / relative
+            (staged_root / relative).replace(target)
+            published.append(target)
+    except (OSError, MirrorMaterializationError) as exc:
+        rollback_errors: list[str] = []
+        for path in reversed(published):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as rollback_exc:
+                rollback_errors.append(f"could not remove {path}: {rollback_exc}")
+        for directory in reversed(created_dirs):
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
+        if rollback_errors:
+            raise MirrorMaterializationError(
+                f"Mirror publish failed ({exc}); rollback was incomplete: "
+                + "; ".join(rollback_errors)
+            ) from exc
+        raise MirrorMaterializationError(f"Mirror publish failed: {exc}") from exc
+
+
+def _source_geometry_is_unchanged(documents: dict[str, AuthoringDocument]) -> bool:
+    """Require every reachable compact document to match its importer hash."""
+    return bool(documents) and all(
+        document.initial_authoring_sha256 == _sha256_file(document.authoring_path)
+        for document in documents.values()
+    )
+
+
+def _spec_skeleton(native: dict, pages: list[tuple[Path, ET.Element]], kind: str) -> str:
+    """Describe source facts only; design judgment remains explicitly unfinished."""
+    from project_utils import CANVAS_FORMATS
+
+    width = native["slideSize"]["width_px"]
+    height = native["slideSize"]["height_px"]
+    viewbox = f"0 0 {format_coordinate(width)} {format_coordinate(height)}"
+    canvas = next((key for key, value in CANVAS_FORMATS.items()
+                   if value["width"] == width and value["height"] == height), "custom")
+    lines = [
+        "---", f"kind: {kind}", f"{kind}_id: TODO", "replication_mode: mirror",
+        "native_structure_mode: structured", f"canvas_format: {canvas}",

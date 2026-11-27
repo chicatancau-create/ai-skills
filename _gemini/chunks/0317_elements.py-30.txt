@@ -1,0 +1,95 @@
+                if prev and not prev_text.endswith(' ') \
+                        and not next_text.startswith(' ') \
+                        and not boundary_is_cjk:
+                    joining_space = {
+                        **prev[-1],
+                        'text': ' ',
+                        'letter_spacing': 0.0,
+                    }
+                    joining_space.pop(_INLINE_FORMULA_KEY, None)
+                    joining_space.pop(HYPERLINK_RID_KEY, None)
+                    joining_space.pop(HYPERLINK_ACTION_KEY, None)
+                    prev.append(joining_space)
+                prev.extend(line_runs)
+            else:
+                paragraph_runs.append(line_runs)
+                sb_attr = child.get('data-paragraph-space-before')
+                paragraph_space_before.append(_f(sb_attr) if sb_attr else 0.0)
+        if not paragraph_runs:
+            paragraph_runs = None
+            paragraph_space_before = []
+            visual_line_widths = []
+            visual_line_runs = []
+        else:
+            stripped_paragraphs: list[list[dict[str, Any]]] = []
+            for line_runs in paragraph_runs:
+                stripped_runs, bullet = _extract_text_bullet(line_runs)
+                stripped_paragraphs.append(
+                    _coalesce_text_runs(stripped_runs, fonts, ctx)
+                )
+                paragraph_bullets.append(bullet)
+            paragraph_runs = stripped_paragraphs
+
+    if paragraph_runs is not None:
+        runs = [r for line in paragraph_runs for r in line]
+    else:
+        runs = _build_text_runs(elem, parent_attrs, ctx)
+        runs, single_bullet = _extract_text_bullet(runs)
+        runs = _coalesce_text_runs(runs, fonts, ctx)
+
+    is_placeholder_carrier = (
+        (elem.get('data-pptx-carrier') or '').strip().lower() == 'true'
+    )
+    full_text = ''.join(str(r.get('text', '')) for r in runs) if runs else ''
+    if not full_text.strip():
+        if not is_placeholder_carrier:
+            return None
+        # A declared carrier must compile to one native text shape even when its
+        # authored visual is blank. U+200B is invisible but survives DrawingML.
+        runs = [{**parent_attrs, 'text': '\u200b'}]
+        paragraph_runs = None
+        paragraph_space_before = []
+        paragraph_bullets = []
+        visual_line_widths = []
+        visual_line_runs = []
+        single_bullet = None
+
+    # Estimate text dimensions
+    if paragraph_runs is not None:
+        # Use the widest authored visual line, not a reflow-joined paragraph.
+        text_width = max(visual_line_widths) if visual_line_widths else 0.0
+        line_extents = [
+            _text_line_vertical_extent(line, font_size)
+            for line in visual_line_runs
+        ]
+        text_height = sum(paragraph_space_before)
+        for ascent, descent, has_formula in line_extents[:-1]:
+            line_advance = line_height_px
+            if has_formula:
+                line_advance = max(
+                    line_advance,
+                    _native_text_line_frame_height(
+                        ascent,
+                        descent,
+                        font_size,
+                    ),
+                )
+            text_height += line_advance
+        first_line_ascent = line_extents[0][0]
+        last_ascent, last_descent, last_has_formula = line_extents[-1]
+        last_line_height = font_size * 1.5
+        if last_has_formula:
+            last_line_height = max(
+                last_line_height,
+                _native_text_line_frame_height(
+                    last_ascent,
+                    last_descent,
+                    font_size,
+                ),
+            )
+        text_height += last_line_height
+    else:
+        text_width = _estimate_text_runs_width(runs)
+        if single_bullet:
+            fs_px = float(runs[0].get('font_size', font_size)) if runs else font_size
+            text_width += _bullet_margin_px(single_bullet, fs_px)

@@ -1,0 +1,122 @@
+            allow_percentage=True,
+        )
+    except ValueError as exc:
+        raise ValueError(f"Cannot resolve adopted object opacity: {exc}") from exc
+    if (
+        (source_has_opacity or target_raw_opacity is not None)
+        and not math.isclose(source_opacity, target_opacity, abs_tol=1e-12)
+    ):
+        _set_explicit_presentation(
+            adopted,
+            "opacity",
+            _format_transform_number(source_opacity),
+        )
+        materialized.append("opacity")
+
+    ancestor_transform_composed = any(
+        (ancestor.get("transform") or "").strip()
+        for ancestor in chain[:-1]
+    )
+    if ancestor_transform_composed:
+        matrix = IDENTITY_MATRIX
+        try:
+            for ancestor in chain:
+                raw_transform = ancestor.get("transform")
+                if raw_transform:
+                    matrix = matrix_multiply(
+                        matrix,
+                        parse_transform_matrix(raw_transform),
+                    )
+        except ValueError as exc:
+            raise ValueError(
+                f"Cannot compose adopted object ancestor transform: {exc}"
+            ) from exc
+        adopted.set(
+            "transform",
+            "matrix(" + " ".join(
+                _format_transform_number(value)
+                for value in matrix
+            ) + ")",
+        )
+    return tuple(sorted(materialized)), ancestor_transform_composed
+
+
+def _rewrite_adopted_fragment_ids(
+    element: ET.Element,
+    target_ids: set[str],
+) -> dict[str, str]:
+    subtree_ids = [
+        item_id
+        for item in element.iter()
+        if (item_id := item.get("id"))
+    ]
+    duplicates = sorted(
+        item_id
+        for item_id, count in Counter(subtree_ids).items()
+        if count > 1
+    )
+    if duplicates:
+        raise ValueError(
+            "Adopted subtree contains duplicate id(s): "
+            + ", ".join(duplicates[:8])
+        )
+
+    reserved = set(target_ids) | set(subtree_ids)
+    replacements: dict[str, str] = {}
+    for item_id in subtree_ids:
+        if item_id not in target_ids:
+            continue
+        base = f"{item_id}-adopted"
+        candidate = base
+        suffix = 2
+        while candidate in reserved:
+            candidate = f"{base}-{suffix}"
+            suffix += 1
+        replacements[item_id] = candidate
+        reserved.add(candidate)
+
+    if not replacements:
+        return replacements
+
+    def rewrite_url(match: re.Match[str]) -> str:
+        quote, ref_id = match.group(1), match.group(2)
+        return f"url({quote}#{replacements.get(ref_id, ref_id)}{quote})"
+
+    for item in element.iter():
+        item_id = item.get("id")
+        if item_id in replacements:
+            item.set("id", replacements[item_id])
+        for name, value in list(item.attrib.items()):
+            rewritten = _URL_ID_RE.sub(rewrite_url, value)
+            if _local_name(name) == "href" and value.startswith("#"):
+                rewritten = "#" + replacements.get(value[1:], value[1:])
+            if rewritten != value:
+                item.set(name, rewritten)
+    return replacements
+
+
+def _adopted_definition_clones(
+    source_root: ET.Element,
+    source_element: ET.Element,
+) -> list[ET.Element]:
+    """Copy the transitive source definitions referenced by one adopted object."""
+    context_elements = [source_element]
+    for ancestor in _element_chain(source_root, source_element)[:-1]:
+        context = ET.Element(ancestor.tag)
+        for name in (*_ADOPT_INHERITED_ATTRIBUTES, "opacity", "style"):
+            value = ancestor.get(name)
+            if value is not None:
+                context.set(name, value)
+        context_elements.append(context)
+    definitions, selected_owners = _definition_closure(
+        source_root,
+        context_elements,
+    )
+    return [
+        copy.deepcopy(child)
+        for definitions_root in definitions
+        for child in definitions_root
+        if id(child) in selected_owners
+    ]
+
+

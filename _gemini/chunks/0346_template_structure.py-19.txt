@@ -1,0 +1,99 @@
+            else:
+                if len(visual_children) != 1 or len(carrier_children) != 1:
+                    composite_hint = (
+                        " For composite object content, declare "
+                        "data-pptx-binding='proxy' in the prototype "
+                        "and page, or create an adaptive Layout; never add a tiny "
+                        "or transparent dummy carrier."
+                        if placeholder == "object" else ""
+                    )
+                    raise TemplateStructureError(
+                        f"{svg_path.name}: carrier placeholder {element_id!r} must "
+                        "contain exactly one visual direct child and mark it "
+                        "data-pptx-carrier='true'."
+                        f"{composite_hint}"
+                    )
+                carrier = carrier_children[0]
+                placeholder_carrier_tag = _local_tag(carrier)
+                _validate_placeholder_carrier(
+                    carrier,
+                    placeholder,
+                    svg_path=svg_path,
+                    element_id=element_id,
+                )
+        elif placeholder:
+            placeholder_binding = "carrier"
+            placeholder_carrier_tag = tag
+            _validate_placeholder_carrier(
+                elem,
+                placeholder,
+                svg_path=svg_path,
+                element_id=element_id,
+            )
+        else:
+            for descendant in elem.iter():
+                if descendant is elem:
+                    continue
+                nested_attrs = _structure_attrs(descendant)
+                if nested_attrs:
+                    nested_id = descendant.get("id") or _local_tag(descendant)
+                    raise TemplateStructureError(
+                        f"{svg_path.name}: {nested_id} uses structure metadata below "
+                        "the SVG root: " + ", ".join(nested_attrs)
+                    )
+
+        if effective_layer or placeholder:
+            elements.append(TemplateElementSpec(
+                element_id=element_id,
+                order=visual_order,
+                tag=tag,
+                layer=effective_layer,
+                placeholder=placeholder,
+                placeholder_bounds=placeholder_bounds,
+                placeholder_idx=placeholder_idx,
+                placeholder_binding=placeholder_binding,
+                placeholder_carrier_tag=placeholder_carrier_tag,
+                is_background=is_background,
+            ))
+        visual_order += 1
+
+    for scope in ("master", "layout", "slide"):
+        backgrounds = [
+            item for item in elements
+            if item.layer == scope and item.is_background
+        ]
+        if len(backgrounds) > 1:
+            raise TemplateStructureError(
+                f"{svg_path.name}: explicit Layout mode allows at most one {scope} "
+                "solid background"
+            )
+
+    spec = TemplateSlideSpec(
+        slide_num=slide_num,
+        svg_path=svg_path,
+        master_key=master_key,
+        master_name=master_name,
+        layout_key=layout_key,
+        layout_name=layout_name,
+        layout_show_master_shapes=layout_show_master_shapes,
+        slide_show_inherited_shapes=slide_show_inherited_shapes,
+        elements=tuple(elements),
+    )
+    return spec
+
+
+def _validate_template_slide_contracts(
+    specs: list[TemplateSlideSpec],
+) -> None:
+    """Enforce cross-prototype Master and Layout structure identity."""
+    by_master: dict[str, list[TemplateSlideSpec]] = {}
+    for spec in specs:
+        by_master.setdefault(spec.master_key, []).append(spec)
+    for master_key, master_specs in by_master.items():
+        prototype = master_specs[0]
+        expected_master = tuple(
+            item.contract_signature() for item in prototype.master_elements
+        )
+        for spec in master_specs[1:]:
+            if spec.master_name != prototype.master_name:
+                raise TemplateStructureError(

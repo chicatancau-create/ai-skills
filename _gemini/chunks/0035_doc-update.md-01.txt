@@ -1,0 +1,78 @@
+# doc update（更新文档内容）
+
+> **前置条件（MUST READ）：** 执行本命令前，必须先用 Read 工具读取以下文件：
+> 1. [`../doc.md`](../doc.md) — 命令路由 + 场景索引 + 意图判断 + 工作流
+> 2. [`./style/doc-update-workflow.md`](./style/doc-update-workflow.md) — 改写流程（编辑形态优先级、分片 append、回读验收）
+> 3. [`./style/doc-style-guideline.md`](./style/doc-style-guideline.md) — 排版规范
+> 4. [`./format/doc-jsonml-cookbook.md`](./format/doc-jsonml-cookbook.md) — 仅当使用 `--content-format jsonml` 时必读
+>
+> **同任务常配合**：[`doc-read.md`](./doc-read.md)（改写前必读，jsonml 模式拿当前结构；担心被并发覆盖时再取 revision）/ [`doc-block.md`](./doc-block.md)（单 block 改写优先；本命令更适合追加 / 整篇 overwrite）
+
+## 命令格式
+
+```
+Usage:
+  dws doc update [flags]
+Example:
+  dws doc update --node <DOC_ID> --content "# 追加内容" --mode append
+  dws doc update --node <DOC_ID> --content "# 完整替换" --mode overwrite
+  dws doc update --node <DOC_ID> --content-file ./part1.md --mode append
+  dws doc update --node <DOC_ID> --content "# 插入到第3个block前" --mode append --index 2
+  dws doc update --node <DOC_ID> --content-file ./body.json --content-format jsonml --mode overwrite
+  cat part2.md | dws doc update --node <DOC_ID> --content - --mode append
+Flags:
+      --node string           文档 ID 或 URL (必填)
+      --content string        文档内容（短文本字面量）；传 - 表示从 stdin 读取
+      --content-file string   从文件读取文档内容（UTF-8）。推荐长/多行/表格内容使用
+      --mode string           更新模式: overwrite=覆盖, append=追加 (必填)
+      --content-format string         内容格式: 默认为 markdown，可选 jsonml
+      --revision int          文档版本号（仅 --content-format jsonml 时生效，可选）；传入后服务端做并发检查，版本不一致时返回 VersionConflict。不传则直接覆盖，不做并发检查
+      --fix-jsonml              启用全部 JSONML 修复（含 JSON 语法修复 + 结构修复），推荐 agent 调用时使用
+      --no-fix-jsonml           关闭全部 JSONML 修复（跳过 JSON 语法修复和结构修复），用于排查原始错误
+      --index int             插入位置（从 0 开始），仅在 mode=append 时生效。指定将内容插入到文档第几个 block 之前。不传时追加到末尾。block 的 index 可通过 doc block list 获取。插入成功后，该位置及之后所有 block 的 index 会依次 +1
+```
+
+## 关键说明
+
+- `--mode` 必填，无默认值。`overwrite` **清空原内容后重写**，谨慎使用；`append` 更安全。
+- 整篇 overwrite 大文档前**必须**先向用户提示风险并等待确认（详见 [`./style/doc-update-workflow.md` §4.5](./style/doc-update-workflow.md)）。
+- `--content` 中的换行必须是**真实换行符**（Unicode `U+000A`），不是字面量 `\n`；多行/表格/长文本优先 `--content-file` 或 `--content -`。
+- **写入后必须回读**——返回 `success=true` 不等于内容真的写入完整（详见 [`./style/doc-update-workflow.md` §6](./style/doc-update-workflow.md)）。
+
+## JSONML 格式写入
+
+使用 `--content-format jsonml` 可以 JSONML 结构直接写入文档，实现无损读写。当前仅支持 `--mode overwrite`。
+
+**输入格式**：JSON 对象，包含 `jsonml` 字段（文本必须用 `span/data-type=text + span/data-type=leaf` 包裹，详见 [`./format/doc-jsonml-cookbook.md`](./format/doc-jsonml-cookbook.md)）：
+
+```json
+{"jsonml": ["root", {"sectPr": {}},
+  ["p", {"uuid": "p1"}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "hello"]]],
+  ["p", {"uuid": "p2"}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "world"]]]
+]}
+```
+
+> 默认模式下，CLI 会自动给缺 uuid 的 block 注入 uuid、把 `["p", {}, "hello"]` 之类的裸字符串自动包裹成上述 span/leaf 形式（每条修复都会以 `[FIX]` 行输出）。如需严格按原样发送，加 `--no-fix-jsonml`，结构错误会被 validator 直接拦下。如果输入来自 LLM 生成且可能有 JSON 语法错误（缺括号/逗号），加 `--fix-jsonml` 启用全部修复。
+
+**典型流程**（无损读改写）：
+
+1. `dws doc read --node <DOC_ID> --content-format jsonml --output ./doc.json` — 获取文档 JSONML 结构
+2. 修改 `doc.json` 中的 jsonml 数组内容
+3. `dws doc update --node <DOC_ID> --content-file ./doc.json --content-format jsonml --mode overwrite` — 写回
+
+> 默认不传 `--revision`，服务端直接覆盖，不做并发检查。担心多 agent 同时改时，按下方 §并发安全模式 加 `--revision`。
+
+**节点结构参考**：[`./format/doc-jsonml-schema.md`](./format/doc-jsonml-schema.md)
+
+### 并发安全模式（担心被并发覆盖时使用）
+
+如果你担心在编辑期间别人也在改这个文档，可以传 `--revision` 触发服务端并发检查：
+
+1. `dws doc read --node <DOC_ID> --content-format jsonml --output /tmp/doc.json` — 返回的 JSON 里有一个 `revision` 字段（比如 `42`）。
+2. 编辑 `/tmp/doc.json` 里的 `jsonml` 字段。
+3. `dws doc update --node <DOC_ID> --content-file /tmp/doc.json --content-format jsonml --mode overwrite --revision 42` — 如果文档在期间被改过，服务端返回 `VersionConflict`，此时重新执行第 1 步即可。
+
+不带 `--revision` 时，服务端不做并发检查，直接覆盖。普通单 agent 编辑场景下默认不传即可。
+
+## 内容写入管道（create / update 共用）
+

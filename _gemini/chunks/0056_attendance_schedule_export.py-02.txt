@@ -1,0 +1,126 @@
+            warn(f"class search 失败，部分班次将显示为 ID: {exc}")
+
+    return class_map
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 日期工具
+# ─────────────────────────────────────────────────────────────────────────────
+
+def normalize_work_date(raw: Any) -> str:
+    """将排班记录中的 workDate 标准化为 YYYY-MM-DD。"""
+    if raw is None:
+        return ""
+    if isinstance(raw, (int, float)):
+        ts = raw / 1000 if raw > 1e12 else raw
+        try:
+            return datetime.fromtimestamp(ts).strftime(DATE_FMT)
+        except (OSError, ValueError, OverflowError):
+            return ""
+    s = str(raw).strip()
+    if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+        return s[:10]
+    return s
+
+
+def generate_date_range(start: datetime, end: datetime) -> list[str]:
+    """生成 start 到 end 之间的所有日期字符串列表。"""
+    dates: list[str] = []
+    current = start
+    while current <= end:
+        dates.append(current.strftime(DATE_FMT))
+        current += timedelta(days=1)
+    return dates
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 构建排班表（日历表格式）
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_schedule_table(
+    records: list[dict],
+    user_ids: list[str],
+    user_names: dict[str, str],
+    class_map: dict[int, str],
+    date_range: list[str],
+) -> tuple[list[str], list[list[str]]]:
+    """构建日历表格式的排班表。
+
+    Returns:
+        (headers, rows)
+        headers = ["员工姓名", "05-19\n周一", "05-20\n周二", ...]
+        rows    = [["张三", "早班", "早班", "休息", ...], ...]
+    """
+    # 构建 (userId, date) → 班次显示文本
+    schedule_lookup: dict[tuple[str, str], str] = {}
+    for record in records:
+        uid = str(record.get("userId") or record.get("userid") or "")
+        work_date = normalize_work_date(record.get("workDate") or record.get("work_date"))
+        if not uid or not work_date:
+            continue
+
+        is_rest = str(record.get("isRest") or record.get("is_rest") or "N").upper()
+        raw_cid = record.get("classId") or record.get("class_id") or 0
+        raw_cname = record.get("className") or record.get("class_name") or ""
+
+        if is_rest == "Y":
+            display = "休息"
+        elif raw_cname and str(raw_cname).strip():
+            display = str(raw_cname).strip()
+        else:
+            cid = int(raw_cid) if raw_cid else 0
+            if cid in class_map:
+                display = class_map[cid]
+            elif cid == 0:
+                display = "休息"
+            else:
+                display = f"班次{cid}"
+
+        schedule_lookup[(uid, work_date)] = display
+
+    # 表头
+    headers = ["员工姓名"]
+    for date_str in date_range:
+        dt = datetime.strptime(date_str, DATE_FMT)
+        weekday = WEEKDAY_NAMES[dt.weekday()]
+        headers.append(f"{date_str[5:]}\n{weekday}")
+
+    # 数据行
+    rows: list[list[str]] = []
+    for uid in user_ids:
+        name = user_names.get(uid, uid)
+        row = [name]
+        for date_str in date_range:
+            row.append(schedule_lookup.get((uid, date_str), ""))
+        rows.append(row)
+
+    return headers, rows
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 摘要输出
+# ─────────────────────────────────────────────────────────────────────────────
+
+def print_summary(
+    rows: list[list[str]],
+    date_range: list[str],
+    out_path: str,
+    record_count: int,
+) -> None:
+    """输出排班查询摘要到 stdout。"""
+    out_abs = os.path.abspath(out_path)
+    print(f"\n✅ 排班表导出成功！")
+    print(f"   文件: {out_abs}")
+    print(f"   人数: {len(rows)}")
+    print(f"   日期: {date_range[0]} ~ {date_range[-1]} ({len(date_range)} 天)")
+    print(f"   记录: {record_count} 条")
+
+    # 预览前 10 人 × 前 7 天
+    preview_rows = min(len(rows), 10)
+    preview_cols = min(len(date_range), 7)
+    if preview_rows > 0:
+        print(f"\n排班预览（前 {preview_rows} 人 × 前 {preview_cols} 天）:")
+        header_line = f"{'姓名':<10}" + "".join(
+            f"{d[5:]:<8}" for d in date_range[:preview_cols]
+        )
+        print(header_line)

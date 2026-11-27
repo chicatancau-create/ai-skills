@@ -1,0 +1,136 @@
+            image_size=image_size,
+        )
+
+
+def write_excel(
+    out_path: str,
+    headers: list[str],
+    rows: list[list[Any]],
+    *,
+    sheet_name: str = "考勤报表",
+    title: str | None = None,
+    subtitle: str | None = None,
+    image_columns: list[str] | None = None,
+    image_size: tuple[int, int] = (80, 120),
+) -> None:
+    """
+    用 openpyxl 写一个钉钉风格的美化版 Excel。
+
+    布局：
+      [可选] 第 1 行：主标题（青绿底色，跨所有列）
+      [可选] 第 2 行：副标题（浅蓝底色，跨所有列，常用于"报表生成时间"）
+      表头行：浅黄底色 + 黑字加粗 + 居中 + 加高
+      数据行：白底 + 文本居中 / 数字右对齐 + 灰色细边框
+
+    交互：
+      - 冻结首列 + 表头（含标题区域）
+      - 自动筛选器（覆盖表头到最后一行）
+      - 列宽自适应（中文字符按 2 宽度估算）
+
+    参数:
+      title:    可选主标题（如"月度汇总展示  统计日期：2026-01-01 至 2026-01-31"）
+      subtitle: 可选副标题（如"报表生成时间：2026-01-20 15:46"）
+    """
+    try:
+        from openpyxl import Workbook
+    except ImportError as e:
+        raise RuntimeError(
+            "缺少 openpyxl 依赖，请执行：pip install openpyxl"
+        ) from e
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = sheet_name[:31]  # openpyxl sheet 名 ≤ 31 字符
+
+    # 计算标题占用行数
+    title_row_count = (1 if title else 0) + (1 if subtitle else 0)
+    header_row = title_row_count + 1
+    first_data_row = header_row + 1
+
+    # 写入表头
+    for col_idx, header in enumerate(headers, start=1):
+        ws.cell(row=header_row, column=col_idx, value=header)
+
+    # 写入数据
+    for row_offset, row in enumerate(rows):
+        excel_row = first_data_row + row_offset
+        for col_idx, value in enumerate(row, start=1):
+            ws.cell(row=excel_row, column=col_idx, value=_excel_safe(value))
+
+    # 应用统一样式（含标题区）
+    styles = _build_styles()
+    _apply_sheet_styles(
+        ws, headers, rows, styles,
+        title=title, subtitle=subtitle,
+        image_columns=image_columns, image_size=image_size,
+    )
+
+    out_abs = os.path.abspath(out_path)
+    wb.save(out_abs)
+
+
+def _excel_safe(value: Any) -> Any:
+    """
+    把 dict / list 等复杂类型序列化为 JSON 字符串，避免 openpyxl 写入失败。
+    """
+    if value is None:
+        return ""
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, datetime):
+        return value.strftime(DATETIME_FMT)
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def write_excel_multi_sheets(
+    out_path: str,
+    sheets: list[dict],
+) -> None:
+    """
+    用 openpyxl 写一个多 sheet 的 Excel 文件，每个 sheet 应用与 write_excel 相同的钉钉风格美化样式。
+
+    每个 sheet 用一个 dict 描述：
+      {
+        "name":          str,             # sheet 标题
+        "headers":       list[str],
+        "rows":          list[list[Any]],
+        "title":         str | None,      # 可选主标题（青绿底）
+        "subtitle":      str | None,      # 可选副标题（浅蓝底）
+        "merge_groups":  list[tuple[int,int,int]] | None,
+                                          # 可选纵向合并配置（基础列）
+                                          # 每项: (start_row_offset, end_row_offset, n_base_cols)
+        "attend_result_columns": set[int] | None,
+                                          # 可选：考勤结果列的 0-based 列索引集合（月度汇总场景）
+        "attend_result_rows":    set[int] | None,
+                                          # 可选：考勤结果行的 0-based 行偏移集合（日历表场景）
+        "image_columns": list[str] | None,
+                                          # 可选：哪些列名的 URL 要嵌入为图片
+        "image_size":    tuple[int,int] | None,
+                                          # 可选：嵌入图片像素尺寸 (width, height)，默认 (80,120)
+      }
+    """
+    if not sheets:
+        raise ValueError("sheets 不能为空")
+
+    try:
+        from openpyxl import Workbook
+    except ImportError as e:
+        raise RuntimeError(
+            "缺少 openpyxl 依赖，请执行：pip install openpyxl"
+        ) from e
+
+    wb = Workbook()
+    # 删除默认 sheet，由 sheets 描述完全决定
+    default_ws = wb.active
+    wb.remove(default_ws)
+
+    styles = _build_styles()
+
+    for sheet_def in sheets:
+        name = sheet_def.get("name") or "Sheet"
+        headers = sheet_def.get("headers") or []
+        rows = sheet_def.get("rows") or []
+        title = sheet_def.get("title")

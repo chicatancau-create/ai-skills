@@ -1,0 +1,98 @@
+                        else:
+                            queue.append(idx)
+                            print(
+                                f"  [RATE] {item['filename']} — requeued "
+                                f"(attempt {attempts}/"
+                                f"{MAX_MANIFEST_RATE_LIMIT_ATTEMPTS})"
+                            )
+                    else:
+                        item["status"] = STATUS_FAILED
+                        item["last_error"] = str(exc)[:500]
+                        fail_count += 1
+                        print(
+                            f"  [FAIL] {item['filename']}: {exc} "
+                            "(status=Failed; retry or mark Needs-Manual before Executor)"
+                        )
+                    save_manifest(manifest_path, manifest)
+
+        if stopped_for_global_error:
+            print(
+                "\n  Backend authentication or billing requires repair. "
+                "Stopping new batches; untouched items remain retryable.\n"
+            )
+            break
+        if stopped_for_rate_limit:
+            print(
+                "\n  Persistent rate limit reached the run boundary. "
+                "Stopping without switching providers; untouched items remain retryable.\n"
+            )
+            break
+        if rate_limited and current > 1 and queue:
+            new_current = max(1, current // 2)
+            print(
+                f"\n  ⚠ Rate-limit hit — concurrency {current} → {new_current}, "
+                "pausing 10s before next batch\n"
+            )
+            current = new_current
+            time.sleep(10)
+        elif queue:
+            time.sleep(2)
+
+    stopped_early = stopped_for_global_error or stopped_for_rate_limit
+    run_state = "Stopped" if stopped_early else "Done"
+    remaining_note = ""
+    if stopped_early:
+        remaining = sum(
+            1 for item in items if item["status"] in RETRYABLE_STATUSES
+        )
+        remaining_note = f"; {remaining} item(s) remain retryable"
+    print(
+        f"\n[Manifest] {run_state}: {ok_count} ok / {fail_count} failed "
+        f"({skipped} pre-skipped{remaining_note}). "
+        f"Manifest written to {manifest_path}"
+    )
+    if fail_count:
+        print(
+            "[Manifest] Failed is retryable and non-terminal. "
+            "Repair permanent backend errors before rerunning; retry transient "
+            "failures or follow the owning manual recovery before entering "
+            "Executor."
+        )
+    return ok_count, fail_count, skipped
+
+
+def _resolve_concurrency(cli_value: int | None) -> int:
+    """CLI value wins over IMAGE_CONCURRENCY env; default 3."""
+    if cli_value is not None:
+        return max(1, cli_value)
+    env_val = os.environ.get("IMAGE_CONCURRENCY", "").strip()
+    if env_val.isdigit():
+        return max(1, int(env_val))
+    return DEFAULT_MANIFEST_CONCURRENCY
+
+
+def render_manifest_md(manifest: dict) -> str:
+    """Render a manifest into the paste-ready Markdown view.
+
+    The output is a read-only snapshot of the JSON manifest, intended as a
+    fallback so a user can copy `Prompt` blocks into ChatGPT / Midjourney
+    when `--manifest` cannot run (no key, no backend, network down).
+    """
+    lines: list[str] = []
+    lines.append("# Image Generation Prompts")
+    lines.append("")
+    lines.append("> Auto-generated from `image_prompts.json` by `image_gen.py --render-md`.")
+    lines.append("> Do not hand-edit — re-run the command to refresh.")
+    lines.append("")
+
+    project = manifest.get("project")
+    generated_at = manifest.get("generated_at")
+    color_scheme = manifest.get("color_scheme") or {}
+    deck_rendering = manifest.get("deck_rendering")
+    if not deck_rendering:
+        legacy_anchor = manifest.get("deck_style_anchor")
+        if isinstance(legacy_anchor, dict):
+            deck_rendering = (
+                legacy_anchor.get("visual_style")
+                or json.dumps(legacy_anchor, ensure_ascii=False, sort_keys=True)
+            )

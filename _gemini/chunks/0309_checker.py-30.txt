@@ -1,0 +1,101 @@
+        content: str,
+        result: Dict,
+        *,
+        font_families: List[str] | None = None,
+    ):
+        """Check font usage.
+
+        PPTX stores concrete typefaces per run with no CSS fallback. The
+        converter resolves each SVG font stack to exported latin / EA typefaces;
+        validate those exported values rather than the visual-preview tail.
+        """
+        font_matches = (
+            self._font_family_values(content)
+            if font_families is None
+            else font_families
+        )
+
+        if not font_matches:
+            return
+
+        result['info']['fonts'] = sorted(set(font_matches))
+        if _unsafe_exported_font_faces is None:
+            result['warnings'].append(
+                "Unable to import svg_to_pptx font resolver; skipped exported-font safety check"
+            )
+            return
+
+        for font_family in font_matches:
+            unsafe = [
+                f"{role}={family}"
+                for role, family in _unsafe_exported_font_faces(font_family).items()
+            ]
+            if unsafe:
+                result['warnings'].append(
+                    "Font stack exports non-PPT-safe typeface(s) to PPTX "
+                    f"({', '.join(unsafe)}): {font_family}"
+                )
+                break
+
+    @staticmethod
+    def _font_family_values(content: str) -> List[str]:
+        """Extract SVG font-family values from attributes and inline styles."""
+        return SVGQualityChecker._svg_property_values(content, 'font-family')
+
+    @staticmethod
+    def _svg_property_values(content: str, property_name: str) -> List[str]:
+        """Extract a SVG property from direct attributes and inline styles."""
+        values: List[str] = []
+        attr_re = re.compile(
+            rf'\b{re.escape(property_name)}\s*=\s*(["\'])(.*?)\1',
+            re.IGNORECASE | re.DOTALL,
+        )
+        for match in attr_re.finditer(content):
+            values.append(html.unescape(match.group(2)).strip())
+
+        for match in re.finditer(r'\bstyle\s*=\s*(["\'])(.*?)\1', content, re.IGNORECASE | re.DOTALL):
+            style_value = html.unescape(match.group(2))
+            for part in style_value.split(';'):
+                if ':' not in part:
+                    continue
+                name, value = part.split(':', 1)
+                if name.strip().lower() == property_name.lower():
+                    values.append(value.strip())
+        return [value for value in values if value]
+
+    def _check_text_elements(self, content: str, root: ET.Element, result: Dict):
+        """Check text elements and wrapping methods"""
+        # Count text and tspan elements
+        text_count = content.count('<text')
+        tspan_count = content.count('<tspan')
+
+        result['info']['text_elements'] = text_count
+        result['info']['tspan_elements'] = tspan_count
+
+        self._check_module_bounds_contract(root, result)
+        self._check_text_output_geometry(root, result)
+        self._check_text_bounds(root, result)
+        self._check_fragmented_paragraph_text(root, result)
+        self._check_unmergeable_leading_text(root, result)
+        self._check_nested_positional_tspans(root, result)
+
+    def _check_hyperlinks(self, root: ET.Element, result: Dict) -> None:
+        """Validate the standard SVG anchor surface shared with export."""
+        anchors = [
+            elem for elem in root.iter()
+            if _local_name(elem) == 'a'
+        ]
+        transports = [
+            elem for elem in root.iter()
+            if elem.get(_SHAPE_HYPERLINK_ATTR) is not None
+        ]
+        if not anchors and not transports:
+            return
+        result['info']['hyperlinks'] = len(anchors) + len(transports)
+        if _project_hyperlink_errors is None:
+            result['errors'].append(
+                'Unable to import hyperlink validator; cannot verify SVG links'
+            )
+            return
+        result['errors'].extend(
+            f'Invalid SVG hyperlink: {error}'

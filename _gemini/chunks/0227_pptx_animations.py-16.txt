@@ -1,0 +1,120 @@
+    audio = ET.SubElement(sub_timing, _qn(PML_NS, 'audio'))
+    media = ET.SubElement(audio, _qn(PML_NS, 'cMediaNode'))
+    ctn = ET.SubElement(
+        media,
+        _qn(PML_NS, 'cTn'),
+        {'display': '0', 'masterRel': 'sameClick'},
+    )
+    conditions = ET.SubElement(ctn, _qn(PML_NS, 'stCondLst'))
+    condition = ET.SubElement(
+        conditions,
+        _qn(PML_NS, 'cond'),
+        {'evt': 'begin', 'delay': '0'},
+    )
+    ET.SubElement(condition, _qn(PML_NS, 'tn'), {'val': str(row.get('id'))})
+    end_conditions = ET.SubElement(ctn, _qn(PML_NS, 'endCondLst'))
+    end_condition = ET.SubElement(
+        end_conditions,
+        _qn(PML_NS, 'cond'),
+        {'evt': 'onStopAudio', 'delay': '0'},
+    )
+    target_element = ET.SubElement(end_condition, _qn(PML_NS, 'tgtEl'))
+    ET.SubElement(target_element, _qn(PML_NS, 'sldTgt'))
+    target_element = ET.SubElement(media, _qn(PML_NS, 'tgtEl'))
+    ET.SubElement(
+        target_element,
+        _qn(PML_NS, 'sndTgt'),
+        {
+            _qn(_REL_NS, 'embed'): str(target.sound_relationship_id),
+            'name': str(target.sound_name),
+        },
+    )
+
+
+def _instantiate_animation_row(
+    target: AnimationTarget,
+    node_type: str,
+    row_id: int,
+    first_behavior_id: int,
+) -> tuple[str, int]:
+    """Instantiate one PowerPoint-authored preset row for a generated shape."""
+    animation = target.effect
+    shape_id = target.shape_id
+    duration_ms = target.duration_ms
+    spec = NATIVE_ANIMATIONS[animation]
+    row = _animation_row_for_options(animation, target.effect_options)
+    row.set('id', str(row_id))
+    row.set('nodeType', node_type)
+    conditions = row.find(_qn(PML_NS, 'stCondLst'))
+    if conditions is None:
+        raise RuntimeError(f'animation preset {animation!r} lost p:stCondLst')
+    direct_conditions = conditions.findall(_qn(PML_NS, 'cond'))
+    if len(direct_conditions) != 1:
+        raise RuntimeError(
+            f'animation preset {animation!r} must have one start condition'
+        )
+    direct_conditions[0].attrib.clear()
+    direct_conditions[0].set(
+        'delay',
+        str(target.delay_ms),
+    )
+
+    if spec['durationScalable']:
+        base_duration_ms = int(spec['defaultDurationMs'])
+        _scale_animation_row_duration(
+            row,
+            base_duration_ms=base_duration_ms,
+            requested_duration_ms=duration_ms,
+        )
+
+    _apply_timing_options(row, target)
+    _append_after_effect(row, target, row_id)
+    _append_animation_sound(row, target)
+
+    next_id = first_behavior_id
+    for ctn in row.iter(_qn(PML_NS, 'cTn')):
+        if ctn is row:
+            continue
+        ctn.set('id', str(next_id))
+        next_id += 1
+    for target in row.iter(_qn(PML_NS, 'spTgt')):
+        target.set('spid', str(shape_id))
+    return ET.tostring(row, encoding='unicode'), next_id
+
+
+def _build_animation_row_xml(
+    target: AnimationTarget,
+    trigger: str,
+    row_id: int,
+    first_behavior_id: int,
+) -> tuple[str, int]:
+    """Build one canonical PowerPoint-authored animation-pane row."""
+    node_type = _TRIGGER_NODE_TYPES[trigger]
+    return _instantiate_animation_row(
+        target,
+        node_type,
+        row_id,
+        first_behavior_id,
+    )
+
+
+def _main_target_offsets(targets: Sequence[AnimationTarget]) -> list[int]:
+    """Return each regular row's start offset within its click group."""
+    offsets: list[int] = []
+    previous_start_ms = 0
+    previous_duration_ms = 0
+    has_previous = False
+    for target in targets:
+        if target.trigger == 'on-click':
+            start_ms = target.delay_ms
+        elif target.trigger == 'with-previous':
+            start_ms = (
+                previous_start_ms if has_previous else 0
+            ) + target.delay_ms
+        else:
+            start_ms = (
+                previous_start_ms + previous_duration_ms
+                if has_previous
+                else 0
+            ) + target.delay_ms
+        if start_ms > MAX_OOXML_MILLISECONDS:

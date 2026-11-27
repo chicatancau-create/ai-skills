@@ -1,0 +1,94 @@
+            if not set(child.attrib).issubset({"lim"}) or list(child):
+                raise _UnsupportedChart("unsupported-chart-series-style")
+            raw_limit = child.attrib.get("lim")
+            if raw_limit is not None and re.fullmatch(r"[0-9]+", raw_limit) is None:
+                raise _UnsupportedChart("unsupported-chart-series-style")
+        else:
+            raise _UnsupportedChart("unsupported-chart-series-style")
+    if len(fill_nodes) > 1:
+        raise _UnsupportedChart("unsupported-chart-series-style")
+    if not fill_nodes:
+        return _LinePaint(None, 1.0, width, cap, True, True)
+    fill = fill_nodes[0]
+    if _local_name(fill.tag) == "noFill":
+        if fill.attrib or list(fill):
+            raise _UnsupportedChart("unsupported-chart-series-style")
+        return _LinePaint(None, 1.0, width, cap, False, False)
+    color, opacity = _resolved_solid_fill(fill, palette)
+    return _LinePaint(color, opacity, width, cap, True, False)
+
+
+def _resolved_shape_paint(
+    sp_pr: ET.Element | None,
+    palette: ColorPalette | None,
+) -> _ShapePaint:
+    if sp_pr is None:
+        return _ShapePaint(None, 1.0, False, None)
+    if sp_pr.attrib:
+        raise _UnsupportedChart("unsupported-chart-series-style")
+    fill_nodes: list[ET.Element] = []
+    line_nodes: list[ET.Element] = []
+    for child in sp_pr:
+        name = _local_name(child.tag)
+        if name in {"solidFill", "noFill"}:
+            fill_nodes.append(child)
+        elif name == "ln":
+            line_nodes.append(child)
+        elif name == "effectLst":
+            if child.attrib or list(child):
+                raise _UnsupportedChart("unsupported-chart-series-style")
+        else:
+            raise _UnsupportedChart("unsupported-chart-series-style")
+    if len(fill_nodes) > 1 or len(line_nodes) > 1:
+        raise _UnsupportedChart("unsupported-chart-series-style")
+    fill_color: str | None = None
+    fill_opacity = 1.0
+    fill_explicit = bool(fill_nodes)
+    if fill_nodes:
+        fill = fill_nodes[0]
+        if _local_name(fill.tag) == "noFill":
+            if fill.attrib or list(fill):
+                raise _UnsupportedChart("unsupported-chart-series-style")
+        else:
+            fill_color, fill_opacity = _resolved_solid_fill(fill, palette)
+    line = _resolved_line(line_nodes[0], palette) if line_nodes else None
+    return _ShapePaint(fill_color, fill_opacity, fill_explicit, line)
+
+
+def _resolved_marker(
+    marker: ET.Element | None,
+    palette: ColorPalette | None,
+) -> _MarkerPaint:
+    if marker is None:
+        return _MarkerPaint(None, 5.0, _resolved_shape_paint(None, palette))
+    if marker.attrib:
+        raise _UnsupportedChart("unsupported-chart-series-style")
+    allowed = {"symbol", "size", "spPr"}
+    names = [_local_name(child.tag) for child in marker]
+    if any(name not in allowed for name in names) or len(names) != len(set(names)):
+        raise _UnsupportedChart("unsupported-chart-series-style")
+    symbol_node = marker.find("c:symbol", C_NS)
+    symbol = _element_val(symbol_node)
+    if symbol_node is not None and (
+        set(symbol_node.attrib) != {"val"} or list(symbol_node)
+    ):
+        raise _UnsupportedChart("unsupported-chart-series-style")
+    if symbol not in {None, "circle", "none"}:
+        raise _UnsupportedChart("unsupported-chart-series-style")
+    size_node = marker.find("c:size", C_NS)
+    size = 5.0
+    if size_node is not None:
+        raw_size = size_node.attrib.get("val", "")
+        if set(size_node.attrib) != {"val"} or list(size_node) or re.fullmatch(r"[0-9]+", raw_size) is None:
+            raise _UnsupportedChart("unsupported-chart-series-style")
+        size = float(raw_size)
+        if not 2 <= size <= 72:
+            raise _UnsupportedChart("unsupported-chart-series-style")
+    return _MarkerPaint(
+        symbol,
+        size,
+        _resolved_shape_paint(marker.find("c:spPr", C_NS), palette),
+    )
+
+
+def _automatic_color(palette: ColorPalette | None, index: int) -> str:

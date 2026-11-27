@@ -1,0 +1,94 @@
+        except (OSError, json.JSONDecodeError) as exc:
+            payload = {}
+            error = f"cannot read {manifest_path}: {exc}"
+        else:
+            if not isinstance(payload, dict):
+                error = f"{manifest_path} must contain a JSON object"
+                payload = {}
+            elif not isinstance(payload.get('items'), list):
+                error = f"{manifest_path} must contain an items array"
+                payload = {}
+            elif any(not isinstance(item, dict) for item in payload['items']):
+                error = f"{manifest_path} items must contain JSON objects"
+                payload = {}
+            else:
+                seen_filenames: set[str] = set()
+                error = None
+                for index, item in enumerate(payload['items']):
+                    filename = item.get('filename')
+                    if (
+                        not isinstance(filename, str)
+                        or not filename.strip()
+                        or filename in {'.', '..'}
+                        or '/' in filename
+                        or '\\' in filename
+                        or ':' in filename
+                        or Path(filename).is_absolute()
+                    ):
+                        error = (
+                            f"{manifest_path} items[{index}].filename must be "
+                            "a non-empty bare filename"
+                        )
+                        break
+                    if filename in seen_filenames:
+                        error = (
+                            f"{manifest_path} contains duplicate filename "
+                            f"{filename!r}"
+                        )
+                        break
+                    seen_filenames.add(filename)
+                if error:
+                    payload = {}
+        self._source_manifest_cache[manifest_path] = (payload, error)
+        return payload, error
+
+    @staticmethod
+    def _external_image_reference_basename(href: str) -> str | None:
+        """Return a decoded basename for one local external image href."""
+        if not href or href.startswith('data:'):
+            return None
+        decoded_href = html.unescape(href)
+        parsed = urlsplit(decoded_href)
+        if parsed.scheme and parsed.scheme != 'file':
+            return None
+        path_part = (
+            parsed.path
+            if parsed.scheme
+            else decoded_href.split('?', 1)[0].split('#', 1)[0]
+        )
+        return Path(unquote(path_part)).name or None
+
+    @classmethod
+    def _referenced_image_basenames(cls, root: ET.Element) -> set[str]:
+        """Return external image basenames rendered by one parsed SVG."""
+        filenames = set()
+        _working_root, _parent_by_id, images = cls._visible_image_elements(root)
+        for elem in images:
+            href = elem.get('href') or elem.get(f'{{{XLINK_NS}}}href')
+            filename = cls._external_image_reference_basename(href or '')
+            if filename:
+                filenames.add(filename)
+        return filenames
+
+    def _check_sourced_image_attribution(
+        self,
+        root: ET.Element,
+        svg_path: Path,
+        result: Dict,
+    ):
+        """Require visible credit text for attribution-required web images.
+
+        image_search.py records the legal tier in images/image_sources.json;
+        Executor must render compact credit text into the SVG. This check
+        binds each credit to the referenced image's author and license instead
+        of accepting one generic deck-level CC token.
+        """
+        manifest, error, manifest_path = self._load_image_sources_manifest(svg_path)
+        if error:
+            if (
+                manifest_path is not None
+                and manifest_path not in self._source_manifest_errors_reported
+            ):
+                result['errors'].append(
+                    f"Invalid image source manifest: {error}"
+                )

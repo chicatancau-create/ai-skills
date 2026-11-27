@@ -1,0 +1,92 @@
+  用户主动切 direct 一律不碰；写前必验 8787 `/health`=200，否则不接（免得把 Agent 打进黑洞）。
+  日志 `D:\AI-Tool-State\wire-guard\guard.log`。
+- **`skill_shield.py`**（被守护每轮调用）：库文件丢了从 **`D:\Skills-mirror`** 还原，
+  窗口联接丢了重建。**从不删除、从不覆盖非空库文件**。日志同目录 `shield.log`。
+
+### ⚠️ 绝不要用资源管理器删 `D:\Skills-active` 里的东西
+
+那是**联接**。2026-11-15 02:04:06 实际发生过一次：有人删了窗口内容，
+**Windows shell 跟随联接把 `D:\Skills\headroom` 与 `skill-router` 的真源一起回收了**，
+12 个文件全没，全机 Agent 同时失去两个默认技能。
+（判据：文件进了回收站 ⇒ shell 删除，不是 Python `rmtree`。）
+已从回收站 `$I` 元数据取证并 100% 还原。**停用技能请移到 `D:\Skills-disabled`，不要删窗口。**
+自愈盾能兜底，但**镜像只能还原它已有的版本**——刚写还没镜像的内容仍会丢。
+
+**判据纪律**：`verify` 里如果**两跳（15721 直连 与 8787 经 headroom）表现一致地失败**，
+那是上游账户/线路的问题，**不是 headroom 的问题**，不要去改 headroom 或回滚接线。
+去看 `C:\Users\Admin\.cc-switch\logs\cc-switch.log`。
+`/v1/models` 返回 200 不算数——余额不足只在真实补全请求上以 403 露出。
+上游 `moyucccx.top` 有间歇性挂起，超时会**在两跳之间随机出现**，重试即可。
+
+**判「headroom 到底有没有在省」只认 `ops.py savings`，不许用单发探针的 token 差值。**
+三种「测出来是 0」但其实是正常的情况（都从源码核实过）：
+1. 单发冷请求 → cache 模式没有上一轮前缀，整段历史算 frozen prefix（`frozen=N`）。
+2. 工具名是 `read_file` 之类 → `HEADROOM_PROTECT_READS=1` 主动排除（`excluded_tool`），
+   因为 Agent 要按原字节打补丁，绝不能有损压缩文件读取。
+3. 密集大 JSON → `ratio_too_high`，`accuracy_guard=strict` 宁可不压。
+反过来，**上游 prompt 缓存会伪造出「省了 99.8%」**（headroom 账本其实是
+`tok_saved=0 cache_read=64000`）。要对比就用唯一 seed 打散缓存。
+
+### 部署命令（幂等，改配置就重跑这一条）
+
+必须带 `--providers manual` 且**不给 `--target`**，否则 headroom 会自己改 Agent 的
+BASE_URL 从而绕过 cc-switch。`coding` profile 的 19 个变量来自
+`headroom agent-savings --profile coding --format shell`，**不要漏**：cache 模式只压最新增量，
+而增量就是 tool/user 观测，`HEADROOM_COMPRESS_USER_MESSAGES=1` 不开就没东西可压。
+
+```
+headroom install apply --preset persistent-task --runtime python --scope user \
+  --providers manual --port 8787 --no-rate-limit --no-telemetry \
+  --env HEADROOM_OFFLINE=1 \
+  --env ANTHROPIC_TARGET_API_URL=http://127.0.0.1:15721 \
+  --env OPENAI_TARGET_API_URL=http://127.0.0.1:15721/v1 \
+  --env HEADROOM_TIKTOKEN_LOAD_TIMEOUT_SECONDS=2 \
+  --env HF_HOME=D:\uv\data\huggingface \
+  --env HEADROOM_MODE=cache --env HEADROOM_SAVINGS_PROFILE=coding \
+  --env HEADROOM_SAVINGS_TARGET=0.50 --env HEADROOM_COMPRESS_USER_MESSAGES=1 \
+  --env HEADROOM_COMPRESS_SYSTEM_MESSAGES=0 --env HEADROOM_PROTECT_RECENT=0 \
+  --env HEADROOM_PROTECT_ANALYSIS_CONTEXT=1 --env HEADROOM_MIN_TOKENS=10 \
+  --env HEADROOM_MAX_ITEMS=15 --env HEADROOM_SMART_CRUSHER_COMPACTION=1 \
+  --env HEADROOM_FORCE_KOMPRESS=0 --env HEADROOM_ACCURACY_GUARD=strict \
+  --env HEADROOM_TOOL_SEARCH=1 --env HEADROOM_DEDUPE=1 \
+  --env HEADROOM_LOSSLESS_THEN_LOSSY=1 --env HEADROOM_PROTECT_READS=1 \
+  --env HEADROOM_CODE_AWARE_ENABLED=1 --env HEADROOM_LOSSLESS=0 \
+  --env HEADROOM_MIN_CHARS_FOR_BLOCK=25
+```
+
+输出里 `ERROR: Access is denied.` 是改计划任务被拒，紧跟的 `successfully created` 才是结果，
+**不是失败**。开机自启靠启动文件夹的 `headroom-autostart.vbs`（`schtasks /create` 本机一律被拒）。
+
+**ML 压缩器 Kompress 的本钱**：`D:\uv\data\huggingface\hub\` 里预置的 261MB ONNX
+（`chopratejas/kompress-v2-base` @ `b1563631b35bfdcee37587ad530147497d820d4c`）+ ModernBERT 分词器。
+`HEADROOM_OFFLINE=1` **只拦网络回退、放行缓存命中**，所以预置后离线也能用。
+清掉缓存会让它**静默退回结构压缩**（不报错，只是省得少）。重建走 hf-mirror
+（`huggingface.co` 本机超时 10060，`hf-mirror.com` 通）；报错里那句
+`requires onnxruntime or torch` 是误导——onnxruntime 1.32.0 装得好好的，真因是离线闸。
+
+## 硬规则
+
+- **不要 pin。** `router.py pin` 会把技能常驻进默认窗口，破坏「只开两个」的设定。
+  只有用户明确说「让某某技能一直开着」时才用。
+- **不要改 `D:\Skills-active`。** 那是默认窗口，由运维脚本管。
+- **不要往技能源目录写运行时产物。** 缓存/输出一律放
+  `D:\AI-Tool-State`（环境变量 `AI_SHARED_SKILLS_STATE_DIR`）。
+- **本机 `python3` 是坏存根，PATH 上的 `python` 指向 Doubao 沙箱运行时。**
+  写脚本一律显式写解释器绝对路径。可用的：
+  `C:\Users\Admin\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\python\python.exe`
+- **报错/超时/乱码/命令失败先查 `local-ai-handbook`**，这台机器基本都踩过并记了。
+- 逆向类技能（`spider-king`、`wechat-miniapp-reverse`）**只对已授权目标使用**。
+
+## 技能索引（53 个）
+
+格式：`技能名` — 用途 → 目录（目录与技能名不同时才标出）
+
+### 必开（不用选，已经在）
+- `skill-router` — 本技能，任务路由
+- `headroom` — 省 token：压缩送进 LLM 的工具输出/日志/JSON（发送省，不是输出省）
+
+### 文档 / 办公
+- `docx` — Word .docx/.dotx 读写编辑
+- `xlsx` — Excel/CSV/TSV 表格读写与公式
+- `pptx` — PowerPoint .pptx/.potx 读写编辑
+- `pdf` — PDF 读取/提取/合并/拆分/表单/OCR

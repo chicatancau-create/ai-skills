@@ -1,0 +1,103 @@
+    for entry in list(layout_list):
+        layout_list.remove(entry)
+    _write_xml_tree(master_path, tree)
+
+    source_rels = _relationships_path_for_part(extract_dir, source_master_part)
+    master_rels = _relationships_path_for_part(extract_dir, master_part)
+    master_rels.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source_rels, master_rels)
+    for rel_id, attrs in tuple(_read_relationships(master_rels).items()):
+        if attrs.get("Type") == SLIDE_LAYOUT_REL_TYPE:
+            _remove_relationship(master_rels, rel_id)
+    _clone_master_theme(
+        extract_dir,
+        source_master_part,
+        master_part,
+        master_name,
+    )
+
+    presentation_rels = extract_dir / "ppt" / "_rels" / "presentation.xml.rels"
+    relationship_target = posixpath.relpath(master_part, "ppt")
+    relationship_id = _append_relationship(
+        presentation_rels,
+        SLIDE_MASTER_REL_TYPE,
+        relationship_target,
+    )
+    presentation_path = extract_dir / "ppt" / "presentation.xml"
+    presentation_xml = presentation_path.read_text(encoding="utf-8")
+    master_ids = [
+        int(value)
+        for value in re.findall(r'<p:sldMasterId\b[^>]*\bid="(\d+)"', presentation_xml)
+    ]
+    master_id = max(master_ids, default=(1 << 31) - 1) + 1
+    if master_id > OOXML_UINT32_MAX:
+        raise TemplateStructureError("Presentation Master id exceeds OOXML UInt32")
+    entry = f'<p:sldMasterId id="{master_id}" r:id="{relationship_id}"/>'
+    if "</p:sldMasterIdLst>" not in presentation_xml:
+        raise RuntimeError("presentation.xml has no p:sldMasterIdLst")
+    presentation_path.write_text(
+        presentation_xml.replace(
+            "</p:sldMasterIdLst>",
+            f"{entry}</p:sldMasterIdLst>",
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    content_types_path = extract_dir / "[Content_Types].xml"
+    content_types_path.write_text(
+        _add_content_type_override(
+            content_types_path.read_text(encoding="utf-8"),
+            master_part,
+            "application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml",
+        ),
+        encoding="utf-8",
+    )
+    return master_part
+
+
+def _assign_structured_masters(
+    extract_dir: Path,
+    structure: PptxStructureContext,
+    specs: list[TemplateSlideSpec],
+) -> dict[str, str]:
+    """Create one registered package Master for each explicit SVG Master key."""
+    if not specs:
+        raise TemplateStructureError("Structured export requires at least one slide")
+    source_master = structure.slide_master_part(specs[0].slide_num)
+    masters: dict[str, str] = {}
+    for spec in specs:
+        existing_part = masters.get(spec.master_key)
+        if existing_part is None:
+            if not masters:
+                existing_part = source_master
+                _set_master_picker_name(
+                    extract_dir / existing_part,
+                    spec.master_name,
+                )
+            else:
+                existing_part = _clone_structured_master(
+                    extract_dir,
+                    source_master,
+                    spec.master_name,
+                )
+            masters[spec.master_key] = existing_part
+        structure.slide_master_parts[spec.slide_num] = existing_part
+    return masters
+
+
+def _clear_master_placeholder_shapes(master_path: Path) -> None:
+    """Remove base-package placeholders before installing structured content."""
+    tree = ET.parse(master_path)
+    root = tree.getroot()
+    sp_tree = root.find(f".//{{{PML_NS}}}cSld/{{{PML_NS}}}spTree")
+    if sp_tree is None:
+        raise RuntimeError(f"Slide master has no p:spTree: {master_path}")
+    for child in list(sp_tree):
+        if child.find(f".//{{{PML_NS}}}ph") is not None:
+            sp_tree.remove(child)
+    _write_xml_tree(master_path, tree)
+
+
+def _set_slide_layout_target(rels_path: Path, target: str) -> None:
+    """Point a slide's layout relationship at a different layout part."""

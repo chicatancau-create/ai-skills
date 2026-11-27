@@ -1,0 +1,131 @@
+    return f"data:{mime};base64,{encoded}"
+
+
+def _embed_reference(
+    value: str,
+    source_dir: Path,
+    resource_root: Path,
+    embedded: list[str],
+) -> str:
+    raw = value.strip()
+    if not raw or raw.startswith(("#", "data:")):
+        return value
+    parsed = urlsplit(raw)
+    _validate_resource_value(raw, allow_fragment=True)
+    resource = (source_dir / unquote(parsed.path)).resolve()
+    try:
+        relative_resource = resource.relative_to(resource_root)
+    except ValueError as exc:
+        raise SvgPictureError(f"Local SVG resource escapes --resource-root: {raw}") from exc
+    if not resource.is_file():
+        raise SvgPictureError(f"Local SVG resource does not exist: {raw}")
+    embedded.append(relative_resource.as_posix())
+    return _data_uri(resource)
+
+
+def _embed_css_urls(
+    value: str,
+    source_dir: Path,
+    resource_root: Path,
+    embedded: list[str],
+) -> str:
+    def replace(match: re.Match[str]) -> str:
+        reference = match.group(2)
+        if reference.startswith(("#", "data:")):
+            return match.group(0)
+        embedded_reference = _embed_reference(
+            reference,
+            source_dir,
+            resource_root,
+            embedded,
+        )
+        return f'url("{embedded_reference}")'
+
+    return _URL_RE.sub(replace, value)
+
+
+def _embed_external_resources(
+    asset_root: ET.Element,
+    source_dir: Path,
+    resource_root: Path,
+) -> list[str]:
+    embedded: list[str] = []
+    for elem in asset_root.iter():
+        tag = _local(elem.tag)
+        for attr_name, value in list(elem.attrib.items()):
+            rewritten = _embed_css_urls(value, source_dir, resource_root, embedded)
+            if _local(attr_name) == "href" and tag in {"image", "feImage"}:
+                rewritten = _embed_reference(
+                    rewritten,
+                    source_dir,
+                    resource_root,
+                    embedded,
+                )
+            elif _local(attr_name) == "href" and tag == "use" and not rewritten.startswith("#"):
+                raise SvgPictureError(f"External <use> is unsupported in a picture asset: {rewritten}")
+            if rewritten != value:
+                elem.set(attr_name, rewritten)
+        if elem.text:
+            elem.text = _embed_css_urls(
+                elem.text,
+                source_dir,
+                resource_root,
+                embedded,
+            )
+    return sorted(set(embedded))
+
+
+def _rebase_reference(
+    value: str,
+    source_dir: Path,
+    output_dir: Path,
+    resource_root: Path,
+) -> str:
+    raw = value.strip()
+    if not raw or raw.startswith(("#", "data:")):
+        return value
+    parsed = urlsplit(raw)
+    if parsed.scheme or parsed.netloc or not parsed.path:
+        return value
+    resource = (source_dir / unquote(parsed.path)).resolve()
+    try:
+        resource.relative_to(resource_root)
+    except ValueError as exc:
+        raise SvgPictureError(f"Local page resource escapes --resource-root: {raw}") from exc
+    relative = Path(os.path.relpath(resource, output_dir)).as_posix()
+    return urlunsplit(("", "", relative, parsed.query, parsed.fragment))
+
+
+def _rebase_css_urls(
+    value: str,
+    source_dir: Path,
+    output_dir: Path,
+    resource_root: Path,
+) -> str:
+    def replace(match: re.Match[str]) -> str:
+        reference = match.group(2)
+        rewritten = _rebase_reference(
+            reference,
+            source_dir,
+            output_dir,
+            resource_root,
+        )
+        if rewritten == reference:
+            return match.group(0)
+        quote = match.group(1)
+        return f"url({quote}{rewritten}{quote})"
+
+    return _URL_RE.sub(replace, value)
+
+
+def _rebase_page_resources(
+    root: ET.Element,
+    source_dir: Path,
+    output_dir: Path,
+    resource_root: Path,
+) -> None:
+    if source_dir == output_dir:
+        return
+    for elem in root.iter():
+        tag = _local(elem.tag)
+        for attr_name, value in list(elem.attrib.items()):

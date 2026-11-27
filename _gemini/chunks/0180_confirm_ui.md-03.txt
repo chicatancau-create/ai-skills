@@ -1,0 +1,95 @@
+  `templates/design_spec.<kind>.<id>.md`, or compatible legacy
+  `design_spec.md`.
+- The array supplies exact-root candidates. The user may select multiple roots
+  when their kind sets do not overlap; each root is selected atomically.
+- Do not write library entries into this block. The server reads only
+  `templates/brands/brands_index.json`,
+  `templates/styles/styles_index.json`,
+  `templates/layouts/layouts_index.json`, and
+  `templates/decks/decks_index.json`, derives each direct-child workspace root,
+  and validates that it exists with `templates/design_spec.md`. It never scans
+  kind directories.
+
+Stage-1 `GET /api/recommendations` embeds this browser catalog as top-level
+`template_options`:
+
+```json
+{
+  "schema_version": 1,
+  "phase": "template",
+  "lang": "zh",
+  "default_mode": "free_design",
+  "library": {
+    "brand": [],
+    "style": [],
+    "layout": [],
+    "deck": []
+  },
+  "explicit": [],
+  "preselected_keys": [],
+  "options_sha256": "<64 lowercase hex characters>"
+}
+```
+
+A library candidate has `key`, `source: "library"`, `kind`, `id`, `label`,
+`summary`, and canonical absolute `workspace_root`. An unregistered explicit
+candidate has `key`, `source: "explicit"`, parsed `kind`, `label`, and
+canonical absolute `workspace_root`. If a supplied root exactly equals a registered canonical
+root, the server reuses the library candidate/key instead of duplicating it as
+explicit. Candidate keys are server-owned. The Stage-1 submit payload carries
+the current `{ "mode": "free_design"|"templates", "selection_keys": [...] }`
+beside the Strategist fields; the server validates that selection and writes it
+to the sidecar rather than copying keys into `result.json`.
+
+When the input supplies exactly one root, `preselected_keys` contains its
+resolved candidate key as a convenience default, including when exact equality
+reclassifies it as library. When several roots are supplied, all remain
+candidates but none is preselected; supplying paths does not select all of them.
+
+**Page selection model**: Stage 1 first asks the user to choose `Free design` or
+`Use templates`, initialized from `default_mode` but always switchable. Exactly
+one supplied root may initialize its candidate as an editable convenience
+default; multiple roots remain unselected. Only `Use templates` expands the
+candidate controls: Brand, Style, Layout, and Deck each have one registered
+single-select dropdown, and Specified has one checkbox per exact root with its
+path and kinds visible. Every dropdown includes `None`; template mode cannot submit until at
+least one root is selected. Free design clears all selections. Registered kinds may
+be combined, and the complete selection contains at most one contribution per
+kind. Layout and Deck may coexist; Layout takes structural precedence. Each specified
+root contributes every kind it exposes and may coexist with other explicit or
+registered roots of non-overlapping kinds. Conflicts block submission; path order
+and source provenance never grant priority.
+
+### Output — `template_selection.json` (written with Stage 1)
+
+```json
+{
+  "schema_version": 1,
+  "phase": "template",
+  "status": "confirmed",
+  "mode": "templates",
+  "selections": [
+    {
+      "source": "library",
+      "kind": "style",
+      "id": "example_style",
+      "workspace_root": "/canonical/library/root/example_style"
+    },
+    {
+      "source": "explicit",
+      "kind": "deck",
+      "workspace_root": "/canonical/unregistered/workspace/root"
+    }
+  ],
+  "root_snapshots": [
+    {
+      "workspace_root": "/canonical/library/root/example_style",
+      "source": "library",
+      "kinds": ["style"],
+      "specs": [{"kind": "style", "id": "example_style", "path": "templates/design_spec.md"}],
+      "files": {"templates/design_spec.md": "<source SHA-256>"}
+    },
+    {
+      "workspace_root": "/canonical/unregistered/workspace/root",
+      "source": "explicit",
+      "kinds": ["deck"],

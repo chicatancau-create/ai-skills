@@ -1,0 +1,95 @@
+        # Master shapes always render behind slide-local shapes. Preserve the
+        # original z-order by promoting only a common leading chrome prefix;
+        # overlay headers/footers remain slide-local.
+        token_by_shape_id = {
+            slide_num: {
+                shape_ids[slide_num]: token
+                for token, shape_ids in promotions
+            }
+            for slide_num in content_slides
+        }
+        leading_token_orders: list[list[str]] = []
+        for slide_num in content_slides:
+            order: list[str] = []
+            for shape_id in slide_state[slide_num]["shapes"]:
+                token = token_by_shape_id[slide_num].get(shape_id)
+                if token is None:
+                    break
+                order.append(token)
+            leading_token_orders.append(order)
+
+        safe_tokens = list(leading_token_orders[0])
+        for order in leading_token_orders[1:]:
+            common_length = 0
+            for expected, actual in zip(safe_tokens, order):
+                if expected != actual:
+                    break
+                common_length += 1
+            safe_tokens = safe_tokens[:common_length]
+            if not safe_tokens:
+                break
+        promotion_by_token = {token: shape_ids for token, shape_ids in promotions}
+        promotions = [
+            (token, promotion_by_token[token])
+            for token in safe_tokens
+        ]
+
+        if not promotions:
+            continue
+
+        master_path = extract_dir / master_part
+        master_rels_path = _relationships_path_for_part(extract_dir, master_part)
+        for _token, shape_ids_by_slide in promotions:
+            first_slide = content_slides[0]
+            first_state = slide_state[first_slide]
+            shape = first_state["shapes"][shape_ids_by_slide[first_slide]]
+            master_shape = _copy_shape_relationships_to_master(
+                shape,
+                first_state["rels"],
+                master_rels_path,
+            )
+            _append_shape_to_master(master_path, master_shape)
+            promoted_roles += 1
+
+            for slide_num, shape_id in shape_ids_by_slide.items():
+                state = slide_state[slide_num]
+                shape_to_remove = state["shapes"].get(shape_id)
+                sp_tree = state["root"].find(f".//{{{PML_NS}}}cSld/{{{PML_NS}}}spTree")
+                if sp_tree is not None and shape_to_remove is not None:
+                    sp_tree.remove(shape_to_remove)
+                    promoted += 1
+
+        for slide_num in content_slides:
+            state = slide_state[slide_num]
+            _write_xml_tree(state["path"], state["tree"])
+
+        # Minority slides (covers, section pages) keep every shape
+        # slide-local and move to a Cover layout that hides the newly
+        # promoted master chrome, so their rendering never changes.
+        minority_slides = [
+            slide_num for slide_num in slide_nums
+            if slide_num not in set(content_slides)
+        ]
+        if minority_slides:
+            first_minority_rels = (
+                extract_dir / "ppt" / "slides" / "_rels"
+                / f"slide{minority_slides[0]}.xml.rels"
+            )
+            base_target = _find_relationship_target(
+                first_minority_rels, SLIDE_LAYOUT_REL_TYPE
+            )
+            if not base_target:
+                raise RuntimeError(
+                    f"Slide {minority_slides[0]} has no slide layout relationship"
+                )
+            base_layout_part = _resolve_package_target(
+                f"ppt/slides/slide{minority_slides[0]}.xml", base_target
+            )
+            cover_target = _create_cover_layout(
+                extract_dir, master_part, base_layout_part
+            )
+            for slide_num in minority_slides:
+                rels_path = (
+                    extract_dir / "ppt" / "slides" / "_rels"
+                    / f"slide{slide_num}.xml.rels"
+                )

@@ -1,0 +1,86 @@
+                el.hasAttribute("data-use-has-transform")) {
+            return payload;
+        }
+        var attrs = Object.assign({}, payload.attrs);
+        delete attrs.transform;
+        return Object.assign({}, payload, { attrs: attrs });
+    }
+
+    function restoreDragStart(el) {
+        applyAttrSnapshot(el, dragStartAttrs[el.id]);
+    }
+
+    function applyMoveLocal(el, dxScreen, dyScreen) {
+        // Each element converts the shared screen delta into its own local space,
+        // so a selection spanning differently-transformed groups still tracks the
+        // pointer. Restore-then-apply keeps every frame relative to the start.
+        restoreDragStart(el);
+        var d = screenDeltaToLocal(el, dxScreen, dyScreen);
+        var attrs;
+        try { attrs = attrsForMove(el, d.x, d.y); }
+        catch (err) { attrs = null; }
+        if (!attrs) return null;
+        applyElementAttrs(el, attrs);
+        return attrs;
+    }
+
+    function updateDragPreview(dxScreen, dyScreen) {
+        dragEls.forEach(function (el) { applyMoveLocal(el, dxScreen, dyScreen); });
+        if (dragEls.length === 1) refreshGeoInputs(dragEls[0], elementPropsEl);
+    }
+
+    function commitDrag(dxScreen, dyScreen) {
+        var single = dragEls.length === 1;
+        dragEls.forEach(function (el) {
+            // Capture the pre-drag snapshot in the closure: endDrag() clears
+            // dragStartAttrs synchronously after this call, before the staging
+            // promise can reject, so the rollback can't rely on the global.
+            var startAttrs = dragStartAttrs[el.id];
+            var attrs = applyMoveLocal(el, dxScreen, dyScreen);
+            if (!attrs) return;
+            var payload = payloadForMovedElement(el, attrs);
+            stageEditRequest(el.id, payload).then(function () {
+                if (payload.attrs) markCommittedAttrs(el, payload.attrs);
+                if (payload.promote_tspan) {
+                    var promoted = promoteTspanDom(el, payload.promote_tspan);
+                    if (promoted && single) refreshGeoInputs(promoted, elementPropsEl);
+                }
+            }).catch(function (err) {
+                // Optimistic preview already moved the element; roll it back so the
+                // canvas never shows a move the server never staged.
+                applyAttrSnapshot(el, startAttrs);
+                if (single) refreshGeoInputs(el, elementPropsEl);
+                showError(t("err_edit") + err.message);
+            });
+        });
+    }
+
+    function endDrag() {
+        dragStart = null;
+        dragMoved = false;
+        dragEls = [];
+        dragStartAttrs = {};
+        document.body.classList.remove("svg-dragging");
+    }
+
+    // Per-element nudge staging is serialized: a held arrow key fires many
+    // keydowns, each sending an *absolute* position. Without ordering, the
+    // unlocked backend could coalesce them out of order and leave the staged
+    // value behind the on-screen one. So at most one nudge stage per element is
+    // in flight; extra keypresses only update the preview and the queued target,
+    // and the next send reads the current DOM position (= the latest).
+    var nudgeFlight = {};   // key -> bool: a nudge stage is in flight
+    var nudgeQueued = {};   // key -> {el, single, slide, attrs}: latest target awaiting send
+    var nudgeLastOk = {};   // key -> attrs: last position the server confirmed
+
+    function nudgeKey(slide, el) { return slide + "|" + el.id; }
+
+    function sendNudge(key, el, single, slide, payload) {
+        if (!payload) return;
+        payload = payloadForCurrentElementState(el, payload);
+        nudgeFlight[key] = true;
+        stageEditRequest(el.id, payload, slide).then(function () {
+            if (payload.attrs) nudgeLastOk[key] = payload.attrs;
+            if (payload.attrs) markCommittedAttrs(el, payload.attrs);
+            nudgeFlight[key] = false;
+            var q = nudgeQueued[key];

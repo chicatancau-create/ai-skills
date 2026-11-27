@@ -1,0 +1,91 @@
+                    f"{owner_label} links to omitted {target_label}; "
+                    "include the target exactly once or remove the link"
+                )
+            if len(output_targets) > 1:
+                raise RuntimeError(
+                    f"{owner_label} links to repeated {target_label}; "
+                    "the output target is ambiguous"
+                )
+            output_target_part = output_targets[0]
+        output_target = _relative_target(output_owner_part, output_target_part)
+        if rel.attrib.get("Target") != output_target:
+            rel.set("Target", output_target)
+            changed = True
+
+    if fail_on_non_jump_slide_relationships:
+        for relationship_id, rel in sorted(relationships.items()):
+            if (
+                relationship_id in relationship_ids
+                or rel.attrib.get("Type") != SLIDE_REL_TYPE
+            ):
+                continue
+            if (rel.attrib.get("TargetMode") or "").strip().lower() == "external":
+                raise RuntimeError(
+                    f"{owner_label} has external non-jump slide relationship "
+                    f"{relationship_id!r}; page-plan export refuses slide "
+                    "relationships without a slide-jump action"
+                )
+            target = rel.attrib.get("Target")
+            if not target:
+                raise RuntimeError(
+                    f"{owner_label} has non-jump slide relationship "
+                    f"{relationship_id!r} without a target"
+                )
+            source_target_part = _normalize_part(target, source_owner_part)
+            source_target_ref = source_ref_by_part.get(source_target_part)
+            target_label = (
+                f"source slide {source_target_ref.index}"
+                if source_target_ref is not None
+                else source_target_part
+            )
+            is_self_target = (
+                self_source_part is not None
+                and self_output_part is not None
+                and source_target_part == self_source_part
+            )
+            if is_self_target:
+                output_targets = [self_output_part]
+            else:
+                output_targets = outputs_by_source_part.get(
+                    source_target_part,
+                    [],
+                )
+            if not output_targets:
+                raise RuntimeError(
+                    f"{owner_label} has non-jump slide relationship "
+                    f"{relationship_id!r} to omitted {target_label}; "
+                    "page-plan export refuses slide relationships without a "
+                    "slide-jump action"
+                )
+            if len(output_targets) > 1:
+                raise RuntimeError(
+                    f"{owner_label} has non-jump slide relationship "
+                    f"{relationship_id!r} to repeated {target_label}; "
+                    "the output target is ambiguous"
+                )
+            output_target = _relative_target(
+                output_owner_part,
+                output_targets[0],
+            )
+            if rel.attrib.get("Target") != output_target:
+                if is_self_target and allow_self_non_jump_retarget:
+                    rel.set("Target", output_target)
+                    changed = True
+                    continue
+                raise RuntimeError(
+                    f"{owner_label} has non-jump slide relationship "
+                    f"{relationship_id!r} to {target_label} that would require "
+                    "retargeting after page planning; page-plan export refuses "
+                    "slide relationships without a slide-jump action"
+                )
+    return changed
+
+
+def _remap_reachable_shared_layer_slide_jumps(
+    entries: dict[str, bytes],
+    output_slides: list[tuple[str, str]],
+    *,
+    outputs_by_source_part: dict[str, list[str]],
+    source_ref_by_part: dict[str, SlideRef],
+    fail_on_non_jump_slide_relationships: bool = False,
+) -> None:

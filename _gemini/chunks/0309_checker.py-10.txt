@@ -1,0 +1,121 @@
+        text = spec_path.read_text(encoding='utf-8')
+    except OSError:
+        return None
+    if not text.startswith('---\n'):
+        return None
+    end = text.find('\n---\n', 4)
+    if end == -1:
+        return None
+    match = re.search(
+        r'^native_structure_mode:\s*([A-Za-z0-9_-]+)\s*$',
+        text[4:end],
+        re.MULTILINE,
+    )
+    return match.group(1).lower() if match else None
+
+
+def _declared_template_canvas_viewbox(target_path: Path) -> str | None:
+    """Return a template design spec's locked root-canvas value."""
+    directory = target_path.parent if target_path.is_file() else target_path
+    spec_path = _roster_spec_path(directory)
+    if spec_path is None:
+        return None
+    try:
+        text = spec_path.read_text(encoding='utf-8')
+    except OSError:
+        return None
+    if not text.startswith('---\n'):
+        return None
+    end = text.find('\n---\n', 4)
+    if end == -1:
+        return None
+    match = re.search(
+        r'^canvas_viewbox:\s*["\']?([^"\'\r\n]+?)["\']?\s*$',
+        text[4:end],
+        re.MULTILINE,
+    )
+    return match.group(1).strip() if match else None
+
+
+def _template_structure_checks_enabled(target_path: Path) -> bool:
+    """Return whether positive structure checks apply to this template."""
+    return _declared_template_structure_mode(target_path) == 'structured'
+
+
+def _direct_defs_index(
+    root: ET.Element,
+) -> tuple[Dict[str, ET.Element], set[str]]:
+    """Return direct ``<defs>`` children by id plus duplicate ids."""
+    definitions: Dict[str, ET.Element] = {}
+    duplicates: set[str] = set()
+    for defs_elem in root.iter():
+        if _local_name(defs_elem) != 'defs':
+            continue
+        for child in defs_elem:
+            definition_id = (child.get('id') or '').strip()
+            if not definition_id:
+                continue
+            if definition_id in definitions:
+                duplicates.add(definition_id)
+            definitions[definition_id] = child
+    return definitions, duplicates
+
+
+def _effective_presentation_value(
+    elem: ET.Element,
+    name: str,
+    parent_by_id: Dict[int, ET.Element],
+) -> str | None:
+    """Resolve one inherited presentation property for validation."""
+    current: ET.Element | None = elem
+    while current is not None:
+        style_values = (
+            _parse_inline_style(current.get('style'))
+            if _parse_inline_style is not None else {}
+        )
+        if name in style_values:
+            return style_values[name]
+        direct = current.get(name)
+        if direct is not None:
+            return direct
+        current = parent_by_id.get(id(current))
+    return None
+
+
+def _parse_viewbox_values(viewbox: str) -> Tuple[float, float, float, float] | None:
+    """Parse a root viewBox into four numeric values."""
+    try:
+        parsed = parse_project_viewbox(viewbox)
+    except CanvasContractError:
+        return None
+    return 0.0, 0.0, float(parsed.width), float(parsed.height)
+
+
+def _parse_placeholders_fallback(block: str) -> Dict[str, Tuple[str, ...]]:
+    """Tiny YAML-free reader for the documented ``placeholders:`` shape.
+
+    Used only when PyYAML is unavailable. Recognized lines (indentation-aware,
+    two-space indent assumed):
+
+    .. code-block:: yaml
+
+        placeholders:
+          01_cover: ["{{TITLE}}", "{{LOGO}}"]
+          03_content: []
+          03a_content_two_col:
+            - "{{LEFT_TITLE}}"
+            - "{{RIGHT_TITLE}}"
+
+    Anything outside this minimal grammar is silently skipped — designers who
+    rely on advanced YAML should install pyyaml.
+    """
+    out: Dict[str, Tuple[str, ...]] = {}
+    inline_re = re.compile(
+        r"^\s{2}([A-Za-z0-9_]+)\s*:\s*\[(.*)\]\s*$"
+    )
+    empty_re = re.compile(r"^\s{2}([A-Za-z0-9_]+)\s*:\s*\[\s*\]\s*$")
+    block_header_re = re.compile(r"^\s{2}([A-Za-z0-9_]+)\s*:\s*$")
+    item_re = re.compile(r'^\s{4}-\s*"?([^"]+)"?\s*$')
+
+    in_section = False
+    current_block_key: str | None = None

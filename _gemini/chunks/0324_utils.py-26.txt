@@ -1,0 +1,109 @@
+        raise ValueError('filter requires feDropShadow or feGaussianBlur')
+
+    return {
+        'std_dev': std_dev,
+        'dx': dx,
+        'dy': dy,
+        'opacity': opacity,
+        'color': color,
+        'has_offset': has_offset,
+    }
+
+
+def project_filter_drawingml_coordinates(
+    params: dict[str, float | str | bool],
+    effect_kind: str | None = None,
+) -> dict[str, int]:
+    """Map filter geometry into validated DrawingML effect coordinates."""
+    kind = effect_kind or ('shadow' if params['has_offset'] else 'glow')
+    std_dev = float(params['std_dev'])
+    dx = float(params['dx'])
+    dy = float(params['dy'])
+    if kind == 'shadow':
+        coordinates_px = {
+            'blurRad': std_dev * 2.0,
+            'dist': math.hypot(dx, dy),
+        }
+    elif kind == 'glow':
+        coordinates_px = {'rad': std_dev}
+    else:
+        raise ValueError(f'unsupported native filter kind {kind!r}')
+
+    coordinates: dict[str, int] = {}
+    for attribute_name, value_px in coordinates_px.items():
+        scaled = value_px * EMU_PER_PX
+        if not math.isfinite(scaled):
+            raise ValueError(
+                f'DrawingML {attribute_name} must be finite after EMU mapping'
+            )
+        mapped = round(scaled)
+        if not 0 <= mapped <= OOXML_COORDINATE_MAX:
+            raise ValueError(
+                f'DrawingML {attribute_name} must map within '
+                f'0..{OOXML_COORDINATE_MAX}; got {mapped}'
+            )
+        coordinates[attribute_name] = mapped
+    return coordinates
+
+
+def project_filter_errors(root: ET.Element) -> list[str]:
+    """Validate filters against the native shadow/glow approximation."""
+    definitions, _duplicates = project_definition_index(root)
+    filters_by_id = {
+        filter_id: elem
+        for filter_id, elem in definitions.items()
+        if _svg_element_tag(elem) == 'filter'
+    }
+    errors: set[str] = set()
+    parents = {
+        child: parent
+        for parent in root.iter()
+        for child in parent
+    }
+
+    for elem in root.iter():
+        tag = (_svg_element_tag(elem) or str(elem.tag)).lower()
+        label = _transform_element_label(elem)
+        style_values = parse_inline_style(elem.get('style'))
+        if style_values.get('filter'):
+            errors.add(
+                f'{label} filter must use a direct filter="url(#id)" '
+                'attribute; inline style filters are not supported'
+            )
+
+        raw_filter = elem.get('filter')
+        if raw_filter is None:
+            continue
+        if (
+            tag not in PROJECT_FILTER_PUBLIC_TARGETS
+            and not _is_compact_authored_preset_filter_target(elem)
+            and not _is_imported_preset_preview_filter_target(elem, parents)
+            and not is_picture_effect_carrier(elem)
+        ):
+            errors.add(
+                f'{label} cannot use filter; supported native targets are '
+                'rect, circle, image, path, polygon, text, a validated compact authored-'
+                'preset shape, and an exact registered carrier group'
+            )
+        if tag == 'image' and elem.get('clip-path') is not None:
+            errors.add(
+                f'{label} cannot combine filter and clip-path on the same '
+                'image; put the filter on an exact single-image outer <g>'
+            )
+        match = re.fullmatch(r'url\(#([^)]+)\)', raw_filter.strip())
+        if match is None:
+            errors.add(
+                f'{label} filter must be an exact local url(#id) reference; '
+                f'got {raw_filter!r}'
+            )
+            continue
+        filter_id = match.group(1)
+        if filter_id not in filters_by_id:
+            errors.add(
+                f'{label} filter=url(#{filter_id}) has no matching direct '
+                f'<defs><filter id="{filter_id}"> definition'
+            )
+
+    for filter_id, filter_elem in filters_by_id.items():
+        label = f'filter #{filter_id}'
+        parameters_are_valid = True

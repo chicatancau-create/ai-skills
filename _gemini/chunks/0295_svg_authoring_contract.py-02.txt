@@ -1,0 +1,121 @@
+            old = source.get(name)
+            new = candidate.get(name)
+            if old == new:
+                continue
+            label = source.get("id") or f"{_local_name(source.tag)}[{index}]"
+            examples.append(
+                f"{label}:{name} {old!r} -> {new!r}"
+            )
+            if len(examples) == limit:
+                return examples
+    return examples
+
+
+def _has_visible_text(root: ET.Element) -> bool:
+    elements_by_id = {
+        element_id: element
+        for element in root.iter()
+        if (element_id := element.get("id"))
+    }
+
+    def visit(
+        element: ET.Element,
+        *,
+        inside_definition: bool,
+        activated_reference: bool,
+        display_hidden: bool,
+        visibility: str,
+        use_stack: frozenset[str],
+    ) -> bool:
+        local = _local_name(element.tag)
+        display = _style_value(element.get("style"), "display")
+        if display is None:
+            display = (element.get("display") or "").strip().lower()
+        nested_display_hidden = display_hidden or display == "none"
+
+        own_visibility = _style_value(element.get("style"), "visibility")
+        if own_visibility is None:
+            own_visibility = (element.get("visibility") or "").strip().lower()
+        nested_visibility = own_visibility or visibility
+
+        nested_definition = inside_definition or (
+            local in _DEFINITION_SUBTREES and not activated_reference
+        )
+        if (
+            local == "text"
+            and not nested_definition
+            and not nested_display_hidden
+            and nested_visibility not in {"hidden", "collapse"}
+            and "".join(element.itertext()).strip()
+        ):
+            return True
+        if local == "use" and not nested_display_hidden:
+            target_id = _href_target(element)
+            target = elements_by_id.get(target_id or "")
+            if target is not None and target_id not in use_stack:
+                if visit(
+                    target,
+                    inside_definition=False,
+                    activated_reference=True,
+                    display_hidden=False,
+                    visibility=nested_visibility,
+                    use_stack=use_stack | {target_id},
+                ):
+                    return True
+        return any(
+            visit(
+                child,
+                inside_definition=nested_definition,
+                activated_reference=False,
+                display_hidden=nested_display_hidden,
+                visibility=nested_visibility,
+                use_stack=use_stack,
+            )
+            for child in element
+        )
+
+    return visit(
+        root,
+        inside_definition=False,
+        activated_reference=False,
+        display_hidden=False,
+        visibility="visible",
+        use_stack=frozenset(),
+    )
+
+
+@dataclass
+class AuthoringNormalizationStats:
+    """Deterministic changes permitted before the first authoring write."""
+
+    coordinates: CoordinateCompactionStats
+    styles: StyleCompactionStats
+
+    @property
+    def changed_declarations(self) -> int:
+        return (
+            self.coordinates.changed_attributes
+            + self.styles.changed_declarations
+        )
+
+    def as_dict(self) -> dict[str, dict[str, int] | int]:
+        return {
+            "coordinates": self.coordinates.as_dict(),
+            "styles": self.styles.as_dict(),
+            "changed_declarations": self.changed_declarations,
+        }
+
+
+def normalize_compact_authoring_tree(
+    root: ET.Element,
+    *,
+    compact_native_frames: bool = True,
+) -> AuthoringNormalizationStats:
+    """Normalize one in-memory authoring tree without changing its semantics."""
+    if _local_name(root.tag) != "svg":
+        raise ValueError("Compact authoring requires an SVG root element")
+    coordinates = compact_svg_tree(
+        root,
+        compact_native_frames=compact_native_frames,
+    )
+    styles = compact_svg_style_tree(root)

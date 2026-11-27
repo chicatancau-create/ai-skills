@@ -1,0 +1,113 @@
+            entry["display_ratio"] = ratios[0]
+
+
+def _manifest_entry(
+    *,
+    index: int,
+    filename: str,
+    image_part: object,
+    ext: str,
+    blob: bytes,
+    occurrence: dict[str, object],
+) -> dict[str, object]:
+    """Build image_manifest.json metadata for one unique PowerPoint media part."""
+    pixel_width, pixel_height = _image_size_from_bytes(blob)
+    pixel_ratio = (
+        pixel_width / pixel_height
+        if pixel_width and pixel_height
+        else None
+    )
+    is_office_vector = ext in OFFICE_VECTOR_EXTENSIONS
+    partname = str(getattr(image_part, "partname", ""))
+    content_type = str(getattr(image_part, "content_type", ""))
+
+    entry: dict[str, object] = {
+        "index": index,
+        "filename": filename,
+        "original_filename": filename,
+        "asset_kind": "office_vector" if is_office_vector else "bitmap",
+        "svg_renderable": not is_office_vector,
+        "pptx_native_supported": True,
+        "source_kind": "pptx_picture",
+        "source_ext": f".{ext}",
+        "source_target": partname.lstrip("/"),
+        "content_type": content_type,
+        "display_left_emu": occurrence.get("display_left_emu"),
+        "display_top_emu": occurrence.get("display_top_emu"),
+        "display_width_emu": occurrence.get("display_width_emu"),
+        "display_height_emu": occurrence.get("display_height_emu"),
+        "display_width_in": occurrence.get("display_width_in"),
+        "display_height_in": occurrence.get("display_height_in"),
+        "display_ratio": occurrence.get("display_ratio"),
+        "pixel_width": pixel_width,
+        "pixel_height": pixel_height,
+        "pixel_ratio": round(pixel_ratio, 6) if pixel_ratio else None,
+        "occurrences": [occurrence],
+    }
+    if entry["display_ratio"] is None and pixel_ratio:
+        entry["display_ratio"] = round(pixel_ratio, 6)
+    _update_manifest_usage(entry)
+    return entry
+
+
+def _asset_cache_key(image_part: object, blob: bytes) -> str:
+    """Return a stable key for deduplicating repeated PPTX media references."""
+    partname = str(getattr(image_part, "partname", ""))
+    if partname:
+        return partname
+    return hashlib.sha256(blob).hexdigest()
+
+
+def _asset_filename(
+    image_part: object,
+    ext: str,
+    asset_index: int,
+    used_filenames: set[str],
+) -> str:
+    """Return a unique asset filename, preferring the PPTX media basename."""
+    partname = str(getattr(image_part, "partname", ""))
+    base = sanitize_filename(Path(partname).name) if partname else f"image_{asset_index:03d}.{ext}"
+    if "." not in base:
+        base = f"{base}.{ext}"
+    if base not in used_filenames:
+        used_filenames.add(base)
+        return base
+
+    path = Path(base)
+    stem = path.stem
+    suffix = path.suffix or f".{ext}"
+    counter = 2
+    while True:
+        candidate = f"{stem}_{counter}{suffix}"
+        if candidate not in used_filenames:
+            used_filenames.add(candidate)
+            return candidate
+        counter += 1
+
+
+def save_picture(
+    shape: object,
+    image_part: object,
+    asset_dir: Path,
+    slide_index: int,
+    asset_index: int,
+    asset_cache: dict[str, SavedPicture],
+    used_filenames: set[str],
+) -> SavedPicture | None:
+    """Persist a shape image to the output asset directory."""
+    content_type = getattr(image_part, "content_type", None)
+    part_ext = getattr(getattr(image_part, "partname", None), "ext", None)
+    ext = normalize_ext(part_ext, content_type)
+    blob = bytes(getattr(image_part, "blob", b""))
+    if not blob:
+        return None
+
+    occurrence = _shape_occurrence(shape, slide_index)
+    cache_key = _asset_cache_key(image_part, blob)
+    cached = asset_cache.get(cache_key)
+    if cached is not None:
+        occurrences = cached.manifest_entry.setdefault("occurrences", [])
+        if isinstance(occurrences, list):
+            occurrences.append(occurrence)
+        _update_manifest_usage(cached.manifest_entry)
+        return SavedPicture(

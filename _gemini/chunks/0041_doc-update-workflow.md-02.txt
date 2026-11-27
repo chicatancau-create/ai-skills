@@ -1,0 +1,90 @@
+dws doc update --node <nodeId> --content-file /tmp/<name>-section.md --mode overwrite --content-format markdown
+```
+
+> ⚠️ **overwrite 须用户确认**——尤其是整篇文档 overwrite。
+
+### 4.2 追加章节（markdown）
+
+> 适用范围：在文档末尾加 X 章 / 补充纯文本段落。追加内容若含 callout / 分栏等富结构，先用本节 append 一个占位段落，再用 §4.4 路径 B 的 `block insert --content-format jsonml` 替换/精修。
+
+```bash
+dws doc update --node <nodeId> --content-file /tmp/<name>-append.md --mode append --content-format markdown
+```
+
+按 [doc-style-guideline.md](./doc-style-guideline.md) 的元素选择规则准备追加内容。
+
+### 4.3 块级精修（element JSON 次选路径）
+
+> 适用范围：JSONML 不支持某个字段时，或快速插入 callout / 分栏不想构造 JSONML 时。**默认优先 §4.4 路径 B**（block update/insert `--content-format jsonml`），本节是老接口次选路径。
+
+```bash
+# 列出所有 block，定位 BLOCK_ID
+dws doc block list --node <nodeId>
+
+# 改一个 block 的文本
+dws doc block update --node <nodeId> --block-id <BLOCK_ID> --text "替换后的内容" --content-format element
+
+# 在某个 block 后插入
+dws doc block insert --node <nodeId> --ref-block <BLOCK_ID> --where after --heading "补充说明" --level 2 --content-format element
+
+# 插入复杂块（callout / 分栏）—— element 默认按 JSON 解析
+dws doc block insert --node <nodeId> --ref-block <BLOCK_ID> --where after --content-format element \
+  --element '{"blockType":"callout","callout":{"emoji":"⚠️","bgColor":"#FDE2E0","content":[{"text":"高风险操作，先备份"}]}}'
+
+# 若改写过程已经在用 JSONML，整段精修也可走 jsonml 路径（uuid 必须 == --block-id）
+dws doc block insert --node <nodeId> --ref-block <BLOCK_ID> --where after --content-format jsonml \
+  --element '["container",{"uuid":"co_new","subType":"colorBlocks","metadata":{"bgcolor":"#FDE2E0","border":"#F5C2C7"}},["p",{"uuid":"co_new_p1"},["span",{"data-type":"text"},["span",{"data-type":"leaf"},"高风险操作，先备份"]]]]'
+```
+
+字段结构以 [doc-block.md](../doc-block.md) 为准，不要猜。callout 字段名不确定时，先用 `doc block list --node <id> --block-type callout` 抓现有 callout 实例看真实字段。整段 JSONML 形态与可复制范例见 §4.4 与 [doc-jsonml-cookbook.md](../format/doc-jsonml-cookbook.md)。
+
+### 4.4 JSONML 无损改写（**首选路径**）
+
+> 改写已有文档**默认走本节**——保真度最高，callout / 分栏 / 表格 / @人 / 附件 / 颜色 / 嵌套都能 1:1 round-trip；写入端有 normalize + validator 兜底。其他路径（§4.1/4.2/4.3/4.5 markdown）仅在 §1.3 列出的"次选 / 兜底"场景下使用。
+
+两条子路径：
+
+**路径 B：单 block JSONML 精修（最常用——只动一个 block 时的默认选择）**
+
+```bash
+# 1. 列出所有 block 拿到 uuid
+dws doc block list --node <nodeId> --content-format jsonml
+
+# 2. 读单个 block 完整子树
+dws doc block list --node <nodeId> --content-format jsonml --block-id <BLOCK_UUID>
+
+# 3. 改完后写回（uuid 必须 == --block-id）
+dws doc block update --node <nodeId> --block-id <BLOCK_UUID> --content-format jsonml \
+  --element '["p", {"uuid": "<BLOCK_UUID>"}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "新内容"]]]'
+
+# 在某个 block 前/后插入新 block
+dws doc block insert --node <nodeId> --ref-block <BLOCK_UUID> --where after --content-format jsonml \
+  --element '["container", {"uuid": "co1", "subType": "colorBlocks", "metadata": {"bgcolor": "#E8F2FE", "border": "#B3D4FC"}}, ["p", {"uuid": "co1p1"}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "提示内容"]]]]'
+```
+
+**路径 A：整篇 JSONML overwrite（一次改多处、改 root 级 sectPr 才用）**
+
+```bash
+# 1. 读出完整 JSONML 结构（输出含 revision，普通改写场景下不需要）
+dws doc read --node <nodeId> --content-format jsonml --output /tmp/doc.json
+
+# 2. 解析 JSON，修改 jsonml 数组中的目标节点
+#    节点结构见 doc-jsonml-schema.md，可复制范例见 doc-jsonml-cookbook.md
+
+# 3. 写回临时文件 /tmp/doc_modified.json，格式 {"jsonml": [...]}
+
+# 4. 提交修改（默认直接覆盖，不做并发检查）
+dws doc update --node <nodeId> --content-file /tmp/doc_modified.json \
+  --content-format jsonml --mode overwrite
+```
+
+> **并发安全模式（担心被并发覆盖时使用）**：如果担心多 agent 同时改这篇文档，可以把第 1 步 read 返回的 `revision` 通过 `--revision <N>` 透传给第 4 步：服务端会做并发检查，版本不一致返回 `VersionConflict`，此时回到第 1 步重读重写即可。普通单 agent 改写场景默认不传 `--revision`。
+
+#### JSONML 写入端的 normalize 与 validator
+
+写入命令（`doc create/update` + `doc block insert/update`）默认按 **normalize → validate** 两步处理 JSONML：
+
+| 行为 | 缺省 | `--fix-jsonml` | `--no-fix-jsonml` |
+|------|------|----------------|-------------------|
+| JSON 语法修复（括号/逗号补全） | ✗ | ✓（打印 `[FIX]`） | ✗ |
+| 注入缺失的 block `uuid` | ✓ | ✓ | ✗ |

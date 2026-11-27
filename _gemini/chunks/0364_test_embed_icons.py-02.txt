@@ -1,0 +1,35 @@
+                    '<use data-icon="tabler-outline/home" fill="none" '
+                    f'stroke="currentColor" stroke-width="{width}"/>'
+                )
+                self.assertNotIn('width', attrs)
+                group = ET.fromstring(generate_icon_group(attrs, ['<path d="M0 0h1"/>'], 'stroke', 24))
+                self.assertEqual(group.get('fill'), 'none')
+                self.assertEqual(group.get('stroke'), 'currentColor')
+                self.assertEqual(group.get('stroke-width'), width)
+
+    def test_rejects_unsafe_attribute_grammars(self) -> None:
+        for attribute, value in (
+            ('fill', '#12'), ('fill', '#12345'), ('fill', '#1234567'),
+            ('fill', 'url(#gradient)'), ('stroke', 'url(https://example.invalid/x)'),
+            ('fill', '#fff" ONMOUSEOVER="alert(1)'),
+            ('stroke', '#fff" ONMOUSEOVER="alert(1)'),
+            ('fill', 'rgb(1, 2, expression(alert(1)))'),
+            ('transform', 'translate(10, 10);alert(1)'),
+            ('transform', 'matrix(1 0 0 1 NaN 0)'), ('transform', 'rotate()'),
+            ('transform', 'translate(1,,2)'), ('transform', 'translate(1.2.3)'),
+            ('stroke-width', '2" ONMOUSEOVER="alert(1)'),
+            ('stroke-width', 'calc(1px + 2px)'), ('stroke-width', '2pt'),
+        ):
+            with self.subTest(attribute=attribute, value=value):
+                with self.assertRaisesRegex(ValueError, f'Invalid icon {attribute}'):
+                    parse_use_element(f'<use data-icon="chunk-filled/rocket" {attribute}=\'{value}\'/>')
+
+    def test_direct_color_resolution_rejects_unsafe_values(self) -> None:
+        for style in ('fill', 'stroke'):
+            for attribute in ('fill', 'stroke'):
+                with self.subTest(style=style, attribute=attribute):
+                    attrs = {attribute: '#fff" ONMOUSEOVER="alert(1)'}
+                    with self.assertRaisesRegex(ValueError, f'Invalid icon {attribute}'):
+                        resolve_icon_color(attrs, style)
+                    with self.assertRaisesRegex(ValueError, f'Invalid icon {attribute}'):
+                        generate_icon_group(attrs, ['<path d="M0 0h1"/>'], style, 16)

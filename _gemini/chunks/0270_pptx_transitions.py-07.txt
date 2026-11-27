@@ -1,0 +1,122 @@
+    speed: str | None = None
+    advance_on_click: bool | None = None
+    advance_after_ms: int | None = None
+    effect_attributes: Mapping[str, str] = field(default_factory=dict)
+    canonical_effect: str | None = None
+    effect_options: Mapping[str, object] = field(default_factory=dict)
+    sound_relationship_id: str | None = None
+    sound_name: str | None = None
+    fallback_sound_relationship_id: str | None = None
+    fallback_sound_name: str | None = None
+
+
+@dataclass(frozen=True)
+class MorphPairExpectation:
+    """One forced-Morph name expected on two adjacent generated slides."""
+
+    source_slide_number: int
+    destination_slide_number: int
+    key: str
+
+    @property
+    def shape_name(self) -> str:
+        return f"!!{self.key}"
+
+
+def _qn(namespace: str, tag: str) -> str:
+    return f"{{{namespace}}}{tag}"
+
+
+def _local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _namespace_name(tag: str) -> str | None:
+    if tag.startswith("{") and "}" in tag:
+        return tag[1:].split("}", 1)[0]
+    return None
+
+
+def _value_repr(value: object) -> str:
+    try:
+        return repr(value)
+    except Exception:
+        return f"<{type(value).__name__}>"
+
+
+def validate_seconds(
+    value: object,
+    field: str,
+    *,
+    allow_zero: bool,
+) -> float:
+    """Return a finite seconds value or raise a field-specific error."""
+    display_value = _value_repr(value)
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be a finite number, not {display_value}")
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(
+            f"{field} must be a finite number: {display_value}"
+        ) from exc
+    if not math.isfinite(number):
+        raise ValueError(f"{field} must be finite: {display_value}")
+    if allow_zero:
+        if number < 0:
+            raise ValueError(f"{field} must be non-negative: {display_value}")
+    elif number <= 0:
+        raise ValueError(f"{field} must be greater than zero: {display_value}")
+    return number
+
+
+def normalize_transition_effect(effect: object, *, allow_none: bool = True) -> str | None:
+    """Return one canonical PowerPoint transition or explicit no-effect."""
+    if effect is None or effect == "none":
+        if allow_none:
+            return None
+        raise ValueError("transition effect is required")
+    if not isinstance(effect, str):
+        raise ValueError(f"transition effect must be a string: {effect!r}")
+    if effect in TRANSITION_ALIASES:
+        return TRANSITION_ALIASES[effect]
+    if effect in NATIVE_TRANSITIONS:
+        return effect
+    valid = ", ".join((*NATIVE_TRANSITION_KEYS, *LEGACY_TRANSITION_KEYS))
+    raise ValueError(
+        f"unknown transition effect {effect!r}; valid effects: {valid}, none"
+    )
+
+
+def normalize_transition_effect_options(
+    effect: str,
+    options: object = None,
+) -> dict[str, object]:
+    """Validate PowerPoint Effect Options for one native transition."""
+    if effect not in NATIVE_TRANSITIONS:
+        if options in (None, {}):
+            return {}
+        raise ValueError(
+            "transition effect_options require one explicit native effect; "
+            f"found {effect!r}"
+        )
+    if options is None:
+        options = {}
+    if not isinstance(options, Mapping):
+        raise ValueError(
+            f"transition effect_options must be an object: {options!r}"
+        )
+
+    option_specs = NATIVE_TRANSITIONS[effect]["effectOptions"]
+    unknown = set(options) - set(option_specs)
+    if unknown:
+        unsupported = ", ".join(sorted(unknown))
+        supported = ", ".join(option_specs) or "(none)"
+        raise ValueError(
+            f"transition effect {effect!r} does not support effect option(s): "
+            f"{unsupported}; supported options: {supported}"
+        )
+
+    normalized: dict[str, object] = {}
+    for name, value in options.items():
+        spec = option_specs[name]

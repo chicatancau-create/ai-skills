@@ -1,0 +1,127 @@
+            placeholder_hex=placeholder_hex,
+        )
+        ctx.defs.extend(fill.defs)
+        if not fill.attrs:
+            return ""
+        # Convert dict to attributes
+        attrs_xml = _attrs_to_xml(fill.attrs)
+        return (f'<rect x="0" y="0" width="{fmt_num(w)}" height="{fmt_num(h)}"'
+                f"{attrs_xml}/>")
+    return ""
+
+
+def _emit_part_background(slide: SlideRef, ctx: AssemblyContext,
+                          w: float, h: float) -> str:
+    """Render the background declared on the part itself only.
+
+    Distinct from `_emit_background`, which walks the slide → layout →
+    master inheritance chain. Used by the layered solo renderer so each
+    standalone master / layout SVG carries only its own ``<p:bg>`` — the
+    inheritance is rebuilt by consumers re-stacking the layers, and we'd
+    rather output nothing than have master decoration leak into a layout
+    file.
+    """
+    bg = get_background(slide.part.xml)
+    if bg is None:
+        return ""
+    bg_pr = bg.find("p:bgPr", NS)
+    bg_ref = bg.find("p:bgRef", NS)
+    placeholder_hex = None
+
+    if bg_pr is None and bg_ref is not None:
+        bg_pr = _theme_background_fill(slide, ctx, bg_ref)
+        color_elem = find_color_elem(bg_ref)
+        placeholder_hex, _ = resolve_color(color_elem, ctx.palette)
+    if bg_pr is None:
+        return ""
+
+    bg_image = _emit_background_image(bg_pr, slide.part, ctx, w, h)
+    if bg_image:
+        return bg_image
+
+    fill = resolve_fill(
+        bg_pr, ctx.palette,
+        id_prefix="bg", id_seq=ctx.grad_seq,
+        placeholder_hex=placeholder_hex,
+    )
+    ctx.defs.extend(fill.defs)
+    if not fill.attrs:
+        return ""
+    attrs_xml = _attrs_to_xml(fill.attrs)
+    return (f'<rect x="0" y="0" width="{fmt_num(w)}" height="{fmt_num(h)}"'
+            f"{attrs_xml}/>")
+
+
+def _emit_background_image(
+    bg_pr: ET.Element,
+    source_part: PartRef,
+    ctx: AssemblyContext,
+    w: float,
+    h: float,
+) -> str:
+    """Render a slide/layout/master background image fill as a full-canvas image."""
+    blip_fill = bg_pr.find("a:blipFill", NS)
+    if blip_fill is None:
+        return ""
+
+    result = convert_blip_fill(
+        blip_fill,
+        Xfrm(0.0, 0.0, w, h),
+        source_part,
+        ctx.pkg,
+        media_subdir=ctx.media_subdir,
+        embed_inline=ctx.embed_images,
+        asset_name_map=ctx.asset_name_map,
+        strict=ctx.strict,
+    )
+    _diagnose_picture_result(ctx, result)
+    if result.media:
+        ctx.media.update(result.media)
+    return result.svg
+
+
+def _theme_background_fill(
+    slide: SlideRef,
+    ctx: AssemblyContext,
+    bg_ref: ET.Element,
+) -> ET.Element | None:
+    """Resolve p:bgRef idx into the theme background fill style list."""
+    def reject_invalid_idx(message: str) -> None:
+        if ctx.strict:
+            raise ValueError(message)
+        ctx.diagnose(
+            "theme-background-reference-omitted",
+            message,
+            "omit this part's theme background fill",
+        )
+
+    idx_raw = bg_ref.attrib.get("idx")
+    if not idx_raw:
+        reject_invalid_idx(
+            "Invalid p:bgRef@idx: expected a 1001-based theme fill index"
+        )
+        return None
+    try:
+        idx = int(idx_raw)
+    except ValueError:
+        reject_invalid_idx(
+            f"Invalid p:bgRef@idx value {idx_raw!r}; expected a 1001-based "
+            "theme fill index"
+        )
+        return None
+    # ECMA style matrix background fill references are 1001-based.
+    bg_fill_index = idx - 1001
+    if bg_fill_index < 0:
+        reject_invalid_idx(
+            f"Invalid p:bgRef@idx value {idx_raw!r}; expected a value of 1001 "
+            "or greater"
+        )
+        return None
+
+    theme = ctx.pkg.resolve_theme(slide.master)
+    if theme is None:
+        return None
+    fill_list = theme.xml.find(".//a:fmtScheme/a:bgFillStyleLst", NS)
+    if fill_list is None:
+        return None
+    fills = [child for child in list(fill_list) if isinstance(child.tag, str)]

@@ -1,0 +1,110 @@
+        elif not failed_count:
+            print(f"[INFO] No images requiring EXIF correction found")
+
+        if failed_count:
+            raise RuntimeError(f"EXIF correction failed for {failed_count} of {len(files)} image(s)")
+        return fixed_count
+
+    def generate_contact_sheet(
+        self,
+        target_dir: Union[str, Path],
+        output_path: Optional[Union[str, Path]] = None,
+    ) -> str:
+        """Generate a labeled, read-only contact sheet for visual review."""
+        target_path = Path(target_dir).resolve()
+        if not target_path.is_dir():
+            raise FileNotFoundError(f"Directory not found: {target_path}")
+
+        valid_exts = {
+            '.bmp', '.jpeg', '.jpg', '.png', '.tif', '.tiff', '.webp'
+        }
+        files = sorted(
+            (
+                path for path in target_path.iterdir()
+                if path.is_file() and path.suffix.lower() in valid_exts
+            ),
+            key=lambda path: self._natural_sort_key(path.name),
+        )
+        if not files:
+            raise ValueError("No image files found")
+
+        columns = 6
+        thumbnail_width = 180
+        thumbnail_height = 180
+        label_height = 34
+        padding = 12
+        cell_width = thumbnail_width + padding * 2
+        cell_height = thumbnail_height + label_height + padding * 2
+        rows = (len(files) + columns - 1) // columns
+
+        sheet = Image.new(
+            'RGB',
+            (columns * cell_width, rows * cell_height),
+            'white',
+        )
+        draw = ImageDraw.Draw(sheet)
+        try:
+            font = ImageFont.truetype('DejaVuSans.ttf', 13)
+        except OSError:
+            font = ImageFont.load_default()
+        resampling = getattr(Image, 'Resampling', Image)
+
+        for index, file_path in enumerate(files):
+            column = index % columns
+            row = index // columns
+            cell_x = column * cell_width
+            cell_y = row * cell_height
+            draw.rectangle(
+                (
+                    cell_x,
+                    cell_y,
+                    cell_x + cell_width - 1,
+                    cell_y + cell_height - 1,
+                ),
+                outline='#D0D7DE',
+            )
+
+            details = 'unreadable'
+            try:
+                with Image.open(file_path) as img:
+                    if getattr(img, 'is_animated', False):
+                        img.seek(0)
+                    prepared = ImageOps.exif_transpose(img)
+                    try:
+                        source_width, source_height = prepared.size
+                        preview = prepared.convert('RGBA')
+                    finally:
+                        if prepared is not img:
+                            prepared.close()
+
+                preview.thumbnail(
+                    (thumbnail_width, thumbnail_height),
+                    resampling.LANCZOS,
+                )
+                preview_x = cell_x + padding + (thumbnail_width - preview.width) // 2
+                preview_y = cell_y + padding + (thumbnail_height - preview.height) // 2
+                sheet.paste(preview, (preview_x, preview_y), preview)
+                preview.close()
+                details = f'{source_width}x{source_height}'
+            except (
+                EOFError,
+                OSError,
+                SyntaxError,
+                ValueError,
+                Image.DecompressionBombError,
+            ):
+                draw.line(
+                    (
+                        cell_x + padding,
+                        cell_y + padding,
+                        cell_x + cell_width - padding,
+                        cell_y + thumbnail_height,
+                    ),
+                    fill='#CF222E',
+                    width=2,
+                )
+                draw.line(
+                    (
+                        cell_x + cell_width - padding,
+                        cell_y + padding,
+                        cell_x + padding,

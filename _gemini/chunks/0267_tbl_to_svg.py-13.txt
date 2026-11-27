@@ -1,0 +1,125 @@
+        return child
+    return default_r_pr.find(f"a:{name}", NS) if default_r_pr is not None else None
+
+
+def _native_run_font_family(
+    r_pr: ET.Element | None,
+    default_r_pr: ET.Element | None,
+    theme_fonts: dict[str, str],
+) -> str | None:
+    faces: list[str] = []
+    for tag in ("latin", "ea"):
+        node = _effective_run_child(r_pr, default_r_pr, tag)
+        raw_face = node.get("typeface") if node is not None else None
+        face = _resolve_theme_typeface(raw_face, theme_fonts)
+        if face and face not in faces:
+            faces.append(face)
+    if len(faces) != 1:
+        return None
+    face = faces[0].strip()
+    return face if face and "," not in face else None
+
+
+def _native_run_payload(
+    run: ET.Element,
+    default_r_pr: ET.Element | None,
+    palette: ColorPalette | None,
+    theme_fonts: dict[str, str],
+) -> dict[str, Any]:
+    r_pr = run.find("a:rPr", NS)
+    text = run.findtext("a:t", default="", namespaces=NS)
+    payload: dict[str, Any] = {"text": text}
+
+    for source, target in (("b", "bold"), ("i", "italic")):
+        raw = _effective_run_attr(r_pr, default_r_pr, source)
+        if raw is not None:
+            payload[target] = ooxml_bool(raw)
+
+    underline = _effective_run_attr(r_pr, default_r_pr, "u")
+    if underline is not None:
+        payload["underline"] = underline != "none"
+    strike = _effective_run_attr(r_pr, default_r_pr, "strike")
+    if strike is not None:
+        payload["strike"] = strike != "noStrike"
+
+    font_size = _canonical_source_font_size_px(
+        _effective_run_attr(r_pr, default_r_pr, "sz")
+    )
+    if font_size is not None:
+        payload["font_size"] = font_size
+
+    solid_fill = _effective_run_child(r_pr, default_r_pr, "solidFill")
+    if solid_fill is not None and not _solid_fill_is_unsafe(solid_fill, palette):
+        try:
+            color, _alpha = resolve_color(find_color_elem(solid_fill), palette)
+        except (AttributeError, OverflowError, TypeError, ValueError):
+            color = None
+        if color:
+            payload["color"] = color
+
+    font_family = _native_run_font_family(
+        r_pr,
+        default_r_pr,
+        theme_fonts,
+    )
+    if font_family:
+        payload["font_family"] = font_family
+
+    for source, target in (("lang", "lang"), ("altLang", "alt_lang")):
+        language = _effective_run_attr(r_pr, default_r_pr, source)
+        if language and language.strip():
+            payload[target] = language.strip()
+
+    raw_baseline = _effective_run_attr(r_pr, default_r_pr, "baseline")
+    if raw_baseline is not None:
+        try:
+            baseline = int(raw_baseline)
+        except ValueError:
+            baseline = 0
+        if baseline:
+            payload["baseline_percent"] = _round_payload_number(
+                baseline / 1000.0
+            )
+
+    outline = _native_run_outline_payload(
+        _effective_run_child(r_pr, default_r_pr, "ln"),
+        palette,
+    )
+    if outline is not None:
+        payload["outline"] = outline
+    return payload
+
+
+def _paragraph_line_spacing_percent(
+    p_pr: ET.Element | None,
+) -> int | float | None:
+    if p_pr is None:
+        return None
+    spacing = p_pr.find("a:lnSpc/a:spcPct", NS)
+    raw = spacing.get("val") if spacing is not None else None
+    if raw is None or not raw.isdigit():
+        return None
+    percent = int(raw) / 1000.0
+    if percent == 100:
+        return None
+    return _round_payload_number(percent)
+
+
+def _run_style_signature(run: dict[str, Any]) -> tuple[tuple[str, Any], ...]:
+    """Return one hashable signature for deciding whether runs are required."""
+    return tuple(
+        sorted(
+            (
+                key,
+                json.dumps(value, sort_keys=True, separators=(",", ":"))
+                if isinstance(value, dict)
+                else value,
+            )
+            for key, value in run.items()
+            if key != "text"
+        )
+    )
+
+
+def _cell_rich_paragraph_payloads(
+    tx_body: ET.Element | None,

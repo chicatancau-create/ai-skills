@@ -1,0 +1,137 @@
+    show_value_labels = payload.get("show_value_axis_labels") is not False
+
+    if is_bar:
+        parts.extend(_horizontal_grid_and_ticks(
+            plot,
+            ticks,
+            lo,
+            hi,
+            label_size,
+            percent,
+            show_labels=show_value_labels,
+        ))
+        parts.extend(_bar_category_labels(plot, categories, label_size))
+    else:
+        parts.extend(_vertical_grid_and_ticks(
+            plot,
+            ticks,
+            lo,
+            hi,
+            label_size,
+            percent,
+            show_labels=show_value_labels,
+        ))
+        parts.extend(_column_category_labels(
+            plot,
+            categories,
+            label_size,
+            point_aligned=chart_type in {"line", "area"},
+        ))
+    parts.extend(_axis_titles(plot, content, axis_titles, label_size, is_bar=is_bar))
+
+    if chart_type in {"bar", "column"}:
+        parts.extend(
+            _render_bars(
+                payload,
+                categories,
+                series,
+                styles,
+                segments,
+                plot,
+                lo,
+                hi,
+                grouping,
+                horizontal=is_bar,
+                label_size=label_size,
+                percent=percent,
+            )
+        )
+    else:
+        parts.extend(
+            _render_lines_or_areas(
+                payload,
+                categories,
+                series,
+                styles,
+                segments,
+                plot,
+                lo,
+                hi,
+                chart_type,
+                label_size,
+                percent,
+            )
+        )
+    return parts
+
+
+def _render_combo(
+    payload: dict[str, Any],
+    styles: list[SeriesVisualStyle],
+    content: _Rect,
+) -> list[str]:
+    """Render supported category combo plots against one shared value scale."""
+    categories = [str(value) for value in payload.get("categories") or []]
+    plots = payload.get("plots") or []
+    if not categories or not isinstance(plots, list) or not plots:
+        return []
+    all_series = [
+        series
+        for plot_payload in plots
+        if isinstance(plot_payload, dict)
+        for series in plot_payload.get("series") or []
+        if isinstance(series, dict)
+    ]
+    values = [
+        float(value)
+        for series in all_series
+        for value in series.get("values") or []
+        if value is not None
+    ]
+    if not all_series or not values:
+        return []
+
+    label_size = max(6.0, min(11.0, content.h * 0.037, content.w * 0.021))
+    axes = payload.get("axes") if isinstance(payload.get("axes"), dict) else {}
+    value_axis = axes.get("value") if isinstance(axes.get("value"), dict) else {}
+    show_value_labels = value_axis.get("visible") is not False
+    show_gridlines = value_axis.get("major_gridlines") is not False
+    left = max(12.0, content.w * 0.035)
+    if show_value_labels:
+        left = max(34.0, content.w * 0.075)
+    bottom = max(25.0, content.h * 0.105)
+    plot_rect = _Rect(
+        content.x + left,
+        content.y + 5.0,
+        max(12.0, content.w - left - 10.0),
+        max(12.0, content.h - bottom - 8.0),
+    )
+    lo, hi, ticks = _nice_scale(values, include_zero=True)
+    parts = _vertical_grid_and_ticks(
+        plot_rect,
+        ticks,
+        lo,
+        hi,
+        label_size,
+        False,
+        show_labels=show_value_labels,
+        show_gridlines=show_gridlines,
+    )
+    parts.extend(
+        _column_category_labels(
+            plot_rect,
+            categories,
+            label_size,
+            point_aligned=False,
+        )
+    )
+
+    style_offset = 0
+    for plot_payload in plots:
+        if not isinstance(plot_payload, dict):
+            continue
+        plot_type = str(plot_payload.get("type") or "")
+        plot_series = plot_payload.get("series") or []
+        if not isinstance(plot_series, list) or not plot_series:
+            continue
+        plot_styles = _complete_styles(

@@ -1,0 +1,112 @@
+    actual_duration = _row_effective_duration_ms(row)
+    if actual_duration is None or actual_duration == requested_duration_ms:
+        return
+    end_nodes = [
+        ctn
+        for ctn in row.iter(_qn(PML_NS, 'cTn'))
+        if ctn is not row
+        and (ctn.get('dur') or '').isdigit()
+        and _ctn_numeric_delay(ctn) + int(ctn.get('dur', '0')) == actual_duration
+    ]
+    for ctn in end_nodes:
+        delay = _ctn_numeric_delay(ctn)
+        if delay >= requested_duration_ms:
+            conditions = ctn.find(_qn(PML_NS, 'stCondLst'))
+            numeric = (
+                [
+                    condition
+                    for condition in conditions.findall(_qn(PML_NS, 'cond'))
+                    if condition.get('delay', '').isdigit()
+                ]
+                if conditions is not None
+                else []
+            )
+            if numeric:
+                numeric[-1].set('delay', str(max(0, requested_duration_ms - 1)))
+                delay = _ctn_numeric_delay(ctn)
+        ctn.set('dur', str(max(1, requested_duration_ms - delay)))
+
+
+def _row_semantic_signature(row: ET.Element) -> tuple[object, ...]:
+    """Return an id/target/duration-independent preset behavior signature."""
+    def canonical(element: ET.Element) -> tuple[object, ...]:
+        attributes: list[tuple[str, str]] = []
+        local_name = _local_name(element.tag)
+        for name, value in sorted(element.attrib.items()):
+            if name in {'id', 'nodeType', 'grpId'}:
+                continue
+            if local_name == 'spTgt' and name == 'spid':
+                value = '#shape'
+            elif local_name == 'cTn' and name == 'dur' and value.isdigit():
+                value = '#duration'
+            elif local_name == 'cond' and name == 'delay' and value.isdigit():
+                value = '#delay'
+            attributes.append((name, value))
+        return (
+            element.tag,
+            tuple(attributes),
+            (element.text or '').strip(),
+            tuple(canonical(child) for child in list(element)),
+        )
+
+    return canonical(row)
+
+
+def _row_timing_profile(
+    row: ET.Element,
+) -> tuple[tuple[str, float, float], ...]:
+    """Return behavior timing ratios, excluding 1ms visibility bookkeeping."""
+    total = _row_effective_duration_ms(row)
+    if total is None or total <= 1:
+        return ()
+    parent_map = {
+        child: parent
+        for parent in row.iter()
+        for child in list(parent)
+    }
+    behavior_names = {
+        'anim',
+        'animClr',
+        'animEffect',
+        'animMotion',
+        'animRot',
+        'animScale',
+        'set',
+    }
+    profile: list[tuple[str, float, float]] = []
+    for ctn in row.iter(_qn(PML_NS, 'cTn')):
+        if ctn is row:
+            continue
+        raw_duration = ctn.get('dur')
+        if raw_duration is None or not raw_duration.isdigit():
+            continue
+        duration = int(raw_duration)
+        owner = parent_map.get(ctn)
+        while owner is not None and _local_name(owner.tag) not in behavior_names:
+            owner = parent_map.get(owner)
+        behavior = _local_name(owner.tag) if owner is not None else 'unknown'
+        if (
+            duration == 1
+            and behavior == 'set'
+            and owner is not None
+            and any(
+                (attribute.text or '') == 'style.visibility'
+                for attribute in owner.iter(_qn(PML_NS, 'attrName'))
+            )
+        ):
+            continue
+        profile.append(
+            (
+                behavior,
+                _ctn_numeric_delay(ctn) / total,
+                duration / total,
+            )
+        )
+    return tuple(profile)
+
+
+def _animation_spec_matches_row(row: ET.Element, spec: Mapping[str, Any]) -> bool:
+    """Require the PowerPoint-authored structure and internal timing ratios."""
+    template = ET.fromstring(spec['rowXml'])
+    if _row_semantic_signature(row) != _row_semantic_signature(template):
+        return False

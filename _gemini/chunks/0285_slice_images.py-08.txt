@@ -1,0 +1,96 @@
+            # crossed a gutter. When the farthest gutter pixel exceeds the
+            # tolerance the branch below still offers the rerun instead.
+            _log(
+                "       Content crosses a cell edge: no --bg/--tolerance rerun "
+                "can separate it. Regenerate with a wider key-only gutter "
+                "(each element about 65% of its cell, at least 10% key on "
+                "every side, tips and effects included)."
+            )
+        else:
+            pure = _nearest_pure_key(dominant)
+            if pure is not None:
+                # A pure key enables despill and soft-alpha recovery; keep it
+                # and widen the tolerance by the measured drift instead.
+                pure_rgb, pure_distance = pure
+                hex_bg = "#{:02X}{:02X}{:02X}".format(*pure_rgb)
+                drift += pure_distance
+                outlier += pure_distance
+            suggested_tolerance = max(
+                tolerance, drift, outlier + _KEY_DRIFT_MARGIN
+            )
+            _log(
+                "       Suggested rerun: "
+                f"--bg {hex_bg} --tolerance {suggested_tolerance}"
+            )
+
+
+def slice_sheet(
+    sheet_path: Path,
+    rows: int,
+    cols: int,
+    output_dir: Path,
+    *,
+    names: Optional[list[str]] = None,
+    prefix: Optional[str] = None,
+    inset: float | tuple[float, float] = 0.0,
+    trim: bool = False,
+    alpha: bool = False,
+    strict_alpha: bool = False,
+    bg: Optional[tuple[int, int, int]] = None,
+    tolerance: int = 18,
+    _auto_retry: bool = True,
+) -> list[Path]:
+    """Slice `sheet_path` into rows*cols element PNGs under `output_dir`.
+
+    Returns the list of written file paths (row-major order). When `names` is
+    given it must hold exactly rows*cols entries — a mismatch is an error so an
+    automated run never silently drops cells. Each name must be a bare filename.
+    """
+    total_cells = rows * cols
+    inset_x, inset_y = inset if isinstance(inset, tuple) else (inset, inset)
+    if strict_alpha and not alpha:
+        raise ValueError("strict_alpha requires alpha=True")
+    if names is not None and len(names) != total_cells:
+        raise ValueError(
+            f"--names has {len(names)} entries but the {rows}x{cols} grid has "
+            f"{total_cells} cells; provide exactly one name per cell"
+        )
+    safe_names = [_safe_basename(n) for n in names] if names else None
+    if safe_names:
+        seen_outputs: set[str] = set()
+        for name in safe_names:
+            output_name = name if Path(name).suffix else f"{name}.png"
+            normalized_output = output_name.casefold()
+            if normalized_output in seen_outputs:
+                raise ValueError(
+                    f"--names repeats output filename {output_name!r} "
+                    "(case-insensitive)"
+                )
+            seen_outputs.add(normalized_output)
+    if alpha and safe_names:
+        for name in safe_names:
+            suffix = Path(name).suffix.lower()
+            if suffix and suffix != ".png":
+                raise ValueError(f"--alpha requires .png output names, got {name!r}")
+
+    with Image.open(sheet_path) as source:
+        sheet = ImageOps.exif_transpose(source).convert("RGBA")
+    sw, sh = sheet.size
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    stem = sheet_path.stem
+    name_prefix = _safe_basename(prefix) if prefix else f"{stem}_"
+    prepared: list[tuple[int, int, Image.Image, Path]] = []
+    written: list[Path] = []
+    findings: list[str] = []
+    notices: list[str] = []
+
+    idx = 0
+    for r in range(rows):
+        for c in range(cols):
+            # Integer cell box via per-index rounding to avoid drift.
+            x0, x1 = round(c * sw / cols), round((c + 1) * sw / cols)
+            y0, y1 = round(r * sh / rows), round((r + 1) * sh / rows)
+            if inset_x > 0 or inset_y > 0:
+                dx = round((x1 - x0) * inset_x)
+                dy = round((y1 - y0) * inset_y)

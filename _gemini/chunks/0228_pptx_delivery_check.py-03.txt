@@ -1,0 +1,132 @@
+                )
+                continue
+            overrides[part_name] = content_type
+            continue
+        errors.append(
+            _issue(
+                "invalid_content_types",
+                "PPTX content-types XML contains an unexpected child.",
+                child=node.tag,
+            )
+        )
+    return defaults, overrides
+
+
+def _content_type_for_part(
+    part_name: str,
+    defaults: dict[str, str],
+    overrides: dict[str, str],
+) -> str:
+    declared = _declared_content_type_for_part(
+        part_name,
+        defaults,
+        overrides,
+    )
+    if declared is not None:
+        return declared
+    guessed, _encoding = mimetypes.guess_type(part_name)
+    return guessed or "application/octet-stream"
+
+
+def _declared_content_type_for_part(
+    part_name: str,
+    defaults: dict[str, str],
+    overrides: dict[str, str],
+) -> str | None:
+    if part_name in overrides:
+        return overrides[part_name]
+    filename = PurePosixPath(part_name).name
+    extension = (
+        "rels"
+        if filename == ".rels" or filename.endswith(".rels")
+        else PurePosixPath(part_name).suffix.lstrip(".").lower()
+    )
+    return defaults.get(extension)
+
+
+def _xml_and_font_inventory(
+    archive: zipfile.ZipFile,
+    part_names: set[str],
+    errors: list[dict[str, object]],
+) -> dict[str, list[dict[str, object]]]:
+    font_counts: dict[str, Counter[str]] = {
+        "latin": Counter(),
+        "ea": Counter(),
+        "cs": Counter(),
+    }
+    for part_name in sorted(
+        name
+        for name in part_names
+        if name.endswith(".xml") and name != "[Content_Types].xml"
+    ):
+        try:
+            root = ET.fromstring(archive.read(part_name))
+        except (KeyError, ET.ParseError) as exc:
+            errors.append(
+                _issue(
+                    "invalid_xml_part",
+                    f"Cannot parse XML part {part_name}: {exc}.",
+                    part=part_name,
+                )
+            )
+            continue
+        for role in font_counts:
+            for element in root.iter(
+                f"{{{DRAWINGML_NS}}}{role}"
+            ):
+                face = (element.attrib.get("typeface") or "").strip()
+                if face:
+                    font_counts[role][face] += 1
+    return {
+        role: [
+            {"value": face, "count": count}
+            for face, count in sorted(
+                counts.items(),
+                key=lambda item: (-item[1], item[0].casefold()),
+            )
+        ]
+        for role, counts in font_counts.items()
+    }
+
+
+def _relationship_kind(relationship_type: str) -> str | None:
+    kind = relationship_type.rstrip("/").rsplit("/", 1)[-1].lower()
+    return kind if kind in _MEDIA_REL_KINDS else None
+
+
+def _relationship_inventory(
+    archive: zipfile.ZipFile,
+    part_names: set[str],
+    errors: list[dict[str, object]],
+) -> tuple[
+    Counter[str],
+    dict[str, set[str]],
+    list[dict[str, object]],
+]:
+    reference_counts: Counter[str] = Counter()
+    relationship_types: dict[str, set[str]] = defaultdict(set)
+    external_counts: Counter[tuple[str, str, str]] = Counter()
+
+    for rels_name in sorted(
+        name for name in part_names if name.endswith(".rels")
+    ):
+        try:
+            root = ET.fromstring(archive.read(rels_name))
+        except (KeyError, ET.ParseError) as exc:
+            errors.append(
+                _issue(
+                    "invalid_relationship_part",
+                    f"Cannot parse relationship part {rels_name}: {exc}.",
+                    part=rels_name,
+                )
+            )
+            continue
+        for relationship in root.findall(
+            f"{{{PACKAGE_REL_NS}}}Relationship"
+        ):
+            relationship_type = (
+                relationship.attrib.get("Type") or ""
+            ).strip()
+            target = (relationship.attrib.get("Target") or "").strip()
+            target_mode = (
+                relationship.attrib.get("TargetMode") or ""

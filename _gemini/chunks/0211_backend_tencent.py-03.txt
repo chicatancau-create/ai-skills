@@ -1,0 +1,40 @@
+    _resolve_size(aspect_ratio, normalized_size, resolved_model)
+    prompt_limit = 8192 if resolved_model == DEFAULT_MODEL else 600
+    if not prompt or len(prompt) > prompt_limit:
+        raise ValueError(f"Invalid request: {resolved_model} requires a prompt of 1-{prompt_limit} characters.")
+    api_key = require_api_key(
+        "TENCENT_API_KEY",
+        "TOKENHUB_API_KEY",
+        message=(
+            "No API key found. Set TENCENT_API_KEY or TOKENHUB_API_KEY "
+            "in the current environment or a .env file."
+        ),
+    )
+    base_url = os.environ.get("TENCENT_BASE_URL") or DEFAULT_BASE_URL
+
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            return _generate_image(
+                api_key=api_key,
+                prompt=prompt,
+                aspect_ratio=aspect_ratio,
+                image_size=normalized_size,
+                output_dir=output_dir,
+                filename=filename,
+                model=resolved_model,
+                base_url=base_url,
+            )
+        except Exception as exc:
+            last_error = exc
+            if is_permanent_error(exc):
+                raise
+            if attempt >= max_retries:
+                break
+            limited = is_rate_limit_error(exc)
+            delay = retry_delay(attempt, rate_limited=limited)
+            label = "Rate limit hit" if limited else f"Error: {exc}"
+            print(f"\n  [WARN] {label}. Retrying in {delay}s...")
+            time.sleep(delay)
+
+    raise RuntimeError(f"Failed after {max_retries + 1} attempts. Last error: {last_error}")

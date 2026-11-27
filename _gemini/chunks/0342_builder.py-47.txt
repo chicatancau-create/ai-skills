@@ -1,0 +1,103 @@
+def _name_flat_themes(extract_dir: Path, name: str) -> int:
+    """Replace stock Office theme identities with the current deck identity."""
+    theme_paths = sorted((extract_dir / "ppt" / "theme").glob("theme*.xml"))
+    if not theme_paths:
+        raise RuntimeError("Flat PPTX package has no theme part")
+    for theme_path in theme_paths:
+        try:
+            tree = ET.parse(theme_path)
+        except (OSError, ET.ParseError) as exc:
+            raise RuntimeError(
+                f"Cannot parse flat theme {theme_path}: {exc}"
+            ) from exc
+        root = tree.getroot()
+        root.set("name", name)
+        for tag in ("clrScheme", "fontScheme", "fmtScheme"):
+            scheme = root.find(f".//{{{DML_NS}}}{tag}")
+            if scheme is not None:
+                scheme.set("name", name)
+        _write_xml_tree(theme_path, tree)
+    return len(theme_paths)
+
+
+def _prepare_flat_structure(
+    extract_dir: Path,
+    structure: PptxStructureContext,
+    slide_count: int,
+    master_text_style_spec: MasterTextStyleSpec | None,
+    structure_name: str | None,
+    *,
+    verbose: bool = False,
+) -> None:
+    """Materialize one clean current-deck Master and Blank Layout for flat export."""
+    pruned = _prune_unused_slide_layouts(
+        extract_dir,
+        structure,
+        slide_count,
+        verbose=False,
+    )
+    live_structure = _read_slide_layout_targets(extract_dir, slide_count)
+    layout_parts = {
+        _resolve_package_target(
+            f"ppt/slides/slide{slide_num}.xml",
+            live_structure.slide_layout_target(slide_num),
+        )
+        for slide_num in range(1, slide_count + 1)
+    }
+    master_parts = set(live_structure.slide_master_parts.values())
+    physical_layouts = {
+        str(path.relative_to(extract_dir)).replace("\\", "/")
+        for path in (extract_dir / "ppt" / "slideLayouts").glob("slideLayout*.xml")
+    }
+    physical_masters = {
+        str(path.relative_to(extract_dir)).replace("\\", "/")
+        for path in (extract_dir / "ppt" / "slideMasters").glob("slideMaster*.xml")
+    }
+    if len(layout_parts) != 1 or layout_parts != physical_layouts:
+        raise RuntimeError(
+            "Flat export must retain exactly one slide-referenced Blank Layout"
+        )
+    if len(master_parts) != 1 or master_parts != physical_masters:
+        raise RuntimeError(
+            "Flat export must retain exactly one slide-referenced Master"
+        )
+
+    identity = _flat_structure_name(structure_name)
+    theme_name = identity
+    master_name = f"{identity} — Master"
+    layout_name = f"{identity} — Blank"
+    master_path = extract_dir / next(iter(master_parts))
+    layout_path = extract_dir / next(iter(layout_parts))
+    removed_master_shapes, retained_master_placeholders = _clean_flat_structure_part(
+        master_path,
+        master_name,
+        is_layout=False,
+    )
+    removed_layout_shapes, retained_layout_placeholders = _clean_flat_structure_part(
+        layout_path,
+        layout_name,
+        is_layout=True,
+    )
+    theme_count = _name_flat_themes(extract_dir, theme_name)
+    master_count = (
+        apply_master_text_style_spec(extract_dir, master_text_style_spec)
+        if master_text_style_spec is not None
+        else 0
+    )
+
+    for part_path, expected_name, expected_layout in (
+        (master_path, master_name, False),
+        (layout_path, layout_name, True),
+    ):
+        root = ET.parse(part_path).getroot()
+        common_slide = root.find(f"{{{PML_NS}}}cSld")
+        if common_slide is None or common_slide.get("name") != expected_name:
+            raise RuntimeError(
+                f"Flat structure identity read-back failed: {part_path}"
+            )
+        shape_tree = common_slide.find(f"{{{PML_NS}}}spTree")
+        if shape_tree is None:
+            raise RuntimeError(f"Flat structure shell has no shape tree: {part_path}")
+        actual_placeholder_types = tuple(
+            sorted(
+                _flat_placeholder_type(child) or ""

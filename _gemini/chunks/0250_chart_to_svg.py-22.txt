@@ -1,0 +1,112 @@
+                raise _UnsupportedChart("unsupported-chart-axis-titles")
+            axis_titles[key] = text
+    else:
+        if len(category_titles) > 1 or len(value_titles) > 1:
+            raise _UnsupportedChart("unsupported-chart-axis-titles")
+        if category_titles:
+            axis_titles["category"] = category_titles[0]
+        if value_titles:
+            axis_titles["value"] = value_titles[0]
+    if axis_titles:
+        payload["axis_titles"] = axis_titles
+
+
+def _chart_text(container: ET.Element | None) -> str:
+    if container is None:
+        return ""
+    paragraphs: list[str] = []
+    for paragraph in container.findall(".//a:p", C_NS):
+        text = "".join(node.text or "" for node in paragraph.findall(".//a:t", C_NS))
+        if text:
+            paragraphs.append(text)
+    if paragraphs:
+        return "\n".join(paragraphs)
+    values = [node.text or "" for node in container.findall(".//c:v", C_NS)]
+    return "".join(values)
+
+
+def _canonical_title_paragraph(paragraph: ET.Element) -> dict[str, Any] | None:
+    """Return one exporter-canonical or basic Office title paragraph."""
+    if paragraph.attrib or [_local_name(child.tag) for child in paragraph] != ["r"]:
+        return None
+    run = paragraph.find("a:r", C_NS)
+    if run is None or run.attrib:
+        return None
+    run_child_names = [_local_name(child.tag) for child in run]
+    if run_child_names == ["t"]:
+        text = run.find("a:t", C_NS)
+        if (
+            text is None
+            or text.attrib
+            or list(text)
+            or not (text.text or "")
+            or text.text != text.text.strip()
+        ):
+            return None
+        return {"text": text.text}
+    if run_child_names != ["rPr", "t"]:
+        return None
+    run_props = run.find("a:rPr", C_NS)
+    text = run.find("a:t", C_NS)
+    if (
+        run_props is None
+        or set(run_props.attrib) != {"lang", "sz"}
+        or text is None
+        or text.attrib
+        or list(text)
+        or not (text.text or "")
+        or text.text != text.text.strip()
+    ):
+        return None
+    size_token = run_props.attrib["sz"]
+    if re.fullmatch(r"[0-9]+", size_token) is None:
+        return None
+    size = int(size_token)
+    if size % 10 != 0 or not 100 <= size <= 400000:
+        return None
+    child_names = [_local_name(child.tag) for child in run_props]
+    if child_names not in ([], ["solidFill"], ["latin", "ea"], ["solidFill", "latin", "ea"]):
+        return None
+    solid_fill = run_props.find("a:solidFill", C_NS)
+    color = None
+    if solid_fill is not None:
+        try:
+            color = _canonical_srgb_color(solid_fill)
+        except _UnsupportedChart:
+            return None
+    latin = run_props.find("a:latin", C_NS)
+    east_asian = run_props.find("a:ea", C_NS)
+    if (latin is None) != (east_asian is None):
+        return None
+    for font in (latin, east_asian):
+        if font is not None and (
+            set(font.attrib) != {"typeface"}
+            or not font.attrib["typeface"].strip()
+            or list(font)
+        ):
+            return None
+    entry: dict[str, Any] = {
+        "text": text.text,
+        "font_size": _round_payload_number(size / 75.0),
+    }
+    if color is not None:
+        entry["color"] = f"#{color}"
+    if latin is not None and east_asian is not None:
+        latin_name = latin.attrib["typeface"]
+        east_asian_name = east_asian.attrib["typeface"]
+        font_family = (
+            latin_name
+            if latin_name == east_asian_name
+            else f"{latin_name}, {east_asian_name}"
+        )
+        resolved_fonts = parse_font_family(font_family)
+        if (
+            resolved_fonts["latin"] != latin_name
+            or resolved_fonts["ea"] != east_asian_name
+        ):
+            return None
+        entry["font_family"] = font_family
+    return entry
+
+
+def _canonical_title_entries(title: ET.Element | None) -> list[dict[str, Any]] | None:

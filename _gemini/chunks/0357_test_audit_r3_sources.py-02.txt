@@ -1,0 +1,68 @@
+            with self.subTest(status=status), _memory_transport(routes) as (visited, _):
+                response = web_to_md._http_get(self.START)
+                self.assertEqual(response.url, self.FINAL)
+                self.assertEqual(response.content, b"ok")
+                self.assertEqual([entry.url for entry in response.history], [self.START])
+                self.assertEqual(len(visited), 2)
+
+    def test_a01_private_opt_in_preserves_redirect_chain(self) -> None:
+        routes = {
+            self.START: (302, {"Location": self.PRIVATE}, b""),
+            self.PRIVATE: (302, {"Location": self.FINAL}, b""),
+            self.FINAL: (200, {}, b"ok"),
+        }
+        with patch.dict(web_to_md.CONFIG, allow_private_hosts=True), _memory_transport(routes) as (visited, _):
+            response = web_to_md._http_get(self.START)
+        self.assertEqual([request.url for request in visited], [self.START, self.PRIVATE, self.FINAL])
+        self.assertEqual(response.url, self.FINAL)
+
+    def test_a01_requests_redirect_limit_remains_enforced(self) -> None:
+        routes = {self.START: (302, {"Location": self.START}, b"")}
+        with _memory_transport(routes) as (visited, _):
+            with self.assertRaises(requests.exceptions.TooManyRedirects):
+                web_to_md._http_get(self.START)
+        self.assertEqual(len(visited), 31)
+
+    def test_a01_refused_page_redirect_returns_nonzero_without_output(self) -> None:
+        routes = {self.START: (302, {"Location": self.PRIVATE}, b"")}
+        with tempfile.TemporaryDirectory() as tmp, _memory_transport(routes), \
+                contextlib.redirect_stdout(io.StringIO()) as log, contextlib.redirect_stderr(io.StringIO()):
+            output = Path(tmp) / "page.md"
+            rc = web_to_md.main([self.START, "-o", str(output)])
+            self.assertEqual(rc, 1)
+            self.assertIn("non-public", log.getvalue())
+            self.assertEqual(list(Path(tmp).iterdir()), [])
+
+    def test_a17_non_public_literals_are_rejected_before_transport(self) -> None:
+        for use_curl in (False, True):
+            for host in self.NON_PUBLIC:
+                backend = Mock()
+                with self.subTest(host=host, curl=use_curl), \
+                        patch.object(web_to_md, "curl_requests", backend if use_curl else None), \
+                        patch.object(requests.Session, "get", backend.get):
+                    with self.assertRaisesRegex(ValueError, "non-public"):
+                        web_to_md._http_get(f"http://{host}/")
+                    backend.get.assert_not_called()
+
+    def test_a17_every_dns_answer_must_be_public_before_transport(self) -> None:
+        public = (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 0))
+        for host in self.NON_PUBLIC:
+            address = host.strip("[]")
+            family = socket.AF_INET6 if ":" in address else socket.AF_INET
+            non_public = (family, socket.SOCK_STREAM, 6, "", (address, 0))
+            with self.subTest(host=host), \
+                    patch.object(socket, "getaddrinfo", return_value=[public, non_public]), \
+                    patch.object(requests.Session, "get") as transport:
+                with self.assertRaisesRegex(ValueError, "non-public"):
+                    web_to_md._http_get("https://source.example/")
+                transport.assert_not_called()
+
+    def test_a17_public_addresses_and_cgnat_neighbors_still_reach_transport(self) -> None:
+        for host in ("8.8.8.8", "100.63.255.255", "100.128.0.0", "[2001:4860:4860::8888]"):
+            url = f"http://{host}/"
+            with self.subTest(host=host), _memory_transport({url: (200, {}, b"ok")}) as (visited, _):
+                self.assertEqual(web_to_md._http_get(url).content, b"ok")
+                self.assertEqual(len(visited), 1)
+
+    def test_a17_private_opt_in_keeps_literal_targets_available(self) -> None:
+        with patch.dict(web_to_md.CONFIG, allow_private_hosts=True):

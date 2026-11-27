@@ -1,0 +1,106 @@
+        if placeholder_size not in {'full', 'half', 'quarter'}:
+            raise ValueError(
+                f'Invalid imported placeholder size: {placeholder_size!r}'
+            )
+        attrs['sz'] = placeholder_size
+    orientation = elem.get('data-pptx-placeholder-orientation')
+    if orientation is not None:
+        if orientation not in {'horz', 'vert'}:
+            raise ValueError(
+                f'Invalid imported placeholder orientation: {orientation!r}'
+            )
+        attrs['orient'] = orientation
+    serialized = ' '.join(
+        f'{name}="{_xml_escape(value)}"'
+        for name, value in attrs.items()
+    )
+    return f'<p:ph {serialized}/>'
+
+
+def _element_effect_xml(elem: ET.Element, ctx: ConvertContext) -> str:
+    """Honor an authored SVG filter before the imported native fallback."""
+    filt_id = get_effective_filter_id(elem, ctx)
+    if filt_id and filt_id in ctx.defs:
+        return build_effect_xml(
+            ctx.defs[filt_id],
+            get_element_opacity(elem, ctx),
+        )
+    return preserved_native_effect_xml(elem) or ''
+
+
+def _decode_shape_style(elem: ET.Element) -> str:
+    encoded = elem.get('data-pptx-shape-style')
+    if not encoded:
+        return ''
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+        style = ET.fromstring(raw)
+        decoded = raw.decode('utf-8')
+    except (ValueError, binascii.Error, UnicodeDecodeError, ET.ParseError) as exc:
+        raise ValueError(f'Invalid shape-style metadata: {exc}') from exc
+    if style.tag != (
+        '{http://schemas.openxmlformats.org/presentationml/2006/main}style'
+    ):
+        raise ValueError('Shape-style metadata payload must be p:style')
+    if has_relationship_attributes(style):
+        raise ValueError(
+            'Shape-style metadata must not contain relationship attributes'
+        )
+    return decoded
+
+
+def _connector_connection_xml(elem: ET.Element, ctx: ConvertContext) -> str:
+    """Restore connector endpoint attachment using the reserved source id map."""
+    parts: list[str] = []
+    for endpoint, tag in (('start', 'stCxn'), ('end', 'endCxn')):
+        raw_shape_id = elem.get(f'data-pptx-{endpoint}-shape-id')
+        raw_site = elem.get(f'data-pptx-{endpoint}-site')
+        if raw_shape_id is None and raw_site is None:
+            continue
+        if raw_shape_id is None or raw_site is None:
+            raise ValueError(
+                f'Connector {endpoint} endpoint requires both shape-id and site'
+            )
+        target_scope = (
+            elem.get(f'data-pptx-{endpoint}-shape-scope')
+            or elem.get('data-pptx-shape-scope')
+            or 'slide'
+        )
+        target_id = ctx.reference_shape_id(raw_shape_id, target_scope)
+        try:
+            site = int(raw_site)
+        except ValueError as exc:
+            raise ValueError(
+                f'Invalid connector {endpoint} site {raw_site!r}'
+            ) from exc
+        if site < 0 or site > 0xFFFFFFFF:
+            raise ValueError(
+                f'Connector {endpoint} site is outside unsigned integer range: {site}'
+            )
+        parts.append(f'<a:{tag} id="{target_id}" idx="{site}"/>')
+    return ''.join(parts)
+
+
+def _claim_element_shape_id(elem: ET.Element, ctx: ConvertContext) -> int:
+    return ctx.claim_shape_id(
+        elem.get('data-pptx-shape-id'),
+        elem.get('data-pptx-shape-scope'),
+    )
+
+
+def _context_transform_matrix(ctx: ConvertContext) -> tuple[float, float, float, float, float, float]:
+    """Return the current context as a full SVG affine matrix."""
+    if ctx.use_transform_matrix:
+        return ctx.transform_matrix
+    return (
+        ctx.scale_x, 0.0,
+        0.0, ctx.scale_y,
+        ctx.translate_x, ctx.translate_y,
+    )
+
+
+def _combined_transform_matrix(
+    ctx: ConvertContext,
+    transform: str | None,
+) -> tuple[float, float, float, float, float, float]:
+    """Compose context transform with an element-level transform attribute."""

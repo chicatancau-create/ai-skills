@@ -1,0 +1,134 @@
+                    break
+                continue
+
+            visible = _fit_sideways_vertical_text(text, run, available)
+            if not visible:
+                break
+            text_blocks.append(
+                _emit_sideways_vertical_segment(
+                    visible,
+                    run,
+                    center_x,
+                    cursor_y,
+                )
+            )
+            cursor_y += _estimate_run_width(visible, run)
+            if len(visible) < len(text):
+                break
+
+    return TextResult(
+        svg="\n".join(text_blocks),
+        defs=_collect_text_defs(paragraphs),
+        contains_inline_formula=False,
+    )
+
+
+def _is_east_asian_vertical_upright(char: str) -> bool:
+    """Keep East Asian wide/full-width glyphs upright in eaVert text."""
+    return _is_cjk(char) or east_asian_width(char) in {"W", "F"}
+
+
+def _east_asian_vertical_segment_height(
+    upright: bool,
+    text: str,
+    run: TextRun,
+) -> float:
+    if upright:
+        return len(text) * run.font_size_px * 1.05
+    return _estimate_run_width(text, run)
+
+
+def _fit_sideways_vertical_text(
+    text: str,
+    run: TextRun,
+    available: float,
+) -> str:
+    end = 0
+    for index in range(1, len(text) + 1):
+        if _estimate_run_width(text[:index], run) > available:
+            break
+        end = index
+    return text[:end]
+
+
+def _emit_upright_vertical_segment(
+    text: str,
+    run: TextRun,
+    center_x: float,
+    top_y: float,
+    advance: float,
+) -> str:
+    first_baseline = top_y + run.font_size_px * 0.85
+    attrs = _text_base_attrs(run, center_x, first_baseline, "middle")
+    spans = [_xml_escape(text[0])]
+    for char in text[1:]:
+        spans.append(
+            f'<tspan x="{fmt_num(center_x)}" dy="{fmt_num(advance)}">'
+            f"{_xml_escape(char)}</tspan>"
+        )
+    markup = f"<text{attrs}>{''.join(spans)}</text>"
+    return _wrap_run_hyperlink(markup, run)
+
+
+def _emit_sideways_vertical_segment(
+    text: str,
+    run: TextRun,
+    center_x: float,
+    top_y: float,
+) -> str:
+    baseline_x = center_x - run.font_size_px * 0.3
+    start_y = top_y + run.font_size_px * 0.1
+    attrs = _text_base_attrs(run, baseline_x, start_y, "start")
+    transform = (
+        f' transform="rotate(90 {fmt_num(baseline_x)} {fmt_num(start_y)})"'
+    )
+    markup = f"<text{attrs}{transform}>{_xml_escape(text)}</text>"
+    return _wrap_run_hyperlink(markup, run)
+
+
+def _rotated_bbox(xfrm: Xfrm) -> tuple[float, float, float, float]:
+    rot = round(xfrm.rot) % 360
+    cx = xfrm.x + xfrm.w / 2.0
+    cy = xfrm.y + xfrm.h / 2.0
+    if rot in (90, 270):
+        return cx - xfrm.h / 2.0, cy - xfrm.w / 2.0, xfrm.h, xfrm.w
+    return xfrm.x, xfrm.y, xfrm.w, xfrm.h
+
+
+def _looks_like_auto_stacked_cjk(
+    tx_body: ET.Element,
+    body_pr: ET.Element,
+    xfrm: Xfrm | None,
+) -> bool:
+    """Detect PowerPoint's narrow-box CJK vertical layout without vert=eaVert."""
+    if xfrm is None or xfrm.w <= 0 or xfrm.h <= 0:
+        return False
+    if body_pr.attrib.get("wrap", "square") != "square":
+        return False
+    if xfrm.w > 64 or xfrm.h < xfrm.w * 2.4:
+        return False
+
+    text = _plain_text(tx_body)
+    chars = [ch for ch in text if not ch.isspace()]
+    if len(chars) < 3 or len(chars) > 16:
+        return False
+    cjk_count = sum(1 for ch in chars if _is_cjk(ch))
+    if cjk_count / len(chars) < 0.8:
+        return False
+
+    lins = _read_emu_attr(body_pr, "lIns", DEFAULT_INSETS_EMU["l"])
+    rins = _read_emu_attr(body_pr, "rIns", DEFAULT_INSETS_EMU["r"])
+    inner_w = max(xfrm.w - lins - rins, 1.0)
+    return inner_w <= DEFAULT_FONT_SIZE_PX
+
+
+def _plain_text(tx_body: ET.Element) -> str:
+    """Return concatenated literal text for layout heuristics."""
+    parts: list[str] = []
+    for text_elem in tx_body.findall(".//a:t", NS):
+        if text_elem.text:
+            parts.append(text_elem.text)
+    return "".join(parts)
+
+
+# ---------------------------------------------------------------------------

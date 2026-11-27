@@ -1,0 +1,97 @@
+        if (STATE.primary_language && STATE.primary_language !== "und") {
+            payload.primary_language = STATE.primary_language;
+        }
+        return payload;
+    }
+
+    function stage1Payload() {
+        var payload = communicationPayload();
+        payload.stage = "stage1";
+        payload.options_sha256 = TEMPLATE_OPTIONS.options_sha256;
+        payload.template_selection = {
+            mode: TEMPLATE_MODE,
+            selection_keys: TEMPLATE_MODE === "templates"
+                ? TEMPLATE_SELECTED_KEYS.slice() : []
+        };
+        return payload;
+    }
+
+    function normalizeCreativePayload(payload) {
+        if (payload.mode !== "custom") delete payload.mode_behavior;
+        if (payload.visual_style !== "custom") delete payload.visual_style_behavior;
+        var imageStrategy = payload.image_strategy;
+        if (imageStrategy && imageStrategy.rendering === "custom") {
+            if (!imageStrategy.behavior && imageStrategy.custom) {
+                imageStrategy.behavior = imageStrategy.custom;
+            }
+            delete imageStrategy.custom;
+        } else if (imageStrategy) {
+            delete imageStrategy.behavior;
+            delete imageStrategy.custom;
+        }
+        delete payload.image_strategy_custom;
+        return payload;
+    }
+
+    function customSelectionsValid(payload) {
+        var imageStrategy = payload.image_strategy || {};
+        var valid = payload.mode !== "custom" || String(payload.mode_behavior || "").trim();
+        valid = valid && (payload.visual_style !== "custom" ||
+            String(payload.visual_style_behavior || "").trim());
+        valid = valid && (imageStrategy.rendering !== "custom" ||
+            String(imageStrategy.behavior || "").trim());
+        if (!valid) {
+            document.getElementById("confirm-status").textContent = t("custom_behavior_required");
+        }
+        return !!valid;
+    }
+
+    function imageStrategyValid(payload) {
+        if (!needsGeneratedImagesForUsage(payload.image_usage)) return true;
+        var imageStrategy = payload.image_strategy || {};
+        var rendering = String(imageStrategy.rendering || "").trim();
+        if (!rendering) {
+            document.getElementById("confirm-status").textContent = t("image_strategy_required");
+            return false;
+        }
+        var presetIds = imageStrategyCatalogCandidates().map(function (candidate) {
+            return candidate.rendering;
+        });
+        if (rendering !== "custom" && presetIds.length && presetIds.indexOf(rendering) < 0) {
+            document.getElementById("confirm-status").textContent = t("image_strategy_invalid");
+            return false;
+        }
+        return true;
+    }
+
+    function positiveNumber(value) {
+        var number = parseFloat(value);
+        return isFinite(number) && number > 0;
+    }
+
+    function designSystemValid(payload) {
+        var color = payload.color || {};
+        var palette = color.palette || {};
+        var completePalette = PALETTE_ROLES.every(function (role) {
+            return !!normHex(palette[role]);
+        });
+        var customPalette = color.name === "custom" && String(color.custom || "").trim();
+
+        var typography = payload.typography || {};
+        var completeFamilies = typographyFamiliesComplete(typography);
+        var sizes = typography.sizes || {};
+        var completeSizes = positiveNumber(typography.body_size) &&
+            ["title", "subtitle", "annotation"].every(function (role) {
+                return positiveNumber(sizes[role]);
+            });
+        var valid = (completePalette || customPalette) &&
+            completeFamilies && completeSizes;
+        if (!valid) {
+            var message = color.name === "custom" && !customPalette
+                ? t("custom_color_required")
+                : t("design_system_required");
+            document.getElementById("confirm-status").textContent = message;
+        }
+        return !!valid;
+    }
+

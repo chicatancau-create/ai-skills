@@ -1,0 +1,108 @@
+"""One entry point for the whole "two skills + token saver" setup on this box.
+
+  python D:\\Skills\\skill-router\\ops.py status     everything at a glance
+  python D:\\Skills\\skill-router\\ops.py verify     real completion, both hops
+  python D:\\Skills\\skill-router\\ops.py start      bring the proxy up
+  python D:\\Skills\\skill-router\\ops.py stop       take the proxy down
+  python D:\\Skills\\skill-router\\ops.py restart    stop + start
+  python D:\\Skills\\skill-router\\ops.py wire       point agents at headroom (8787)
+  python D:\\Skills\\skill-router\\ops.py unwire     roll agents back to cc-switch (15721)
+  python D:\\Skills\\skill-router\\ops.py skills     rebuild the router catalog
+
+Chain:  agent -> headroom:8787 -> cc-switch:15721 -> upstream
+"""
+import os, sys, json, socket, subprocess, time, urllib.request, urllib.error
+
+# The console here is GBK (Windows PowerShell 5.1).  Subprocess output carries
+# UTF-8 Chinese paths that arrive as U+FFFD, which raises UnicodeEncodeError on
+# print and kills the whole command.  Never let a display problem abort ops.
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(errors="replace")
+    except Exception:
+        pass
+
+H = r"C:\Users\Admin"
+PY = r"C:\Users\Admin\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\python\python.exe"
+HR = r"D:\uv\bin\headroom.exe"
+ROUTER = r"D:\Skills\skill-router\router.py"
+WIRE = r"D:\Skills\skill-router\wire_headroom.py"
+LIB = r"D:\Skills"
+ACTIVE = r"D:\Skills-active"
+LOG = os.path.join(H, ".headroom", "logs", "proxy-8787.log")
+
+AGENT_ROOTS = {
+    "claude": os.path.join(H, ".claude", "skills"),
+    "agents/DSH": os.path.join(H, ".agents", "skills"),
+    "opencode": os.path.join(H, ".config", "opencode", "skills"),
+    "workbuddy": os.path.join(H, ".workbuddy", "skills"),
+    "workbuddy-ai": os.path.join(H, ".workbuddy-ai", "skills"),
+    "openclaw": os.path.join(H, ".openclaw", "skills"),
+    "codex": os.path.join(H, ".codex", "skills"),
+    "qoder": os.path.join(H, ".qoder", "skills"),
+    "qoder-cn": os.path.join(H, ".qoder-cn", "skills"),
+    "herdsman": os.path.join(H, ".herdsman", "work", "skills"),
+    "dsh": os.path.join(H, ".dsh", "skills"),
+    "cc-switch": os.path.join(H, ".cc-switch", "skills"),
+}
+
+
+def reparse(p):
+    try:
+        return getattr(os.lstat(p), "st_reparse_tag", 0)
+    except OSError:
+        return None
+
+
+def target(p):
+    try:
+        return os.readlink(p)
+    except OSError:
+        return ""
+
+
+def tcp(port, t=3):
+    try:
+        s = socket.create_connection(("127.0.0.1", port), timeout=t); s.close(); return True
+    except Exception:
+        return False
+
+
+def http(url, t=8):
+    try:
+        with urllib.request.urlopen(url, timeout=t) as r:
+            return r.status, r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode("utf-8", "replace")
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
+
+
+def run(cmd, t=180):
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=t,
+                       encoding="utf-8", errors="replace")
+    return (p.stdout or "") + (p.stderr or "")
+
+
+def hr(*args, t=240):
+    return run([HR, *args], t)
+
+
+def cmd_status():
+    print("=== headroom proxy ===")
+    print(f"  8787 listening : {tcp(8787)}")
+    st, body = http("http://127.0.0.1:8787/health")
+    print(f"  /health        : {st}  {body[:160]}")
+    out = hr("install", "status")
+    for ln in out.splitlines():
+        if ln.strip():
+            print("  " + ln.strip())
+
+    print("\n=== cc-switch proxy (upstream hop) ===")
+    print(f"  15721 listening: {tcp(15721)}")
+    st, body = http("http://127.0.0.1:15721/health")
+    print(f"  /health        : {st}  {body[:120]}")
+
+    print("\n=== agent wiring (which port each agent points at) ===")
+    for label, path, key in (
+        ("claude", os.path.join(H, ".claude", "settings.json"), "ANTHROPIC_BASE_URL"),

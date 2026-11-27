@@ -1,0 +1,112 @@
+    rels: dict[str, str] = {}
+    for rel in rels_root.findall("rel:Relationship", DOCX_NS):
+        rel_id = rel.attrib.get("Id")
+        target = rel.attrib.get("Target")
+        if rel_id and target:
+            rels[rel_id] = target
+
+    parent_map = {child: parent for parent in doc_root.iter() for child in parent}
+
+    def _inside_mc_choice(elem: ET.Element) -> bool:
+        parent = parent_map.get(elem)
+        while parent is not None:
+            if _local_name(parent) == "Choice":
+                return True
+            parent = parent_map.get(parent)
+        return False
+
+    occurrences: list[dict[str, object]] = []
+    for elem in doc_root.iter():
+        if _inside_mc_choice(elem):
+            continue
+        local = _local_name(elem)
+        if local == "drawing":
+            container = elem.find(".//wp:inline", DOCX_NS)
+            if container is None:
+                container = elem.find(".//wp:anchor", DOCX_NS)
+            if container is None:
+                continue
+            extent = container.find("wp:extent", DOCX_NS)
+            blip = container.find(".//a:blip", DOCX_NS)
+            if extent is None or blip is None:
+                continue
+
+            rel_id = blip.attrib.get(f"{{{DOCX_NS['r']}}}embed")
+            if not rel_id:
+                rel_id = blip.attrib.get(f"{{{DOCX_NS['r']}}}link")
+            target = rels.get(rel_id or "", "")
+            if not target:
+                continue
+
+            try:
+                width_emu = int(extent.attrib.get("cx", "0"))
+                height_emu = int(extent.attrib.get("cy", "0"))
+            except ValueError:
+                width_emu = 0
+                height_emu = 0
+
+            occurrences.append(_occurrence_entry(
+                rel_id=rel_id,
+                target=target,
+                width_emu=width_emu,
+                height_emu=height_emu,
+                source_sha256=_zip_sha256_for_target(media_hashes, target),
+                source_kind="drawing",
+            ))
+        elif local == "imagedata":
+            rel_id = elem.attrib.get(f"{{{DOCX_NS['r']}}}id")
+            if not rel_id:
+                rel_id = elem.attrib.get(f"{{{DOCX_NS['r']}}}pict")
+            target = rels.get(rel_id or "", "")
+            if not target:
+                continue
+            width_emu, height_emu = _vml_display_size_emu(parent_map.get(elem))
+            occurrences.append(_occurrence_entry(
+                rel_id=rel_id,
+                target=target,
+                width_emu=width_emu,
+                height_emu=height_emu,
+                source_sha256=_zip_sha256_for_target(media_hashes, target),
+                source_kind="vml",
+            ))
+    return occurrences
+
+
+def _match_occurrence(
+    occurrences: list[dict[str, object]],
+    used_indexes: set[int],
+    index: int,
+    image_bytes: bytes,
+) -> dict[str, object] | None:
+    """Match a Mammoth image callback to DOCX metadata."""
+    image_hash = hashlib.sha256(image_bytes).hexdigest()
+    for occurrence_index, occurrence in enumerate(occurrences):
+        if occurrence_index in used_indexes:
+            continue
+        if occurrence.get("source_sha256") == image_hash:
+            used_indexes.add(occurrence_index)
+            return occurrence
+
+    fallback_index = index - 1
+    if fallback_index < len(occurrences) and fallback_index not in used_indexes:
+        used_indexes.add(fallback_index)
+        return occurrences[fallback_index]
+    return None
+
+
+def _manifest_entry(
+    index: int,
+    filename: str,
+    meta: dict[str, object] | None,
+    file_path: Path,
+    *,
+    original_filename: str | None = None,
+    asset_kind: str = "bitmap",
+    svg_renderable: bool = True,
+    pptx_native_supported: bool = True,
+) -> dict[str, object]:
+    width, height = _image_size(file_path)
+    pixel_ratio = width / height if width and height else None
+    entry: dict[str, object] = {
+        "index": index,
+        "filename": filename,

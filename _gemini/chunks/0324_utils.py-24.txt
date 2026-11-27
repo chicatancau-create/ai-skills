@@ -1,0 +1,92 @@
+                        f'{label} {coordinate_name} must be a normalized finite '
+                        'value from 0 to 1 or 0% to 100%; '
+                        f'got {raw_coordinate!r}'
+                    )
+                    continue
+                radial_coordinates[coordinate_name] = coordinate
+                if coordinate_name == 'r' and coordinate <= 0:
+                    errors.add(f'{label} r must be greater than 0')
+            focus_x_name = (
+                'fx' if gradient.get('fx') is not None else 'cx'
+            )
+            focus_y_name = (
+                'fy' if gradient.get('fy') is not None else 'cy'
+            )
+            focus_is_valid = (
+                (
+                    gradient.get(focus_x_name) is None
+                    or focus_x_name in radial_coordinates
+                )
+                and (
+                    gradient.get(focus_y_name) is None
+                    or focus_y_name in radial_coordinates
+                )
+            )
+            if focus_is_valid:
+                focus_x = radial_coordinates.get(focus_x_name, 0.5)
+                focus_y = radial_coordinates.get(focus_y_name, 0.5)
+                if not is_project_radial_focus_point(focus_x, focus_y):
+                    errors.add(
+                        f'{label} effective focus (fx/fy, otherwise cx/cy) '
+                        'must lie within the canonical circle centered at '
+                        f'0.5,0.5 with radius 0.5; got ({focus_x}, {focus_y})'
+                    )
+
+        stops: list[ET.Element] = []
+        for child in list(gradient):
+            child_tag = _svg_element_tag(child) or str(child.tag)
+            if child_tag in PROJECT_NON_VISUAL_DEFINITION_CHILD_TAGS:
+                continue
+            if child_tag != 'stop':
+                errors.add(
+                    f'{label} has unsupported direct child <{child_tag}>; '
+                    'gradient definitions may contain only direct <stop> children'
+                )
+                continue
+            stops.append(child)
+        if len(stops) < 2:
+            errors.add(
+                f'{label} requires at least two direct <stop> children for '
+                'native PPTX gradient interpolation'
+            )
+        previous_offset: float | None = None
+        for index, stop in enumerate(stops, start=1):
+            stop_label = f'{label} stop #{index}'
+            raw_offset = stop.get('offset')
+            try:
+                if raw_offset is None:
+                    raise ValueError
+                offset = parse_project_gradient_ratio(raw_offset)
+            except ValueError:
+                errors.add(
+                    f'{stop_label} offset must be explicit and within 0..1 '
+                    f'or 0%..100%; got {raw_offset!r}'
+                )
+            else:
+                if (
+                    previous_offset is not None
+                    and offset < previous_offset
+                ):
+                    errors.add(
+                        f'{label} stop offsets must be non-decreasing; '
+                        f'stop #{index} offset {raw_offset!r} precedes a '
+                        f'larger offset at stop #{index - 1}'
+                    )
+                previous_offset = offset
+            style_values = parse_inline_style(stop.get('style'))
+            if not (style_values.get('stop-color') or stop.get('stop-color')):
+                errors.add(f'{stop_label} requires an explicit stop-color')
+    return sorted(errors)
+
+
+def parse_project_filter_params(
+    filter_elem: ET.Element,
+) -> dict[str, float | str | bool]:
+    """Extract the shared native shadow/glow parameters from one filter."""
+    primitive_units = filter_elem.get('primitiveUnits')
+    if primitive_units not in (None, 'userSpaceOnUse'):
+        raise ValueError(
+            'filter primitiveUnits must be userSpaceOnUse when explicit; '
+            f'got {primitive_units!r}'
+        )
+    std_dev: float | None = None

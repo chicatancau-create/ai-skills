@@ -1,0 +1,72 @@
+                    with Image.open(expected[0]) as normal, Image.open(actual[0]) as strict:
+                        self.assertEqual(strict.size, normal.size)
+                        self.assertEqual(strict.tobytes(), normal.tobytes())
+                        histogram = strict.getchannel("A").histogram()
+                        self.assertGreater(sum(histogram[20:151]) / (strict.width * strict.height), 0.15)
+                        self.assertGreater(histogram[255], 0)
+
+    def test_a13_off_key_ground_and_inner_margin_haze_fail_without_output(self) -> None:
+        for fault in ("off_key_ground", "inner_margin_noise"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                key = (0, 0, 255)
+                sheet = Image.new("RGB", (120, 120), key)
+                draw = ImageDraw.Draw(sheet)
+                if fault == "off_key_ground":
+                    draw.rectangle((0, 0, 119, 119), fill=(3, 74, 244))
+                else:
+                    # All four outer 1% edges are pure; the required 10%
+                    # margins contain haze well beyond the key tolerance.
+                    draw.rectangle((4, 4, 115, 115), fill=(0, 0, 180))
+                draw.rectangle((50, 50, 70, 70), fill=(255, 255, 255))
+                source = root / "sheet.png"
+                sheet.save(source)
+                output = root / "output"
+                stderr = io.StringIO()
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+                    result = slice_images.main([
+                        str(source), "--grid", "1x1", "--names", "element",
+                        "--trim", "--alpha", "--strict-alpha", "--bg", "#0000FF",
+                        "--tolerance", "62", "--output", str(output),
+                    ])
+                self.assertEqual(result, 1)
+                self.assertIn("four 10% key-only margins", stderr.getvalue())
+                self.assertIn("measured ground colour", stderr.getvalue())
+                self.assertFalse((output / "element.png").exists())
+
+
+class CalculatorFiniteInputTests(unittest.TestCase):
+    def _run_calculator(self, argv):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            try:
+                code = position_calculator.main(argv)
+            except SystemExit as exc:
+                code = exc.code
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_nonfinite_scalar_parameters_fail_before_calculation(self):
+        cases = (
+            ('bar', '--bar-width', ['--data', 'A:10,B:20']),
+            ('bar', '--gap-width', ['--data', 'A:10,B:20']),
+            ('pie', '--radius', ['--data', 'A:10,B:20']),
+            ('pie', '--inner-radius', ['--data', 'A:10,B:20']),
+            ('pie', '--start-angle', ['--data', 'A:10,B:20']),
+            ('radar', '--radius', ['--data', 'A:10,B:20,C:30']),
+            ('radar', '--max-value', ['--data', 'A:10,B:20,C:30']),
+            ('grid', '--padding', ['--rows', '2', '--cols', '3']),
+            ('grid', '--gap', ['--rows', '2', '--cols', '3']),
+        )
+        for value in ('NaN', 'Infinity', '-Infinity'):
+            for chart, option, required in cases:
+                with self.subTest(chart=chart, option=option, value=value):
+                    code, stdout, stderr = self._run_calculator(
+                        ['calc', chart, *required, f'{option}={value}']
+                    )
+                    self.assertNotEqual(code, 0)
+                    self.assertEqual(stdout, '')
+                    self.assertIn(option, stderr)
+                    self.assertIn('must be finite', stderr)
+            with self.subTest(command='validate', value=value):
+                code, stdout, stderr = self._run_calculator(
+                    ['validate', 'unused.svg', '--extract', f'--tolerance={value}']

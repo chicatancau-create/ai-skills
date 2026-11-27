@@ -1,0 +1,95 @@
+# 日志 (report) 命令参考
+
+> **注意**：钉钉日志 = 「OA 周报应用」（按模版填报 / 收件箱 / 已发列表 / 统计），不是通用日志或记录系统。`dws report` 与其别名 `dws log` 自动由 envelope 注册——`dws report --help` 输出会列出全部别名，文档不再单独声明。
+
+## 载体辨义（首屏必读）
+
+`dws report` 管理「钉钉日志」OA 应用（按模版填报、收到列表、已发列表、统计），**不是**钉钉在线文档。Agent 在拿到用户 query 时按下表选择命令族：
+
+| 用户原话信号 | 命令族 | 不走 |
+|-------------|--------|------|
+| 钉钉日志 / OA 周报 / 周报模板 / 日报模板 / 我的钉钉日志 / 写日志 / 提交周报 / 填模版 | `dws report` | 不走 dws doc |
+| 在线文档 / 写一篇文档 / 整理成文档 / 周报文档 / 月报文档 / 用文档保存 | `dws doc` | 不走 dws report |
+| （无强信号）写日报 / 写周报 / 写月报 | **默认** `dws doc` | 仅当用户后续明确指定钉钉日志时才切到 dws report |
+
+- 默认走 `dws doc`：长文本编辑、富文本、可分享链接的场景。
+- 切到 `dws report`：query 中出现「钉钉日志 / OA 周报模板 / 钉钉日报应用 / 我的钉钉日志」等强信号时（不依赖词典扩张，依赖语义判断 + 必要时反问澄清）。
+- 信号歧义时应先反问「您指的是钉钉日志（OA 周报应用）还是钉钉在线文档？」而不是默认选一个。
+
+## 查日志快速调度（Agent 首选）
+
+当用户说「查日志 / 看日志 / 找日报 / 查看周报 / 我发过的日志 / 收到的日志」且语义指向钉钉日志 OA 应用时，Agent 不要先解释概念，直接按下面指令调度：
+
+- `dws report inbox list` = 列出**我收到**的日报（别人发给我的）。
+- `dws report outbox list` = 列出**我发出**的日报（我创建或提交的）。
+- `dws report entry get --report-id <reportId>` = 读取单份日报正文 + 钉钉跳转链接。
+- `dws report entry stats --report-id <reportId>` = 读取单份日报的已读统计。
+- `dws report entry submit --template-id ... --contents-file ...` = 按模版提交一份新日报。
+- `dws report template list` = 列出可用日报模版。
+- `dws report template get --name "<模版名>"` = 读取单个模版的字段定义（contents 拼装来源）。
+
+| 用户意图 | 第一条有效指令 | 后续动作 |
+|----------|----------------|----------|
+| 查我发过的日志 / 我创建的日志 | `dws report outbox list --cursor 0 --size 20 --format json` | 从返回里取 `reportId`，再执行 `dws report entry get --report-id <reportId> --format json` |
+| 查我收到的日志 / 别人发给我的日志 | `dws report inbox list --start "<YYYY-MM-DDT00:00:00+08:00>" --end "<YYYY-MM-DDT23:59:59+08:00>" --cursor 0 --size 20 --format json` | 必须先按用户时间词补齐完整 ISO 起止时间；取 `reportId` 后调用 `entry get` |
+| 查看某条日志正文 / 日志详情 | `dws report entry get --report-id <reportId> --format json` | 如果用户没给 `reportId`，先用 `outbox list` 或 `inbox list` 找候选 |
+| 查某条日志统计 / 已读统计 | `dws report entry stats --report-id <reportId> --format json` | 如果用户没给 `reportId`，先用 `outbox list` 或 `inbox list` 找候选 |
+| 查日志模版 / 有哪些周报模板 | `dws report template list --format json` | 需要字段定义时继续 `dws report template get --name "<模版名>" --format json` |
+| 提交 / 填写 / 创建钉钉日志 | `dws report template list --format json` | 再 `template get` 取字段定义，最后 `entry submit`；禁止直接编 contents |
+
+效率约束：
+
+- 不要先调用 `dws report --help` / `dws report inbox list --help`。本页已经给出可执行命令。
+- 查询收到的日志统一使用 `dws report inbox list`；查询发出的日志统一使用 `dws report outbox list`。
+- 不要为了格式化结果创建脚本。直接从 JSON 里抽取关键字段，返回用户可读列表。
+- 对"最近一周"这类常用查询，直接把当前日期换算成 7 天窗口后执行一次 `inbox list`；如返回分页标记再继续翻页。
+
+时间窗口默认规则：
+
+- `outbox list` 不传 `--start` / `--end` 时 CLI 默认最近 20 天，适合"我发过的日志 / 最近日志"。
+- `inbox list` 必须传 `--start` / `--end`；用户说"最近一周/今天/本周/昨天"时，Agent 必须先转成 `YYYY-MM-DDT00:00:00+08:00` 到 `YYYY-MM-DDT23:59:59+08:00`。
+- 查更早日志时每次窗口不要超过 20 天，按窗口滚动查询。
+
+时间参数硬约束：
+
+- 只允许使用 `--start` 和 `--end` 两个 flag；禁止写 `--start-date`、`--end-date`、`--date`、`startDate`、`endDate`。
+- 时间值推荐使用完整 ISO-8601 + 时区格式：`YYYY-MM-DDTHH:mm:ss+08:00`。
+- Agent 不要只传裸日期；即使 CLI 能兼容 `YYYY-MM-DD`，生成命令时也必须展开成当天起止时间，避免工具层把日期误解析成普通字符串。
+- "最近一周"固定展开为：起始日 `T00:00:00+08:00`，结束日 `T23:59:59+08:00`。
+
+错误示例（不要生成）：
+
+```bash
+dws report inbox list --start-date 2026-05-04 --end-date 2026-05-11 --format json
+dws report inbox list --date 2026-05-11 --format json
+```
+
+正确示例：
+
+```bash
+dws report inbox list --start "2026-05-04T00:00:00+08:00" --end "2026-05-11T23:59:59+08:00" --cursor 0 --size 20 --format json
+```
+
+快速决策：
+
+```bash
+# 我发过 / 我创建的日志
+dws report outbox list --cursor 0 --size 20 --format json
+dws report entry get --report-id <reportId> --format json
+
+# 我收到的日志
+dws report inbox list --start "<YYYY-MM-DDT00:00:00+08:00>" --end "<YYYY-MM-DDT23:59:59+08:00>" --cursor 0 --size 20 --format json
+dws report entry get --report-id <reportId> --format json
+
+# 已知 reportId
+dws report entry get --report-id <reportId> --format json
+```
+
+## 日志列表展示规范
+
+面向用户展示时，默认不要把 `reportId` / `report_id` / `report_Id` 作为主列。日志 ID 只给 Agent 后续调用 `detail` / `stats` 使用，用户一般不需要看。
+
+优先展示这些字段：
+
+| 展示列 | 取值优先级 |
+|--------|------------|

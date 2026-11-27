@@ -1,0 +1,65 @@
+    def test_b7_retained_diagram_and_replaced_chart_coexist(self) -> None:
+        self.import_source(chart=True, mutate=_diagram_fixture)
+        path, root = self.page()
+        summary = json.loads((path.parent / 'authoring_summary.json').read_text())
+        self.assertIn('"source_proxies": 1', json.dumps(summary))
+        marker = next(node for node in root.iter() if node.get('data-pptx-replace-with') == 'chart')
+        metadata = marker.find('s:metadata[@type="application/json"]', NS)
+        payload = json.loads(metadata.text)
+        payload['series'][0]['values'][0] = 98765
+        metadata.text = json.dumps(payload)
+        path.write_bytes(_xml(root))
+        with zipfile.ZipFile(self.source) as source, zipfile.ZipFile(self.export(native=True)) as output:
+            self.assertEqual(output.read('ppt/diagrams/data1.xml'), source.read('ppt/diagrams/data1.xml'))
+            self.assertEqual(output.read('ppt/diagrams/drawing1.xml'), source.read('ppt/diagrams/drawing1.xml'))
+            charts = [name for name in output.namelist() if name.startswith('ppt/charts/') and name.endswith('.xml')]
+            self.assertEqual(len(charts), 1, charts)
+            self.assertIn(b'98765', output.read(charts[0]))
+
+    def test_b7_diagram_is_atomic_proxy(self) -> None:
+        self.import_source(mutate=_diagram_fixture)
+        path, root = self.page()
+        obj = next(node for node in root.iter() if node.get('data-pptx-source-ref') == 'slide:90')
+        self.assertEqual(obj.get('data-pptx-source-proxy'), 'native-restore')
+        with self.assertRaisesRegex(ValueError, 'Cannot adopt source proxy'):
+            adopt_authoring_object(path.parent, f'{path.name}:{obj.get("id")}', 'slide_02.svg')
+        obj.set('opacity', '0.5')
+        path.write_bytes(_xml(root))
+        with self.assertRaisesRegex(RuntimeError, 'edits source-backed proxy'):
+            self.materialize()
+
+    def test_b7_nested_diagram_is_proxy_and_rejects_adopting_its_parent(self) -> None:
+        def nested_diagram(entries):
+            _diagram_fixture(entries)
+            root = ET.fromstring(entries['ppt/slides/slide1.xml'])
+            tree = root.find('p:cSld/p:spTree', NS)
+            diagram = tree.find('p:graphicFrame', NS)
+            tree.remove(diagram)
+            group = ET.fromstring(
+                f'<p:grpSp xmlns:p="{NS["p"]}" xmlns:a="{NS["a"]}">'
+                '<p:nvGrpSpPr><p:cNvPr id="91" name="Container"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>'
+                '<p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="9000000" cy="5000000"/>'
+                '<a:chOff x="0" y="0"/><a:chExt cx="9000000" cy="5000000"/></a:xfrm></p:grpSpPr></p:grpSp>'
+            )
+            group.append(diagram)
+            tree.append(group)
+            entries['ppt/slides/slide1.xml'] = _xml(root)
+        self.import_source(mutate=nested_diagram)
+        path, root = self.page()
+        self.assertTrue(any(node.get('data-pptx-source-proxy') == 'native-restore' for node in root.iter()))
+        self.materialize()
+        with self.assertRaisesRegex(ValueError, 'Cannot adopt source proxy'):
+            adopt_authoring_object(path.parent, 'slide_01.svg:shape-91', 'slide_02.svg')
+
+    def test_b7_ole_and_unknown_graphic_frames_are_proxies(self) -> None:
+        for kind in ('ole', 'unknown'):
+            with self.subTest(kind=kind):
+                self.workspace = self.root / f'workspace-{kind}'
+                def unsupported(entries):
+                    _diagram_fixture(entries)
+                    root = ET.fromstring(entries['ppt/slides/slide1.xml'])
+                    root.find('.//a:graphicData', NS).set('uri', f'{NS["p"]}/{kind}')
+                    entries['ppt/slides/slide1.xml'] = _xml(root)
+                self.import_source(mutate=unsupported)
+                _, root = self.page()
+                obj = next(node for node in root.iter() if node.get('data-pptx-source-ref') == 'slide:90')

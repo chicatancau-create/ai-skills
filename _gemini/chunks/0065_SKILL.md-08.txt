@@ -1,0 +1,135 @@
+### API Error → User-Facing Message
+
+```typescript
+// lib/error-handler.ts
+export function getErrorMessage(error: unknown): string {
+  if (error instanceof ApiError) {
+    switch (error.status) {
+      case 401: return 'Please log in to continue.';
+      case 403: return 'You don\'t have permission to do this.';
+      case 404: return 'The item you\'re looking for doesn\'t exist.';
+      case 409: return 'This conflicts with an existing item.';
+      case 422:
+        const fields = error.body?.errors;
+        if (fields?.length) return fields.map((f: any) => f.message).join('. ');
+        return 'Please check your input.';
+      case 429: return 'Too many requests. Please wait a moment.';
+      default: return 'Something went wrong. Please try again.';
+    }
+  }
+  if (error instanceof TypeError && error.message === 'Failed to fetch') {
+    return 'Cannot connect to server. Check your internet connection.';
+  }
+  return 'An unexpected error occurred.';
+}
+```
+
+### React Query Global Error Handler
+
+```typescript
+const queryClient = new QueryClient({
+  defaultOptions: {
+    mutations: { onError: (error) => toast.error(getErrorMessage(error)) },
+    queries: {
+      retry: (failureCount, error) => {
+        if (error instanceof ApiError && error.status < 500) return false;
+        return failureCount < 3;
+      },
+    },
+  },
+});
+```
+
+### Rules
+
+```
+✅ Map every API error code to a human-readable message
+✅ Show field-level validation errors next to form inputs
+✅ Auto-retry on 5xx (max 3, with backoff), never on 4xx
+✅ Redirect to login on 401 (after refresh attempt fails)
+✅ Show "offline" banner when fetch fails with TypeError
+
+❌ Never show raw API error messages to users ("NullPointerException")
+❌ Never silently swallow errors (show toast or log)
+❌ Never retry 4xx errors (client is wrong, retrying won't help)
+```
+
+### Integration Decision Tree
+
+```
+Same team owns frontend + backend?
+│
+├─ YES, both TypeScript
+│   └─ tRPC (end-to-end type safety, zero codegen)
+│
+├─ YES, different languages
+│   └─ OpenAPI spec → generated client (type safety via codegen)
+│
+├─ NO, public API
+│   └─ REST + OpenAPI → generated SDKs for consumers
+│
+└─ Complex data needs, multiple frontends
+    └─ GraphQL + codegen (flexible queries per client)
+
+Real-time needed?
+│
+├─ Server → Client only (notifications, feeds, AI streaming)
+│   └─ SSE (simplest, auto-reconnect, works through proxies)
+│
+├─ Bidirectional (chat, collaboration)
+│   └─ WebSocket (need heartbeat + reconnection logic)
+│
+└─ Simple status polling (< 10 clients)
+    └─ React Query refetchInterval (no infrastructure needed)
+```
+
+---
+
+## 13. Production Hardening (MEDIUM)
+
+### Health Checks
+
+```typescript
+app.get('/health', (req, res) => res.json({ status: 'ok' }));           // liveness
+app.get('/ready', async (req, res) => {                                   // readiness
+  const checks = {
+    database: await checkDb(), redis: await checkRedis(), 
+  };
+  const ok = Object.values(checks).every(c => c.status === 'ok');
+  res.status(ok ? 200 : 503).json({ status: ok ? 'ok' : 'degraded', checks });
+});
+```
+
+### Graceful Shutdown
+
+```typescript
+process.on('SIGTERM', async () => {
+  logger.info('SIGTERM received');
+  server.close();              // stop new connections
+  await drainConnections();    // finish in-flight
+  await closeDatabase();
+  process.exit(0);
+});
+```
+
+### Security Checklist
+
+```
+✅ CORS: explicit origins (never '*' in production)
+✅ Security headers (helmet / equivalent)
+✅ Rate limiting on public endpoints
+✅ Input validation on ALL endpoints (trust nothing)
+✅ HTTPS enforced
+❌ Never expose internal errors to clients
+```
+
+---
+
+## Anti-Patterns
+
+| # | ❌ Don't | ✅ Do Instead |
+|---|---------|--------------|
+| 1 | Business logic in routes/controllers | Move to service layer |
+| 2 | `process.env` scattered everywhere | Centralized typed config |
+| 3 | `console.log` for logging | Structured JSON logger |
+| 4 | Generic `Error('oops')` | Typed error hierarchy |

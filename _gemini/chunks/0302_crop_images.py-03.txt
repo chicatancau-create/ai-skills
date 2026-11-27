@@ -1,0 +1,106 @@
+                    img = img.convert('RGBA' if 'A' in img.getbands() else 'RGB')
+            else:
+                if img.mode in ('RGBA', 'LA'):
+                    background = Image.new('RGB', img.size, (255, 255, 255))
+                    alpha = img.getchannel('A')
+                    background.paste(img.convert('RGB'), mask=alpha)
+                    img = background
+                elif img.mode == 'P':
+                    img = img.convert('RGB')
+                elif img.mode not in ('RGB', 'L'):
+                    img = img.convert('RGB')
+            
+            # Crop
+            cropped = crop_image_to_size(img, target_width, target_height, x_anchor, y_anchor)
+            
+            # Generate output filename (keep original name, place in cropped directory)
+            output_filename = img_path.name
+            output_path = output_dir / output_filename
+            
+            # Save
+            if output_is_png:
+                cropped.save(output_path, 'PNG', optimize=True)
+            else:
+                cropped.save(output_path, 'JPEG', quality=90, optimize=True)
+            
+            if verbose:
+                print(f"    [OK] {img_path.name}: {img.size} -> {target_width}x{target_height} "
+                      f"({align})")
+            
+            # Update image path in SVG
+            new_href = f"../images/cropped/{output_filename}"
+            if image.get('{http://www.w3.org/1999/xlink}href'):
+                image.set('{http://www.w3.org/1999/xlink}href', new_href)
+            else:
+                image.set('href', new_href)
+            
+            # Remove preserveAspectRatio (image is now correctly sized)
+            if 'preserveAspectRatio' in image.attrib:
+                del image.attrib['preserveAspectRatio']
+            
+            modified = True
+            processed_count += 1
+            
+        except Exception as e:
+            if verbose:
+                print(f"    [ERROR] {img_path.name}: {e}")
+            error_count += 1
+    
+    # Save modified SVG
+    if modified and not dry_run:
+        tree.write(str(svg_path), encoding='unicode', xml_declaration=False)
+    
+    return (processed_count, error_count)
+
+
+def process_directory(directory: str, dry_run: bool = False, verbose: bool = True) -> tuple[int, int]:
+    """Process all SVG files in a directory."""
+    directory_path = Path(directory)
+    total_processed = 0
+    total_errors = 0
+    
+    for svg_file in directory_path.glob('*.svg'):
+        if verbose:
+            print(f"  Processing: {svg_file.name}")
+        processed, errors = process_svg_images(str(svg_file), dry_run=dry_run, verbose=verbose)
+        total_processed += processed
+        total_errors += errors
+    
+    return (total_processed, total_errors)
+
+
+def main() -> None:
+    """Run the CLI entry point."""
+    parser = argparse.ArgumentParser(
+        description='PPT Master - Smart Image Cropping Tool',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  %(prog)s projects/my_project/svg_output
+  %(prog)s page_01.svg --dry-run
+
+preserveAspectRatio usage:
+  xMidYMid slice   Center crop (default)
+  xMidYMin slice   Keep top
+  xMidYMax slice   Keep bottom
+  xMinYMid slice   Keep left
+  xMaxYMid slice   Keep right
+  xMidYMid meet    Display fully, no cropping
+        '''
+    )
+    
+    parser.add_argument('path', type=Path, help='SVG file or directory')
+    parser.add_argument('--dry-run', '-n', action='store_true', help='Preview only, no actual processing')
+    parser.add_argument('--quiet', '-q', action='store_true', help='Quiet mode')
+    
+    args = parser.parse_args()
+    
+    if not args.path.exists():
+        print(f"[ERROR] Path not found: {args.path}")
+        sys.exit(1)
+
+    print("PPT Master - Smart Image Cropping")
+    print("=" * 50)
+    
+    if args.path.is_file():
+        processed, errors = process_svg_images(str(args.path), dry_run=args.dry_run, 

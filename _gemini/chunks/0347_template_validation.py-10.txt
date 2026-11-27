@@ -1,0 +1,84 @@
+                errors.append(
+                    "expected Master part mapping assigns one part to multiple keys"
+                )
+            if expected_master_parts is not None and (
+                set(expected_master_parts) != expected_master_keys
+            ):
+                errors.append(
+                    "expected Master key roster differs from the SVG contract; "
+                    f"missing={sorted(expected_master_keys - set(expected_master_parts))}, "
+                    f"extra={sorted(set(expected_master_parts) - expected_master_keys)}"
+                )
+            for layout_key, layout_specs in specs_by_layout.items():
+                prototype = layout_specs[0]
+                layout_part = layout_parts_by_key.get(layout_key)
+                if layout_part is None:
+                    errors.append(f"layout key {layout_key!r} has no resolved Layout part")
+                    continue
+                layout_root = reader.xml(layout_part)
+                if layout_root is None:
+                    continue
+                if layout_root.tag != f"{{{PML_NS}}}sldLayout":
+                    errors.append(f"{layout_part} is not a p:sldLayout part")
+                if layout_root.get("type") != "cust":
+                    errors.append(f"{layout_part} must have type='cust'")
+                if layout_root.get("preserve") != "1":
+                    errors.append(f"{layout_part} must have preserve='1'")
+                raw_show_master = (
+                    layout_root.get("showMasterSp", "1").strip().lower()
+                )
+                if raw_show_master not in {"0", "1", "false", "true"}:
+                    errors.append(
+                        f"{layout_part} showMasterSp is not a valid boolean"
+                    )
+                elif (
+                    (raw_show_master in {"1", "true"})
+                    != prototype.layout_show_master_shapes
+                ):
+                    errors.append(
+                        f"{layout_part} showMasterSp={raw_show_master}, "
+                        "expected "
+                        f"{str(prototype.layout_show_master_shapes).lower()}"
+                    )
+                c_sld = layout_root.find(f"{{{PML_NS}}}cSld")
+                expected_name = layout_specs[0].layout_name
+                actual_name = c_sld.get("name") if c_sld is not None else None
+                if actual_name != expected_name:
+                    errors.append(
+                        f"{layout_part} has picker name {actual_name!r}, expected "
+                        f"{expected_name!r}"
+                    )
+
+                override_values = overrides.get(f"/{layout_part}", [])
+                if override_values != [SLIDE_LAYOUT_CONTENT_TYPE]:
+                    errors.append(
+                        f"[Content_Types].xml must declare {layout_part} exactly once "
+                        f"as {SLIDE_LAYOUT_CONTENT_TYPE}"
+                    )
+
+                bindings = bindings_by_layout[layout_key]
+                layout_placeholders = _validate_placeholder_roster(
+                    layout_root,
+                    bindings,
+                    f"Layout {layout_key!r}",
+                    errors,
+                    is_layout=True,
+                )
+                _validate_layout_header_footer(
+                    layout_root,
+                    bindings,
+                    f"Layout {layout_key!r}",
+                    errors,
+                )
+                expected_layout_names = tuple(
+                    f"{item.element_id} Layout"
+                    if item.layer == "layout"
+                    else f"{item.element_id} Placeholder"
+                    for item in prototype.elements
+                    if (
+                        (item.layer == "layout" and not item.is_background)
+                        or item.placeholder
+                    )
+                )
+                _validate_named_shape_roster(
+                    layout_root,

@@ -1,0 +1,105 @@
+    for mapping in plan.mappings:
+        if mapping.dst in by_dst:
+            raise ApplyTemplateError(
+                f"two selected files map to {mapping.dst}: "
+                f"{by_dst[mapping.dst].src} and {mapping.src}"
+            )
+        by_dst[mapping.dst] = mapping
+    removals = set(plan.removals)
+    collisions: list[str] = []
+    for mapping in plan.mappings:
+        if mapping.dst in removals or not mapping.dst.exists():
+            continue
+        if mapping.content is not None:
+            identical = mapping.dst.read_bytes() == mapping.content
+        else:
+            identical = filecmp.cmp(mapping.src, mapping.dst, shallow=False)
+        if identical:
+            mapping.status = "identical"
+        else:
+            collisions.append(f"{mapping.dst} (from {mapping.src})")
+    if collisions:
+        raise ApplyTemplateError(
+            "destination collision; remove or rename before installing:\n  "
+            + "\n  ".join(collisions)
+        )
+
+
+# ---------------------------------------------------------------------------
+# Writing and receipt
+# ---------------------------------------------------------------------------
+
+
+def _file_sha256(path: Path) -> str:
+    with path.open("rb") as stream:
+        digest = hashlib.sha256()
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _workspace_files(root: Path) -> dict[str, str]:
+    return {
+        path.relative_to(root).as_posix(): _file_sha256(path)
+        for name in ("templates", *ASSET_DIRS)
+        for path in _iter_files(root / name)
+    }
+
+
+def _root_snapshots(roots: list[RootRecord]) -> list[dict]:
+    return [{
+        "workspace_root": str(record.root),
+        "source": record.source,
+        "kinds": sorted(record.kinds),
+        "specs": [{
+            "kind": spec.kind,
+            "id": spec.template_id,
+            "path": spec.path.relative_to(record.root).as_posix(),
+        } for spec in sorted(record.specs, key=lambda spec: spec.kind)],
+        "files": _workspace_files(record.root),
+    } for record in sorted(roots, key=lambda record: str(record.root))]
+
+
+def snapshot_template_roots(project: Path, root_args: list[str]) -> list[dict]:
+    """Freeze the selected roots, kinds, spec identities, and portable file bytes."""
+    roots = [_load_root(arg, project) for arg in root_args]
+    return _root_snapshots(roots)
+
+
+def _install_contract(snapshots: list[dict]) -> tuple[list[str], dict | None, set[str]]:
+    specs = sorted(
+        f"design_spec.{spec['kind']}.{spec['id']}.md"
+        for root in snapshots for spec in root["specs"]
+    )
+    paths = {f"templates/{name}" for name in specs}
+    for root in snapshots:
+        paths.update(name for name in root["files"] if name.startswith(("images/", "icons/")))
+    owner = next((root for root in snapshots if "layout" in root["kinds"]), None)
+    owner_kind = "layout"
+    if owner is None:
+        owner = next((root for root in snapshots if "deck" in root["kinds"]), None)
+        owner_kind = "deck"
+    roster = None
+    if owner is not None:
+        structural = sorted(
+            name for name in owner["files"]
+            if name.startswith("templates/")
+            and not _is_spec_file(Path(name))
+            and Path(name).suffix.lower() not in BITMAP_SUFFIXES
+        )
+        paths.update(structural)
+        roster = {"workspace_root": owner["workspace_root"], "kind": owner_kind, "files": structural}
+    return specs, roster, paths
+
+
+def read_template_install(
+    project: Path,
+    snapshots: list[dict],
+    selection_sha256: str | None,
+    *,
+    content_root: Path | None = None,
+) -> dict:
+    """Verify installer provenance and every installed spec, roster file, and asset.
+
+    Extra project images/icons are allowed; selected assets and the exact active
+    template roster must still match. ``content_root`` validates staging before

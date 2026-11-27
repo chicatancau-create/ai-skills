@@ -1,0 +1,98 @@
+        return _stage_recommendations_path(confirm_dir, 1)
+    result_stage = _result_stage(confirm_dir / RESULT_NAME)
+    expected_stage = _expected_recommendation_stage(result_stage)
+    return _stage_recommendations_path(confirm_dir, expected_stage)
+
+
+def _read_active_recommendations(
+    confirm_dir: Path,
+    *,
+    retries: int = 2,
+) -> tuple[Path, dict]:
+    """Read and validate the recommendation payload active for this stage."""
+    rec_file = _active_recommendations_path(confirm_dir)
+    data = _read_json_object(rec_file, retries=retries)
+    for stage_number, filename in RECOMMENDATION_STAGE_NAMES.items():
+        if rec_file.name != filename:
+            continue
+        actual_stage = _recommendation_stage(data)
+        if actual_stage != stage_number:
+            raise ValueError(
+                f'{filename} must declare stage={_stage_name(stage_number)}, '
+                f'found {_stage_name(actual_stage) or "absent"}'
+            )
+        if stage_number == 2:
+            selection = _read_template_selection(confirm_dir / TEMPLATE_SELECTION_NAME)
+            if data.get('selection_sha256') != selection['selection_sha256']:
+                raise ValueError(f'{filename} selection_sha256 must match template_selection.json')
+            production_error = _stage2_production_recommendations_error(data)
+            if production_error:
+                raise ValueError(production_error)
+        break
+    return rec_file, data
+
+
+def _template_confirmation_required(project_path: Path) -> bool:
+    """Return whether the confirmed project state has an active template."""
+    confirm_dir = project_path / CONFIRM_DIR_NAME
+    return _read_template_installation(project_path)['mode'] == 'templates'
+
+
+def _template_stage2_error(
+    recommendations: dict,
+    *,
+    template_required: bool,
+) -> Optional[str]:
+    """Require the natural-language template plan in template Stage 2."""
+    if template_required and 'template_application' not in recommendations:
+        return (
+            'template Stage 2 recommendations must include '
+            'template_application.value'
+        )
+    return None
+
+
+def _localized_text_present(candidate: dict, field: str) -> bool:
+    """Return whether a candidate carries non-empty localized prose."""
+    return any(
+        isinstance(candidate.get(key), str) and bool(candidate[key].strip())
+        for key in (field, f'{field}_zh', f'{field}_zh_tw', f'{field}_en', f'{field}_ja')
+    )
+
+
+def _recommended_image_usage(recommendations: dict):
+    """Return the Stage 2 image-source recommendation in either schema."""
+    recommend = recommendations.get('recommend')
+    usage = recommend.get('image_usage') if isinstance(recommend, dict) else None
+    if usage is None:
+        usage = recommendations.get('image_usage')
+        if isinstance(usage, dict):
+            usage = usage.get('value')
+    return usage
+
+
+def _uses_ai_images(recommendations: dict) -> bool:
+    """Return whether Stage 2 proposes AI-generated images."""
+    usage = _recommended_image_usage(recommendations)
+    return 'ai' in usage if isinstance(usage, list) else usage == 'ai'
+
+
+def _stage2_production_recommendations_error(
+    recommendations: dict,
+) -> Optional[str]:
+    """Require every production control in current Stage 2 recommendations."""
+    recommend = recommendations.get('recommend')
+    if not isinstance(recommend, dict):
+        recommend = {}
+    generation_mode = recommend.get('generation_mode')
+    if not isinstance(generation_mode, str) or not generation_mode.strip():
+        return (
+            'Stage 2 recommendations must include non-empty '
+            'recommend.generation_mode'
+        )
+    refine_spec = recommendations.get('refine_spec')
+    if (
+        not isinstance(refine_spec, dict)
+        or not isinstance(refine_spec.get('value'), bool)
+    ):
+        return 'Stage 2 recommendations must include refine_spec.value as a boolean'

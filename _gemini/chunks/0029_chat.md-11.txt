@@ -1,0 +1,94 @@
+| `mediaId=...`（图片 / 视频 / 语音，扩展名任意） | 钉钉消息媒体；**host 不唯一**：`down.dingtalk.com/media`（公开直链）或 `*.trans.dingtalk.com/...?Expires=&Signature=`（签名 + 会过期） | **首选 `dws chat message download-media`**（内部取最新下载 URL，不受过期影响，需 `--message-id` + `--open-conversation-id`）。仅当链接是 `down.dingtalk.com/media` 公开直链时，可 `curl -sL -o` 快捷下载；**签名/过期链（`trans.dingtalk.com`、带 `Signature`/`Expires`）不要裸 curl，过期会 403** |
+| `[文件] xxx fileId: <fileId>`（钉盘文件） | 钉盘临时签名链接 | `dws drive download --node <fileId> --output <路径>`（裸 curl 不通用，需签名头） |
+| `https://alidocs.dingtalk.com/i/nodes/<nodeId>`（钉钉文档 / .adoc / 视频 .mov 等节点） | 文档 / 钉盘节点 | 读内容用 `dws doc`，下文件用 `dws drive download`（裸 curl 只得 HTML 预览页） |
+
+> - 下载到本地后用 `file <文件>` 判断真实类型：部分链接扩展名是 `.unknown`、服务端按 `application/octet-stream` 返回，仍可正常下载。
+> - 图片消息还会附带 AI 识别的内容描述（`<imageContent>...</imageContent>`），不下载也能理解图意。
+> - 钉盘文件在 `content` 里给的是 `fileId`、不是 mediaId，必须走 `dws drive download`（下载链接是带签名头的临时链接，裸 curl 不通用）。
+> - alidocs 节点裸 curl 只会拿到 HTML 预览页、不是文件本体，需走 `dws doc`（读内容）或 `dws drive download`（下文件）。
+
+### search-common (搜索共同群)
+
+#### 搜索共同群 — 查询指定人共同所在的群聊
+
+根据昵称列表搜索共同群聊。--nicks 指定要搜索的人员昵称（逗号分隔，必填）。--match-mode 控制匹配模式：AND 表示所有人都在群里，OR 表示任一人在群里（默认 AND）。分页参数 --limit（默认 20）和 --cursor（默认 "0"）始终传递；hasMore=true 时用返回的 nextCursor 作为下次 --cursor 继续翻页。
+```
+Usage:
+  dws chat search-common [flags]
+Example:
+  dws chat search-common --nicks "风雷,山乔" --limit 20 --cursor 0
+  dws chat search-common --nicks "天鸡,乐函" --match-mode OR --limit 20 --cursor 0
+  dws chat search-common --nicks "风雷,山乔,天鸡" --limit 10 --cursor <nextCursor>
+Flags:
+      --nicks string        要搜索的昵称列表，逗号分隔 (必填)
+      --match-mode string   匹配模式：AND=所有人都在群里，OR=任一人在群里（默认 AND）
+      --limit int           每页返回数量（默认 20）
+      --cursor string       分页游标（默认 "0"，翻页传 nextCursor）
+
+注意:
+  - --nicks 传人员昵称（花名），逗号分隔，如 "风雷,山乔"
+  - --match-mode AND 表示群里必须包含所有指定的人；OR 表示包含任意一人即可
+  - 翻页：hasMore=true 时，用返回的 nextCursor 作为下次 --cursor
+```
+
+### conversation-info (获取会话基础信息)
+
+#### 获取会话基础信息 — 含会话关联的钉盘共享空间 ID
+
+获取指定会话的基础信息，包含会话关联的钉盘共享空间 ID (newCSpaceIdIM)。发送文件消息前需先调用此命令获取 spaceId，再用 drive upload --space-id 上传文件到共享空间。
+```
+Usage:
+  dws chat conversation-info [flags]
+Example:
+  dws chat conversation-info --group <openConversationId> --format json
+  dws chat conversation-info --user <userId> --format json
+  dws chat conversation-info --open-dingtalk-id <openDingTalkId> --format json
+Flags:
+      --group string              群聊 openConversationId（群聊时使用）
+      --user string               单聊对方 userId（单聊时使用）
+      --open-dingtalk-id string   单聊对方 openDingTalkId（单聊时使用）
+
+注意:
+  - --group、--user、--open-dingtalk-id 互斥，必须且只能指定其一
+  - --group 的别名: --id, --chat, --conversation-id (均可替代 --group)
+  - 返回值中的 newCSpaceIdIM 为会话共享空间 ID，用于 drive upload --space-id 参数
+  - 上传到共享空间的文件对方才能打开，上传到个人空间的文件对方无法访问
+```
+
+#### 合并转发多条消息 — 将多条消息合并后转发到目标会话（源/目标会话均支持单聊/群聊）
+```
+Usage:
+  dws chat message combine-forward [flags]
+Example:
+  dws chat message combine-forward --src-conversation-id <srcOpenCid> --msg-ids <id1>,<id2>,<id3> --dest-conversation-id <destOpenCid>
+  dws chat message combine-forward --src-conversation-id <srcOpenCid> --msg-ids <id1>,<id2> --dest-conversation-id <destOpenCid> --uuid <idempotencyKey>
+Flags:
+      --src-conversation-id string    源会话 openConversationId (必填)
+      --msg-ids string                源消息 openMessageId 列表，逗号分隔 (必填)
+      --dest-conversation-id string   目标会话 openConversationId (必填)
+      --uuid string                   幂等键（可选）
+
+注意:
+  - 与 chat message forward 区别: forward 转单条，combine-forward 合并多条为一条转发
+  - --msg-ids 多个消息 ID 用逗号分隔，无顺序要求
+```
+
+#### 钉住某条消息（Pin） — 将指定消息设置为钉住状态
+```
+Usage:
+  dws chat message set-pin-msg [flags]
+Example:
+  dws chat message set-pin-msg --open-conversation-id <openConversationId> --msg-id <openMessageId>
+Flags:
+      --open-conversation-id string    (必填)会话 openConversationId（支持群聊/单聊）
+      --msg-id string                  (必填)消息 openMessageId
+
+注意:
+  - 钉住消息后，会话成员均可在会话中看到被钉住的消息
+```
+
+#### 取消钉住某条消息（Unpin） — 取消指定消息的钉住状态
+```
+Usage:
+  dws chat message unset-pin-msg [flags]
+Example:

@@ -1,0 +1,120 @@
+    except ET.ParseError:
+        return None
+    entries = [
+        (
+            child.tag.rsplit('}', 1)[-1],
+            tuple(sorted(child.attrib.items())),
+        )
+        for child in root
+        if child.tag.rsplit('}', 1)[-1] in {'Default', 'Override'}
+    ]
+    return tuple(sorted(entries))
+
+
+_IMAGE_CONTENT_TYPES = {
+    'png': 'image/png',
+    'jpg': 'image/jpeg',
+    'jpeg': 'image/jpeg',
+    'gif': 'image/gif',
+    'webp': 'image/webp',
+    'svg': 'image/svg+xml',
+    'bmp': 'image/bmp',
+    'emf': 'image/x-emf',
+    'tif': 'image/tiff',
+    'tiff': 'image/tiff',
+    'wmf': 'image/x-wmf',
+}
+
+
+def _content_type_for_extension(ext: str) -> str:
+    clean = ext.lower().lstrip('.')
+    content_type = _IMAGE_CONTENT_TYPES.get(clean) or mimetypes.guess_type(f'x.{clean}')[0]
+    if not content_type:
+        raise ValueError(f"Unknown media content type for extension: {ext}")
+    return content_type
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _create_writable_work_dir(output_path: Path) -> Path:
+    """Create a real writable work directory for PPTX assembly."""
+    parents = [output_path.parent, Path.cwd(), Path(tempfile.gettempdir())]
+    seen: set[str] = set()
+    errors: list[str] = []
+
+    for parent in parents:
+        parent = parent if str(parent) else Path(".")
+        try:
+            key = str(parent.resolve())
+        except OSError:
+            key = str(parent.absolute())
+        if key in seen:
+            continue
+        seen.add(key)
+
+        try:
+            parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            errors.append(f"{parent}: cannot create parent ({exc})")
+            continue
+
+        for _ in range(3):
+            work_dir = parent / f".pptx-build-{os.getpid()}-{uuid.uuid4().hex}"
+            try:
+                work_dir.mkdir(mode=0o700)
+                probe_path = work_dir / ".write-probe"
+                probe_path.write_text("ok", encoding="utf-8")
+                probe_path.unlink()
+                return work_dir
+            except OSError as exc:
+                errors.append(f"{work_dir}: {exc}")
+                shutil.rmtree(work_dir, ignore_errors=True)
+
+    details = "\n  - ".join(errors) if errors else "no candidate directories available"
+    raise PermissionError(
+        "Unable to create a writable PPTX work directory. "
+        "Set the output path to a writable project directory or adjust sandbox permissions. "
+        f"Tried:\n  - {details}"
+    )
+
+
+def _relax_output_permissions(output_path: Path) -> list[str]:
+    """Make exported files readable outside the sandbox owner where possible."""
+    warnings: list[str] = []
+
+    try:
+        current_mode = output_path.stat().st_mode
+        readable_mode = (
+            current_mode
+            | stat.S_IRUSR
+            | stat.S_IWUSR
+            | stat.S_IRGRP
+            | stat.S_IROTH
+        )
+        os.chmod(output_path, readable_mode)
+    except OSError as exc:
+        warnings.append(f"chmod skipped for {output_path}: {exc}")
+
+    if os.name != 'nt':
+        return warnings
+
+    # Windows ACLs can remain sandbox-only even when the file mode looks sane.
+    # Grant the built-in Users SID read access; the SID avoids localization
+    # issues on non-English Windows installations.
+    try:
+        result = subprocess.run(
+            ['icacls', str(output_path), '/grant', '*S-1-5-32-545:R'],
+            capture_output=True,
+            check=False,
+        )
+    except OSError as exc:
+        warnings.append(f"icacls skipped for {output_path}: {exc}")
+    else:
+        if result.returncode != 0:
+            # icacls writes in the console OEM code page, so decode lazily
+            # and leniently; text mode would decode under the interpreter's
+            # encoding (UTF-8 in UTF-8 mode) and raise inside the reader
+            # thread on non-ASCII bytes.
+            message = (result.stderr or result.stdout or b'').decode(

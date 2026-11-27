@@ -1,0 +1,116 @@
+            os.path.relpath(asset_path, output_dir).replace(os.sep, "/"),
+        )
+        preview.set("data-pptx-part", "authoring-preview")
+        element.append(preview)
+        stats.semantic_table_preview_bytes += len(payload)
+    return assets
+
+
+def _prefer_editable_vector_asset(element: ET.Element) -> bool:
+    """Keep pure vector decorations available for later `<use>` extraction."""
+    if any(
+        _local_name(item.tag) in _SEMANTIC_CONTENT_TAGS
+        for item in element.iter()
+    ):
+        return False
+    if any(
+        "chart" in (item.get("id") or "").lower()
+        for item in element.iter()
+    ):
+        return False
+    return any(
+        _local_name(item.tag) in _DRAWABLE_TAGS
+        for item in element.iter()
+    )
+
+
+def _contains_authoring_semantics(element: ET.Element) -> bool:
+    """Keep meaning-bearing content inline and editable for the model."""
+    for item in element.iter():
+        if _local_name(item.tag) in _SEMANTIC_CONTENT_TAGS:
+            return True
+        if any(item.get(name) is not None for name in _SEMANTIC_AUTHORING_ATTRIBUTES):
+            return True
+        if (
+            _local_name(item.tag) == "metadata"
+            and item.get("type") == "application/json"
+        ):
+            return True
+    return False
+
+
+def _externalize_large_source_objects(
+    root: ET.Element,
+    references: list[SourceReference],
+    output_dir: Path,
+    proxy_dir: Path,
+    stats: ProjectionStats,
+) -> dict[Path, bytes]:
+    reference_by_id = {
+        reference.source_ref: reference
+        for reference in references
+    }
+    candidates: list[tuple[ET.Element, ET.Element]] = []
+
+    def visit(parent: ET.Element, inside_source_ref: bool) -> None:
+        for child in list(parent):
+            source_ref = child.get(SOURCE_REF_ATTRIBUTE)
+            forced_proxy = child.get(SOURCE_PROXY_ATTRIBUTE) == SOURCE_PROXY_KIND
+            if source_ref and (not inside_source_ref or forced_proxy):
+                candidates.append((parent, child))
+                if forced_proxy:
+                    continue
+            visit(child, inside_source_ref or bool(source_ref))
+
+    visit(root, False)
+    assets: dict[Path, bytes] = {}
+    for parent, element in candidates:
+        if element.get(SEMANTIC_OBJECT_ATTRIBUTE) in {
+            SEMANTIC_SHAPE_KIND,
+            SEMANTIC_TABLE_KIND,
+        }:
+            continue
+        original_bytes = len(_serialize_svg(element))
+        forced_source_proxy = (
+            element.get(SOURCE_PROXY_ATTRIBUTE) == SOURCE_PROXY_KIND
+        )
+        if (
+            not forced_source_proxy
+            and (
+                original_bytes < SOURCE_PROXY_MIN_BYTES
+                or _contains_authoring_semantics(element)
+                or _prefer_editable_vector_asset(element)
+            )
+        ):
+            continue
+        source_ref = element.get(SOURCE_REF_ATTRIBUTE)
+        if not source_ref or source_ref not in reference_by_id:
+            raise ValueError("Large source object has no manifest reference")
+        payload = _source_proxy_asset_bytes(
+            root,
+            element,
+            output_dir,
+            proxy_dir,
+            stats,
+        )
+        digest = hashlib.sha256(payload).hexdigest()
+        asset_path = proxy_dir / f"source-object-{digest}.svg"
+        previous = assets.get(asset_path)
+        if previous is not None and previous != payload:
+            raise ValueError(f"Source proxy hash collision: {asset_path.name}")
+        assets[asset_path] = payload
+
+        reference = reference_by_id[source_ref]
+        reference.representation = "source-proxy"
+        reference.proxy_asset = asset_path
+        reference.proxy_asset_sha256 = digest
+        proxy = _source_proxy_element(
+            root,
+            element,
+            source_ref,
+            asset_path,
+            output_dir,
+        )
+        siblings = list(parent)
+        index = siblings.index(element)
+        parent.remove(element)

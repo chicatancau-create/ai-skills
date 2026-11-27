@@ -1,0 +1,138 @@
+        _qn(PML_NS, "cNvPr"),
+        {"id": str(shape_id), "name": NARRATION_SHAPE_PREFIX + shape_name},
+    )
+    ET.SubElement(
+        c_nv_pr,
+        _qn(DRAWINGML_NS, "hlinkClick"),
+        {
+            _qn(RELATIONSHIPS_NS, "id"): "",
+            "action": "ppaction://media",
+        },
+    )
+    c_nv_pic_pr = ET.SubElement(nv_pic_pr, _qn(PML_NS, "cNvPicPr"))
+    ET.SubElement(
+        c_nv_pic_pr,
+        _qn(DRAWINGML_NS, "picLocks"),
+        {"noChangeAspect": "1"},
+    )
+    nv_pr = ET.SubElement(nv_pic_pr, _qn(PML_NS, "nvPr"))
+    ET.SubElement(
+        nv_pr,
+        _qn(DRAWINGML_NS, "audioFile"),
+        {_qn(RELATIONSHIPS_NS, "link"): audio_rid},
+    )
+    ext_list = ET.SubElement(nv_pr, _qn(PML_NS, "extLst"))
+    extension = ET.SubElement(
+        ext_list,
+        _qn(PML_NS, "ext"),
+        {"uri": "{DAA4B4D4-6D71-4841-9C94-3DE7FCFB9230}"},
+    )
+    ET.SubElement(
+        extension,
+        _qn(P14_NS, "media"),
+        {_qn(RELATIONSHIPS_NS, "embed"): media_rid},
+    )
+
+    blip_fill = ET.SubElement(pic, _qn(PML_NS, "blipFill"))
+    ET.SubElement(
+        blip_fill,
+        _qn(DRAWINGML_NS, "blip"),
+        {_qn(RELATIONSHIPS_NS, "embed"): poster_rid},
+    )
+    stretch = ET.SubElement(blip_fill, _qn(DRAWINGML_NS, "stretch"))
+    ET.SubElement(stretch, _qn(DRAWINGML_NS, "fillRect"))
+
+    shape_properties = ET.SubElement(pic, _qn(PML_NS, "spPr"))
+    transform = ET.SubElement(shape_properties, _qn(DRAWINGML_NS, "xfrm"))
+    ET.SubElement(
+        transform,
+        _qn(DRAWINGML_NS, "off"),
+        {
+            "x": str(AUDIO_MARKER_OFF_CANVAS_EMU),
+            "y": str(AUDIO_MARKER_OFF_CANVAS_EMU),
+        },
+    )
+    ET.SubElement(
+        transform,
+        _qn(DRAWINGML_NS, "ext"),
+        {
+            "cx": str(AUDIO_MARKER_SIZE_EMU),
+            "cy": str(AUDIO_MARKER_SIZE_EMU),
+        },
+    )
+    geometry = ET.SubElement(
+        shape_properties,
+        _qn(DRAWINGML_NS, "prstGeom"),
+        {"prst": "rect"},
+    )
+    ET.SubElement(geometry, _qn(DRAWINGML_NS, "avLst"))
+    return pic
+
+
+def create_audio_pic_xml(
+    shape_id: int,
+    shape_name: str,
+    audio_rid: str,
+    media_rid: str,
+    poster_rid: str,
+) -> str:
+    """Create an off-canvas audio picture shape carrying narration media."""
+    element = _create_audio_pic_element(
+        shape_id,
+        shape_name,
+        audio_rid,
+        media_rid,
+        poster_rid,
+    )
+    return ET.tostring(element, encoding="unicode")
+
+
+def _numeric_ids(
+    elements: Iterable[ET.Element],
+    label: str,
+    *,
+    minimum: int = 0,
+    maximum: int = MAX_OOXML_UNSIGNED_INT,
+) -> list[int]:
+    ids: list[int] = []
+    seen: set[int] = set()
+    for element in elements:
+        raw_id = element.get("id")
+        try:
+            numeric_id = int(raw_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"narration source has invalid {label} id: {raw_id!r}") from exc
+        if numeric_id < minimum:
+            raise ValueError(
+                f"narration source has {label} id below {minimum}: {numeric_id}"
+            )
+        if numeric_id > maximum:
+            raise ValueError(
+                f"narration source has {label} id above {maximum}: {numeric_id}"
+            )
+        if numeric_id in seen:
+            raise ValueError(f"narration source has duplicate {label} id: {numeric_id}")
+        ids.append(numeric_id)
+        seen.add(numeric_id)
+    return ids
+
+
+def narration_lead_in_seconds(
+    transition_duration: float,
+    *,
+    start_floor: float = DEFAULT_NARRATION_START_FLOOR,
+) -> float:
+    """Return silence after a slide transition before narration starts."""
+    transition_seconds = validate_seconds(
+        transition_duration,
+        "narration transition duration",
+        allow_zero=True,
+    )
+    floor_seconds = validate_seconds(
+        start_floor,
+        "narration start floor",
+        allow_zero=True,
+    )
+    return max(0.0, floor_seconds - transition_seconds)
+
+

@@ -1,0 +1,60 @@
+      Save-AclBackup -FullPath $object -Directory $Out -Root $AllowRoot
+      $grantAcl = Get-Acl -LiteralPath $object
+      $grantAcl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+        [System.Security.Principal.SecurityIdentifier]::new($meSid),
+        [System.Security.AccessControl.FileSystemRights]::FullControl,
+        [System.Security.AccessControl.AccessControlType]::Allow))
+      Invoke-ReportedOperation grant_dacl $object "WRITE_DAC or WRITE_OWNER is missing; add a FullControl allow ACE for $meSid while preserving deny ACEs, owner and SACL." acl {
+        [Dsh.TokenInfo]::SetDacl($object, $grantAcl.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::Access))
+      }
+      $grantAfter = Get-ObjectFacts -FullPath $object -MeSid $meSid -CompactRecord
+      $factsByPath[$object] = $grantAfter
+      $verified = $grantAfter.Readable -and $grantAfter.Errors.Count -eq 0 -and $grantAfter.HasWriteDac -and $grantAfter.HasWriteOwner
+      Write-Report verification grant $object $(if ($verified) { 'verified' } else { 'failed' }) 'The DACL write completed; recheck effective access before claiming that provisioning can succeed. On failure, restore this invocation and stop.' @{
+        before = @{ writeDac = $grantBefore.HasWriteDac; writeOwner = $grantBefore.HasWriteOwner }
+        after = @{ writeDac = $grantAfter.HasWriteDac; writeOwner = $grantAfter.HasWriteOwner }
+        recovery = $recoveries[-1].command
+      }
+      if ($verified) {
+        Write-Line ('GRANTED {0} SID={1}' -f $object, $meSid); $granted++
+      } else {
+        Write-Line ('GRANT_FAILED {0}; effective WRITE_DAC and WRITE_OWNER were not both confirmed; restore this invocation and stop' -f $object)
+        $refused++
+        break paths
+      }
+    }
+
+    $sources = @($packageTargets | Where-Object {
+      @($factsByPath[$_].Aces | Where-Object { $_.type -eq 'Allow' -and $_.sid -match $PACKAGE_SID -and -not $_.inherited }).Count -gt 0
+    })
+    # Ancestor first, for chain and scan-discovered sources alike.
+    $sources = @($sources | Sort-Object -Property @{ Expression = { $_.Split([char]92).Count } }, @{ Expression = { $_ } })
+    foreach ($source in $sources) {
+      if (-not $factsByPath[$source].HasWriteDac) {
+        Write-Line ('REPAIR_REFUSED {0} needs WRITE_DAC; stop for permission-policy review' -f $source)
+        Write-Decision $mode $source refused 'Effective WRITE_DAC is absent; removing a package allow ACE requires that right.'
+        $refused++
+        break paths
+      }
+    }
+    if ($sources.Count -gt 0) {
+      Write-Report decision remove_package_sources $full selected 'Remove explicit package allow ACEs from their sources, ancestor first, leaving inheritance enabled so inherited copies follow their repaired source.' @{
+        sources = @($sources); affectedPaths = @($packageTargets)
+      }
+    }
+    foreach ($source in $sources) {
+      Save-AclBackup -FullPath $source -Directory $Out -Root $AllowRoot
+      $sids = @($factsByPath[$source].Aces | Where-Object { $_.type -eq 'Allow' -and $_.sid -match $PACKAGE_SID -and -not $_.inherited } | ForEach-Object { $_.sid } | Sort-Object -Unique)
+      foreach ($sid in $sids) {
+        Invoke-ReportedOperation remove_package_allow $source "Remove the observed package allow ACE for $sid; preserve deny ACEs and all other principals." acl {
+          $output = @(icacls $source /remove:g "*$sid" 2>&1)
+          if ($LASTEXITCODE -ne 0) { throw "icacls removal exit $($LASTEXITCODE): $($output -join [char]10)" }
+        }
+      }
+    }
+
+    # A package deny can share the removed allow's SID; only allow ACEs were removed.
+    foreach ($packagePath in $packageTargets) {
+      $fixBefore = $factsByPath[$packagePath]
+      $fixAfter = Get-ObjectFacts -FullPath $packagePath -MeSid $meSid -CompactRecord
+      # Compare the object's own ACEs as sorted sets: listing order and inherited

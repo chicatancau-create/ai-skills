@@ -1,0 +1,112 @@
+            "name": input_path if is_url else (source.name if source else input_path),
+            "suffix": "" if is_url else (source.suffix.lower() if source else ""),
+            "kind": "url" if is_url else "file",
+            "exists": source_exists,
+            "size_bytes": (
+                source.stat().st_size
+                if source_exists and source is not None and source.is_file()
+                else None
+            ),
+        },
+        "outputs": {
+            "markdown": _display_path(markdown, root),
+            "asset_dir": _display_path(assets, root) if assets.is_dir() else "",
+            "image_manifest": (
+                _display_path(image_manifest, root) if image_manifest.is_file() else ""
+            ),
+            "image_count": _image_count_from_manifest(image_manifest),
+        },
+        "markdown": markdown_stats(markdown),
+        "warnings": warnings or [],
+    }
+
+
+def write_conversion_profile(
+    *,
+    input_path: str,
+    markdown_path: str | Path,
+    converter: str,
+    conversion_type: str,
+    asset_dir: str | Path | None = None,
+    warnings: list[str] | None = None,
+) -> Path:
+    """Write `<stem>.conversion_profile.json` beside one Markdown output."""
+    markdown = Path(markdown_path)
+    profile_path = profile_path_for(markdown)
+    profile = build_conversion_profile(
+        input_path=input_path,
+        markdown_path=markdown,
+        converter=converter,
+        conversion_type=conversion_type,
+        asset_dir=asset_dir,
+        warnings=warnings,
+    )
+    profile_path.write_text(
+        json.dumps(profile, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return profile_path
+
+
+def record_source_url(markdown_path: str | Path, url: str) -> None:
+    """Add the fetched URL to a profile written for a downloaded document."""
+    profile_path = profile_path_for(Path(markdown_path))
+    profile = _read_json(profile_path)
+    if not isinstance(profile, dict) or not isinstance(profile.get("source"), dict):
+        return
+    profile["source"]["url"] = url
+    profile_path.write_text(
+        json.dumps(profile, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def write_conversion_profile_best_effort(
+    *,
+    input_path: str,
+    markdown_path: str | Path,
+    converter: str,
+    conversion_type: str,
+    asset_dir: str | Path | None = None,
+    warnings: list[str] | None = None,
+) -> Path | None:
+    """Write a profile sidecar, warning without changing converter success."""
+    try:
+        return write_conversion_profile(
+            input_path=input_path,
+            markdown_path=markdown_path,
+            converter=converter,
+            conversion_type=conversion_type,
+            asset_dir=asset_dir,
+            warnings=warnings,
+        )
+    except OSError as exc:
+        print(f"[WARN] Could not write conversion profile: {exc}", file=sys.stderr)
+        return None
+
+
+def build_result_payload(
+    *,
+    input_path: str,
+    markdown_path: str | Path,
+    converter: str,
+    conversion_type: str,
+    asset_dir: str | Path | None = None,
+    profile_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Return a compact JSON payload for CLI consumers."""
+    markdown = Path(markdown_path)
+    assets = Path(asset_dir) if asset_dir else default_asset_dir(markdown)
+    image_manifest = assets / IMAGE_MANIFEST_NAME
+    profile = Path(profile_path) if profile_path else profile_path_for(markdown)
+    return {
+        "input": (
+            input_path
+            if input_path.startswith(("http://", "https://"))
+            else str(Path(input_path).resolve())
+        ),
+        "markdown": str(markdown.resolve()),
+        "asset_dir": str(assets.resolve()) if assets.is_dir() else "",
+        "image_manifest": str(image_manifest.resolve()) if image_manifest.is_file() else "",
+        "conversion_profile": str(profile.resolve()) if profile.is_file() else "",
+        "converter": converter,

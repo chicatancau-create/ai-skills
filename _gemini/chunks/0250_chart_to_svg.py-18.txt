@@ -1,0 +1,105 @@
+    if plot_style not in {"line", "lineMarker", "marker", "smooth", "smoothMarker"}:
+        raise _UnsupportedChart("unsupported-chart-scatter-style")
+    plot_has_line = plot_style in {"line", "lineMarker", "smooth", "smoothMarker"}
+    plot_is_smooth = plot_style in {"smooth", "smoothMarker"}
+
+    style_by_state = {
+        (False, True, False): "marker",
+        (True, False, False): "line",
+        (True, True, False): "lineMarker",
+        (True, False, True): "smooth",
+        (True, True, True): "smoothMarker",
+    }
+    effective_styles: set[str] = set()
+    series_nodes = plot.findall("c:ser", C_NS)
+    if len(series_nodes) != len(visual_styles):
+        raise _UnsupportedChart("unsupported-chart-scatter-style")
+    for series, visual_style in zip(series_nodes, visual_styles):
+        line_node = series.find("c:spPr/a:ln", C_NS)
+        has_line = plot_has_line if line_node is None else (
+            visual_style.stroke is not None
+            and visual_style.stroke_opacity > 0
+        )
+        markers = series.findall("c:marker", C_NS)
+        if len(markers) != 1:
+            raise _UnsupportedChart("unsupported-chart-scatter-style")
+        marker = markers[0]
+        symbol = marker.find("c:symbol", C_NS) if marker is not None else None
+        if (
+            marker is None
+            or symbol is None
+            or set(symbol.attrib) != {"val"}
+            or list(symbol)
+        ):
+            raise _UnsupportedChart("unsupported-chart-scatter-style")
+        symbol_value = _element_val(symbol)
+        if symbol_value not in {"circle", "none"}:
+            raise _UnsupportedChart("unsupported-chart-scatter-style")
+        has_marker = symbol_value == "circle"
+
+        smooth_nodes = series.findall("c:smooth", C_NS)
+        if len(smooth_nodes) > 1:
+            raise _UnsupportedChart("unsupported-chart-scatter-style")
+        smooth = smooth_nodes[0] if smooth_nodes else None
+        is_smooth = plot_is_smooth
+        if smooth is not None:
+            if not set(smooth.attrib).issubset({"val"}) or list(smooth):
+                raise _UnsupportedChart("unsupported-chart-scatter-style")
+            raw_smooth = smooth.attrib.get("val")
+            key = raw_smooth.strip().lower() if raw_smooth is not None else "true"
+            if key in {"1", "on", "true"}:
+                is_smooth = True
+            elif key in {"0", "false", "off"}:
+                is_smooth = False
+            else:
+                raise _UnsupportedChart("unsupported-chart-scatter-style")
+        if is_smooth and not has_line:
+            raise _UnsupportedChart("unsupported-chart-scatter-style")
+
+        effective_style = style_by_state.get((has_line, has_marker, is_smooth))
+        if effective_style is None:
+            raise _UnsupportedChart("unsupported-chart-scatter-style")
+        effective_styles.add(effective_style)
+
+    if len(effective_styles) != 1:
+        raise _UnsupportedChart("unsupported-chart-scatter-style")
+    return effective_styles.pop()
+
+
+def _bounded_plot_integer(
+    plot: ET.Element,
+    name: str,
+    *,
+    minimum: int,
+    maximum: int,
+    status: str,
+) -> int | None:
+    nodes = plot.findall(f"c:{name}", C_NS)
+    if len(nodes) > 1:
+        raise _UnsupportedChart(status)
+    if not nodes:
+        return None
+    node = nodes[0]
+    raw_value = node.attrib.get("val")
+    if (
+        set(node.attrib) != {"val"}
+        or list(node)
+        or raw_value is None
+        or re.fullmatch(r"-?[0-9]+", raw_value) is None
+    ):
+        raise _UnsupportedChart(status)
+    value = int(raw_value)
+    if not minimum <= value <= maximum:
+        raise _UnsupportedChart(status)
+    return value
+
+
+def _validate_chart_semantics(
+    payload: dict[str, Any],
+    plot_area: ET.Element,
+    plot: ET.Element,
+    *,
+    palette: ColorPalette | None = None,
+    validate_axes: bool = True,
+) -> list[SeriesVisualStyle]:
+    """Reject valid chart features the compact marker cannot reproduce."""

@@ -1,0 +1,129 @@
+      --number-format string        数字格式，如 General/@/#,##0/0%/yyyy/m/d
+```
+
+**特性说明**：
+- 每个样式维度提供两种写法，二选一：`--xxx`（单值刷整个 range，CLI 本地展开为二维数组）vs `--xxx-json`（逐单元格指定，维度需与 `--range` 完全一致）
+- 至少需传入一个样式参数。单次调用建议：行数 ≤ 1000，单元格总数 ≤ 5000
+- 枚举值按驼峰书写：`autoWrap`、`bold`、`normal`、`center` 等
+
+### 批量设置单元格样式
+```
+Usage:
+  dws sheet range batch-set-style [flags]
+Example:
+  dws sheet range batch-set-style --node <NODE_ID> --batch ./styles.json
+  dws sheet range batch-set-style --node <NODE_ID> --batch ./styles.json --continue-on-error
+Flags:
+      --node string               表格文档 ID 或 URL (必填)
+      --batch string              批次配置 JSON 文件路径 (必填)
+      --continue-on-error         遇到失败时继续执行后续条目（默认遇错即停）
+```
+
+配置文件格式（JSON 数组，每个元素一条批次项）：
+```json
+[
+  {
+    "sheetId": "Sheet1",
+    "range":   "A1:B3",
+    "bgColor":      "#FFF2CC",
+    "fontSize":     12,
+    "hAlign":       "center",
+    "vAlign":       "middle",
+    "fontColor":    "#333333",
+    "fontWeight":   "bold",
+    "wordWrap":     "autoWrap",
+    "numberFormat": "General"
+  },
+  {
+    "sheetId": "Sheet1",
+    "range":   "C1:C5",
+    "bgColorsJson": "[[\"#FF0000\"],[\"#00FF00\"],[\"#0000FF\"],[\"#FFFF00\"],[\"#FF00FF\"]]"
+  }
+]
+```
+
+**特性说明**：
+- CLI 侧顺序循环逐条调用 `update_range`（非服务端批量），运行时输出 `[N/M]` 进度
+- 每条记录执行与 `set-style` 一致的校验：至少一项样式字段 + rows ≤ 1000 + rows×cols ≤ 30000 + 枚举合法
+- 默认遇错即停（返回非 0），`--continue-on-error` 时所有条目跑完再返回首个错误
+
+### 在工作表中搜索单元格内容
+```
+Usage:
+  dws sheet find [flags]
+Example:
+  # 基本搜索
+  dws sheet find --node <NODE_ID> --sheet-id <SHEET_ID> --find "销售额"
+
+  # 在指定范围内搜索
+  dws sheet find --node <NODE_ID> --sheet-id <SHEET_ID> --find "合计" --range "A1:D100"
+
+  # 正则表达式搜索（不区分大小写）
+  dws sheet find --node <NODE_ID> --sheet-id <SHEET_ID> --find "^total" --use-regexp --match-case=false
+
+  # 精确匹配整个单元格内容
+  dws sheet find --node <NODE_ID> --sheet-id <SHEET_ID> --find "完成" --match-entire-cell
+
+  # 搜索公式文本
+  dws sheet find --node <NODE_ID> --sheet-id <SHEET_ID> --find "SUM" --match-formula
+Flags:
+      --node string         表格文档 ID 或 URL (必填)
+      --sheet-id string     工作表 ID 或名称 (必填)
+      --find string         搜索文本 (必填)
+      --range string        搜索范围，A1 表示法 (如 A1:D10)
+      --match-case          区分大小写 (默认 true)
+      --match-entire-cell   精确匹配整个单元格内容
+      --use-regexp          启用正则表达式搜索
+      --match-formula       搜索公式文本而非显示值
+      --include-hidden      包含隐藏单元格
+```
+
+### 在工作表末尾追加数据
+```
+Usage:
+  dws sheet append [flags]
+Example:
+  dws sheet append --node <NODE_ID> --sheet-id <SHEET_ID> --values '[["张三","销售部",50000]]'
+  dws sheet append --node <NODE_ID> --sheet-id "Sheet1" \
+    --values '[["李四","市场部",38000],["王五","销售部",62000]]'
+Flags:
+      --node string       表格文档 ID 或 URL (必填)
+      --sheet-id string   工作表 ID 或名称 (必填)
+      --values string     追加数据，二维 JSON 数组 (必填)
+```
+
+`--values` 为二维 JSON 数组，外层每个元素代表一行，内层每个元素代表一个单元格值。
+追加的数据列数应与工作表已有数据的列数保持一致。
+
+### 将 CSV 数据写入指定位置
+```
+Usage:
+  dws sheet csv-put [flags]
+Example:
+  dws sheet csv-put --node <NODE_ID> --sheet-id <SHEET_ID> --start-cell A1 \
+    --csv 'name,score\nAlice,95\nBob,87'
+
+  dws sheet csv-put --node <NODE_ID> --sheet-id <SHEET_ID> --start-cell B2 \
+    --csv @data.csv --allow-overwrite
+
+  cat data.csv | dws sheet csv-put --node <NODE_ID> --sheet-id <SHEET_ID> \
+    --start-cell A1 --csv -
+
+  dws sheet csv-put --node <NODE_ID> --sheet-id <SHEET_ID> --start-cell A1 \
+    --csv @data.csv --dry-run
+Flags:
+      --node string         表格文档 ID 或 URL (必填)
+      --sheet-id string     工作表 ID 或名称 (必填)
+      --csv string          CSV 文本、@文件路径 或 - 表示 stdin (必填)
+      --start-cell string   起始单元格，A1 表示法 (必填)
+      --allow-overwrite     允许覆盖已有数据 (默认 false)
+```
+
+将 RFC 4180 格式的 CSV 文本写入指定工作表的指定单元格位置。
+- 只写纯值，不支持公式/样式/批注。`=` 开头的内容当文本处理，不会被解析为公式
+- 数字/日期/百分数由表格引擎自动识别类型（如 `95` 存为数字，`2025-03-01` 存为日期）
+- 自动扩容行列：CSV 数据超出当前工作表维度时自动追加行/列
+- 目标区域如含合并单元格，合并将被打散，值正常写入
+- `--allow-overwrite` 默认 false，目标区域有数据时需显式传 `--allow-overwrite` 才能覆盖
+- `--csv` 支持三种输入：直接传文本、`@filepath` 从本地文件读取、`-` 从 stdin 管道读取
+- CSV 文本上限 2M 字符，单元格总数上限 30000

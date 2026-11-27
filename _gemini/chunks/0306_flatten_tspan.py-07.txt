@@ -1,0 +1,110 @@
+                if current_line_tspans or _has_non_xml_whitespace(
+                    current_line_lead_text
+                ):
+                    ne = _create_text_element_from_line(
+                        text_el, current_line_lead_text, current_line_tspans, cur_x, cur_y
+                    )
+                    new_texts.append(ne)
+                    current_line_tspans = []
+                    current_line_lead_text = None
+                
+                # Update position
+                nx, ny = compute_line_positions(text_el, child, cur_x, cur_y)
+                cur_x, cur_y = nx, ny
+            
+            # Keep raw XML whitespace and tails until the shared downstream
+            # text normalizer sees the whole line. A whitespace-only run can
+            # still be the visible boundary between two formatted runs.
+            if content or child.tail or child.get("dx") is not None:
+                current_line_tspans.append(child)
+        
+        # Process the last line
+        if current_line_tspans or _has_non_xml_whitespace(
+            current_line_lead_text
+        ):
+            ne = _create_text_element_from_line(
+                text_el, current_line_lead_text, current_line_tspans, cur_x, cur_y
+            )
+            new_texts.append(ne)
+
+        if new_texts:
+            # Replace original <text> with the list of new <text> nodes
+            try:
+                idx = list(parent).index(text_el)
+            except ValueError:
+                idx = None
+
+            # Insert in place to preserve drawing order
+            for i, ne in enumerate(new_texts):
+                if idx is not None:
+                    parent.insert(idx + i, ne)
+                else:
+                    parent.append(ne)
+
+            # Remove the original <text>
+            parent.remove(text_el)
+            changed = True
+
+    return changed
+
+
+def _has_tspan_children(elem: ET.Element) -> bool:
+    """Return True when one inline subtree has nested runs or hyperlinks."""
+    return any(
+        c.tag in {
+            f"{{{SVG_NS}}}a",
+            f"{{{SVG_NS}}}tspan",
+        }
+        for c in list(elem)
+    )
+
+
+def _declares_baseline_shift(elem: ET.Element) -> bool:
+    """Keep tspan ownership for the project-only baseline-shift contract."""
+    return (
+        elem.get("baseline-shift") is not None
+        or "baseline-shift" in parse_style(elem.get("style"))
+    )
+
+
+def _copy_inline_element(src: ET.Element, strip_line_attrs: bool) -> ET.Element:
+    """Deep-copy one supported inline ``tspan`` or hyperlink subtree."""
+    local = src.tag.rsplit("}", 1)[-1]
+    if local not in {"a", "tspan"}:
+        raise ValueError(f"Unsupported inline text child <{local}>")
+    new = ET.Element(f"{{{SVG_NS}}}{local}")
+    consumed_dx = (
+        local == "tspan"
+        and strip_line_attrs
+        and _positional_tspan_attribute(src) is not None
+    )
+    for k, v in src.attrib.items():
+        if strip_line_attrs and k in ("x", "y", "dy"):
+            continue
+        if k == "dx" and consumed_dx:
+            continue
+        new.set(k, v)
+    new.text = src.text
+    for child in list(src):
+        if child.tag in {
+            f"{{{SVG_NS}}}a",
+            f"{{{SVG_NS}}}tspan",
+        }:
+            new.append(_copy_inline_element(child, strip_line_attrs=False))
+    new.tail = src.tail
+    return new
+
+
+def _copy_inline_tspan(src: ET.Element, strip_line_attrs: bool) -> ET.Element:
+    """Deep-copy a tspan as an inline run, preserving nested tspan structure, head text, and tail text.
+
+    When strip_line_attrs is True, x/y/dy are dropped because the enclosing
+    <text> owns the resolved line position. Drop dx only from a positioned
+    line starter, where compute_line_positions already consumed it; preserve
+    dx on later inline runs.
+    Nested tspans are copied recursively without stripping (they are already inline-only).
+    """
+    return _copy_inline_element(src, strip_line_attrs)
+
+
+def _create_text_element_from_line(

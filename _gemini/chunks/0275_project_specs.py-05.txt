@@ -1,0 +1,104 @@
+def _load_markdown_schema(schema_path: Path) -> dict[str, object]:
+    """Load and sanity-check one versioned Markdown schema."""
+    with schema_path.open("r", encoding="utf-8") as stream:
+        schema = json.load(stream)
+    contract = schema.get("x-markdown")
+    if not isinstance(contract, dict):
+        raise ValueError(f"Schema is missing x-markdown: {schema_path}")
+    if contract.get("version") != 1:
+        raise ValueError(f"Unsupported Markdown schema version: {schema_path}")
+    return schema
+
+
+def _catalog_values(
+    schema_path: Path,
+    value_catalog: Mapping[str, object],
+) -> tuple[Path, dict[str, object]]:
+    """Resolve a schema-declared JSON catalog and object pointer."""
+    relative_path = value_catalog.get("path")
+    pointer = value_catalog.get("pointer", [])
+    if not isinstance(relative_path, str) or not isinstance(pointer, list):
+        raise ValueError("value_catalog requires string path and list pointer")
+
+    catalog_path = (schema_path.parent / relative_path).resolve()
+    with catalog_path.open("r", encoding="utf-8") as stream:
+        node: object = json.load(stream)
+    for pointer_part in pointer:
+        if not isinstance(node, dict):
+            raise ValueError(f"pointer enters a non-object at '{pointer_part}'")
+        node = node[str(pointer_part)]
+    if not isinstance(node, dict):
+        raise ValueError("catalog pointer does not resolve to an object")
+    return catalog_path, node
+
+
+def _validate_catalog_values(
+    *,
+    markdown_name: str,
+    section_id: str,
+    fields: Mapping[str, object],
+    schema_path: Path,
+    value_catalog: Mapping[str, object],
+) -> list[str]:
+    """Validate catalog membership and any schema-declared asset path."""
+    errors: list[str] = []
+    relative_path = value_catalog.get("path")
+    try:
+        catalog_path, catalog = _catalog_values(schema_path, value_catalog)
+    except (OSError, KeyError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        return [
+            f"{markdown_name} schema: cannot read value catalog "
+            f"'{relative_path}': {exc}"
+        ]
+
+    asset_pattern = value_catalog.get("asset_path_pattern")
+    for field_value in fields.values():
+        value = _normalize_schema_value(str(field_value))
+        if value not in catalog:
+            errors.append(
+                f"{markdown_name} schema: section '{section_id}' value '{value}' "
+                f"is absent from {catalog_path.name}"
+            )
+            continue
+        if not isinstance(asset_pattern, str):
+            continue
+        try:
+            relative_asset_path = asset_pattern.format(key=value, value=value)
+        except (KeyError, ValueError) as exc:
+            errors.append(
+                f"{markdown_name} schema: invalid asset_path_pattern "
+                f"'{asset_pattern}': {exc}"
+            )
+            break
+        asset_path = (schema_path.parent / relative_asset_path).resolve()
+        if asset_path.suffix.casefold() != ".svg" or not asset_path.is_file():
+            errors.append(
+                f"{markdown_name} schema: section '{section_id}' value '{value}' "
+                f"does not resolve to an SVG asset at {asset_path}"
+            )
+    return errors
+
+
+def _validate_section(
+    *,
+    markdown_name: str,
+    section_id: str,
+    section: Mapping[str, object],
+    definition: Mapping[str, object],
+    schema_path: Path,
+) -> list[str]:
+    """Apply one section definition to one matched Markdown section."""
+    errors: list[str] = []
+    fields = section["fields"]
+    assert isinstance(fields, dict)
+
+    required_fields = definition.get("required_fields", [])
+    allow_empty = {
+        str(field_name)
+        for field_name in definition.get("allow_empty_fields", [])
+    }
+    if isinstance(required_fields, list):
+        for field_name in required_fields:
+            field_key = str(field_name)
+            if field_key not in fields:
+                errors.append(

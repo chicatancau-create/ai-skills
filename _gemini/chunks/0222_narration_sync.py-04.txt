@@ -1,0 +1,95 @@
+        raw.get("narration_padding"),
+        'Narration timing plan field "narration_padding"',
+    )
+    narration_start_floor = (
+        _finite_non_negative_seconds(
+            raw["narration_start_floor"],
+            'Narration timing plan field "narration_start_floor"',
+        )
+        if "narration_start_floor" in raw
+        else None
+    )
+    slides = raw.get("slides")
+    if not isinstance(slides, dict):
+        raise ValueError('Narration timing plan field "slides" must be an object')
+
+    result: dict[str, list[TimingPlanEntry]] = {}
+    for slide_name, slide_raw in slides.items():
+        if not isinstance(slide_name, str) or not slide_name:
+            raise ValueError("Narration timing plan slide names must be non-empty strings")
+        if not isinstance(slide_raw, dict) or set(slide_raw) != {"groups"}:
+            raise ValueError(
+                f'Narration timing plan slide "{slide_name}" must contain only "groups"'
+            )
+        groups = slide_raw["groups"]
+        if not isinstance(groups, list):
+            raise ValueError(
+                f'Narration timing plan slide "{slide_name}" groups must be a list'
+            )
+
+        entries: list[TimingPlanEntry] = []
+        seen_groups: set[str] = set()
+        for position, entry_raw in enumerate(groups, 1):
+            if not isinstance(entry_raw, dict):
+                raise ValueError(
+                    f'Narration timing plan "{slide_name}" group #{position} '
+                    "must be an object"
+                )
+            unknown_fields = set(entry_raw) - {"id", "cue"}
+            if unknown_fields:
+                raise ValueError(
+                    f'Narration timing plan "{slide_name}" group #{position} '
+                    f"has unknown field(s): {', '.join(sorted(unknown_fields))}"
+                )
+            group_id = entry_raw.get("id")
+            if not isinstance(group_id, str) or not group_id.strip():
+                raise ValueError(
+                    f'Narration timing plan "{slide_name}" group #{position} '
+                    'field "id" must be a non-empty string'
+                )
+            if group_id in seen_groups:
+                raise ValueError(
+                    f'Narration timing plan "{slide_name}" repeats group "{group_id}"'
+                )
+            cue_number = entry_raw.get("cue")
+            if cue_number is not None and (
+                isinstance(cue_number, bool)
+                or not isinstance(cue_number, int)
+                or cue_number <= 0
+            ):
+                raise ValueError(
+                    f'Narration timing plan "{slide_name}/{group_id}" cue '
+                    "must be a positive integer or null"
+                )
+            entries.append(TimingPlanEntry(group_id, cue_number))
+            seen_groups.add(group_id)
+        result[slide_name] = entries
+    return srt_sha256, narration_padding, narration_start_floor, result
+
+
+def _load_canonical_animation_config(path: Path) -> dict[str, Any]:
+    """Load and field-validate the read-only canonical animation sidecar."""
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"Canonical animation config is missing: {path}. "
+            "Complete the customize-animations stage first; narration sync "
+            "does not create or replace animations.json."
+        )
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError(f"Canonical animation config must be a JSON object: {path}")
+    if raw.get("version", 1) != 1:
+        raise ValueError(
+            f"Unsupported canonical animation config version: {raw.get('version')!r}"
+        )
+    errors = list(
+        dict.fromkeys(
+            [
+                *validate_transition_config(raw),
+                *validate_animation_config_errors(raw),
+            ]
+        )
+    )
+    if errors:
+        details = "\n".join(f"- {error}" for error in errors)
+        raise ValueError(

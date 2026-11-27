@@ -1,0 +1,71 @@
+        self.import_source(mutate=lambda entries: _show_fixture(entries, action=True))
+        path, root = self.page()
+        for parent in root.iter():
+            for child in list(parent):
+                if child.get('data-pptx-source-ref') == 'slide:2':
+                    parent.remove(child)
+        path.write_bytes(_xml(root))
+        self.plan([1])
+        self.export()
+
+    def test_b6_native_chart_replacement_prunes_old_payloads(self) -> None:
+        self.import_source(chart=True)
+        path, root = self.page()
+        marker = next(node for node in root.iter() if node.get('data-pptx-replace-with') == 'chart')
+        metadata = marker.find('s:metadata[@type="application/json"]', NS)
+        payload = json.loads(metadata.text)
+        payload['series'][0]['values'] = [70, 30]
+        metadata.text = json.dumps(payload)
+        path.write_bytes(_xml(root))
+        self.plan([1])
+        with zipfile.ZipFile(self.export(native=True)) as archive:
+            charts = [name for name in archive.namelist() if name.startswith('ppt/charts/')
+                      and name.endswith('.xml') and '/_rels/' not in name]
+            self.assertEqual(len(charts), 1, charts)
+            self.assertIn(b'70', archive.read(charts[0]))
+            books = [name for name in archive.namelist() if name.startswith('ppt/embeddings/')]
+            self.assertEqual(len(books), 1, books)
+
+    def test_b6_delivery_reports_xml_unused_relationships(self) -> None:
+        self.import_source(chart=True)
+        valid = audit_pptx_delivery(self.source)
+        self.assertFalse(any(item['code'] == 'unreferenced_slide_relationship' for item in valid['errors']))
+        _rewrite_package(self.source, lambda entries: _add_relationship(
+            entries, 'ppt/slides/slide1.xml', 'rIdUnused', 'chart', '../charts/chart1.xml',
+        ))
+        report = audit_pptx_delivery(self.source)
+        issues = [item for item in report['advisories'] if item['code'] == 'unreferenced_slide_relationship']
+        self.assertEqual(len(issues), 1, report)
+        self.assertIn('rIdUnused', issues[0]['message'])
+
+    def test_b6_deleted_graphic_frame_prunes_diagram_without_page_plan(self) -> None:
+        self.import_source(mutate=_diagram_fixture)
+        path, root = self.page()
+        for parent in root.iter():
+            for child in list(parent):
+                if child.get('data-pptx-source-ref') == 'slide:90':
+                    parent.remove(child)
+        path.write_bytes(_xml(root))
+        with zipfile.ZipFile(self.export()) as archive:
+            self.assertFalse(any(name.startswith('ppt/diagrams/') for name in archive.namelist()))
+            self.assertNotIn(b'rIdDiagram', archive.read('ppt/slides/_rels/slide1.xml.rels'))
+
+    def test_b6_diagram_drawing_relationship_ids_are_part_local(self) -> None:
+        def modern_diagram(entries):
+            _diagram_fixture(entries)
+            entries['ppt/diagrams/_rels/data1.xml.rels'] = _xml(ET.Element('{%s}Relationships' % NS['rel']))
+            entries['ppt/diagrams/modern.xml'] = entries['ppt/diagrams/drawing1.xml']
+            _add_relationship(entries, 'ppt/diagrams/data1.xml', 'rIdDrawing', 'diagramDrawing', 'modern.xml')
+        self.import_source(mutate=modern_diagram)
+        report = audit_pptx_delivery(self.source)
+        unused = [item for item in report['advisories'] if item['code'] == 'unreferenced_slide_relationship']
+        self.assertEqual(len(unused), 1, report)
+        self.assertIn('rIdDrawing', unused[0]['message'])
+        self.edit_text()
+        output = self.export()
+        with zipfile.ZipFile(output) as archive:
+            self.assertIn('ppt/diagrams/modern.xml', archive.namelist())
+            self.assertNotIn('ppt/diagrams/drawing1.xml', archive.namelist())
+        self.assertFalse(any(item['code'] == 'unreferenced_slide_relationship'
+                             for item in audit_pptx_delivery(output)['errors']))
+

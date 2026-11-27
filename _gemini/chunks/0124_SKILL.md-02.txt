@@ -1,0 +1,54 @@
+4. **Match the envelope level.** If the app writes `{ schemaVersion, savedAt, data }`, the value must live under `.data`. A probe (or a seed) that reads/writes the top level silently gets `null` — and the resulting report reads "the value persisted, location unknown" instead of a bug.
+
+```js
+localStorage.setItem(`${base}:${scope}`,
+  JSON.stringify({ schemaVersion: 3, savedAt: new Date().toISOString(), data: payload }))
+```
+
+Hard-code `schemaVersion` next to the app's own constant only if the tool asserts the app still exports that version; otherwise read it from the app module. After writing, reload the page (state is read at mount, not reactively).
+
+## Step 3 — Cross-reference fields must hold real ids
+
+Any field the UI resolves through a catalogue (`titles[refId] ?? refId`) will render the raw id when the id is synthetic — the measurement then captures the seed's shape, not the product's. Fetch the live catalogue and map `contentId || id || lessonId`, then:
+
+- **filter to non-empty strings and assert the values themselves.** `refs.length >= 3` has passed with `[null, null, null]`, which keyed a map on the string `"null"` and produced 0 rows;
+- if fewer real ids than records are available, fall back to synthetic ids **and record the fallback in the report** (`usedRealRefs: false`).
+
+## Step 4 — Assert the seed rendered, not that it was written
+
+Per measured page/viewport, at minimum:
+
+- landed on the intended page (page marker true);
+- **no empty-state element** (`.empty-state` etc. absent);
+- **row / card count > 0** — this is the gate that catches silent seed failure;
+- detail panel / expanded branch actually opened, if that's the state under measurement;
+- a shape-sanity judge, because "zero horizontal overflow" is also achievable by crushing a text column to one character per line: measure the key content column and require e.g. `width >= 120px` and `>= 3 chars/line` (CJK ≈ 1em).
+
+## Step 5 — Clean up what you wrote
+
+In `finally`, recompute the same scope and delete exactly the keys you wrote (derive both lists from one object so they can't diverge), and assert the removed count equals the written count:
+
+```js
+for (const base of Object.keys(payload)) if (localStorage.getItem(`${base}:${scope}`) !== null) localStorage.removeItem(`${base}:${scope}`)
+```
+
+Browser profiles and user-data dirs are commonly reused across sections of a run; a leftover key silently changes what the next section measures. Deleting by your own key list only — never by scanning and clearing `localStorage` — keeps real state intact.
+
+## Step 6 — Disclose it in the report
+
+Put a `seedMethod` string next to the numbers, and the limitation next to any claim that consumes them. Working wording, adapted per project:
+
+> Seed method: in-page `/api/auth/me` → write N account-scoped localStorage keys in the app's own envelope → full reload. Not entered through the UI; this is not a user-reachable flow.
+> This measures the has-data shape only; it does not claim the app produced this data, and it must not be cited as an end-to-end chain.
+
+Do the seeding against an isolated instance, isolated data dir, and a synthetic account. Never write into a real runtime data dir or a profile the user signs in with.
+
+## Failure modes seen in practice
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| `Failed to parse URL from /api/...` | relative fetch on `about:blank` | navigate to origin first; absolute URL |
+| Probe says value is `null` though the app persisted it | read top level instead of `.data` | match the envelope level |
+| Page not empty, but 0 rows, and "everything is fine" flags green | ids silently `null`; map keyed on `"null"` | assert row count > 0 and the id values themselves |
+| Overflow 0 but the column is unreadable | judge only checked overflow | add a key-column width / chars-per-line gate |
+| A later section measures strange state | seeded keys left behind | delete-in-finally + assert removed count |

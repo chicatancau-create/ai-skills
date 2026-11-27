@@ -1,0 +1,104 @@
+                        f'animations.json Morph endpoint {slide_name}/{group_id} '
+                        f'is a root primitive ({primitive}), not a direct-root '
+                        '<g>; wrap it in a group (drop a static role marker) '
+                        'before pairing'
+                    )
+                else:
+                    warnings.append(
+                        'animations.json Morph references missing or ambiguous group: '
+                        f'{slide_name}/{group_id}'
+                    )
+            elif target.hidden_reason:
+                warnings.append(
+                    f'animations.json Morph endpoint {slide_name}/{group_id} '
+                    f'is hidden, not exported ({target.hidden_reason})'
+                )
+            elif target.structurally_static:
+                warnings.append(
+                    'animations.json Morph references structural group: '
+                    f'{slide_name}/{group_id}'
+                )
+            elif (
+                target.placeholder is not None
+                and target.on_structured_page
+                and _lock_structure_mode(project_path) != 'flat'
+            ):
+                warnings.append(
+                    f'animations.json Morph endpoint {slide_name}/{group_id} '
+                    f'is the placeholder slot {target.placeholder!r}: structured '
+                    'export rewrites a slot into a layout placeholder, so it '
+                    'cannot carry a Morph name; pair a Slide-local group instead'
+                )
+    return list(dict.fromkeys(warnings))
+
+
+def _lock_structure_mode(project_path: Path) -> str | None:
+    """Return ``spec_lock.md``'s ``pptx_structure.mode``, or None without one."""
+    lock_path = project_path / 'spec_lock.md'
+    try:
+        text = lock_path.read_text(encoding='utf-8-sig')
+    except OSError:
+        return None
+    section = re.search(
+        r'^##[ \t]+pptx_structure[ \t]*$(?P<body>.*?)(?=^##[ \t]|\Z)',
+        text,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    if section is None:
+        return None
+    mode = re.search(
+        r'^-[ \t]+mode[ \t]*:[ \t]*([A-Za-z_-]+)',
+        section.group('body'),
+        flags=re.MULTILINE,
+    )
+    return mode.group(1).lower() if mode else None
+
+
+def build_scaffold(project_path: Path) -> dict[str, Any]:
+    """Build an editable animation override scaffold from current SVGs.
+
+    Chrome groups are omitted — layer/slide-number placeholder semantics are
+    authoritative, followed by an explicit structural role. ``is_chrome_id``
+    remains only for marker-free legacy SVGs. Listing static page framing in
+    the scaffold would be pure noise. A ``defaults`` stub is emitted up front
+    to remind the editor that deck-wide overrides exist and most pages should
+    inherit them.
+    """
+    transition_defaults = {
+        'effect': 'fade',
+        'duration': 0.4,
+        'sound': None,
+    }
+    animation_defaults = {
+        'effect': 'none',
+        'duration': 0.4,
+        'stagger': 0.5,
+        'trigger': 'after-previous',
+    }
+    targets_by_slide, _anonymous = scan_project_targets(project_path)
+    slides: dict[str, Any] = {}
+    for slide_name, targets in targets_by_slide.items():
+        _require_unique_target_ids(slide_name, targets)
+        groups: dict[str, Any] = {}
+        for target in targets:
+            if target.chrome:
+                continue
+            groups[target.group_id] = {}
+        slides[slide_name] = {
+            'transition': {
+                'effect': transition_defaults['effect'],
+                'duration': transition_defaults['duration'],
+            },
+            'animation': dict(animation_defaults),
+            'groups': groups,
+        }
+    return {
+        'version': 1,
+        'defaults': {
+            'transition': transition_defaults,
+            'animation': animation_defaults,
+        },
+        'slides': slides,
+    }
+
+

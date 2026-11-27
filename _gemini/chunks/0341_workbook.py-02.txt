@@ -1,0 +1,86 @@
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1"
+              Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"
+              Target="worksheets/sheet1.xml"/>
+<Relationship Id="rId2"
+              Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles"
+              Target="styles.xml"/>
+</Relationships>''',
+        "xl/worksheets/sheet1.xml": f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+           xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<sheetData>{''.join(sheet_rows)}</sheetData>
+</worksheet>''',
+        "xl/styles.xml": '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>
+<fills count="1"><fill><patternFill patternType="none"/></fill></fills>
+<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+<cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>
+</styleSheet>''',
+    }
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+        for name, data in entries.items():
+            zout.writestr(name, data.encode("utf-8"))
+    return buffer.getvalue()
+
+
+def _minimal_category_chart_workbook(chart_data: dict[str, Any]) -> bytes:
+    if chart_data.get("kind") == "combo" and chart_data.get("independent_categories"):
+        plots = chart_data["plots"]
+        column_count = max(
+            int(plot["start_column"]) + len(plot["series"]) - 1
+            for plot in plots
+        )
+        rows: list[list[Any]] = [[None] * column_count]
+        for plot in plots:
+            category_column = int(plot["category_column"]) - 1
+            start_column = int(plot["start_column"]) - 1
+            for offset, series in enumerate(plot["series"]):
+                rows[0][start_column + offset] = series["name"]
+            for point_index, category in enumerate(plot["categories"], start=1):
+                while len(rows) <= point_index:
+                    rows.append([None] * column_count)
+                rows[point_index][category_column] = category
+                for offset, series in enumerate(plot["series"]):
+                    rows[point_index][start_column + offset] = (
+                        series["values"][point_index - 1]
+                    )
+        return _minimal_workbook(rows)
+
+    categories = chart_data["categories"]
+    series = chart_data["series"]
+    rows: list[list[Any]] = [[None] + [item["name"] for item in series]]
+    for row_index, category in enumerate(categories):
+        rows.append([category] + [item["values"][row_index] for item in series])
+    return _minimal_workbook(rows)
+
+
+def _minimal_xy_chart_workbook(chart_data: dict[str, Any]) -> bytes:
+    series = chart_data["series"]
+    is_bubble = chart_data["type"] == "bubble"
+    rows: list[list[Any]] = [[]]
+    for item in series:
+        rows[0].extend([f"{item['name']} X", item["name"]])
+        if is_bubble:
+            rows[0].append(f"{item['name']} Size")
+
+    max_points = max(len(item["x"]) for item in series)
+    for point_idx in range(max_points):
+        row: list[Any] = []
+        for item in series:
+            if point_idx < len(item["x"]):
+                row.extend([item["x"][point_idx], item["y"][point_idx]])
+                if is_bubble:
+                    row.append(item["sizes"][point_idx])
+            else:
+                row.extend(["", ""])
+                if is_bubble:
+                    row.append("")
+        rows.append(row)
+    return _minimal_workbook(rows)
+
+

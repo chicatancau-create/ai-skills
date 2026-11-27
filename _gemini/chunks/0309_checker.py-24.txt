@@ -1,0 +1,104 @@
+                parent_by_id,
+                font_sizes,
+                letter_spacings,
+                include_headroom=True,
+            )
+            _label, frame, _error, _inferred = self._roundtrip_text_frame(
+                text_element,
+                parent_by_id,
+            )
+            if estimated is None or frame is None:
+                continue
+            metrics = self._bounds_overflow_metrics(estimated, frame)
+            if metrics is not None and metrics[1] > 0:
+                overflow[source_ref] = max(
+                    overflow.get(source_ref, 0.0),
+                    metrics[1],
+                )
+        return overflow
+
+    @classmethod
+    def _roundtrip_text_frame(
+        cls,
+        text_element: ET.Element,
+        parent_by_id: Dict[int, ET.Element],
+    ) -> Tuple[
+        str | None,
+        Tuple[float, float, float, float] | None,
+        str | None,
+        bool,
+    ]:
+        """Resolve an explicit logical frame or the nearest rect sibling."""
+        current: ET.Element | None = text_element
+        while current is not None:
+            raw_frame = current.get('data-pptx-frame')
+            if raw_frame is not None:
+                label = f'{_element_label(current)} data-pptx-frame'
+                try:
+                    frame = _parse_positive_bounds(raw_frame)
+                except ValueError as exc:
+                    return label, None, f'{label} {exc}', False
+                transformed = cls._transformed_rect_bounds(
+                    current,
+                    frame,
+                    parent_by_id,
+                )
+                if transformed is None:
+                    return (
+                        label,
+                        None,
+                        f'{label} has an unresolved transform',
+                        False,
+                    )
+                return label, transformed, None, False
+            current = parent_by_id.get(id(current))
+
+        if _parse_project_geometry_length is None:
+            return None, None, 'the SVG length parser is unavailable', False
+        current = text_element
+        rect_errors: List[str] = []
+        while current is not None:
+            parent = parent_by_id.get(id(current))
+            if parent is None:
+                break
+            siblings = list(parent)
+            try:
+                current_index = siblings.index(current)
+            except ValueError:
+                current_index = 0
+            rects = sorted(
+                (
+                    (abs(index - current_index), index, sibling)
+                    for index, sibling in enumerate(siblings)
+                    if _local_name(sibling) == 'rect'
+                ),
+                key=lambda item: (item[0], item[1]),
+            )
+            for _distance, _index, rect in rects:
+                label = _element_label(rect)
+                try:
+                    x = _parse_project_geometry_length(
+                        rect.get('x') or '0',
+                        'x',
+                    )
+                    y = _parse_project_geometry_length(
+                        rect.get('y') or '0',
+                        'y',
+                    )
+                    width = _parse_project_geometry_length(
+                        rect.get('width'),
+                        'width',
+                    )
+                    height = _parse_project_geometry_length(
+                        rect.get('height'),
+                        'height',
+                    )
+                    if (
+                        not all(math.isfinite(value) for value in (x, y, width, height))
+                        or width <= 0
+                        or height <= 0
+                    ):
+                        raise ValueError('must use finite positive width and height')
+                except (TypeError, ValueError) as exc:
+                    rect_errors.append(f'{label} {exc}')
+                    continue

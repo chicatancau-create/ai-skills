@@ -1,0 +1,95 @@
+        "has_persisted_drawing": False,
+        "has_fallback_preview": shape_id in fallback_shape_ids,
+        "status": "diagram-read-error",
+        "warnings": [f"{type(error).__name__}:{error}"],
+    }
+
+
+def read_smartart_diagrams(
+    zf: zipfile.ZipFile,
+    slide_part: str,
+    slide_index: int,
+) -> list[dict[str, Any]]:
+    """Return SmartArt source facts for one slide part."""
+    slide_root = _read_xml(zf, slide_part)
+    relationship_error: str | None = None
+    try:
+        relationships = _slide_relationships(zf, _rels_name_for_part(slide_part))
+    except ET.ParseError:
+        relationships = {}
+        relationship_error = "invalid-slide-relationships"
+    fallback_shape_ids = _fallback_preview_shape_ids(slide_root)
+    diagrams: list[dict[str, Any]] = []
+
+    for order, container in enumerate(_diagram_containers(slide_root), start=1):
+        try:
+            diagram = _read_diagram_container(
+                zf,
+                container,
+                slide_root=slide_root,
+                slide_part=slide_part,
+                slide_index=slide_index,
+                order=order,
+                relationships=relationships,
+                relationship_error=relationship_error,
+                fallback_shape_ids=fallback_shape_ids,
+            )
+        except (OSError, RuntimeError, zipfile.BadZipFile, ET.ParseError, KeyError, ValueError) as exc:
+            diagram = _failed_diagram(
+                container,
+                slide_root=slide_root,
+                slide_index=slide_index,
+                order=order,
+                error=exc,
+                fallback_shape_ids=fallback_shape_ids,
+            )
+        diagrams.append(diagram)
+    return diagrams
+
+
+def smartart_to_markdown(diagram: dict[str, Any]) -> str:
+    """Render one extracted SmartArt diagram as hierarchical Markdown."""
+    name = str(diagram.get("shape_name") or diagram.get("diagram_id") or "SmartArt")
+    layout = diagram.get("layout") or {}
+    layout_name = str(layout.get("name") or "") if isinstance(layout, dict) else ""
+    heading = f"### SmartArt: {name}"
+    if layout_name and layout_name.lower() not in name.lower():
+        heading += f" — {layout_name}"
+    lines = [heading, ""]
+    nodes = diagram.get("nodes") or []
+    text_nodes = [node for node in nodes if str(node.get("text") or "").strip()]
+    if text_nodes:
+        nodes_by_id = {
+            str(node.get("id")): node
+            for node in nodes
+            if node.get("id") is not None
+        }
+        rendered_depths: dict[str, int] = {}
+
+        def rendered_depth(node: dict[str, Any]) -> int:
+            node_id = str(node.get("id") or "")
+            if node_id in rendered_depths:
+                return rendered_depths[node_id]
+            parent = nodes_by_id.get(str(node.get("parent_id") or ""))
+            if parent is None:
+                depth = 0
+            else:
+                depth = rendered_depth(parent)
+                if str(parent.get("text") or "").strip():
+                    depth += 1
+            rendered_depths[node_id] = depth
+            return depth
+
+        for node in text_nodes:
+            text = " / ".join(str(node.get("text") or "").splitlines()).strip()
+            indent = "  " * rendered_depth(node)
+            lines.append(f"{indent}- {text}")
+    elif nodes:
+        lines.append(f"> [SmartArt structure has {len(nodes)} node(s), but no text]")
+    else:
+        status = str(diagram.get("status") or "content-unavailable")
+        if diagram.get("text_extracted") and status == "ok":
+            lines.append("> [SmartArt data is readable but has no semantic nodes]")
+        else:
+            lines.append(f"> [SmartArt content unavailable: {status}]")
+    return "\n".join(lines).rstrip()

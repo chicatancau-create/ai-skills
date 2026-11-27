@@ -1,0 +1,107 @@
+    """Validate the complete source theme part stored by pptx_to_svg."""
+    if not isinstance(value, dict):
+        return None
+    if value.get('encoding') != 'base64':
+        raise ThemeColorError('Diagnostic source theme OOXML must use base64')
+    payload = value.get('payload')
+    expected_sha256 = value.get('sha256')
+    if not isinstance(payload, str) or not isinstance(expected_sha256, str):
+        raise ThemeColorError(
+            'Diagnostic source theme OOXML requires payload and sha256'
+        )
+    try:
+        raw = base64.b64decode(payload, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ThemeColorError(
+            'Diagnostic source theme OOXML payload is not canonical base64'
+        ) from exc
+    if hashlib.sha256(raw).hexdigest() != expected_sha256.strip().lower():
+        raise ThemeColorError(
+            'Diagnostic source theme OOXML sha256 does not match its payload'
+        )
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError as exc:
+        raise ThemeColorError(
+            f'Diagnostic source theme OOXML is malformed: {exc}'
+        ) from exc
+    dml_namespace = 'http://schemas.openxmlformats.org/drawingml/2006/main'
+    if root.tag != f'{{{dml_namespace}}}theme':
+        raise ThemeColorError(
+            'Diagnostic source theme OOXML root must be a:theme'
+        )
+    return raw
+
+
+@dataclass
+class _PostflightReceipt:
+    """Carry the compact export result printed after the audit is written."""
+
+    output_path: Path
+    report_path: Path
+    status: str
+    quality_gate: str
+    slide_count: int
+    warnings: tuple[str, ...]
+
+
+def _font_stack_is_generic_only(stack: str) -> bool:
+    """Return whether a CSS font stack contains no concrete family name."""
+    families = [
+        family.strip().strip('"\'').strip().lower()
+        for family in stack.split(',')
+        if family.strip().strip('"\'').strip()
+    ]
+    return bool(families) and all(
+        family in _CSS_GENERIC_FONT_FAMILIES
+        for family in families
+    )
+
+
+def _package_part_counts(pptx_path: Path) -> dict[str, object]:
+    """Count public and structural OOXML parts in a completed PPTX package."""
+    with zipfile.ZipFile(pptx_path) as archive:
+        bad_member = archive.testzip()
+        names = archive.namelist()
+
+    def count(pattern: str) -> int:
+        matcher = re.compile(pattern)
+        return sum(bool(matcher.fullmatch(name)) for name in names)
+
+    return {
+        'zip_integrity': 'passed' if bad_member is None else 'failed',
+        'corrupt_member': bad_member,
+        'slides': count(r'ppt/slides/slide\d+\.xml'),
+        'notes': count(r'ppt/notesSlides/notesSlide[^/]+\.xml'),
+        'masters': count(r'ppt/slideMasters/slideMaster\d+\.xml'),
+        'layouts': count(r'ppt/slideLayouts/slideLayout\d+\.xml'),
+    }
+
+
+def _source_resource_audit(svg_files: list[Path]) -> dict[str, object]:
+    """Collect unresolved tokens and portability-oriented source inventories."""
+    placeholder_re = re.compile(r'\{\{[^{}]+\}\}')
+    placeholders: list[dict[str, str]] = []
+    font_stacks: set[str] = set()
+    image_counts = {
+        'data_uri': 0,
+        'local': 0,
+        'external': 0,
+    }
+    external_images: list[dict[str, str]] = []
+    for svg_path in svg_files:
+        try:
+            content = svg_path.read_text(encoding='utf-8')
+            root = ET.fromstring(content)
+        except (OSError, ET.ParseError):
+            continue
+        for token in sorted(set(placeholder_re.findall(content))):
+            placeholders.append({'file': svg_path.name, 'token': token})
+        for element in root.iter():
+            font_family = element.get('font-family')
+            if font_family:
+                font_stacks.add(font_family.strip())
+            style = element.get('style') or ''
+            for declaration in style.split(';'):
+                if ':' not in declaration:
+                    continue

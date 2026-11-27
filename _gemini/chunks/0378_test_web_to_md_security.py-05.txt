@@ -1,0 +1,62 @@
+                    _offline_transport(routes, use_curl) as (visited, _):
+                response = web_to_md._http_get('HTTP://PUBLIC.EXAMPLE/%7estart')
+                self.assertEqual(response.content, b'public content')
+                self.assertEqual(visited, [start, final])
+
+    def test_requests_rebinding_is_refused_before_socket_creation(self) -> None:
+        for scheme in ('http', 'https'):
+            for rebound in (_dns_answer('169.254.169.254'),
+                            _dns_answer('8.8.8.8') + _dns_answer('169.254.169.254')):
+                with self.subTest(scheme=scheme, rebound=rebound), \
+                        patch.object(web_to_md, 'curl_requests', None), \
+                        patch.object(socket, 'getaddrinfo', side_effect=[_dns_answer('8.8.8.8'), rebound]) as dns:
+                    with self.assertRaisesRegex(web_to_md._UnsafeUrlError, 'non-public'):
+                        web_to_md._http_get(f'{scheme}://rebind.example/')
+                    self.assertEqual(dns.call_count, 2)
+                    socket.socket.assert_not_called()
+
+    def test_requests_rebinding_on_a_redirect_is_refused_before_its_socket(self) -> None:
+        sock = _http_socket()
+        sock.makefile.side_effect = lambda *args: io.BytesIO(
+            b'HTTP/1.1 302 Found\r\nLocation: http://rebind.example/private\r\n'
+            b'Content-Length: 0\r\nConnection: close\r\n\r\n'
+        )
+        with patch.object(web_to_md, 'curl_requests', None), \
+                patch.object(socket, 'socket', return_value=sock) as create_socket, \
+                patch.object(socket, 'getaddrinfo', side_effect=[
+                    _dns_answer('8.8.8.8'), _dns_answer('169.254.169.254'),
+                ]) as dns:
+            with self.assertRaisesRegex(web_to_md._UnsafeUrlError, 'non-public'):
+                web_to_md._http_get('http://8.8.8.8/start')
+            self.assertEqual(dns.call_count, 2)
+            create_socket.assert_called_once()
+            sock.connect.assert_called_once_with(('8.8.8.8', 80))
+
+    def test_curl_rebinding_on_a_redirect_is_refused_before_transport(self) -> None:
+        routes = {PUBLIC_URL: (302, {'Location': 'http://rebind.example/private'})}
+        with _offline_transport(routes, True) as (visited, responses), \
+                patch.object(socket, 'getaddrinfo', side_effect=[
+                    _dns_answer('8.8.8.8'), _dns_answer('169.254.169.254'),
+                ]) as dns:
+            with self.assertRaisesRegex(web_to_md._UnsafeUrlError, 'non-public'):
+                web_to_md._http_get(PUBLIC_URL)
+            self.assertEqual(dns.call_count, 2)
+            self.assertEqual(visited, [PUBLIC_URL])
+            self.assertTrue(responses[0].raw.closed)
+
+    def test_requests_public_connections_keep_host_and_tls_verification(self) -> None:
+        for scheme in ('http', 'https'):
+            sock = _http_socket()
+            with self.subTest(scheme=scheme), patch.object(web_to_md, 'curl_requests', None), \
+                    patch.object(socket, 'getaddrinfo', return_value=_dns_answer('8.8.8.8')), \
+                    patch.object(socket, 'socket', return_value=sock), \
+                    patch.dict(web_to_md.os.environ, HTTP_PROXY='http://127.0.0.1:9',
+                               HTTPS_PROXY='http://127.0.0.1:9', ALL_PROXY='http://127.0.0.1:9'), \
+                    patch('urllib3.connection._ssl_wrap_socket_and_match_hostname',
+                          return_value=SimpleNamespace(socket=sock, is_verified=True)) as tls:
+                response = web_to_md._http_get(f'{scheme}://public.example/')
+                self.assertEqual(response.content, b'public')
+                sock.connect.assert_called_once_with(('8.8.8.8', 443 if scheme == 'https' else 80))
+                self.assertIn(b'Host: public.example\r\n', sock.sendall.call_args.args[0])
+                if scheme == 'https':
+                    self.assertEqual(tls.call_args.kwargs['server_hostname'], 'public.example')

@@ -1,0 +1,84 @@
+                    has_any_image = True
+                    image_exts_used.add('png')
+
+                    media_rid = _append_relationship(
+                        rels_path,
+                        MEDIA_REL_TYPE,
+                        f'../media/{media_name}',
+                    )
+                    audio_rid = _append_relationship(
+                        rels_path,
+                        AUDIO_REL_TYPE,
+                        f'../media/{media_name}',
+                    )
+                    poster_rid = _append_relationship(
+                        rels_path,
+                        IMAGE_REL_TYPE,
+                        f'../media/{poster_name}',
+                    )
+
+                    narration_shape_id = next_shape_id(slide_xml)
+                    narration_transition_duration = (
+                        slide_transition_duration
+                        if slide_transition is not None
+                        else 0.0
+                    )
+                    narration_lead_in = narration_lead_in_seconds(
+                        narration_transition_duration,
+                        start_floor=narration_start_floor,
+                    )
+                    slide_xml = inject_narration(
+                        slide_xml,
+                        shape_id=narration_shape_id,
+                        shape_name=media_name,
+                        audio_rid=audio_rid,
+                        media_rid=media_rid,
+                        poster_rid=poster_rid,
+                        start_delay=narration_lead_in,
+                    )
+
+                    if use_narration_timings:
+                        duration = probe_audio_duration(audio_path)
+                        if duration is None:
+                            raise RuntimeError(
+                                f"Unable to read narration duration with ffprobe: {audio_path}"
+                            )
+                        narration_advance_after = (
+                            narration_lead_in + duration + narration_padding
+                        )
+                        slide_xml = apply_recorded_timing(
+                            slide_xml,
+                            advance_after=narration_advance_after,
+                            transition_duration=slide_transition_duration,
+                            transition_effect=slide_transition,
+                        )
+                        resolved_advance_after = narration_advance_after
+                        resolved_advance_on_click = False
+                        package_uses_timings = True
+                    slide_xml_path.write_text(slide_xml, encoding='utf-8')
+                    narration_slides_created.add(slide_num)
+
+                final_slide_xml = slide_xml_path.read_text(encoding='utf-8')
+                preserved_source_transition = (
+                    slide_patch is not None
+                    and not slide_patch.transition_replaced
+                )
+                preserved_source_animation = (
+                    slide_patch is not None and not slide_patch.animation_changed
+                )
+                resolved_motion = None
+                resolved_animation = None
+                if not preserved_source_transition:
+                    try:
+                        resolved_motion = validate_generated_transition_xml(
+                            final_slide_xml,
+                            effect=slide_transition,
+                            effect_options=slide_transition_effect_options,
+                            duration=slide_transition_duration,
+                            advance_on_click=resolved_advance_on_click,
+                            advance_after=resolved_advance_after,
+                            sound=expected_transition_sound,
+                        )
+                    except ValueError as exc:
+                        raise RuntimeError(
+                            f'Slide {slide_num} transition validation failed: {exc}'

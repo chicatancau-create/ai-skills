@@ -1,0 +1,110 @@
+        rels_path,
+        NOTES_SLIDE_REL_TYPE,
+        posixpath.relpath(notes_part, posixpath.dirname(source_part)),
+    )
+    return notes_master
+
+
+def _roundtrip_resource_payloads(
+    resource_root: Path | None,
+    resources: tuple[WorkspaceResourceSpec, ...],
+) -> dict[str, bytes]:
+    """Read changed, validated round-trip resources by package part."""
+    changed = [resource for resource in resources if resource.changed]
+    if not changed:
+        return {}
+    if resource_root is None:
+        raise TemplateStructureError(
+            "Round-trip resource reinjection requires an explicit project root"
+        )
+    workspace = resource_root.resolve()
+    payloads: dict[str, bytes] = {}
+    for resource in changed:
+        source = (workspace / resource.workspace_path).resolve()
+        try:
+            source.relative_to(workspace)
+        except ValueError as exc:
+            raise TemplateStructureError(
+                "Round-trip resource resolves outside the project: "
+                f"{resource.workspace_path.as_posix()}"
+            ) from exc
+        if not source.is_file():
+            raise TemplateStructureError(
+                "Materialized round-trip resource is missing: "
+                f"{resource.workspace_path.as_posix()}"
+            )
+        payload = source.read_bytes()
+        current_sha256 = hashlib.sha256(payload).hexdigest()
+        if current_sha256 != resource.current_sha256:
+            raise TemplateStructureError(
+                "Round-trip resource changed after validation: "
+                f"{resource.workspace_path.as_posix()}"
+            )
+        payloads[resource.package_part] = payload
+    return payloads
+
+
+def _reinject_roundtrip_resources(
+    extract_dir: Path,
+    resource_root: Path | None,
+    resources: tuple[WorkspaceResourceSpec, ...],
+) -> int:
+    """Write changed resource bytes back to their exact source package parts."""
+    payloads = _roundtrip_resource_payloads(resource_root, resources)
+    written = 0
+    for package_part, payload in payloads.items():
+        target = extract_dir.joinpath(*PurePosixPath(package_part).parts)
+        if not target.is_file():
+            raise TemplateStructureError(
+                "Round-trip source package part is missing: "
+                f"{package_part}"
+            )
+        target.write_bytes(payload)
+        written += 1
+    return written
+
+
+COVER_LAYOUT_NAME = "Cover"
+
+
+def _next_layout_part_number(extract_dir: Path) -> int:
+    layouts_dir = extract_dir / "ppt" / "slideLayouts"
+    numbers = [
+        int(match.group(1))
+        for path in layouts_dir.glob("slideLayout*.xml")
+        if (match := re.fullmatch(r"slideLayout(\d+)\.xml", path.name))
+    ]
+    return max(numbers, default=0) + 1
+
+
+def _next_slide_layout_id(extract_dir: Path) -> int:
+    """Return a package-wide unused id for a new sldLayoutId entry."""
+    ids: list[int] = []
+    masters_dir = extract_dir / "ppt" / "slideMasters"
+    for master_path in sorted(masters_dir.glob("slideMaster*.xml")):
+        master_root = ET.parse(master_path).getroot()
+        ids.extend(
+            int(entry.attrib["id"])
+            for entry in master_root.findall(
+                f"{{{PML_NS}}}sldLayoutIdLst/{{{PML_NS}}}sldLayoutId"
+            )
+            if entry.attrib.get("id", "").isdigit()
+        )
+    presentation_path = extract_dir / "ppt" / "presentation.xml"
+    if presentation_path.exists():
+        ids.extend(
+            int(value)
+            for value in re.findall(
+                r'\bid="(\d{9,})"', presentation_path.read_text(encoding="utf-8")
+            )
+        )
+    next_id = max([*ids, 2147483648]) + 1
+    if next_id > OOXML_UINT32_MAX:
+        raise TemplateStructureError(
+            "Cannot register another Slide Layout because the OOXML UInt32 "
+            "identifier range is exhausted"
+        )
+    return next_id
+
+
+def _create_cover_layout(extract_dir: Path, master_part: str, base_layout_part: str) -> str:

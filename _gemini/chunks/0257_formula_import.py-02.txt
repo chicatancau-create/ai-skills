@@ -1,0 +1,96 @@
+        font_size_px=font_size_px,
+        color=color,
+        align=_formula_alignment(validated_root),
+        language=language,
+    )
+
+
+def opaque_formula_preview(math_zone: ET.Element) -> str:
+    """Return readable source text without claiming native reconstruction."""
+    text = "".join(
+        item.text or ""
+        for item in math_zone.iter(f"{_M}t")
+    ).strip()
+    return text or "[unsupported formula]"
+
+
+def _serialize_root(root: ET.Element) -> str:
+    if root.tag == f"{_M}oMathPara":
+        math = root.find(f"{_M}oMath")
+        if math is None:
+            raise FormulaImportError("m:oMathPara is missing m:oMath")
+        return _serialize_children(math)
+    if root.tag == f"{_M}oMath":
+        return _serialize_children(root)
+    raise FormulaImportError("unsupported Office Math root")
+
+
+def _serialize_children(parent: ET.Element, *, alignment: bool = False) -> str:
+    return "".join(
+        _serialize_node(child, alignment=alignment)
+        for child in parent
+        if _local_name(child) not in {_PROPERTY_SUFFIX, "ctrlPr"}
+        and not _local_name(child).endswith(_PROPERTY_SUFFIX)
+    )
+
+
+def _serialize_argument(owner: ET.Element, name: str, *, alignment: bool = False) -> str:
+    element = owner.find(f"{_M}{name}")
+    if element is None:
+        raise FormulaImportError(
+            f"m:{_local_name(owner)} is missing required m:{name}"
+        )
+    return _serialize_children(element, alignment=alignment)
+
+
+def _serialize_node(element: ET.Element, *, alignment: bool = False) -> str:
+    name = _local_name(element)
+    if name == "r":
+        return _serialize_run(element, alignment=alignment)
+    if name == "f":
+        kind = _property_value(element, "fPr", "type", "bar")
+        command = {"bar": "frac", "skw": "ifrac"}.get(kind)
+        numerator = _serialize_argument(element, "num")
+        denominator = _serialize_argument(element, "den")
+        if command is not None:
+            return f"\\{command}{{{numerator}}}{{{denominator}}}"
+        if kind == "noBar":
+            return (
+                r"\genfrac{}{}{0pt}{}"
+                f"{{{numerator}}}{{{denominator}}}"
+            )
+        raise FormulaImportError(f"unsupported reversible fraction type: {kind!r}")
+    if name == "rad":
+        body = _serialize_argument(element, "e")
+        degree = _serialize_argument(element, "deg")
+        return f"\\sqrt[{degree}]{{{body}}}" if degree else f"\\sqrt{{{body}}}"
+    if name in {"sSub", "sSup", "sSubSup"}:
+        base = _serialize_argument(element, "e")
+        subscript = _serialize_optional_argument(element, "sub")
+        superscript = _serialize_optional_argument(element, "sup")
+        return _scripted(f"{{{base}}}", subscript, superscript)
+    if name == "sPre":
+        base = _serialize_argument(element, "e")
+        subscript = _serialize_optional_argument(element, "sub")
+        superscript = _serialize_optional_argument(element, "sup")
+        return _scripted("", subscript, superscript) + f"{{{base}}}"
+    if name == "nary":
+        symbol = _property_value(element, "naryPr", "chr", "")
+        command = _NARY_COMMAND_BY_SYMBOL.get(symbol)
+        if command is None:
+            raise FormulaImportError(f"unsupported reversible n-ary symbol: {symbol!r}")
+        source = f"\\{command}"
+        # Serialize the source location explicitly when it uses under/over
+        # limits. ``subSup`` is the neutral default in both formula contexts.
+        default_location = "subSup"
+        location = _property_value(element, "naryPr", "limLoc", default_location)
+        if location != default_location:
+            source += r"\limits" if location == "undOvr" else r"\nolimits"
+        source = _scripted(
+            source,
+            _serialize_optional_argument(element, "sub"),
+            _serialize_optional_argument(element, "sup"),
+        )
+        body = _serialize_optional_argument(element, "e")
+        return source + (f"{{{body}}}" if body else "")
+    if name == "d":

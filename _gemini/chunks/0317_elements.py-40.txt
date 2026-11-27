@@ -1,0 +1,130 @@
+    return ext_cx / emu_per_px, ext_cy / emu_per_px
+
+
+def _read_svg_image_size(data: bytes) -> tuple[float, float] | None:
+    """Read an SVG image's viewport ratio from root dimensions or viewBox."""
+    try:
+        root = ET.fromstring(data)
+    except ET.ParseError:
+        return None
+    if root.tag != f'{{{SVG_NS}}}svg':
+        return None
+
+    try:
+        width = parse_svg_length(root.get('width'))
+        height = parse_svg_length(root.get('height'))
+    except ValueError:
+        width = 0.0
+        height = 0.0
+    if (
+        width > 0
+        and height > 0
+        and math.isfinite(width)
+        and math.isfinite(height)
+    ):
+        return width, height
+
+    view_box = root.get('viewBox')
+    if view_box:
+        parts = [
+            part for part in re.split(r'[\s,]+', view_box.strip())
+            if part
+        ]
+        try:
+            values = [float(part) for part in parts]
+        except ValueError:
+            values = []
+        if (
+            len(values) == 4
+            and all(math.isfinite(value) for value in values)
+            and values[2] > 0
+            and values[3] > 0
+        ):
+            return values[2], values[3]
+    return None
+
+
+def _read_image_size(data: bytes) -> tuple[float | None, float | None]:
+    """Read intrinsic image dimensions (width, height) from raw bytes.
+
+    Used by ``convert_image`` to translate SVG ``preserveAspectRatio`` into
+    DrawingML ``<a:srcRect>`` so the original image is preserved and remains
+    croppable inside PowerPoint.
+
+    SVG images use valid root ``width`` / ``height`` as the viewport ratio and
+    fall back to ``viewBox`` when either dimension is unavailable. Raster
+    images use EXIF-normalized pixel dimensions. Returns ``(None, None)`` on
+    any failure.
+    """
+    svg_size = _read_svg_image_size(data)
+    if svg_size is not None:
+        return svg_size
+
+    try:
+        from PIL import Image, ImageOps, UnidentifiedImageError  # type: ignore
+    except ImportError:
+        return (None, None)
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            oriented = ImageOps.exif_transpose(img)
+            try:
+                return oriented.size
+            finally:
+                if oriented is not img:
+                    oriented.close()
+    except (
+        UnidentifiedImageError,
+        OSError,
+        SyntaxError,
+        ValueError,
+        ZeroDivisionError,
+    ):
+        return (None, None)
+
+
+def _image_has_alpha(img: Any) -> bool:
+    """Return whether a PIL image carries useful transparency."""
+    if img.mode in ('RGBA', 'LA'):
+        return True
+    return 'transparency' in getattr(img, 'info', {})
+
+
+def _prepare_raster_for_geometry(img: Any) -> Any:
+    """Apply EXIF orientation and materialize palette/tRNS transparency."""
+    try:
+        from PIL import ImageOps  # type: ignore
+    except ImportError:
+        return img
+
+    prepared = ImageOps.exif_transpose(img)
+    if prepared.mode == 'P':
+        prepared = prepared.convert(
+            'RGBA' if _image_has_alpha(prepared) else 'RGB'
+        )
+    elif (
+        'transparency' in getattr(prepared, 'info', {})
+        and prepared.mode not in {'RGBA', 'LA'}
+    ):
+        prepared = prepared.convert('RGBA')
+    return prepared
+
+
+def _has_exif_geometry_transform(img: Any) -> bool:
+    """Return whether EXIF requires a physical mirror or rotation."""
+    try:
+        return int(img.getexif().get(274, 1)) in range(2, 9)
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
+def _image_target_size(
+    display_w: float,
+    display_h: float,
+    *,
+    max_dimension: int | None,
+    scale: float,
+) -> tuple[int, int]:
+    """Resolve optimized pixel dimensions from rendered SVG dimensions."""
+    target_w = max(1, int(round(display_w * max(scale, 1.0))))
+    target_h = max(1, int(round(display_h * max(scale, 1.0))))
+    if max_dimension and max(target_w, target_h) > max_dimension:

@@ -1,0 +1,53 @@
+def svg_data_uri_payload_error(raw: str) -> str | None:
+    """Return why an inline SVG image data URI is not a closed resource."""
+    nested_svg, decode_error = _decode_svg_data_uri(raw)
+    if decode_error is not None:
+        return decode_error
+    if nested_svg is None:
+        return None
+    nested_error = _svg_image_payload_error(nested_svg, 0)
+    if nested_error is None:
+        return None
+    return f'inline SVG data URI is not closed: {nested_error}'
+
+
+def external_image_reference_path(
+    svg_dir: Path,
+    href: str,
+    *,
+    project_root: Path | None = None,
+) -> Path | None:
+    """Resolve one exact SVG-relative image reference inside the project."""
+    parsed = urlsplit(href)
+    if parsed.scheme or parsed.netloc or parsed.query or parsed.fragment:
+        return None
+    decoded = unquote(parsed.path)
+    if not decoded or Path(decoded).is_absolute():
+        return None
+    svg_dir = Path(svg_dir)
+    resolved_project_root = (
+        Path(project_root).resolve()
+        if project_root is not None
+        else project_root_for_svg_path(svg_dir).resolve()
+    )
+    resolved = (svg_dir / decoded).resolve()
+    try:
+        resolved.relative_to(resolved_project_root)
+    except ValueError:
+        return None
+    return resolved
+
+
+def resolve_external_image_reference(
+    svg_dir: Path,
+    href: str,
+    *,
+    project_root: Path | None = None,
+) -> Path | None:
+    """Resolve an exact SVG-relative image href, or return None."""
+    candidate = external_image_reference_path(
+        svg_dir,
+        href,
+        project_root=project_root,
+    )
+    return candidate if candidate is not None and candidate.is_file() else None

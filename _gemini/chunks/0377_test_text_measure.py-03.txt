@@ -1,0 +1,95 @@
+                )
+
+    def test_extended_clusters_keep_existing_widths_and_tracking(self) -> None:
+        text = '👩🏽‍💻🇨🇳1️⃣Ａｱ'
+        for weight in ('400', 'bold'):
+            with self.subTest(weight=weight):
+                crude = estimate_text_cluster_widths(text, 20, weight)
+                self.assertEqual(
+                    estimate_text_cluster_widths(text, 20, weight, font_family='Arial'),
+                    crude,
+                )
+                self.assertAlmostEqual(
+                    measure_text(text, size=20, family='Arial', weight=weight,
+                                 letter_spacing=2, include_headroom=False),
+                    sum(crude) + 2 * (len(crude) - 1),
+                )
+
+    def test_accented_letters_outside_the_table_advance_like_their_base(self) -> None:
+        for family in ('Arial', 'Cambria'):
+            with self.subTest(family=family):
+                accented = estimate_text_cluster_widths('ỔỊe\u0301ệ', 20, font_family=family)
+                plain = estimate_text_cluster_widths('OIee', 20, font_family=family)
+                self.assertEqual(accented, plain)
+
+    def test_arial_black_keeps_wide_family_factor(self) -> None:
+        crude = sum(estimate_text_cluster_widths('CAPS', 20, 'bold'))
+        self.assertAlmostEqual(
+            measure_text('CAPS', size=20, family='Arial Black', weight='bold',
+                         include_headroom=False),
+            crude * 1.25,
+        )
+
+    def test_monospace_families_measure_fixed_pitch(self) -> None:
+        text = "WHERE table = 'x'"
+        consolas = measure_text(
+            text, size=20, family='Consolas', include_headroom=False,
+        )
+        courier = measure_text(
+            text, size=20, family='Courier New', include_headroom=False,
+        )
+        unlisted = measure_text(
+            text, size=20, family='Victor Mono', include_headroom=False,
+        )
+        arial = measure_text(
+            text, size=20, family='Arial', include_headroom=False,
+        )
+        self.assertAlmostEqual(consolas, len(text) * 0.55 * 20)
+        self.assertAlmostEqual(courier, len(text) * 0.60 * 20, delta=1.0)
+        self.assertAlmostEqual(unlisted, courier, delta=0.01)
+        self.assertGreater(consolas, arial)
+        # Weight never changes a fixed-pitch advance.
+        self.assertAlmostEqual(
+            measure_text(
+                text, size=20, family='Consolas', weight='bold',
+                include_headroom=False,
+            ),
+            consolas,
+            delta=0.01,
+        )
+
+    def test_wrap_lines_never_exceed_max_width(self) -> None:
+        max_width = 180.0
+        lines, widths, oversized = wrap_text(
+            'Editable DrawingML text stays measurable',
+            size=22,
+            max_width=max_width,
+        )
+
+        self.assertGreater(len(lines), 1)
+        self.assertEqual(oversized, [])
+        for line, width in zip(lines, widths):
+            direct = measure_text(line, size=22)
+            self.assertAlmostEqual(width, direct)
+            self.assertLessEqual(direct, max_width)
+
+    def test_wrap_can_request_raw_width_without_headroom(self) -> None:
+        with_headroom = measure_text(SAMPLE, size=22)
+        raw = measure_text(SAMPLE, size=22, include_headroom=False)
+
+        self.assertGreater(with_headroom, raw)
+        result = _run_cli(
+            'wrap', SAMPLE, '--size', '22', '--max-width', '900',
+            '--x', '96', '--dy', '30', '--no-headroom', '--json',
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload['widths'], [raw])
+
+    def test_oversized_token_is_emitted_alone_with_warning(self) -> None:
+        token = 'UnbreakableToken'
+        lines, widths, oversized = wrap_text(token, size=22, max_width=20)
+
+        self.assertEqual(lines, [token])
+        self.assertGreater(widths[0], 20)
+        self.assertEqual(oversized, [(token, widths[0])])

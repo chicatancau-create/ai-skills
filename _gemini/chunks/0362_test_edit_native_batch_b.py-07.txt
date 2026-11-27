@@ -1,0 +1,67 @@
+        obj.find('*[@data-pptx-part="geometry"]').set('fill', '#FF0000')
+        path.write_bytes(_xml(root))
+        with zipfile.ZipFile(self.source) as source, zipfile.ZipFile(self.export()) as output:
+            original = ET.fromstring(source.read('ppt/slides/slide1.xml')).find('.//p:sp', NS)
+            result = ET.fromstring(output.read('ppt/slides/slide1.xml')).find('.//p:sp', NS)
+            old_body, new_body = original.find('p:txBody', NS), result.find('p:txBody', NS)
+            old_body.tail = new_body.tail = None
+            self.assertEqual(ET.tostring(new_body), ET.tostring(old_body))
+            self.assertEqual(result.find('p:nvSpPr/p:nvPr/p:ph', NS).attrib,
+                             original.find('p:nvSpPr/p:nvPr/p:ph', NS).attrib)
+            self.assertIsNotNone(result.find('p:spPr/a:effectLst/a:outerShdw', NS))
+
+    def test_b4_relationship_text_keeps_links_without_unsafe_payload_copy(self) -> None:
+        self.import_source(mutate=lambda entries: _link_fixture(entries, text=True))
+        path, root = self.page()
+        obj = next(node for node in root.iter() if node.get('data-pptx-source-ref') == 'slide:2')
+        obj.find('*[@data-pptx-part="geometry"]').set('fill', '#FF0000')
+        path.write_bytes(_xml(root))
+        result = self.materialize()
+        materialized = ET.parse(result.svg_files[0]).getroot()
+        self.assertIsNone(materialized.find('.//s:metadata[@data-pptx-part="txbody"]', NS))
+        self.assert_jump(self.export(), 1, 'slide3.xml')
+
+    def test_b4_edited_text_is_not_overwritten_by_source_body(self) -> None:
+        self.import_source()
+        self.edit_text()
+        with zipfile.ZipFile(self.export()) as archive:
+            xml = archive.read('ppt/slides/slide1.xml')
+            self.assertIn(b'Bonsoir', xml)
+            self.assertNotIn(b'Bonjour', xml)
+
+    def test_b5_page_plan_resets_source_slide_range(self) -> None:
+        def range_selection(entries):
+            root = ET.fromstring(entries['ppt/presProps.xml'])
+            show = ET.SubElement(root, '{%s}showPr' % NS['p'], {'loop': '1'})
+            ET.SubElement(show, '{%s}sldRg' % NS['p'], {'st': '2', 'end': '3'})
+            entries['ppt/presProps.xml'] = _xml(root)
+        _source(self.source, mutate=range_selection)
+        output = self.root / 'clone.pptx'
+        clone_presentation_slides(self.source, (1,), output)
+        with zipfile.ZipFile(output) as archive:
+            show = ET.fromstring(archive.read('ppt/presProps.xml')).find('p:showPr', NS)
+            self.assertIsNotNone(show.find('p:sldAll', NS))
+            self.assertIsNone(show.find('p:sldRg', NS))
+            self.assertEqual(show.get('loop'), '1')
+
+    def test_b5_delivery_checks_custom_show_semantic_closure(self) -> None:
+        _source(self.source, mutate=lambda entries: _show_fixture(entries, action=True))
+        valid = audit_pptx_delivery(self.source)
+        self.assertFalse(any(item['code'] == 'dangling_custom_show_reference' for item in valid['errors']))
+
+        def remove_show(entries):
+            root = ET.fromstring(entries['ppt/presentation.xml'])
+            root.remove(root.find('p:custShowLst', NS))
+            entries['ppt/presentation.xml'] = _xml(root)
+        _rewrite_package(self.source, remove_show)
+        broken = audit_pptx_delivery(self.source)
+        issues = [item for item in broken['errors'] if item['code'] == 'dangling_custom_show_reference']
+        self.assertEqual(len(issues), 2, broken)
+        self.assertTrue(all('42' in item['message'] for item in issues))
+
+    def test_b5_page_plan_rejects_retained_custom_show_action(self) -> None:
+        _source(self.source, mutate=lambda entries: _show_fixture(entries, action=True))
+        with self.assertRaisesRegex(RuntimeError, '[Ss]lide 1.*42'):
+            clone_presentation_slides(self.source, (1,), self.root / 'clone.pptx')
+
+    def test_b5_deleted_custom_show_action_no_longer_blocks_plan(self) -> None:

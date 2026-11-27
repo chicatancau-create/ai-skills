@@ -1,0 +1,112 @@
+        print(f"[ERROR] File not found: {input_arg}", file=sys.stderr)
+        return 1
+
+    output = resolve_output(output_arg, input_arg)
+    try:
+        route = build_conversion_command(
+            input_arg,
+            output,
+            forced_type=conversion_type,
+            extra_args=unknown_args,
+            pdf_image_mode=_pdf_image_mode(args),
+            render_vector_figures=args.render_vector_figures,
+        )
+    except ValueError as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 1
+    rc = run_backend(route.command, route.script_name)
+    if rc != 0:
+        return rc
+    if not output.is_file():
+        print(f"[ERROR] Expected Markdown output not found: {output}", file=sys.stderr)
+        return 1
+
+    profile = ensure_profile(input_arg, output, route.script_name, conversion_type)
+    if not args.json:
+        print_output(output)
+    if args.json:
+        print_json_result(input_arg, output, route.script_name, conversion_type, profile)
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Auto-detect source type and convert to Markdown via source_to_md backends.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python3 scripts/source_to_md.py paper.pdf
+  python3 scripts/source_to_md.py paper.pdf report.docx deck.pptx
+  python3 scripts/source_to_md.py ./sources -o ./markdown
+  python3 scripts/source_to_md.py report.docx -o output.md
+  python3 scripts/source_to_md.py deck.pptx --json
+  python3 scripts/source_to_md.py https://example.com/article -o article.md
+
+Backend-specific flags not listed here are passed through to the selected
+converter, so existing converter behavior remains the source of truth.
+        """,
+    )
+    parser.add_argument("inputs", nargs="+", help="Input file(s), directories, or URL(s)")
+    parser.add_argument(
+        "-t",
+        "--type",
+        choices=["auto", "pdf", "doc", "excel", "pptx", "web", "markdown", "text"],
+        default="auto",
+        help="Force a conversion type (default: auto)",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        help="Output Markdown file for one input, or output directory (an existing directory or a path ending in /) for one or more inputs",
+    )
+    parser.add_argument(
+        "--images",
+        choices=["all", "filtered", "none"],
+        help="PDF image extraction mode; maps to pdf_to_md.py --images",
+    )
+    parser.add_argument(
+        "--no-images",
+        action="store_true",
+        help=(
+            "Skip images: PDF image mode none; web pages keep remote image "
+            "links instead of downloading; no-op for Markdown/text"
+        ),
+    )
+    parser.add_argument(
+        "--filter-images",
+        action="store_true",
+        help="Alias for --images filtered on PDF inputs",
+    )
+    parser.add_argument(
+        "--render-vector-figures",
+        action="store_true",
+        help="Pass through to pdf_to_md.py for PDF vector figure rendering",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a machine-readable result after successful conversion",
+    )
+    return parser
+
+
+def _has_pdf_image_flags(args: argparse.Namespace) -> bool:
+    return bool(args.images or args.no_images or args.filter_images or args.render_vector_figures)
+
+
+def _conversion_type_for_input(input_arg: str, requested_type: str) -> str:
+    if requested_type == "auto":
+        return detect_source_type(input_arg)
+    return requested_type
+
+
+def _skips_images(args: argparse.Namespace) -> bool:
+    return bool(args.no_images or args.images == "none")
+
+
+def _validate_pdf_image_flags(args: argparse.Namespace, conversion_types: list[str]) -> bool:
+    if not _has_pdf_image_flags(args):
+        return True
+    skip_only = _skips_images(args) and not (
+        args.filter_images or args.render_vector_figures
+    )

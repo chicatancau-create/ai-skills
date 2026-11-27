@@ -1,0 +1,118 @@
+        raise PageContextError(f"path escapes project: {path}") from exc
+
+
+def _prototype_image_refs(svg_path: Path) -> list[str]:
+    try:
+        root = ET.parse(svg_path).getroot()
+    except (OSError, ET.ParseError) as exc:
+        raise PageContextError(f"cannot read prototype SVG {svg_path}: {exc}") from exc
+    refs: set[str] = set()
+    for element in root.iter():
+        if element.tag.rsplit("}", 1)[-1] != "image":
+            continue
+        for name, value in element.attrib.items():
+            if name.rsplit("}", 1)[-1] != "href":
+                continue
+            normalized = value.strip()
+            if normalized and not normalized.startswith(("data:", "#")):
+                refs.add(normalized)
+    return sorted(refs)
+
+
+def _contains_token(text: str, token: str) -> bool:
+    if not token:
+        return False
+    if re.fullmatch(r"[A-Za-z0-9_]+", token):
+        return re.search(
+            rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])",
+            text,
+        ) is not None
+    return token in text
+
+
+def _page_images(
+    locked_images: dict[str, str],
+    brief: str,
+    prototype_refs: list[str],
+    assigned_filenames: set[str],
+    resolved_filenames: set[str],
+) -> tuple[str, dict[str, str]]:
+    if not locked_images:
+        return "none", {}
+    ref_basenames = {Path(ref).name for ref in prototype_refs}
+    selected: dict[str, str] = {}
+    unresolved: dict[str, str] = {}
+    for key, value in locked_images.items():
+        basename = _locked_image_basename(value)
+        if (
+            _contains_token(brief, key)
+            or _contains_token(brief, value)
+            or _contains_token(brief, basename)
+            or basename in ref_basenames
+            or basename in assigned_filenames
+        ):
+            selected[key] = value
+        elif basename not in resolved_filenames:
+            unresolved[key] = value
+    if selected and unresolved:
+        return "explicit+unassigned", {**selected, **unresolved}
+    if selected:
+        return "explicit", selected
+    if unresolved:
+        return "unassigned", unresolved
+    return "confirmed-none", {}
+
+
+def _page_template(
+    project_path: Path,
+    structure_lock: PptxStructureLock | None,
+    page_number: int,
+) -> tuple[dict[str, object] | None, Path | None]:
+    if structure_lock is None or structure_lock.mode != "structured":
+        return None, None
+    prototype = next(
+        (item for item in structure_lock.prototypes if item.slide_num == page_number),
+        None,
+    )
+    assignment = next(
+        (item for item in structure_lock.layouts if item.slide_num == page_number),
+        None,
+    )
+    if prototype is None or assignment is None:
+        raise PageContextError(
+            f"structured lock has no complete mapping for P{page_number:02d}"
+        )
+    definition = next(
+        (
+            item
+            for item in structure_lock.layout_definitions
+            if item.layout_key == assignment.layout_key
+        ),
+        None,
+    )
+    if definition is None:
+        raise PageContextError(
+            f"structured lock has no definition for Layout {assignment.layout_key!r}"
+        )
+    master = next(
+        (
+            item
+            for item in structure_lock.masters
+            if item.master_key == definition.master_key
+        ),
+        None,
+    )
+    if master is None:
+        raise PageContextError(
+            f"structured lock has no definition for Master {definition.master_key!r}"
+        )
+    template = {
+        "reuse_scope": structure_lock.template_reuse_scope,
+        "adherence": structure_lock.template_adherence,
+        "prototype": prototype.template_basename,
+        "prototype_path": _relative_project_path(project_path, prototype.svg_path),
+        "layout": {
+            "key": definition.layout_key,
+            "name": definition.layout_name,
+            "source": (
+                f"P{definition.prototype_slide_num:02d}"

@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""PPT Master - Web Conversion Security Tests
+
+Check URL validation, TLS defaults, and failure paths with in-memory responses.
+
+Usage:
+    python3 -m unittest discover -s skills/ppt-master/scripts/tests -p test_web_to_md_security.py
+
+Dependencies:
+    requests, beautifulsoup4
+"""
+
+import io
+import socket
+import ssl
+import sys
+import tempfile
+import unittest
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
+from urllib3.util.ssl_ import resolve_cert_reqs
+
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+import source_to_md  # noqa: E402
+
+WEB_BACKEND_DIR = SCRIPTS_DIR / 'source_to_md'
+if str(WEB_BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(WEB_BACKEND_DIR))
+
+import web_to_md  # noqa: E402
+
+
+PUBLIC_URL = 'https://8.8.8.8/page'
+
+
+class _CurlHeaders(web_to_md.requests.structures.CaseInsensitiveDict):
+    def get_list(self, name):
+        return [self[name]] if name in self else []
+
+
+@contextmanager
+def _offline_transport(routes, use_curl):
+    """Replace transmission while retaining requests' preparation and redirects."""
+    visited = []
+    responses = []
+
+    def respond(url):
+        visited.append(url)
+        status, headers = routes[url]
+        response = web_to_md.requests.Response()
+        response.url = url
+        response.status_code = status
+        response.headers = _CurlHeaders(headers)
+        response._content = b'public content'
+        response.raw = io.BytesIO(response._content)
+        responses.append(response)
+        return response
+
+    def send(adapter, request, **kwargs):
+        response = respond(request.url)
+        response.request = request
+        return response
+
+    backend = SimpleNamespace(get=Mock(side_effect=lambda url, **kwargs: respond(url)))
+    with patch.object(web_to_md, 'curl_requests', backend if use_curl else None), \
+            patch.object(web_to_md.requests.adapters.HTTPAdapter, 'send', send):
+        yield visited, responses
+
+
+def _dns_answer(address, port=0):
+    family = socket.AF_INET6 if ':' in address else socket.AF_INET
+    return [(family, socket.SOCK_STREAM, 6, '', (address, port))]
+
+
+def _http_socket():
+    """Provide a socket substitute to exercise the real urllib3 connection path."""
+    sock = Mock()
+    sock.makefile.side_effect = lambda *args, **kwargs: io.BytesIO(
+        b'HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\npublic'
+    )
+    return sock
+
+
+class PublicUrlTests(unittest.TestCase):
+    def setUp(self) -> None:
+        dns_patch = patch.object(web_to_md.socket, 'getaddrinfo', side_effect=AssertionError('Unexpected DNS'))
+        dns_patch.start()
+        self.addCleanup(dns_patch.stop)
+        options = patch.object(web_to_md, 'CurlOpt', SimpleNamespace(RESOLVE=10203, PROXY=10004))
+        options.start()
+        self.addCleanup(options.stop)
+
+    def test_non_public_literal_addresses_are_rejected_without_dns(self) -> None:
+        for host in ('169.254.169.254', '10.0.0.1', '172.16.0.1', '192.168.0.1',
+                     '127.0.0.1', '0.0.0.0', '[::1]', '[::]', '[fe80::1]', '[fc00::1]',
+                     '[::ffff:127.0.0.1]'):
+            with self.subTest(host=host), self.assertRaisesRegex(ValueError, 'non-public'):
+                web_to_md._validate_public_url(f'http://{host}/')
+
+    def test_public_literal_addresses_are_accepted_without_dns(self) -> None:
+        for host in ('8.8.8.8', '[2001:4860:4860::8888]'):
+            with self.subTest(host=host):
+                url, addresses = web_to_md._validate_public_url(f'https://{host}/')
+                self.assertEqual(url, f'https://{host}/')
+                self.assertEqual([str(ip) for ip in addresses], [host.strip('[]')])
+
+    def test_non_http_or_malformed_urls_are_rejected(self) -> None:

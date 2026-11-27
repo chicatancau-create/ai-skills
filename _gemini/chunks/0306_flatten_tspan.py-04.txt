@@ -1,0 +1,98 @@
+      - Every logical line starts with a new-line tspan.
+      - Direct-child inline formatting tspans without x/y/dy are allowed only
+        after a line starts; they are normalized into the previous line.
+      - First line-break tspan has dy == 0 (or no dy).
+      - All subsequent line-break tspans use positive dy (no <y>).
+      - dy values cluster around a single minimum "base line-height";
+        any larger dy must be ≤ MAX_DY_MULTIPLIER × base. Anything larger
+        is treated as a section break and rejected.
+      - Every line-break tspan that sets x repeats the parent <text>'s x.
+      - A line-break tspan cannot add a non-zero dx offset.
+      - No nested tspan inside any line carries x/y/non-zero dy.
+      - Adjacent lines with different effective font sizes start new paragraphs.
+    """
+    base_x = parse_first_number(get_attr(text_el, "x"))
+    child_view = _build_paragraph_child_view(text_el, is_svg_tag)
+    if child_view is None:
+        return None
+    direct_tspans, synthetic_first = child_view
+
+    if len(direct_tspans) < 2:
+        return None
+
+    line_groups: list[list[ET.Element]] = []
+    for tspan in direct_tspans:
+        if is_new_line_tspan(tspan):
+            line_groups.append([tspan])
+        else:
+            if not line_groups:
+                return None
+            line_groups[-1].append(tspan)
+
+    if len(line_groups) < 2:
+        return None
+
+    # Tail text after a direct-child tspan is a run of the parent <text>. It
+    # survives when the line is wrapped into a container with its sibling
+    # runs; a line made of one positioned tspan has no container, so its
+    # tail would dangle outside every line and the block is not mergeable.
+    for group in line_groups:
+        if len(group) == 1 and (group[0].tail or "").strip():
+            return None
+
+    # First pass: validate per-line structural rules and collect dy values.
+    dy_values: list[float] = []  # one per line (0 for first)
+    for idx, group in enumerate(line_groups):
+        tspan = group[0]
+
+        t_y = get_attr(tspan, "y")
+        if t_y is not None:
+            return None
+
+        t_x_raw = get_attr(tspan, "x")
+        if t_x_raw is not None:
+            t_x = parse_first_number(t_x_raw)
+            if base_x is None or t_x is None or abs(t_x - base_x) > 1e-6:
+                return None
+        t_dx_raw = get_attr(tspan, "dx")
+        t_dx = parse_first_number(t_dx_raw) if t_dx_raw is not None else None
+        if t_dx is not None and abs(t_dx) > 1e-6:
+            return None
+
+        t_dy_raw = get_attr(tspan, "dy")
+        t_dy = parse_first_number(t_dy_raw) if t_dy_raw is not None else None
+
+        if idx == 0:
+            if t_dy is not None and abs(t_dy) > 1e-6:
+                return None
+            dy_values.append(0.0)
+        else:
+            if t_dy is None or t_dy <= 0:
+                return None
+            dy_values.append(t_dy)
+
+    # Second pass: pick the base line-height as the minimum positive dy and
+    # express each line's dy as base + extra space-before.
+    positive_dys = [d for d in dy_values[1:] if d > 0]
+    if not positive_dys:
+        return None
+    base = min(positive_dys)
+    font_size = _get_font_size_px(text_el)
+    if font_size is not None and base > font_size * MAX_DY_MULTIPLIER + DY_TOLERANCE_PX:
+        return None
+
+    extras: list[float] = [0.0]  # first line never has space-before
+    break_kinds = ["paragraph"]
+    line_font_sizes = [
+        _effective_line_font_size_px(text_el, group)
+        for group in line_groups
+    ]
+    for idx, d in enumerate(dy_values[1:], start=1):
+        if d + DY_TOLERANCE_PX < base:
+            return None  # below base — line overlap, not a paragraph
+        if d > base * MAX_DY_MULTIPLIER + DY_TOLERANCE_PX:
+            return None  # gap too large — treat as section break
+        extra = d - base
+        if extra < 0:
+            extra = 0.0
+        # dy at the base line-height = soft break (SVG was simulating wrap);

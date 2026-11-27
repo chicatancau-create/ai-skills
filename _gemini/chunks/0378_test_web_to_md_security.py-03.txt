@@ -1,0 +1,65 @@
+                result = web_to_md.process_url(PUBLIC_URL, '/unused/result.md')
+                self.assertFalse(result[0])
+                self.assertIn('non-public', result[2])
+                write.assert_not_called()
+                blocked.close.assert_called_once_with()
+
+
+class TlsVerificationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        options = patch.object(web_to_md, 'CurlOpt', SimpleNamespace(RESOLVE=10203, PROXY=10004))
+        options.start()
+        self.addCleanup(options.stop)
+
+    def test_both_http_backends_verify_by_default_and_honor_explicit_opt_out(self) -> None:
+        for use_curl in (False, True):
+            for kwargs, expected in (({}, True), ({'verify': False}, False)):
+                backend = Mock()
+                backend.get.return_value = Mock(url=PUBLIC_URL)
+                with self.subTest(curl=use_curl, kwargs=kwargs), \
+                        patch.object(web_to_md, 'curl_requests', backend if use_curl else None), \
+                        patch.object(web_to_md.requests.Session, 'get', backend.get):
+                    web_to_md._http_get(PUBLIC_URL, **kwargs)
+                    self.assertIs(backend.get.call_args.kwargs['verify'], expected)
+                    if use_curl:
+                        self.assertEqual(backend.get.call_args.kwargs['impersonate'], web_to_md._CURL_IMPERSONATE)
+
+    def test_pages_and_images_share_the_insecure_config(self) -> None:
+        response = Mock(url=PUBLIC_URL, content=b'page', headers={'Content-Type': 'text/plain; charset=utf-8'})
+        for insecure in (False, True):
+            with self.subTest(insecure=insecure), patch.dict(web_to_md.CONFIG, insecure=insecure):
+                with patch.object(web_to_md, '_http_get', return_value=response) as fetch:
+                    web_to_md.fetch_url(PUBLIC_URL)
+                    self.assertIs(fetch.call_args.kwargs['verify'], not insecure)
+                content = web_to_md.BeautifulSoup('<img src="/image.png">', 'html.parser')
+                with patch.object(web_to_md, '_http_get', side_effect=web_to_md._UnsafeUrlError('blocked')) as fetch, \
+                        patch.object(web_to_md.os, 'makedirs'):
+                    with self.assertRaises(web_to_md._UnsafeUrlError):
+                        web_to_md.download_and_rewrite_images(content, PUBLIC_URL, '/unused/images', 'images')
+                    self.assertIs(fetch.call_args.kwargs['verify'], not insecure)
+
+    def test_cli_insecure_is_opt_in_and_warns(self) -> None:
+        with patch.dict(web_to_md.CONFIG), \
+                patch.object(web_to_md, 'process_url', return_value=(True, PUBLIC_URL, None, None)), \
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(web_to_md.main([PUBLIC_URL, '--insecure']), 0)
+            self.assertIs(web_to_md.CONFIG['insecure'], True)
+            self.assertIn('TLS certificate verification disabled', errors.getvalue())
+            self.assertEqual(web_to_md.main([PUBLIC_URL]), 0)
+            self.assertIs(web_to_md.CONFIG['insecure'], False)
+
+    def test_dispatcher_forwards_insecure_to_web_backend(self) -> None:
+        args, unknown = source_to_md.build_parser().parse_known_args([PUBLIC_URL, '--insecure'])
+        with patch.object(source_to_md, 'run_backend', return_value=1) as run:
+            self.assertEqual(source_to_md.dispatch_single(PUBLIC_URL, 'web', '/unused/result.md', args, unknown), 1)
+        command, script_name = run.call_args.args
+        self.assertEqual(script_name, 'web_to_md.py')
+        self.assertEqual(command.count('--insecure'), 1)
+
+
+class TransportBindingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        for guard in (
+            patch.dict(web_to_md.CONFIG, allow_private_hosts=False),
+            patch.object(web_to_md, 'CurlOpt', SimpleNamespace(RESOLVE=10203, PROXY=10004)),
+            patch.object(web_to_md.socket, 'getaddrinfo', side_effect=AssertionError('Unexpected DNS')),

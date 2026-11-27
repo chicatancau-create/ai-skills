@@ -1,0 +1,75 @@
+            denominator = self._parse_required_argument("binomial denominator")
+            fraction = Fraction(numerator, denominator, kind="noBar")
+            return Delimiter("(", ")", (Sequence((fraction,)),))
+        if command == "genfrac":
+            left = self._delimiter_from_raw(self._parse_raw_required_group("left delimiter"))
+            right = self._delimiter_from_raw(self._parse_raw_required_group("right delimiter"))
+            thickness = self._parse_raw_required_group("fraction thickness").strip()
+            self._parse_raw_required_group("fraction style")
+            numerator = self._parse_required_argument("fraction numerator")
+            denominator = self._parse_required_argument("fraction denominator")
+            if not thickness:
+                kind = "bar"
+            elif thickness == "0":
+                kind = "noBar"
+            else:
+                thickness_match = _LENGTH_RE.fullmatch(thickness)
+                if thickness_match is None:
+                    self._fail(
+                        f"Invalid generalized-fraction thickness {thickness!r}"
+                    )
+                kind = (
+                    "noBar"
+                    if float(thickness_match.group(1)) == 0.0
+                    else "bar"
+                )
+            fraction = Fraction(numerator, denominator, kind=kind)
+            if left or right:
+                return Delimiter(left, right, (Sequence((fraction,)),))
+            return fraction
+        if command == "sqrt":
+            degree = self._parse_optional_argument("radical degree")
+            body = self._parse_required_argument("radical body")
+            return Radical(body=body, degree=degree)
+        if command == "root":
+            degree = self._parse_nested_sequence(stop_commands=frozenset({"of"}))
+            if not self._at_control_word("of") or is_empty(degree):
+                self._fail("\\root requires a degree followed by \\of")
+            self._consume_control_word("of")
+            body = self._parse_required_argument("radical body")
+            return Radical(body=body, degree=degree)
+        if command in {"left", _BIG_LEFT_COMMAND}:
+            return self._parse_delimited_expression(command)
+        if command == _BIG_RIGHT_COMMAND:
+            right = self._parse_delimiter_token("explicit big right delimiter")
+            return Delimiter("", right, (Sequence(()),))
+        if command == _BIG_MIDDLE_COMMAND:
+            separator = self._parse_delimiter_token("explicit big middle delimiter")
+            return Delimiter("", "", (Sequence(()), Sequence(())), separator)
+        if command == _BIG_SYMMETRIC_COMMAND:
+            return self._parse_big_symmetric_delimiter()
+        if command in {"right", "middle"}:
+            self._fail(f"Unexpected \\{command} without matching \\left", position=command_start)
+        if command == "begin":
+            return self._parse_environment()
+        if command == "end":
+            self._fail("Unexpected \\end without matching \\begin", position=command_start)
+        if command in _STYLE_WRAPPERS:
+            text_mode = command in {
+                "text", "textrm", "textnormal", "textbf", "textit", "emph",
+                "textsf", "texttt", "mbox", "hbox",
+            }
+            body = self._parse_required_argument(f"\\{command} body", text_mode=text_mode)
+            return Styled(body=body, style=_STYLE_WRAPPERS[command])
+        if command in _DECLARATION_STYLES:
+            self.current_style = merge_run_styles(
+                self.current_style,
+                _DECLARATION_STYLES[command],
+            )
+            return Sequence(())
+        if command in ACCENT_COMMANDS:
+            body = self._parse_required_argument(f"\\{command} body")
+            return Accent(character=ACCENT_COMMANDS[command], body=body)
+        if command == "overline":
+            return Bar("top", self._parse_required_argument("overline body"))
+        if command == "underline":

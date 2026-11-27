@@ -1,0 +1,77 @@
+---
+name: reference-dsh-desktop-internals
+description: DeepSeek Harness 桌面端本机机制：崩溃日志落点、模型卡图片能力字段 input、预设要逐行声明、bundle 会遮蔽内核同名包、overrides 只能写 pnpm-workspace.yaml。
+metadata:
+  type: reference
+---
+
+2026-11-03 在装 `dsh-super-agent` 一路踩出来的 DSH 桌面端（`D:\DeepSeek Harness`，内核 0.2.1-rc.5）机制。
+
+**崩溃/启动日志**：`%APPDATA%\@deepseek-ai\dsh-desktop\logs\crash-<utc>-host.log`（另有 `-renderer.log`）。
+host 那份含 `Failed plugins (N)` 全表和 `Plugins waiting for services (43)` 清单，**比 UI 上的错误有用得多**；
+判"是否真崩"就看有没有比本次启动更晚的 crash 文件。
+
+**装 bundle 会把应用装死**：bundle 的依赖若含与内核同名的 `@deepseek-ai/*`，pnpm 会把旧版装进
+`profiles\desktop\node_modules\`，而 profile 是 **`nodeLinker: hoisted`**（扁平目录）→ **遮蔽内核 asar 里的版本**。
+表现是**装的时候一切正常**（`Done in 5s`），只在**下一次冷启动**才炸：
+`typert-loader … parameter codec has no create() factory` → `startup failed: 1 required plugin did not activate` →
+窗口停在 "DeepSeek Harness is unavailable"。修法是把同名包**钉到内核同版**（registry 上 `next` tag 就是内核版本，
+如 `@deepseek-ai/dsh-llm 0.2.1-rc.5`、`cordis 4.0.5`、`schemastery 3.18.5`、`cosmokit 1.8.6`）。
+
+**两处必须记住的写法**：
+1. **`pnpm.overrides` 写进 `package.json` 会被 pnpm 11 静默忽略**（警告原文：该字段不再被读取），
+   必须写 **`profiles\desktop\pnpm-workspace.yaml` 的 `overrides:` 段**。写错位置时 install 只回
+   `Already up to date`、版本一个没变 ⇒ **装完必须回读 `node_modules/@deepseek-ai/*/package.json` 逐个比版本**，别信 rc=0。
+2. 用 **DSH 自带的 pnpm 大版本**（本机 11.28.5，`cmd /c corepack pnpm@11.28.5 install`）。
+   corepack 默认是 12.5.1，跨大版本可能重写 `lockfileVersion: '9.0'` 让宿主自己的安装路径失配。
+
+**预设（preset）的真实 schema**：内核提供的是 `agent-preset-registry` / `@deepseek-ai/dsh-agent-preset-registry`，
+文档明写**注册表不扫描目录、也不接受 preset 路径**（所以 bundle 补丁里的 `roots:` 是无效的，
+`@deepseek-ai/dsh-agent-presets` 这个名字在本机 asar 中出现 **0 次**）。
+新建预设必须逐行插：
+
+```yaml
+- id: preset-solo                    # Loader 编辑地址
+  name: '@deepseek-ai/dsh-agent-preset'
+  config:
+    id: solo                         # 会话保存的预设标识（与行 id 不同）
+    name: Solo delivery
+    description: …
+    order: 10
+    plugins: [ …子插件行，可含 !!js 条件… ]
+```
+声明会**提前加载**，所以加预设会把 plugins 里的插件拉起来。**保留 `!!js` 原文要用追加文本，
+不要用 YAML 解析器回写**（一轮就把它抹平了）。
+
+**模型卡与图片能力**：报错「当前模型不支持图片」判据在 `dsh-api-session-controller`：
+`if (model.inputModalities !== void 0 && !model.inputModalities.includes("image")) throw … MODEL_DOES_NOT_SUPPORT_IMAGES`；
+而 `dsh-llm-pi-ai` 里 `inputModalities: [...resolvedModel.input]` ⇒ **模型卡上的字段名是 `input`**
+（`input: [text, image]`）。本机 profile 里 23 条模型卡是从 WorkBuddy 目录**手抄**的，
+只抄了 id/name/contextWindow/maxTokens/reasoningEfforts，**能力字段全丢**，所以两条 V4.1-Flash 都收不了图。
+改完要**重启内核**才生效（profile 配置在启动时读）。
+
+**读内核版本/源码**：`app.asar`（174 MB）可直接按头解析，无需 asar CLI：
+`pickle=uint32@4`、`jsonLen=uint32@12`、JSON 从偏移 16 起（用 `raw_decode` 忽略尾部填充），
+**文件数据基址 = 8 + pickle**，再 `seek(base + offset)`。个别 `package.json` 条目没有 `offset`，要跳过。
+
+**其它**：
+- 本地网关（实测端口会变，如 9230 / 57000）**要鉴权**：`/` 回 401、`/api/presets` 回 403，
+  所以我无法枚举预设名册；「语法正确 + 启动不报错」**不等于**服务已注册（Cordis 对不上号的行静默跳过）。
+- 写 `.workbuddy-ai-catalog.json` 的是 `dsh-workbuddy-connect` 插件；它被卸后目录就成了**孤儿缓存**
+  （价格/促销字段会停在过期值上，例如促销 11-01 到期但缓存仍写 `x0.00 free=true`），
+  且 `/ai/status`、`/plugins/<x>/status` 全部 404 —— 想确认实时价格只能看应用界面或看实际扣费。
+- **判会话是真跑还是僵死**：CPU 时间两次采样在涨 ≠ 在推进；要看 `~\.dsh\` 与
+  `AppData\Roaming\@deepseek-ai\` 有没有落盘。实测见过「深度求索中 1h20m」但 `~\.dsh` **60 分钟零改动**、
+  只有 Electron 的 ShaderCache/GPUCache 在动 = UI 在转圈，turn 已僵。
+- `dsh plugin --profile desktop exec` **不是只读**（会触发 pnpm 安装写盘），见项目记忆
+  [[project-dsh-agent-teams-deploy]]。
+
+**2026-11-07 补：V4 会话转储格式（只读）。**
+`~\.dsh\sessions\<项目slug>\<会话uuid>\session.v4.jsonl.zstd` —— zstd 压缩的 JSONL，Python 3.14 用
+`from compression import zstd` 直接解压。事件类型：`session`（id/createdAt/cwd/parentSession/origin）、
+`assistant/message`（`data.message.content`、`data.source.model`）、`tool/call|tool/result`、`step/start|end` 等。
+**本机实测这些事件里没有结构化的 usage/token 字段**：要统计 token 只能回到
+`storages\session_projcache\sessions\*.json` 的 `record.rows.tokenUsage.val.totals`；没有 usage 就标"来源不支持"，
+别把消息正文里的数字当 token。
+
+相关：[[project-dsh-agent-teams-deploy]]、[[reference-windows-permission-denied-as-missing]]、

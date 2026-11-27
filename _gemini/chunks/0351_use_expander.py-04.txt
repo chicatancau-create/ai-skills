@@ -1,0 +1,91 @@
+                clone.tag = _qualified_tag(clone, 'g')
+                viewport_transform = _symbol_viewport_transform(target, use_elem)
+                existing_transform = clone.get('transform', '').strip()
+                clone.set(
+                    'transform',
+                    f'{existing_transform} {viewport_transform}'.strip(),
+                )
+                for attr in ('viewBox', 'preserveAspectRatio', 'x', 'y', 'width', 'height'):
+                    clone.attrib.pop(attr, None)
+            self._expand_children(clone, next_stack)
+
+        self._rewrite_clone_ids(clone, self._next_instance_prefix(clone))
+        wrapper = self._build_wrapper(use_elem)
+        wrapper.append(clone)
+        self.expanded += 1
+        return wrapper
+
+    @staticmethod
+    def _reject_structural_metadata(elem: ET.Element, label: str) -> None:
+        """Reject reusable template/native markers parsed before expansion."""
+        for candidate in elem.iter():
+            for attr in candidate.attrib:
+                if attr.startswith(_NON_REUSABLE_METADATA_PREFIXES):
+                    raise UseExpansionError(
+                        f'Local <use> {label} cannot carry structural {attr} metadata'
+                    )
+
+    def _validate_fragment_reference_syntax(
+        self,
+        elem: ET.Element,
+        label: str,
+    ) -> None:
+        """Reject URL fragment forms the clone rewriter cannot preserve."""
+        for candidate in elem.iter():
+            for value in candidate.attrib.values():
+                starts = list(_URL_FUNCTION_START_RE.finditer(value))
+                if not starts:
+                    continue
+                functions = list(_URL_FUNCTION_RE.finditer(value))
+                if len(functions) != len(starts):
+                    raise UseExpansionError(
+                        f'Local <use> {label} has malformed url(...) reference {value!r}'
+                    )
+                for function in functions:
+                    raw = function.group(0)
+                    match = _URL_REF_RE.fullmatch(raw)
+                    if match is None:
+                        raise UseExpansionError(
+                            f'Local <use> {label} requires exact url(#id) fragments; '
+                            f'got {raw!r}'
+                        )
+                    ref_id = match.group(1)
+                    if ref_id in self.duplicate_ids:
+                        raise UseExpansionError(
+                            f'Local <use> {label} has ambiguous url(#{ref_id}); '
+                            'the referenced id is duplicated'
+                        )
+                    if ref_id not in self.targets:
+                        raise UseExpansionError(
+                            f'Local <use> {label} has unresolved url(#{ref_id})'
+                        )
+
+    def _next_instance_prefix(self, clone: ET.Element) -> str:
+        """Reserve a deterministic clone prefix that cannot collide."""
+        clone_ids = {
+            elem_id
+            for elem in clone.iter()
+            if (elem_id := elem.get('id'))
+        }
+        while True:
+            self.instance_index += 1
+            prefix = f'use-instance-{self.instance_index}-'
+            generated_ids = {f'{prefix}{elem_id}' for elem_id in clone_ids}
+            if not generated_ids & self.used_ids:
+                self.used_ids.update(generated_ids)
+                return prefix
+
+    @staticmethod
+    def _rewrite_clone_ids(clone: ET.Element, prefix: str) -> None:
+        """Make materialized IDs instance-local and rewrite fragment refs."""
+        id_map: dict[str, str] = {}
+        for elem in clone.iter():
+            elem_id = elem.get('id')
+            if elem_id:
+                id_map[elem_id] = f'{prefix}{elem_id}'
+        if not id_map:
+            return
+        for elem in clone.iter():
+            elem_id = elem.get('id')
+            if elem_id in id_map:
+                elem.set('id', id_map[elem_id])

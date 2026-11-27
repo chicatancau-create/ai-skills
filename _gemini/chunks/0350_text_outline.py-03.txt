@@ -1,0 +1,112 @@
+                    - glyph_cursor_y
+                    - position.y_offset * shaped.scale
+                ),
+                scale=shaped.scale,
+                commands=commands,
+            )
+            shaped.font.draw_glyph(info.codepoint, draw_funcs, state)
+            if state.segment_count == 0:
+                cluster = shaped.run.clusters[cluster_index]
+                if not _cluster_may_have_no_outline(cluster):
+                    codepoints = " ".join(
+                        f"U+{ord(character):04X}"
+                        for character in cluster
+                    )
+                    raise ValueError(
+                        f"{_element_label(element)} glyph for {codepoints} has "
+                        "no vector outline; bitmap/color-only glyphs cannot be "
+                        "used in Shape Boolean"
+                    )
+            glyph_cursor_x += position.x_advance * shaped.scale
+            glyph_cursor_y += position.y_advance * shaped.scale
+        natural_run_x += shaped.advance_x
+
+    if not commands:
+        raise ValueError(
+            f"{_element_label(element)} has no glyph outline to materialize"
+        )
+    return normalize_path_commands(commands)
+
+
+@lru_cache(maxsize=1)
+def _load_harfbuzz() -> Any:
+    try:
+        import uharfbuzz
+    except ImportError as exc:
+        raise RuntimeError(
+            "Text operands in Shape Boolean require uharfbuzz. Install the "
+            "project requirements, or run: pip install uharfbuzz"
+        ) from exc
+    required = ("Blob", "Buffer", "DrawFuncs", "Face", "Font", "StyleTag", "shape")
+    missing = [name for name in required if not hasattr(uharfbuzz, name)]
+    if missing:
+        raise RuntimeError(
+            "Installed uharfbuzz is incompatible; missing: "
+            + ", ".join(missing)
+        )
+    return uharfbuzz
+
+
+def _element_chain(
+    element: ET.Element,
+    parents: Mapping[ET.Element, ET.Element],
+) -> list[ET.Element]:
+    chain = [element]
+    current = element
+    while current in parents:
+        current = parents[current]
+        chain.append(current)
+    chain.reverse()
+    return chain
+
+
+def _validate_text_structure(
+    element: ET.Element,
+    chain: Sequence[ET.Element],
+) -> None:
+    if _local_name(element.tag) != "text":
+        raise AssertionError("Text outline requires one <text> element")
+    children = list(element)
+    if children:
+        child_tags = ", ".join(
+            f"<{_local_name(child.tag)}>"
+            for child in children
+        )
+        raise ValueError(
+            f"{_element_label(element)} must contain direct single-line text; "
+            f"child content is unsupported ({child_tags})"
+        )
+    unsupported_attrs = sorted(
+        _local_name(name)
+        for name in element.attrib
+        if _local_name(name) in _UNSUPPORTED_TEXT_ATTRIBUTES
+    )
+    if unsupported_attrs:
+        raise ValueError(
+            f"{_element_label(element)} uses unsupported text attribute(s): "
+            + ", ".join(unsupported_attrs)
+        )
+
+    for current in chain:
+        inline = parse_inline_style(current.get("style"))
+        unsupported = sorted(
+            name
+            for name in _UNSUPPORTED_TEXT_PROPERTIES
+            if current.get(name) is not None or name in inline
+        )
+        if unsupported:
+            raise ValueError(
+                f"{_element_label(element)} inherits unsupported text "
+                f"property/properties from {_element_label(current)}: "
+                + ", ".join(unsupported)
+            )
+
+    decoration = _effective_property(chain, "text-decoration") or "none"
+    try:
+        parsed_decoration = parse_project_text_decoration(decoration)
+    except ValueError as exc:
+        raise ValueError(
+            f"{_element_label(element)} text-decoration={decoration!r}: {exc}"
+        ) from exc
+    if parsed_decoration.canonical != "none":
+        raise ValueError(

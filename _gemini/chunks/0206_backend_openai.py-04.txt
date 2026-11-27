@@ -1,0 +1,106 @@
+    base = (base_url or DEFAULT_BASE_URL).rstrip("/")
+    if base.endswith("/images/edits"):
+        return base
+    if base.endswith("/images/generations"):
+        # Swap the sibling endpoint rather than appending to a full URL.
+        return base[: -len("/generations")] + "/edits"
+    return f"{base}/images/edits"
+
+
+def _read_size_preset() -> str | None:
+    """Read the optional size mapping preset for OpenAI-compatible providers."""
+    return _read_env_choice("OPENAI_SIZE_PRESET", OPENAI_SIZE_PRESETS)
+
+
+def _read_response_format() -> str | None:
+    """Read the optional response_format override."""
+    return _read_env_choice("OPENAI_RESPONSE_FORMAT", OPENAI_RESPONSE_FORMATS)
+
+
+def _read_quality(image_size: str, model: str) -> str | None:
+    """Resolve the quality field for OpenAI-compatible requests."""
+    quality = _read_env_choice("OPENAI_QUALITY", OPENAI_QUALITY_VALUES)
+    if quality == "omit":
+        return None
+    if quality and quality != "auto":
+        if _is_gpt_image_model(model) and quality in {"standard", "hd"}:
+            raise ValueError(
+                f"{model} does not support OPENAI_QUALITY={quality}. "
+                "Use auto, omit, low, medium, or high."
+            )
+        return quality
+    return IMAGE_SIZE_TO_QUALITY.get(image_size, "auto")
+
+
+def _apply_response_format(request: dict, model: str) -> None:
+    """Apply response_format while preserving the existing default behavior."""
+    response_format = _read_response_format()
+    if response_format == "omit":
+        return
+    if not _supports_response_format(model):
+        if response_format in {"b64_json", "url"}:
+            raise ValueError(
+                f"{model} does not support OPENAI_RESPONSE_FORMAT. "
+                "Use auto or omit."
+            )
+        return
+    if response_format in {"b64_json", "url"}:
+        request["response_format"] = response_format
+        return
+    request["response_format"] = "b64_json"
+
+
+def _validate_request_options(
+    model: str,
+    aspect_ratio: str,
+    image_size: str,
+    *,
+    editing: bool,
+) -> None:
+    """Validate local model options before entering the retry loop."""
+    size_preset = _read_size_preset()
+    _select_size(model, aspect_ratio, image_size, size_preset)
+    if not (editing and _is_dall_e_2(model)):
+        _read_quality(image_size, model)
+    if _is_gpt_image_model(model):
+        _gpt_image_options(model)
+    if editing:
+        _read_input_fidelity(model)
+    _apply_response_format({}, model)
+
+
+def _post_image_generation(api_key: str, base_url: str | None, request: dict) -> dict:
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    response = requests.post(
+        _image_generations_url(base_url),
+        headers=headers,
+        json=request,
+        timeout=300,
+    )
+    if not response.ok:
+        raise http_error(response, "OpenAI image generation")
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise RuntimeError("OpenAI image generation returned invalid JSON.") from exc
+
+
+def _post_image_edit(api_key: str, base_url: str | None,
+                     data: dict, image_path: str) -> dict:
+    headers = {"Authorization": f"Bearer {api_key}"}
+    # GPT Image models take the image list field 'image[]'; dall-e-2 and other
+    # OpenAI-compatible edit models use the singular 'image'.
+    model = str(data.get("model", ""))
+    field = "image[]" if _is_gpt_image_model(model) else "image"
+    mime_type = mimetypes.guess_type(image_path)[0] or "application/octet-stream"
+    # Let requests build the multipart/form-data body (and its Content-Type
+    # boundary) from files=; do not set Content-Type by hand.
+    with open(image_path, "rb") as image_file:
+        response = requests.post(
+            _image_edits_url(base_url),
+            headers=headers,
+            data=data,
+            files=[(field, (Path(image_path).name, image_file, mime_type))],

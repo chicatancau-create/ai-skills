@@ -1,0 +1,112 @@
+        # Keep positioned markers literal so bullet normalization cannot
+        # discard or relocate an authored displacement.
+        return runs, None
+    first_nonspace = _first_nonspace_run(runs)
+    if first_nonspace and (
+        first_nonspace.get(_INLINE_FORMULA_KEY) is not None
+        or first_nonspace.get(HYPERLINK_RID_KEY) is not None
+    ):
+        return runs, None
+    full_text = ''.join(str(run.get('text', '')) for run in runs)
+    match = _TEXT_BULLET_RE.match(full_text)
+    if not match:
+        return runs, None
+    if not full_text[match.end():].strip():
+        return runs, None
+
+    marker = match.group('marker')
+    marker_run = _first_nonspace_run(runs) or {}
+    prefix_runs = _take_leading_chars_from_runs(runs, match.end())
+    replacement_prefix = _TEXT_BULLET_MARKERS.get(marker, marker) + (match.group('space') or ' ')
+    replacement_runs = [{**marker_run, 'text': replacement_prefix}] if marker_run else []
+    bullet = {
+        'char': _TEXT_BULLET_MARKERS.get(marker, marker),
+        'fill': marker_run.get('fill'),
+        'fill_raw': marker_run.get('fill_raw'),
+        'opacity': marker_run.get('opacity'),
+        'source_prefix_width_px': _estimate_text_runs_width(prefix_runs, include_headroom=False),
+        'margin_px': max(
+            _estimate_text_runs_width(replacement_runs, include_headroom=False),
+            8.0,
+        ),
+    }
+    stripped = _strip_leading_chars_from_runs(runs, match.end())
+    return (stripped or runs), bullet
+
+
+def _bullet_margin_px(bullet: dict[str, Any], font_size: float) -> float:
+    try:
+        return float(bullet.get('margin_px', 0.0))
+    except (TypeError, ValueError):
+        return max(font_size * 0.95, 12.0)
+
+
+def _bullet_indent_px(bullet: dict[str, Any], font_size: float) -> float:
+    return -_bullet_margin_px(bullet, font_size)
+
+
+def _build_bullet_xml(
+    bullet: dict[str, Any] | None,
+    ctx: ConvertContext | None,
+) -> str:
+    if not bullet:
+        return ''
+    fill = bullet.get('fill')
+    fill_raw = bullet.get('fill_raw')
+    color, color_alpha = parse_svg_color(
+        fill_raw if isinstance(fill_raw, str) else ''
+    )
+    if color is None and isinstance(fill, str):
+        color = parse_hex_color(fill)
+    if color:
+        opacity = combine_opacity(bullet.get('opacity'), color_alpha)
+        alpha_xml = (
+            f'<a:alphaMod val="{quantize_ooxml_alpha(opacity)}"/>'
+            if opacity is not None else ''
+        )
+        theme_spec = ctx.theme_color_spec if ctx is not None else None
+        color_xml = (
+            f'<a:buClr>{color_node_xml(color, theme_spec, "text", alpha_xml)}</a:buClr>'
+        )
+    else:
+        color_xml = '<a:buClrTx/>'
+    return (
+        f'{color_xml}<a:buSzTx/><a:buFontTx/>'
+        f'<a:buChar char="{_xml_escape(str(bullet.get("char", "•")))}"/>'
+    )
+
+
+def _paragraph_pr_xml(
+    *,
+    algn: str,
+    font_size: float,
+    body_xml: str = '',
+    bullet: dict[str, Any] | None = None,
+    ctx: ConvertContext | None = None,
+    rtl: bool = False,
+) -> str:
+    attrs = f'algn="{algn}"'
+    if rtl:
+        attrs += ' rtl="1"'
+    if bullet:
+        margin = px_to_emu(_bullet_margin_px(bullet, font_size))
+        indent = px_to_emu(_bullet_indent_px(bullet, font_size))
+        attrs += f' marL="{margin}" indent="{indent}"'
+    return f'<a:pPr {attrs}>{body_xml}{_build_bullet_xml(bullet, ctx)}</a:pPr>'
+
+
+def _estimate_bullet_line_width(
+    runs: list[dict[str, Any]],
+    default_fonts: dict[str, str],
+    ctx: ConvertContext,
+) -> float:
+    line_runs, bullet = _extract_text_bullet(runs)
+    line_runs = _coalesce_text_runs(line_runs, default_fonts, ctx)
+    width = _estimate_text_runs_width(line_runs, include_headroom=False)
+    if bullet:
+        fs_px = float(line_runs[0].get('font_size', 16)) if line_runs else 16.0
+        width += _bullet_margin_px(bullet, fs_px)
+    return width
+
+
+def _textbox_padding(font_size: float) -> float:

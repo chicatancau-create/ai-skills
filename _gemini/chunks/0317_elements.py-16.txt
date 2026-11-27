@@ -1,0 +1,102 @@
+        # connector shapes).  Custom geometry shapes silently ignore
+        # headEnd / tailEnd in most PowerPoint versions.
+        #
+        # The "line" preset draws from (0,0) to (w,h).
+        #   headEnd  → placed at the start of the line = (x1, y1)
+        #   tailEnd  → placed at the end   of the line = (x2, y2)
+        # We set flipH / flipV so that the preset start/end align with the
+        # original SVG endpoints:
+        #   default  (no flip)  : top-left  → bottom-right  (x1≤x2, y1≤y2)
+        #   flipH               : top-right → bottom-left   (x1>x2, y1≤y2)
+        #   flipV               : bottom-left → top-right   (x1≤x2, y1>y2)
+        #   flipH + flipV       : bottom-right → top-left   (x1>x2, y1>y2)
+        # ----------------------------------------------------------------
+        w = abs(x2 - x1)
+        h = abs(y2 - y1)
+        # DrawingML requires ext cx/cy ≥ 1 EMU
+        w_emu = px_to_emu(w) if w > 0 else 1
+        h_emu = px_to_emu(h) if h > 0 else 1
+
+        flip_h = x1 > x2
+        flip_v = y1 > y2
+        flip_attr = ''
+        if flip_h and flip_v:
+            flip_attr = ' flipH="1" flipV="1"'
+        elif flip_h:
+            flip_attr = ' flipH="1"'
+        elif flip_v:
+            flip_attr = ' flipV="1"'
+
+        xml = _wrap_shape(
+            shape_id,
+            f'Line {shape_id}',
+            off_x,
+            off_y,
+            w_emu,
+            h_emu,
+            '<a:prstGeom prst="line"><a:avLst/></a:prstGeom>',
+            '<a:noFill/>',
+            stroke,
+            xfrm_attr=flip_attr,
+        )
+    else:
+        # ----------------------------------------------------------------
+        # Custom geometry (original behaviour) for plain lines.
+        # ----------------------------------------------------------------
+        w = max(abs(x2 - x1), 1)
+        h = max(abs(y2 - y1), 1)
+        w_emu = px_to_emu(w)
+        h_emu = px_to_emu(h)
+
+        lx1 = px_to_emu(x1 - min_x)
+        ly1 = px_to_emu(y1 - min_y)
+        lx2 = px_to_emu(x2 - min_x)
+        ly2 = px_to_emu(y2 - min_y)
+
+        geom = (
+            f'<a:custGeom>'
+            f'<a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/>'
+            f'<a:rect l="l" t="t" r="r" b="b"/>'
+            f'<a:pathLst><a:path w="{w_emu}" h="{h_emu}">'
+            f'<a:moveTo><a:pt x="{lx1}" y="{ly1}"/></a:moveTo>'
+            f'<a:lnTo><a:pt x="{lx2}" y="{ly2}"/></a:lnTo>'
+            f'</a:path></a:pathLst>'
+            f'</a:custGeom>'
+        )
+        xml = _wrap_shape(
+            shape_id, f'Line {shape_id}',
+            off_x, off_y, w_emu, h_emu,
+            geom, '<a:noFill/>', stroke,
+        )
+
+    return ShapeResult(xml=xml, bounds_emu=(off_x, off_y, off_x + w_emu, off_y + h_emu))
+
+
+# ---------------------------------------------------------------------------
+# path
+# ---------------------------------------------------------------------------
+
+def convert_path(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
+    """Convert SVG <path> to DrawingML custom geometry shape."""
+    preset_geom = _build_preset_geom_from_meta(elem)
+    preserved_custom_geom = _build_preserved_custom_geom(elem)
+    native_geom = preset_geom or preserved_custom_geom
+    d = elem.get('d', '')
+    if not d:
+        if native_geom is not None:
+            raise ValueError('Native-geometry <path> requires a non-empty d attribute')
+        return None
+
+    commands = parse_svg_path(d)
+    commands = svg_path_to_absolute(commands)
+    commands = normalize_path_commands(commands)
+
+    transform = elem.get('transform')
+    if _uses_full_transform(ctx, transform):
+        commands = transform_path_commands(commands, _combined_transform_matrix(ctx, transform))
+        path_xml, min_x, min_y, width, height = path_commands_to_drawingml(
+            commands, 0, 0, 1.0, 1.0,
+        )
+    else:
+        path_xml, min_x, min_y, width, height = path_commands_to_drawingml(
+            commands, ctx.translate_x, ctx.translate_y,

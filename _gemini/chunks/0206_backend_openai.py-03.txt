@@ -1,0 +1,102 @@
+    """Select a model-compatible size while preserving legacy fallbacks."""
+    preset = size_preset or "auto"
+    if preset in {"gpt-image-2"} or (preset == "auto" and _is_gpt_image_2(model)):
+        size = GPT_IMAGE_2_SIZES[image_size][aspect_ratio]
+        _validate_gpt_image_2_size(size)
+        return size
+    if preset in {"gpt-image", "gpt-image-legacy"} or (
+        preset == "auto" and _is_gpt_image_model(model)
+    ):
+        return GPT_IMAGE_LEGACY_ASPECT_RATIO_TO_SIZE[aspect_ratio]
+    if preset in {"dall-e-2", "dalle-2"} or (preset == "auto" and _is_dall_e_2(model)):
+        return DALL_E_2_SIZE_BY_IMAGE_SIZE[image_size]
+    return LEGACY_COMPAT_ASPECT_RATIO_TO_SIZE[aspect_ratio]
+
+
+def _supports_response_format(model: str) -> bool:
+    """GPT Image models always return base64; DALL-E/compatible models may need this."""
+    return not _is_gpt_image_model(model)
+
+
+def _read_env_choice(name: str, allowed: set[str]) -> str | None:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return None
+    normalized = value.strip().lower()
+    if normalized not in allowed:
+        allowed_list = ", ".join(sorted(allowed))
+        raise ValueError(f"Invalid {name}='{value}'. Supported: {allowed_list}")
+    return normalized
+
+
+def _read_env_int(name: str, minimum: int, maximum: int) -> int | None:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return None
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ValueError(f"Invalid {name}='{value}'. Expected integer {minimum}-{maximum}.") from exc
+    if not (minimum <= parsed <= maximum):
+        raise ValueError(f"Invalid {name}={parsed}. Expected integer {minimum}-{maximum}.")
+    return parsed
+
+
+def _gpt_image_options(model: str) -> tuple[dict, str]:
+    """Read optional GPT Image request parameters from environment."""
+    output_format = _read_env_choice("OPENAI_OUTPUT_FORMAT", GPT_IMAGE_OUTPUT_FORMATS)
+    output_ext = GPT_IMAGE_OUTPUT_EXTENSIONS[output_format] if output_format else ".png"
+    options = {}
+    if output_format:
+        options["output_format"] = output_format
+
+    output_compression = _read_env_int("OPENAI_OUTPUT_COMPRESSION", 0, 100)
+    if output_compression is not None:
+        if output_format not in {"jpeg", "webp"}:
+            raise ValueError(
+                "OPENAI_OUTPUT_COMPRESSION is only supported when "
+                "OPENAI_OUTPUT_FORMAT is jpeg or webp."
+            )
+        options["output_compression"] = output_compression
+
+    background = _read_env_choice("OPENAI_BACKGROUND", GPT_IMAGE_BACKGROUNDS)
+    if background:
+        if _is_gpt_image_2(model) and background == "transparent":
+            raise ValueError("gpt-image-2 does not support OPENAI_BACKGROUND=transparent.")
+        options["background"] = background
+
+    moderation = _read_env_choice("OPENAI_MODERATION", GPT_IMAGE_MODERATION_VALUES)
+    if moderation:
+        options["moderation"] = moderation
+
+    return options, output_ext
+
+
+def _read_input_fidelity(model: str) -> str | None:
+    """Read input fidelity for GPT Image edit requests."""
+    input_fidelity = _read_env_choice(
+        "OPENAI_INPUT_FIDELITY",
+        GPT_IMAGE_INPUT_FIDELITY_VALUES,
+    )
+    if input_fidelity is None:
+        return None
+    if _is_gpt_image_2(model):
+        raise ValueError(
+            "gpt-image-2 always uses high input fidelity and does not accept "
+            "OPENAI_INPUT_FIDELITY. Remove this setting."
+        )
+    if not _is_gpt_image_model(model):
+        raise ValueError(
+            f"{model} does not support OPENAI_INPUT_FIDELITY in this backend."
+        )
+    return input_fidelity
+
+
+def _image_generations_url(base_url: str | None) -> str:
+    base = (base_url or DEFAULT_BASE_URL).rstrip("/")
+    if base.endswith("/images/generations"):
+        return base
+    return f"{base}/images/generations"
+
+
+def _image_edits_url(base_url: str | None) -> str:

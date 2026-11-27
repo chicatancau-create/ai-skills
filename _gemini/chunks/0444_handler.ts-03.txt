@@ -1,0 +1,128 @@
+  sessionFilePath: string;
+  action: string;
+  timestamp: Date;
+}): string {
+  const { excerpts, sessionKey, sessionFilePath, action, timestamp } = params;
+  const plural = excerpts.length === 1 ? '' : 's';
+  const patternKeys = [...new Set(excerpts.map((item) => item.patternKey))];
+
+  return [
+    `## [${generateEntryId(timestamp)}] openclaw_session_sweep`,
+    '',
+    `**Logged**: ${timestamp.toISOString()}`,
+    '**Priority**: medium',
+    '**Status**: pending',
+    '**Area**: config',
+    '',
+    '### Summary',
+    `Session-end sweep detected ${excerpts.length} possible error${plural} in the previous OpenClaw session.`,
+    '',
+    '### Error',
+    '```',
+    ...excerpts.map((item) => item.excerpt),
+    '```',
+    '',
+    '### Context',
+    `- Detected by the self-improvement hook on \`/${action}\` (OpenClaw has no per-tool-call hook, so errors are swept from the session transcript at session end)`,
+    `- Session key: ${sessionKey || 'unknown'}`,
+    `- Session transcript: ${sessionFilePath}`,
+    '- Excerpts are truncated and redacted; check the transcript for full context',
+    '',
+    '### Suggested Fix',
+    'Triage this entry: if the error was real and non-obvious, keep it and fill in the fix; otherwise mark it resolved or delete it. Before keeping it, grep for its Pattern-Key(s) and fold recurrences into the existing entry (bump Recurrence-Count) instead of duplicating.',
+    '',
+    '### Metadata',
+    `- Source: ${SWEEP_SOURCE}`,
+    '- Reproducible: unknown',
+    ...patternKeys.map((patternKey) => `- Pattern-Key: ${patternKey}`),
+    '',
+    '---',
+  ].join('\n');
+}
+
+async function handleSessionEndSweep(event: HookEvent): Promise<void> {
+  const context = event.context as Record<string, unknown>;
+  const workspaceDir =
+    typeof context.workspaceDir === 'string' && context.workspaceDir.trim()
+      ? context.workspaceDir
+      : undefined;
+  if (!workspaceDir) {
+    return;
+  }
+
+  // Opt-in gate: only sweep when the workspace uses the self-improvement skill.
+  const learningsDir = path.join(workspaceDir, '.learnings');
+  try {
+    const stats = await fs.stat(learningsDir);
+    if (!stats.isDirectory()) {
+      return;
+    }
+  } catch {
+    return;
+  }
+
+  const sessionFilePath = resolveSessionFilePath(context, workspaceDir);
+  if (!sessionFilePath) {
+    return;
+  }
+
+  const excerpts = await scanTranscriptForErrors(sessionFilePath);
+  if (excerpts.length === 0) {
+    return;
+  }
+
+  const errorsFilePath = path.join(learningsDir, 'ERRORS.md');
+  let existing = '';
+  try {
+    existing = await fs.readFile(errorsFilePath, 'utf-8');
+  } catch {
+    // Missing file is fine; it is created below.
+  }
+
+  const freshExcerpts = excerpts.filter((item) => !existing.includes(item.excerpt));
+  if (freshExcerpts.length === 0) {
+    return;
+  }
+
+  const entry = formatErrorEntry({
+    excerpts: freshExcerpts,
+    sessionKey: typeof event.sessionKey === 'string' ? event.sessionKey : '',
+    sessionFilePath,
+    action: event.action,
+    timestamp: event.timestamp instanceof Date ? event.timestamp : new Date(),
+  });
+
+  if (!existing) {
+    try {
+      await fs.writeFile(errorsFilePath, `${ERRORS_FILE_HEADER}\n${entry}\n`, { flag: 'wx' });
+      return;
+    } catch (err) {
+      if (!isObject(err) || (err as { code?: string }).code !== 'EEXIST') {
+        throw err;
+      }
+    }
+  }
+  await fs.appendFile(errorsFilePath, `\n${entry}\n`);
+}
+
+async function countPendingSweepEntries(workspaceDir: string | undefined): Promise<number> {
+  if (!workspaceDir) {
+    return 0;
+  }
+  let content: string;
+  try {
+    content = await fs.readFile(path.join(workspaceDir, '.learnings', 'ERRORS.md'), 'utf-8');
+  } catch {
+    return 0;
+  }
+
+  return content
+    .split(/^## /m)
+    .slice(1)
+    .filter(
+      (section) =>
+        section.includes(`Source: ${SWEEP_SOURCE}`) && section.includes('**Status**: pending'),
+    ).length;
+}
+
+async function handleBootstrap(event: HookEvent): Promise<void> {

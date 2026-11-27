@@ -1,0 +1,127 @@
+    qt = tokens(task)
+    scored = []
+    for r in recs:
+        if r["name"] in ALWAYS_ON:
+            continue
+        hay = norm(r["name"] + " " + r["brief"] + " " + " ".join(r["triggers"]) + " " + r["description"])
+        score = 0.0
+        hits = []
+        for trig in r["triggers"]:
+            tn = norm(trig)
+            if tn and tn in norm(task):
+                score += 3.0 + min(len(tn), 6) * 0.3
+                hits.append(trig)
+        if norm(r["name"]) in norm(task):
+            score += 6.0
+            hits.append(r["name"])
+        for t in qt:
+            if len(t) >= 2 and t in hay:
+                score += 0.35
+        if score > 0:
+            scored.append((score, r, hits))
+    scored.sort(key=lambda x: -x[0])
+    if not scored:
+        print("没有命中任何技能。按通用能力直接做，不要强行套技能。")
+        return
+    # 噪声闸：低于 2.0 分的多半是单字偶然命中，不要塞给模型。
+    strong = [s for s in scored if s[0] >= 2.0]
+    show = strong[:6] if strong else scored[:2]
+    print(f"任务: {task}\n")
+    print("候选（按相关度，只读你真正需要的那几个）:")
+    for score, r, hits in show:
+        print(f"  {score:5.1f}  {r['name']:32s} {r['brief']}")
+        print(f"         read: {r['skill_md']}")
+        if hits:
+            print(f"         命中: {', '.join(hits[:8])}")
+    if not strong:
+        print("\n（相关度都很低，可能本次任务不需要任何技能。）")
+    print("\n下一步：用文件读取工具打开上面需要的 SKILL.md，按它执行。")
+    print("不要 pin，除非用户明确要求某技能长期常驻。")
+
+
+def find(name):
+    for r in load_catalog():
+        if r["name"] == name or r["dir"] == name:
+            return r
+    return None
+
+
+def cmd_show(name):
+    r = find(name)
+    if not r:
+        print(f"NOT FOUND: {name}")
+        sys.exit(2)
+    print(r["skill_md"])
+
+
+def cmd_cat(name):
+    r = find(name)
+    if not r:
+        print(f"NOT FOUND: {name}")
+        sys.exit(2)
+    with open(r["skill_md"], "r", encoding="utf-8", errors="replace") as f:
+        sys.stdout.write(f.read())
+
+
+def junction(src, dst):
+    r = subprocess.run(["cmd", "/c", "mklink", "/J", src, dst],
+                       capture_output=True, text=True, encoding="gbk", errors="replace")
+    return r.returncode == 0, (r.stdout or "") + (r.stderr or "")
+
+
+def cmd_status():
+    print(f"库      : {LIB}  exists={os.path.isdir(LIB)}")
+    print(f"默认窗口: {ACTIVE}  exists={os.path.isdir(ACTIVE)}")
+    if os.path.isdir(ACTIVE):
+        for n in sorted(os.listdir(ACTIVE)):
+            p = os.path.join(ACTIVE, n)
+            if not os.path.isdir(p):
+                continue          # app state files (WorkBuddy *_migration.json)
+            tgt = os.readlink(p) if is_link(p) else "(real dir)"
+            ok = os.path.isfile(os.path.join(p, "SKILL.md"))
+            print(f"  {'OK ' if ok else 'BAD'} {n:34s} -> {tgt}")
+    print(f"停用区  : {DISABLED}  exists={os.path.isdir(DISABLED)}")
+
+
+def cmd_pin(names):
+    os.makedirs(ACTIVE, exist_ok=True)
+    for name in names:
+        r = find(name)
+        if not r:
+            print(f"NOT FOUND: {name}")
+            continue
+        dst = os.path.join(ACTIVE, r["dir"])
+        if os.path.exists(dst):
+            print(f"already pinned: {name}")
+            continue
+        ok, msg = junction(dst, os.path.dirname(r["skill_md"]))
+        print(f"{'PINNED' if ok else 'FAIL'} {name} -> {os.path.dirname(r['skill_md'])} {msg.strip()}")
+
+
+def cmd_unpin(names):
+    for name in names:
+        r = find(name)
+        d = r["dir"] if r else name
+        p = os.path.join(ACTIVE, d)
+        if not os.path.exists(p):
+            print(f"not pinned: {name}")
+            continue
+        if name in ALWAYS_ON:
+            print(f"REFUSE: {name} 是默认必开技能，不能 unpin")
+            continue
+        try:
+            if is_link(p):
+                os.rmdir(p)
+            else:
+                print(f"REFUSE: {p} 不是联接，不敢删")
+                continue
+            print(f"UNPINNED {name}")
+        except OSError as e:
+            print(f"FAIL {name}: {e}")
+
+
+def cmd_doctor():
+    problems = []
+    recs = load_catalog()
+    print(f"catalog: {len(recs)} skills")
+    for r in recs:

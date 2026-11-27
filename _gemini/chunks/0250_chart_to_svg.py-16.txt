@@ -1,0 +1,78 @@
+    """Keep the original narrow axis gate for payloads without axes metadata."""
+    grouping = payload.get("grouping")
+    axes = plot_area.findall("c:catAx", C_NS) + plot_area.findall("c:valAx", C_NS)
+    for axis in axes:
+        axis_kind = _local_name(axis.tag)
+        axis_position = _element_val(axis.find("c:axPos", C_NS))
+        delete = axis.find("c:delete", C_NS)
+        if delete is not None and ooxml_bool(delete.attrib.get("val"), True):
+            raise _UnsupportedChart("unsupported-chart-axis-options")
+        scaling = axis.find("c:scaling", C_NS)
+        if scaling is not None:
+            for tag in ("logBase", "min", "max"):
+                if scaling.find(f"c:{tag}", C_NS) is not None:
+                    raise _UnsupportedChart("unsupported-chart-axis-options")
+            orientation = _element_val(scaling.find("c:orientation", C_NS))
+            if orientation not in {None, "minMax"}:
+                raise _UnsupportedChart("unsupported-chart-axis-options")
+        for tag in (
+            "majorUnit", "minorUnit", "crossesAt", "dispUnits",
+            "tickLblSkip", "tickMarkSkip",
+        ):
+            if axis.find(f"c:{tag}", C_NS) is not None:
+                raise _UnsupportedChart("unsupported-chart-axis-options")
+        crosses = _element_val(axis.find("c:crosses", C_NS))
+        if crosses not in {None, "autoZero"}:
+            raise _UnsupportedChart("unsupported-chart-axis-options")
+        auto = axis.find("c:auto", C_NS)
+        if auto is not None and not ooxml_bool(auto.attrib.get("val"), True):
+            raise _UnsupportedChart("unsupported-chart-axis-options")
+        num_fmt = axis.find("c:numFmt", C_NS)
+        if num_fmt is not None:
+            format_code = num_fmt.attrib.get("formatCode", "").strip()
+            allowed_formats = {"", "General"}
+            if grouping == "percentStacked":
+                allowed_formats.add("0%")
+            if format_code not in allowed_formats:
+                raise _UnsupportedChart("unsupported-chart-axis-number-format")
+        tick_label_position = _element_val(axis.find("c:tickLblPos", C_NS))
+        if payload["type"] in {"scatter", "bubble"} or axis_kind == "catAx":
+            if tick_label_position not in {None, "nextTo"}:
+                raise _UnsupportedChart("unsupported-chart-axis-options")
+        elif tick_label_position == "none":
+            payload["show_value_axis_labels"] = False
+        elif tick_label_position not in {None, "nextTo"}:
+            raise _UnsupportedChart("unsupported-chart-axis-options")
+
+        has_major_gridlines = axis.find("c:majorGridlines", C_NS) is not None
+        if payload["type"] in {"scatter", "bubble"}:
+            expected_major_gridlines = axis_position in {"l", "r"}
+        else:
+            expected_major_gridlines = axis_kind == "valAx"
+        if has_major_gridlines != expected_major_gridlines:
+            raise _UnsupportedChart("unsupported-chart-axis-options")
+        if axis.find("c:minorGridlines", C_NS) is not None:
+            raise _UnsupportedChart("unsupported-chart-axis-options")
+
+
+def _validate_normalized_axis_topology(
+    payload: dict[str, Any],
+    plot_area: ET.Element,
+    plot: ET.Element,
+) -> None:
+    """Validate a category/value pair whose presentation will normalize."""
+    axes_by_id = _axis_nodes_by_id(plot_area)
+    cat_id, cat_axis, val_id, val_axis = _plot_axis_pair(plot, axes_by_id)
+    if set(axes_by_id) != {cat_id, val_id}:
+        raise _UnsupportedChart("unsupported-chart-axis-options")
+
+    plot_axis_nodes = plot.findall("c:axId", C_NS)
+    if any(set(node.attrib) != {"val"} or list(node) for node in plot_axis_nodes):
+        raise _UnsupportedChart("unsupported-chart-axis-options")
+    for axis, axis_id, cross_axis_id in (
+        (cat_axis, cat_id, val_id),
+        (val_axis, val_id, cat_id),
+    ):
+        if axis.attrib:
+            raise _UnsupportedChart("unsupported-chart-axis-options")
+        id_nodes = axis.findall("c:axId", C_NS)

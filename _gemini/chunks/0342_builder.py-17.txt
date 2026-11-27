@@ -1,0 +1,105 @@
+    for child in list(source_tree):
+        source_tree.remove(child)
+    for child, _generated in merged_children:
+        source_tree.append(child)
+
+    visible_shape_ids = {
+        value
+        for element in source_tree
+        for value in _shape_ids_in_element(element)
+    }
+    if not patch.animation_changed:
+        missing_timing_targets = _timing_shape_ids(source_root) - visible_shape_ids
+        if missing_timing_targets:
+            raise TemplateStructureError(
+                "Edited slide removed source animation target(s); update "
+                "animations.json explicitly: "
+                + ", ".join(sorted(missing_timing_targets, key=int))
+            )
+    serialized_slide = serialize_source_xml(source_root, source_slide)
+    if not patch.transition_changed:
+        serialized_slide = _preserve_roundtrip_transition_markup(
+            serialized_slide,
+            source_slide,
+        )
+    if not patch.animation_changed:
+        serialized_slide = _preserve_roundtrip_timing_markup(
+            serialized_slide,
+            source_slide,
+        )
+    generated_slide_path.write_bytes(serialized_slide)
+    combined_id_map = {
+        **restored_shape_id_map,
+        **renumbered_shape_id_map,
+    }
+    return {
+        int(old_id): int(new_id)
+        for old_id, new_id in combined_id_map.items()
+        if old_id.isdigit() and new_id.isdigit()
+    }
+
+
+def _remove_relationships_by_type(rels_path: Path, rel_type: str) -> int:
+    """Remove every relationship of one type and return the removed count."""
+    tree = ET.parse(rels_path)
+    root = tree.getroot()
+    removed = 0
+    for relationship in list(root):
+        if _relationship_attrs(relationship).get("Type") != rel_type:
+            continue
+        root.remove(relationship)
+        removed += 1
+    if removed:
+        _write_xml_tree(rels_path, tree)
+    return removed
+
+
+def _part_has_relationship_references(extract_dir: Path, part_name: str) -> bool:
+    """Return whether any relationships file in the package still targets a part."""
+    for rels_path in (extract_dir / 'ppt').rglob('*.rels'):
+        source_part = _part_name_for_relationships_path(rels_path)
+        for attrs in _read_relationships(rels_path).values():
+            if attrs.get('TargetMode') == 'External':
+                continue
+            target = attrs.get('Target')
+            if target and _resolve_package_target(source_part, target) == part_name:
+                return True
+    return False
+
+
+def _unused_part_path(directory: Path, filename: str) -> Path:
+    """Allocate a part name without overwriting any existing package member."""
+    requested = Path(filename)
+    occupied = {path.name.casefold() for path in directory.iterdir()}
+    candidate = directory / requested.name
+    suffix = 1
+    while candidate.name.casefold() in occupied:
+        candidate = directory / f"{requested.stem}_{suffix}{requested.suffix}"
+        suffix += 1
+    return candidate
+
+
+def _remove_all_notes_parts(extract_dir: Path) -> None:
+    """Remove notes slides, masters, their relationships, and type overrides."""
+    content_types_path = extract_dir / '[Content_Types].xml'
+    content_tree = ET.parse(content_types_path)
+    content_root = content_tree.getroot()
+    notes_content_types = {
+        'application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml',
+        _NOTES_MASTER_CONTENT_TYPE,
+    }
+    notes_parts = {
+        _canonical_opc_part_path(node.get('PartName', '').lstrip('/'))
+        for node in content_root
+        if node.get('ContentType') in notes_content_types
+    } - {None}
+    notes_files = [
+        path for path in extract_dir.rglob('*')
+        if path.is_file() and (
+            _canonical_opc_part_path(path.relative_to(extract_dir).as_posix()) in notes_parts
+            or path.relative_to(extract_dir).as_posix().startswith((
+                'ppt/notesSlides/', 'ppt/notesMasters/',
+            ))
+        )
+    ]
+    notes_parts.update(

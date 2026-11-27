@@ -1,0 +1,124 @@
+{paragraphs_xml}
+</p:txBody>
+</p:sp>'''
+    if any(run.get(_INLINE_FORMULA_KEY) is not None for run in runs):
+        from ..native_objects.inline_formula import wrap_inline_formula_shape
+        shape_xml = wrap_inline_formula_shape(shape_xml)
+    return ShapeResult(
+        xml=shape_xml,
+        bounds_emu=(off_x, off_y, off_x + ext_cx, off_y + ext_cy),
+    )
+
+
+# ---------------------------------------------------------------------------
+# clipPath support (image clipping)
+# ---------------------------------------------------------------------------
+
+def _clip_commands_to_geom(
+    commands: list[PathCommand],
+    img_x: float, img_y: float,
+    img_w: float, img_h: float,
+    object_bbox: bool,
+) -> str:
+    """Convert clip path commands to DrawingML custGeom XML.
+
+    Coordinates are transformed relative to the image bounding box so that
+    (img_x, img_y) maps to (0, 0) and (img_x+img_w, img_y+img_h) maps to
+    (w_emu, h_emu).
+    """
+    w_emu = px_to_emu(img_w)
+    h_emu = px_to_emu(img_h)
+
+    if w_emu <= 0 or h_emu <= 0:
+        return '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>'
+
+    def _tx(x: float) -> int:
+        if object_bbox:
+            return int(x * w_emu)
+        return px_to_emu(x - img_x)
+
+    def _ty(y: float) -> int:
+        if object_bbox:
+            return int(y * h_emu)
+        return px_to_emu(y - img_y)
+
+    parts: list[str] = []
+    for cmd in commands:
+        if cmd.cmd == 'M':
+            parts.append(
+                f'<a:moveTo><a:pt x="{_tx(cmd.args[0])}" '
+                f'y="{_ty(cmd.args[1])}"/></a:moveTo>'
+            )
+        elif cmd.cmd == 'L':
+            parts.append(
+                f'<a:lnTo><a:pt x="{_tx(cmd.args[0])}" '
+                f'y="{_ty(cmd.args[1])}"/></a:lnTo>'
+            )
+        elif cmd.cmd == 'C':
+            pts = ''.join(
+                f'<a:pt x="{_tx(cmd.args[i])}" y="{_ty(cmd.args[i + 1])}"/>'
+                for i in range(0, 6, 2)
+            )
+            parts.append(f'<a:cubicBezTo>{pts}</a:cubicBezTo>')
+        elif cmd.cmd == 'Z':
+            parts.append('<a:close/>')
+
+    path_inner = '\n'.join(parts)
+    return f'''<a:custGeom>
+<a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/>
+<a:rect l="l" t="t" r="r" b="b"/>
+<a:pathLst><a:path w="{w_emu}" h="{h_emu}">
+{path_inner}
+</a:path></a:pathLst>
+</a:custGeom>'''
+
+
+_CLIP_SHAPE_TAGS = frozenset({'circle', 'ellipse', 'rect', 'path', 'polygon'})
+_CLIP_NON_VISUAL_ELEMENTS = frozenset({
+    f'{{{SVG_NS}}}{tag}' for tag in ('desc', 'metadata', 'style', 'title')
+})
+
+
+def _element_contract_label(elem: ET.Element) -> str:
+    tag = elem.tag.rsplit('}', 1)[-1]
+    elem_id = (elem.get('id') or '').strip()
+    return f'<{tag} id="{elem_id}">' if elem_id else f'<{tag}>'
+
+
+def _unsupported_clip_rule_properties(elem: ET.Element) -> tuple[str, ...]:
+    style_values = parse_inline_style(elem.get('style'))
+    return tuple(
+        name for name in ('clip-rule', 'fill-rule')
+        if elem.get(name) is not None or name in style_values
+    )
+
+
+def _effective_clip_geometry_length(
+    elem: ET.Element,
+    attribute: str,
+    *,
+    default: float | None = None,
+) -> float:
+    style_values = parse_inline_style(elem.get('style'))
+    raw = style_values.get(attribute)
+    if raw is None:
+        raw = elem.get(attribute)
+    if raw is None:
+        if default is None:
+            raise ValueError(f'requires {attribute}')
+        return default
+    return parse_project_geometry_length(raw, attribute)
+
+
+def _clip_preset_geometry_error(
+    target: ET.Element,
+    shape: ET.Element,
+    clip_units: str,
+) -> str | None:
+    """Reject primitive clips that cannot map to a full-frame preset."""
+    shape_tag = shape.tag.rsplit('}', 1)[-1].lower()
+    if shape_tag not in {'circle', 'ellipse', 'rect'}:
+        return None
+    target_label = _element_contract_label(target)
+    try:
+        target_x = _effective_clip_geometry_length(target, 'x', default=0.0)

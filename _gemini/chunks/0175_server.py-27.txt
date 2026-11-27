@@ -1,0 +1,93 @@
+        main_language = None
+        if rec_stage_number > 0:
+            language_source = (
+                previous_result
+                if _recommendation_language(previous_result)
+                else current_recommendations
+            )
+            if not _recommendation_language(language_source):
+                language_source = result
+            language_error = _canonicalize_primary_language(
+                language_source,
+                required=True,
+            )
+            if language_error:
+                return jsonify({'error': language_error}), 409
+            main_language = _recommendation_language(language_source)
+            if main_language:
+                result['primary_language'] = main_language
+            else:
+                result.pop('primary_language', None)
+        if rec_stage_number == 2:
+            solution_error = _stage2_solution_error(
+                result,
+                main_language=main_language,
+            )
+            if solution_error:
+                return jsonify({'error': solution_error}), 400
+        if rec_stage_number == 2:
+            proactive_defaults, proactive_recommendation_error = (
+                _resolve_proactive_execution_values(current_recommendations)
+            )
+            if proactive_recommendation_error:
+                return jsonify({
+                    'error': proactive_recommendation_error,
+                }), 409
+            proactive_result_error = _normalize_proactive_execution_result(
+                result,
+                proactive_defaults,
+            )
+            if proactive_result_error:
+                return jsonify({'error': proactive_result_error}), 400
+        _normalize_custom_selections(result)
+        locked_values = _apply_locked_recommendations(
+            result,
+            rec_file,
+            result_file,
+            carry_previous=rec_stage_number > 1,
+        )
+        # Formula realization is Executor-owned. Accept the retired field from
+        # older recommendations/clients, but never persist it in a new receipt.
+        result.pop('formula_policy', None)
+        locked_values.pop('formula_policy', None)
+        if rec_stage_number == 1 or not template_required:
+            result.pop('template_application', None)
+            locked_values.pop('template_application', None)
+        result.pop('template_reuse_scope', None)
+        result.pop('template_adherence', None)
+        if stage == 'stage1':
+            result['stage'] = 'stage1'
+            result['status'] = 'stage1-confirmed'
+            if locked_values:
+                result[_LOCKED_RECOMMENDATIONS_KEY] = locked_values
+        else:
+            result.pop(_LOCKED_RECOMMENDATIONS_KEY, None)
+            result['stage'] = 'final'
+            result['status'] = 'confirmed'
+        if _stage1_sha256(confirm_dir) != stage1_sha256:
+            return jsonify({'error': 'Stage 1 recommendations changed; reload the page'}), 409
+        result['stage1_sha256'] = stage1_sha256
+        result['selection_sha256'] = (
+            selection_receipt['selection_sha256'] if selection_receipt is not None
+            else previous_result['selection_sha256']
+        )
+        result['confirmed_at'] = time.strftime('%Y-%m-%dT%H:%M:%S')
+        if write_selection and selection_receipt is not None:
+            _write_json_atomic(selection_file, selection_receipt)
+        _write_json_atomic(result_file, result)
+        _sync_session_state(
+            confirm_dir,
+            server_port=app.config.get('SERVER_PORT'),
+            event=f'{result["stage"]}-submitted',
+        )
+        logger.info('%s confirmation written to %s', result['stage'], result_file)
+        return jsonify({'status': 'ok'})
+
+    return app
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description='PPT Master template and Strategist confirmation UI',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )

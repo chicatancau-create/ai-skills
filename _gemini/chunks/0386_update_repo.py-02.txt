@@ -1,0 +1,119 @@
+            ) from exc
+        if resolved in visited:
+            digest.update(b"repeat\0")
+            return
+        visited.add(resolved)
+
+        if not resolved.is_file():
+            digest.update(b"missing\0")
+            return
+        try:
+            content = resolved.read_bytes()
+        except OSError as exc:
+            raise RuntimeError(
+                f"Unable to read requirements file {resolved}: {exc}"
+            ) from exc
+        digest.update(b"file\0")
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+        for included in _requirement_includes(
+            resolved,
+            content.decode("utf-8", errors="replace"),
+        ):
+            visit(included)
+
+    visit(path)
+    return digest.hexdigest()
+
+
+def ensure_git_available() -> None:
+    if shutil.which("git") is None:
+        raise RuntimeError("Missing executable: git")
+
+
+def ensure_git_checkout() -> None:
+    if not (REPO_ROOT / ".git").exists():
+        raise RuntimeError(non_git_checkout_message())
+
+
+def ensure_clean_tracked_worktree() -> None:
+    status = run_command(["git", "status", "--porcelain", "--untracked-files=no"], check=False)
+    if status.returncode != 0:
+        details = (status.stderr or status.stdout or "").strip()
+        raise RuntimeError(details or "Unable to inspect git status.")
+
+    if status.stdout.strip():
+        raise RuntimeError(
+            "Tracked local changes detected. Please commit or stash them before running the update command."
+        )
+
+
+def get_head_revision() -> str:
+    result = run_command(["git", "rev-parse", "HEAD"])
+    return result.stdout.strip()
+
+
+def sync_python_dependencies() -> None:
+    if not REQUIREMENTS_FILE.exists():
+        print_status("requirements.txt not found; skipping Python dependency sync.")
+        return
+
+    print_status("Requirements include tree changed. Syncing Python dependencies...")
+    result = run_command([sys.executable, "-m", "pip", "install", "-r", str(REQUIREMENTS_FILE)])
+    if result.stdout.strip():
+        print_status(result.stdout.strip())
+    if result.stderr.strip():
+        print_status(result.stderr.strip())
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+
+    try:
+        ensure_git_checkout()
+        ensure_git_available()
+        ensure_clean_tracked_worktree()
+
+        before_head = get_head_revision()
+        before_requirements = requirements_digest(REQUIREMENTS_FILE)
+
+        print_status(f"Repository: {REPO_ROOT}")
+        pull_result = run_command(["git", "pull", "--ff-only"])
+        if pull_result.stdout.strip():
+            print_status(pull_result.stdout.strip())
+        if pull_result.stderr.strip():
+            print_status(pull_result.stderr.strip())
+
+        after_head = get_head_revision()
+        after_requirements = requirements_digest(REQUIREMENTS_FILE)
+
+        if before_head == after_head:
+            print_status("Repository is already up to date.")
+        else:
+            print_status(f"Updated from {before_head[:7]} to {after_head[:7]}.")
+
+        if args.skip_pip:
+            print_status("Skipped Python dependency sync (--skip-pip).")
+        elif before_requirements != after_requirements:
+            sync_python_dependencies()
+        else:
+            print_status(
+                "Requirements include tree unchanged. Skipping Python dependency sync."
+            )
+
+        print_status(
+            "Note: system dependencies such as Node.js and Pandoc still need "
+            "to be installed manually."
+        )
+        return 0
+    except subprocess.CalledProcessError as exc:
+        details = (exc.stderr or exc.stdout or "").strip()
+        print(details or "Command failed.", file=sys.stderr)
+        return exc.returncode or 1
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

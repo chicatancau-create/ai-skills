@@ -1,0 +1,104 @@
+# 电子表格 (sheet) 命令参考
+
+## 适用范围（重要）
+
+`sheet` 产品线仅支持钉钉在线电子表格（`contentType=ALIDOC`、`extension=axls`），不支持上传的 `xlsx` / `xls` / `xlsm` / `csv` 等本地表格文件。
+
+| 文件类型 | 处理方式 |
+|---------|---------|
+| 在线电子表格（`axls`） | 走 `sheet` 全部命令（读/写/筛选/合并/导出等服务端原子操作） |
+| `xlsx` / `xls` / `xlsm` / `csv` 等本地表格文件 | 必须用 `dws doc download --node <ID> --output <路径>` 先下载到本地再解析处理，禁止调用任何 `sheet` 子命令（sheet 底层 MCP 工具仅认 `axls`，传入 xlsx 节点会直接报错） |
+| 想把在线表格导出为 xlsx | 用 `dws sheet export` ——输入是 `axls`，输出是 xlsx（axls → xlsx 的格式转换） |
+
+> 用户直接粘贴原始 `alidocs` URL 时必须先 probe：先执行 `dws doc info --node <URL> --format json`，按 [链接规范](../url-patterns.md#alidocs-url-类型探测流程) 校验 `contentType` 和 `extension`：
+> - 仅当 `contentType=ALIDOC` 且 `extension=axls` 时，才继续走 `sheet`
+> - 如果是 `xlsx` / `xls` / `xlsm` / `csv`，立即转向 `dws doc download`，并告知用户"这是本地表格文件，已为你下载到本地处理"
+
+## URL 识别与 NODE_ID 提取
+
+当用户输入包含钉钉文档 URL 时，必须先识别并提取 NODE_ID，再判断意图。
+
+硬性规则：对用户直接给出的原始 `alidocs` URL，不允许直接走 `sheet` 命令，必须先执行：
+
+```bash
+dws doc info --node "<URL>" --format json
+```
+
+根据返回路由：
+- `contentType=ALIDOC` + `extension=axls` → 继续走 `sheet`
+- `contentType≠ALIDOC` + `extension=xlsx` / `xls` / `xlsm` / `csv` → 转向 `dws doc download --node <ID> --output <路径>`，禁止调用任何 sheet 子命令
+- 其他类型 → 按 [链接规范](../url-patterns.md#alidocs-url-类型探测流程) 路由
+
+补充：如果这是用户直接提供的原始 `alidocs` URL，先按 [链接规范](../url-patterns.md#alidocs-url-类型探测流程) probe 一次确认真实类型，再判断是否继续走 `sheet`。
+
+### 支持的 URL 格式
+
+| 格式 | 示例 | NODE_ID 提取方式 |
+|------|------|----------------|
+| `alidocs.dingtalk.com/i/nodes/{id}` | `https://alidocs.dingtalk.com/i/nodes/9E05BDRVQePjzLkZt2p2vE7kV63zgkYA` | 取 URL 路径最后一段 |
+| `alidocs.dingtalk.com/i/nodes/{id}?queryParams` | `https://alidocs.dingtalk.com/i/nodes/abc123?doc_type=wiki_doc` | 忽略 query 参数，取路径最后一段 |
+| `alidocs.dingtalk.com/spreadsheetv2/{key}/...` | `https://alidocs.dingtalk.com/spreadsheetv2/vKJngl50tJN1v3a3/...?dentryKey=vKJngl50tJN1v3a3&type=s` | **不要提取 path segment**，将完整 URL 直接传给 `--node` 参数，由 MCP 服务端解析 |
+
+### 提取规则
+
+1. 匹配 URL 中 `alidocs.dingtalk.com` 域名
+2. **判断 URL 路径格式**：
+   - 路径包含 `/i/nodes/` → 取 URL path 的最后一段作为 NODE_ID（去掉 query string 和 fragment）
+   - 路径包含 `/spreadsheetv2/` → **不要提取 path segment**，必须将完整 URL 原样传给 `--node` 参数（因为 path 中的短 ID 不是合法的 nodeId，MCP 服务端会自行解析完整 URL）
+3. 对于 `/i/nodes/` 格式，提取出的 NODE_ID 可直接用于所有 `--node` 参数，也可将完整 URL 传给 `--node`（CLI 会自动解析）
+4. 对用户直接提供的原始 `alidocs` URL，先按 [链接规范](../url-patterns.md#alidocs-url-类型探测流程) probe；只有 probe 确认 `contentType=ALIDOC` 且 `extension=axls` 时，才继续留在 `sheet`；如果 `extension=xlsx` / `xls` / `xlsm` / `csv`，必须转向 `dws doc download`，不能走任何 sheet 命令
+
+## 查询命令帮助
+
+当你不确定某个命令的具体参数、格式或可选项时，**优先执行 `--help` 查询**，不要猜测参数名或凭记忆编造。
+
+```bash
+# 查看 sheet 下所有子命令
+dws sheet --help
+
+# 查看具体命令的完整参数说明
+dws sheet range update --help
+dws sheet filter-view create --help
+dws sheet insert-dimension --help
+
+# 查看子命令组下的所有命令
+dws sheet range --help
+dws sheet filter-view --help
+```
+
+规则：
+- 参数名不确定时 → 先 `--help`，再调用
+- 报错 "unknown flag" 时 → `--help` 确认正确的 flag 名称
+- 不确定某个功能是否存在时 → `dws sheet --help` 查看命令列表
+
+## 命令速查表
+
+| 命令 | 用途 |
+|------|------|
+| `sheet create` | 创建钉钉表格文档 |
+| `sheet list` | 获取全部工作表列表 |
+| `sheet info` | 获取指定工作表详情 |
+| `sheet new` | 新建工作表 |
+| `sheet update` | 更新工作表属性（标题/位置/隐藏/冻结） |
+| `sheet copy` | 复制工作表 |
+| `sheet range read` | 读取工作表数据（别名: range get） |
+| `sheet range update` | 更新指定区域内容（值/公式/超链接） |
+| `sheet range set-style` | 设置单元格样式 |
+| `sheet range batch-set-style` | 按配置文件批量设置样式 |
+| `sheet find` | 搜索单元格内容 |
+| `sheet append` | 在末尾追加数据行 |
+| `sheet csv-put` | 将 CSV 数据写入指定位置（纯值，自动扩容） |
+| `sheet replace` | 全局查找替换文本 |
+| `sheet merge-cells` | 合并单元格 |
+| `sheet unmerge-cells` | 取消合并单元格 |
+| `sheet set-dropdown` | 设置下拉列表 |
+| `sheet get-dropdown` | 获取下拉列表配置 |
+| `sheet delete-dropdown` | 删除下拉列表 |
+| `sheet insert-dimension` | 在指定位置插入行或列 |
+| `sheet delete-dimension` | 删除指定位置的行或列 |
+| `sheet update-dimension` | 更新行/列属性（显隐/行高/列宽） |
+| `sheet move-dimension` | 移动行或列到指定位置 |
+| `sheet add-dimension` | 在末尾追加空行或空列 |
+| `sheet media-upload` | 上传附件到表格 |
+| `sheet write-image` | 上传图片并写入单元格 |
+| `sheet create-float-image` | 创建浮动图片 |

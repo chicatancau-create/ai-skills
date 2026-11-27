@@ -1,0 +1,110 @@
+            _resolve_project_letter_spacings,
+        )
+        if any(helper is None for helper in helpers):
+            result['warnings'].append(
+                'Unable to import text metrics; skipped edited-text frame-fit check'
+            )
+            return
+        try:
+            font_sizes = _resolve_project_font_sizes(root)
+            letter_spacings = _resolve_project_letter_spacings(
+                root,
+                font_sizes,
+            )
+        except ValueError:
+            return
+
+        parent_by_id = {
+            id(child): parent
+            for parent in root.iter()
+            for child in list(parent)
+        }
+        measured_unchanged = 0
+        positive_overflow_ratios: List[float] = []
+        for text_element in root.iter(f'{{{SVG_NS}}}text'):
+            if id(text_element) not in unchanged_text_ids:
+                continue
+            if self._has_non_visual_ancestor(
+                text_element,
+                root,
+                parent_by_id,
+            ):
+                continue
+            if (
+                self._is_hidden_element(text_element, parent_by_id)
+                or self._has_zero_opacity(text_element, parent_by_id)
+            ):
+                continue
+            visible_text = ''.join(text_element.itertext())
+            if (
+                not visible_text.strip()
+                or ('{{' in visible_text and '}}' in visible_text)
+            ):
+                continue
+            estimated = self._estimated_text_bounds(
+                text_element,
+                parent_by_id,
+                font_sizes,
+                letter_spacings,
+                include_headroom=True,
+            )
+            if estimated is None:
+                continue
+            _frame_label, frame, _frame_error, frame_is_inferred = (
+                self._roundtrip_text_frame(
+                    text_element,
+                    parent_by_id,
+                )
+            )
+            if frame is None or frame_is_inferred:
+                continue
+            measured_unchanged += 1
+            metrics = self._bounds_overflow_metrics(estimated, frame)
+            if metrics is not None and metrics[1] > 0:
+                positive_overflow_ratios.append(metrics[1])
+
+        calibration = min(
+            max(positive_overflow_ratios, default=0.0),
+            _ROUNDTRIP_TEXT_CALIBRATION_CAP,
+        )
+        source_slot_overflow = self._roundtrip_source_slot_overflow(baseline_root)
+        result['info']['roundtrip_text_calibration'] = {
+            'factor': calibration,
+            'measured_unchanged': measured_unchanged,
+            'positive_unchanged': len(positive_overflow_ratios),
+        }
+        for text_element in root.iter(f'{{{SVG_NS}}}text'):
+            if id(text_element) not in included_text_ids:
+                continue
+            if self._has_non_visual_ancestor(
+                text_element,
+                root,
+                parent_by_id,
+            ):
+                continue
+            if (
+                self._is_hidden_element(text_element, parent_by_id)
+                or self._has_zero_opacity(text_element, parent_by_id)
+            ):
+                continue
+            visible_text = ''.join(text_element.itertext())
+            if (
+                not visible_text.strip()
+                or ('{{' in visible_text and '}}' in visible_text)
+            ):
+                continue
+            estimated = self._estimated_text_bounds(
+                text_element,
+                parent_by_id,
+                font_sizes,
+                letter_spacings,
+                include_headroom=True,
+            )
+            if estimated is None:
+                continue
+            frame_label, frame, frame_error, frame_is_inferred = (
+                self._roundtrip_text_frame(
+                    text_element,
+                    parent_by_id,
+                )
+            )

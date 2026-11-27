@@ -1,0 +1,89 @@
+        or "\\" in filename
+    ):
+        raise ValueError(f"Media filename must be a basename: {filename!r}")
+
+
+def _extract_theme_info(
+    theme: PartRef,
+    palette: ColorPalette,
+) -> tuple[dict[str, str], dict[str, str]]:
+    from .color_resolver import find_color_elem, resolve_color
+
+    colors: dict[str, str] = {}
+    fonts: dict[str, str] = {}
+
+    scheme = theme.xml.find(".//a:clrScheme", NS)
+    if scheme is not None:
+        for child in list(scheme):
+            if not isinstance(child.tag, str):
+                continue
+            name = child.tag.split("}", 1)[-1]
+            try:
+                color_elem = find_color_elem(child)
+                hex_, _ = resolve_color(color_elem, palette)
+            except ValueError as exc:
+                if palette.strict:
+                    raise
+                palette._diagnose(
+                    "theme-summary-color-omitted",
+                    str(exc),
+                    "omit only this malformed theme-summary color",
+                )
+                continue
+            if hex_:
+                colors[name] = hex_
+
+    font_scheme = theme.xml.find(".//a:fontScheme", NS)
+    if font_scheme is not None:
+        for slot in ("majorFont", "minorFont"):
+            fnt = font_scheme.find(f"a:{slot}", NS)
+            if fnt is None:
+                continue
+            role_prefix = "major" if slot == "majorFont" else "minor"
+            latin = fnt.find("a:latin", NS)
+            if latin is not None and latin.attrib.get("typeface"):
+                fonts[f"{role_prefix}Latin"] = latin.attrib["typeface"]
+            ea = fnt.find("a:ea", NS)
+            if ea is not None and ea.attrib.get("typeface"):
+                fonts[f"{role_prefix}EastAsia"] = ea.attrib["typeface"]
+            cs = fnt.find("a:cs", NS)
+            if cs is not None and cs.attrib.get("typeface"):
+                fonts[f"{role_prefix}ComplexScript"] = cs.attrib["typeface"]
+            for supplemental in fnt.findall("a:font", NS):
+                script = supplemental.attrib.get("script", "")
+                typeface = supplemental.attrib.get("typeface", "")
+                if script in _CJK_THEME_SCRIPTS and typeface:
+                    fonts[f"{role_prefix}Script{script}"] = typeface
+
+    return colors, fonts
+
+
+@dataclass
+class ConvertOptions:
+    """Convert behavior knobs.
+
+    images_subdir: where to write image files relative to output_dir. SVG image
+        href will use './<images_subdir>/<filename>'.
+    sound_subdir: where to write transition/object cue audio relative to
+        output_dir. New workspaces use ``sounds``.
+    embed_images: when True, base64-encode images inline instead of writing
+        files. Default False (matches svg_to_pptx default of external images).
+    keep_hidden: include shapes marked hidden="1". Default False.
+    inheritance_mode: how to render master/layout shapes per slide SVG.
+        - "both" (default): emit both views — layered under svg/ for template
+          designers (master/layout/slide as separate files) and flat under
+          svg-flat/ for previewers (each slide self-contained). Costs roughly
+          1.3-1.5× converter time and ~1.6-2× disk vs. either single mode.
+        - "layered": skip inherited shapes inside the slide. The orchestrator
+          renders every master and layout to its own SVG, plus
+          svg/inheritance.json describing the reuse graph. Optimised for
+          template authors who need to see "what is shared vs. unique".
+        - "flat": inline the inherited shapes visible under the source
+          ``showMasterSp`` flags for preview pages and screenshot pipelines.
+    strict: stop on the first unsupported or malformed source construct.
+        Default False keeps usable content and records structured diagnostics.
+    roundtrip: create the fixed semantic workspace and source-preserving
+        package contracts used by the editable ``authoring-svg-flat/`` route.
+    """
+
+    images_subdir: str = "images"

@@ -1,0 +1,118 @@
+        if field not in effect_cfg:
+            continue
+        try:
+            animation_seconds_to_milliseconds(
+                effect_cfg[field],
+                f'animations.json {path}.{field}',
+                allow_zero=allow_zero,
+            )
+        except ValueError as exc:
+            errors.append(str(exc))
+
+    if 'order' in effect_cfg:
+        order = effect_cfg['order']
+        if isinstance(order, bool) or not isinstance(order, int) or order <= 0:
+            errors.append(
+                f'animations.json {path}.order must be a positive integer: '
+                f'{order!r}'
+            )
+
+    if 'trigger' in effect_cfg:
+        trigger_error = _animation_trigger_error(effect_cfg['trigger'], path)
+        if trigger_error:
+            errors.append(trigger_error)
+
+    if 'trigger_shape' in effect_cfg:
+        trigger_shape = effect_cfg['trigger_shape']
+        if not isinstance(trigger_shape, str) or not trigger_shape.strip():
+            errors.append(
+                f'animations.json {path}.trigger_shape must be a '
+                f'non-empty group id: {trigger_shape!r}'
+            )
+        elif trigger_shape == target_group_id:
+            errors.append(
+                f'animations.json {path}.trigger_shape must reference '
+                'a different group'
+            )
+        if effect_cfg.get('effect') == 'none':
+            errors.append(
+                f'animations.json {path}.trigger_shape cannot be used '
+                'with effect "none"'
+            )
+        if (
+            'trigger' in effect_cfg
+            and effect_cfg.get('trigger') != 'on-click'
+        ):
+            errors.append(
+                f'animations.json {path}.trigger_shape requires '
+                'trigger "on-click" when trigger is explicit'
+            )
+
+    errors.extend(
+        _animation_parameter_errors(
+            effect_cfg,
+            path,
+            inherited_effect='auto',
+        )
+    )
+    return errors
+
+
+def _bounce_support_error(
+    animation: dict[str, Any],
+    label: str,
+) -> str | None:
+    """Return a writer-equivalent bounce support error for one resolved scope."""
+    bounce_end = animation.get('bounce_end')
+    if (
+        isinstance(bounce_end, bool)
+        or not isinstance(bounce_end, (int, float))
+        or not math.isfinite(float(bounce_end))
+        or float(bounce_end) <= 0
+    ):
+        return None
+    try:
+        effect, options = normalize_animation_effect_request(
+            animation.get('effect', 'auto'),
+            animation.get('effect_options'),
+            allow_none=True,
+            allow_modes=True,
+        )
+    except ValueError:
+        return None
+    if effect is None or effect in ANIMATION_MODES:
+        return None
+    if animation_effect_supports_bounce_end(effect, options):
+        return None
+    return (
+        f'animations.json {label} effect {effect!r} has no behavior that '
+        'supports bounce_end'
+    )
+
+
+def _resolved_animation_parameter_errors(config: dict[str, Any]) -> list[str]:
+    """Validate effective animation parameters after sidecar inheritance."""
+    defaults = config.get('defaults', {})
+    default_animation: dict[str, Any] = {'effect': 'none'}
+    if isinstance(defaults, dict):
+        value = defaults.get('animation', {})
+        if isinstance(value, dict):
+            default_animation = resolve_slide_animation_config(
+                default_animation,
+                value,
+            )
+
+    errors: list[str] = []
+    default_error = _bounce_support_error(default_animation, 'defaults animation')
+    if default_error:
+        errors.append(default_error)
+
+    slides = config.get('slides', {})
+    if not isinstance(slides, dict):
+        return errors
+    for slide_name, slide_cfg in slides.items():
+        if not isinstance(slide_cfg, dict):
+            continue
+        slide_value = slide_cfg.get('animation', {})
+        if not isinstance(slide_value, dict):
+            continue

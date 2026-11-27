@@ -1,0 +1,91 @@
+                            f"{schema_field} is stale; expected "
+                            f"{accepted_config['owner_fingerprint']}, current "
+                            f"{owner_fingerprint}"
+                        ),
+                        path=manifest_label,
+                        related=[source],
+                    )
+                )
+
+            configured_projections = {
+                projection["path"]: projection
+                for projection in (
+                    accepted_config.get("projections", [])
+                    if accepted_config is not None
+                    else []
+                )
+            }
+            open_projections: list[dict[str, Any]] = []
+            accepted_projections: list[dict[str, Any]] = []
+            stale_projections: list[dict[str, Any]] = []
+            for path, projection in projections.items():
+                configured = configured_projections.get(path)
+                projection_matches = bool(
+                    configured is not None
+                    and configured["fingerprint"] == projection["fingerprint"]
+                )
+                if owner_matches and projection_matches:
+                    accepted_projections.append(
+                        {
+                            **projection,
+                            "role": configured["role"],
+                            "reason": configured["reason"],
+                        }
+                    )
+                    continue
+
+                if configured is None:
+                    open_projections.append(projection)
+                    first_line = projection["definition_candidates"][0]["line"]
+                    findings.append(
+                        Finding(
+                            severity="warning",
+                            code="SCHEMA_MULTIDEF_CANDIDATE",
+                            message=(
+                                f"{source} owns {schema_field}, but this file carries "
+                                "an unaccepted grammar-like projection"
+                            ),
+                            path=path,
+                            line=first_line,
+                            related=[source],
+                        )
+                    )
+                    continue
+
+                stale_projections.append(
+                    {
+                        **projection,
+                        "role": configured["role"],
+                        "reason": configured["reason"],
+                        "expected_fingerprint": configured["fingerprint"],
+                        "stale_reason": (
+                            "owner_fingerprint" if not owner_matches else "fingerprint"
+                        ),
+                    }
+                )
+                if owner_matches and not projection_matches:
+                    findings.append(
+                        Finding(
+                            severity="error",
+                            code="SCHEMA_ACCEPTED_STALE",
+                            message=(
+                                f"schema_grammars accepted projection fingerprint "
+                                f"for {schema_field} at {path} is stale; expected "
+                                f"{configured['fingerprint']}, current "
+                                f"{projection['fingerprint']}"
+                            ),
+                            path=manifest_label,
+                            related=[source, path],
+                        )
+                    )
+
+            if owner_matches:
+                for path, configured in configured_projections.items():
+                    if path in projections:
+                        continue
+                    stale_projections.append(
+                        {
+                            "path": path,
+                            "fingerprint": None,
+                            "definition_candidates": [],
+                            "role": configured["role"],

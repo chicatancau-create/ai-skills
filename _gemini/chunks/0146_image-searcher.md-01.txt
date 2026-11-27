@@ -1,0 +1,58 @@
+> See [`image-base.md`](./image-base.md) for the common framework. Technical SVG/PPT constraints are in [`shared-standards-core.md`](./shared-standards-core.md).
+
+# Image_Searcher Reference Manual
+
+Role definition for the **web image acquisition path**: translate the resource owner's intent into keyword queries, search openly-licensed providers, download one license-cleared image into `project/images/`, and record provenance and license in `image_sources.json`.
+
+**Trigger**: the Default resource list contains `Acquire Via: web`, or Quick has resolved a required web image in active context.
+
+---
+
+## 1. License Tier Discipline
+
+Every provider-sourced image lands in one of two tiers; everything else is rejected. `manual` exists only for a directly selected `--from-url` replacement or an adopted-page package image — never for a provider result with an unknown license. Downstream consumers read `license_tier` alone and never interpret raw license strings.
+
+| Tier | Licenses | On-slide attribution |
+|---|---|---|
+| `no-attribution` | CC0, Public Domain, Pexels License, Pixabay Content License | None |
+| `attribution-required` | CC BY, CC BY-SA, publisher terms that require a source credit | Inline credit `<text>` on the slide (the CC token only for a CC licence) |
+| `manual` | Directly selected URL or adopted-page image, license unverified | None — rights and any credit are the user's responsibility |
+
+**Forbidden — auto-rejected**: CC BY-NC, CC BY-NC-SA, CC BY-ND, CC BY-NC-ND, All Rights Reserved, unknown or missing license.
+
+---
+
+## 2. Search Strategy
+
+Quality first across all allowed tiers — never prefer CC0 over a better CC BY image; the manifest's `license_tier` lets Executor add credit only when needed. `--strict-no-attribution` (CC0 / PD / Pexels / Pixabay only) is opt-in for decks that cannot carry any on-slide credit.
+
+```
+Multimodal Generate: explicit query variants × provider chain + allowed licenses
+         → aggregate/deduplicate/rank → first 8 thumbnails → visually select
+         → download one original; if none passes, inspect the next 8 first.
+Non-visual / standalone best-only: explicit query variants × provider chain
+         → strict metadata gate → first downloadable ranked original wins.
+```
+
+---
+
+## 3. Providers
+
+| Provider | Config | Strength |
+|---|---|---|
+| Pexels | `PEXELS_API_KEY` (free, [signup](https://www.pexels.com/api/)) | modern stock photography, people, workplace, lifestyle |
+| Pixabay | `PIXABAY_API_KEY` (free, [signup](https://pixabay.com/api/docs/)) | broad coverage including illustrations; its API serves at most a 1280 px long edge, so prefer Wikimedia or Pexels for full-bleed heroes |
+| Openverse | zero-config | fallback aggregator: Wikimedia + Flickr + museums + rawpixel |
+| Wikimedia Commons | zero-config | educational, scientific, geographic, historical; pin `provider: wikimedia` for murals, manuscripts, artworks, and museum objects, which stock providers tag with tourist snapshots |
+
+Default chain: `pexels` → `pixabay` (each when keyed) → `openverse` → `wikimedia`; a keyed provider without a key is silently skipped. Configure Pexels or Pixabay when stock coverage serves the brief; their absence is never a failure.
+
+---
+
+## 4. Intent → Query Translation
+
+| Layer | Owner and grammar |
+|---|---|
+| Default `design_spec.md §VIII Reference` / Quick active `Reference` | The owner's complete visual intent — exact subject, view/mood, focal or quiet region, crop safety, positive quality cues — fixed for the run and never rewritten by this role |
+| `image_queries.json.items[].query` / positional query | This role's concrete entity keyword string: the shortest phrase that preserves identity, keeping exact multi-word names and disambiguators even beyond four words; no mood, quality, composition, HEX, or negative wording |
+

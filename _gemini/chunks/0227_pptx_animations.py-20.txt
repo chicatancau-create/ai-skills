@@ -1,0 +1,117 @@
+              <p:nextCondLst><p:cond evt="onClick" delay="0"><p:tgtEl><p:spTgt spid="{trigger_shape_id}"/></p:tgtEl></p:cond></p:nextCondLst>
+            </p:seq>''')
+    sequence_xml = '\n            '.join(
+        [
+            value
+            for value in (
+                main_sequence_xml,
+                *interactive_sequences,
+            )
+            if value
+        ]
+    )
+
+    timing_xml = f'''  <p:timing>
+    <p:tnLst>
+      <p:par>
+        <p:cTn id="1" dur="indefinite" restart="never" nodeType="tmRoot">
+          <p:childTnLst>
+            {sequence_xml}
+          </p:childTnLst>
+        </p:cTn>
+      </p:par>
+    </p:tnLst>
+  </p:timing>'''
+    if not any(target.bounce_end for target in normalized_targets):
+        return timing_xml
+
+    fallback_xml = re.sub(
+        r'\s+p14:(?:presetBounceEnd|bounceEnd)="\d+"',
+        '',
+        timing_xml,
+    )
+    fallback_xml = fallback_xml.replace(
+        f' xmlns:p14="{_P14_NS}"',
+        '',
+    )
+    return f'''  <mc:AlternateContent xmlns:mc="{_MC_NS}">
+    <mc:Choice xmlns:p14="{_P14_NS}" Requires="p14">
+      {timing_xml}
+    </mc:Choice>
+    <mc:Fallback>
+      {fallback_xml}
+    </mc:Fallback>
+  </mc:AlternateContent>'''
+
+
+def pick_animation_effect(
+    mode: str,
+    idx: int,
+    offset: int = 0,
+    group_id: str | None = None,
+    *,
+    rng: random.Random | None = None,
+) -> str:
+    """Resolve a per-element effect name from a mode string.
+
+    - A specific animation name returns itself (no variation).
+    - 'auto': map ``group_id`` to an effect. Image-like ids
+      (hero / figure- / image / img- / kpi) cycle through ``_IMAGE_POOL``
+      (``entrance_zoom`` / ``entrance_dissolve`` / ``entrance_circle`` /
+      ``entrance_box`` / ``entrance_diamond`` / ``entrance_wheel``) by
+      ``idx + offset``
+      so multiple images vary across the deck. Other semantic matches in
+      ``_SEMANTIC_PATTERNS`` return a single stable effect
+      (chart→``entrance_wipe``, card-/step-/pillar-→``entrance_fly``,
+      title/takeaway→``entrance_fade``). When the id matches no pattern, cycle
+      through ``_AUTO_POOL``.
+    - 'mixed' (compatible mode name): first element fixed to
+      ``entrance_fade``; the rest cycle through ``_MIXED_POOL`` plus
+      ``offset`` so titles stay calm while content varies across slides.
+    - 'random': uniform seeded choice from the same canonical preset pool.
+    Unknown modes fail explicitly; no effect is silently substituted.
+    """
+    mode = normalize_animation_effect(
+        mode,
+        allow_none=False,
+        allow_modes=True,
+    )
+    if isinstance(idx, bool) or not isinstance(idx, int) or idx < 0:
+        raise ValueError(f'animation index must be a non-negative integer: {idx!r}')
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        raise ValueError(
+            f'animation offset must be a non-negative integer: {offset!r}'
+        )
+    if mode in NATIVE_ANIMATIONS:
+        return mode
+    if mode == 'auto':
+        semantic = _semantic_effect(group_id, idx, offset)
+        if semantic is not None:
+            return semantic
+        return _AUTO_POOL[(idx + offset) % len(_AUTO_POOL)]
+    if mode == 'mixed':
+        if idx == 0:
+            return 'entrance_fade'
+        return _MIXED_POOL[(idx - 1 + offset) % len(_MIXED_POOL)]
+    if mode == 'random':
+        chooser = rng if rng is not None else random
+        return chooser.choice(_MIXED_POOL)
+    raise AssertionError(f'unhandled animation mode: {mode}')
+
+
+def _int_attribute(
+    element: ET.Element,
+    name: str,
+    label: str,
+    errors: list[str],
+    *,
+    minimum: int = 0,
+    maximum: int | None = None,
+) -> int | None:
+    value = element.get(name)
+    if value is None or not re.fullmatch(r'\d+', value):
+        errors.append(f'{label} must be an integer; found {value!r}')
+        return None
+    number = int(value)
+    if number < minimum:
+        errors.append(f'{label} must be at least {minimum}; found {number}')

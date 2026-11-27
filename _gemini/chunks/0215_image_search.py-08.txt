@@ -1,0 +1,104 @@
+    output_dir: Path,
+    stem: str,
+    request: ImageSearchRequest,
+    license_stage: str,
+    max_candidates: int = DEFAULT_CANDIDATE_PAGE_SIZE,
+    candidate_page: int = 1,
+) -> tuple[list[dict], Optional[Path], list[str], int, bool]:
+    """Save one ranked page of previews without downloading originals."""
+    cand_dir = output_dir / "candidates" / stem
+    cand_dir.mkdir(parents=True, exist_ok=True)
+    review_dir = cand_dir / "review"
+    review_dir.mkdir(parents=True, exist_ok=True)
+
+    eligible: list[tuple[float, str, AssetCandidate]] = []
+    seen_candidates: set[str] = set()
+    for ranked_item in ranked:
+        _score, provider_name, candidate = ranked_item
+        dedupe_key = _candidate_dedupe_key(provider_name, candidate)
+        if dedupe_key in seen_candidates:
+            continue
+        if (
+            request.min_width
+            and candidate.width
+            and candidate.width < request.min_width
+        ):
+            continue
+        if (
+            request.min_height
+            and candidate.height
+            and candidate.height < request.min_height
+        ):
+            continue
+        if not candidate.preview_url.strip():
+            continue
+        seen_candidates.add(dedupe_key)
+        eligible.append(ranked_item)
+
+    candidate_total = len(eligible)
+    if max_candidates == 0:
+        page_start = 0
+        page_items = eligible
+        has_more_candidates = False
+    else:
+        page_start = (candidate_page - 1) * max_candidates
+        page_end = page_start + max_candidates
+        page_items = eligible[page_start:page_end]
+        has_more_candidates = page_end < candidate_total
+
+    pool: list[dict] = []
+    preview_errors: list[str] = []
+    for global_rank, (score, provider_name, candidate) in enumerate(
+        page_items,
+        start=page_start + 1,
+    ):
+        preview_url = candidate.preview_url.strip()
+        cand_filename = f"candidate_{global_rank:02d}.jpg"
+        review_path = review_dir / cand_filename
+        staged_path: Optional[Path] = None
+        try:
+            staged_path, preview_dimensions = _stage_validated_image(
+                preview_url,
+                review_path,
+                min_width=1,
+                min_height=1,
+                enforce_thumbnail_floor=False,
+            )
+            os.replace(staged_path, review_path)
+            staged_path = None
+            missing_terms = missing_required_terms(
+                candidate,
+                request.required_terms,
+            )
+            pool.append({
+                "rank": global_rank,
+                "score": round(score, 2),
+                "filename": cand_filename,
+                "review": f"review/{review_path.name}",
+                "provider": provider_name,
+                "title": candidate.title,
+                "author": candidate.author,
+                "source_page_url": candidate.source_page_url,
+                "download_url": candidate.download_url,
+                "preview_url": preview_url,
+                "matched_query": candidate.discovery_query or request.query,
+                "identity_evidence": (
+                    "metadata-verified"
+                    if not missing_terms
+                    else "visual-verification-required"
+                ),
+                "missing_required_terms": missing_terms,
+                "license_name": candidate.license_name,
+                "license_url": candidate.license_url,
+                "license_tier": candidate.license_tier,
+                "attribution_required": (
+                    candidate.license_tier == "attribution-required"
+                ),
+                "attribution_text": build_attribution_text(
+                    request.filename,
+                    candidate,
+                ),
+                "width": candidate.width,
+                "height": candidate.height,
+                "preview_width": preview_dimensions[0],
+                "preview_height": preview_dimensions[1],

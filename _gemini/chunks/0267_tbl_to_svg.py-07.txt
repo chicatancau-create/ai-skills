@@ -1,0 +1,115 @@
+                _CanonicalMergeRegion(row_idx, col_idx, row_span, col_span)
+            )
+
+    owners: dict[tuple[int, int], _CanonicalMergeRegion] = {}
+    for region in anchors:
+        if (
+            region.row + region.row_span > len(rows)
+            or region.col + region.col_span > col_count
+        ):
+            return "unsupported-merge-topology"
+        for covered_row in range(region.row, region.row + region.row_span):
+            for covered_col in range(region.col, region.col + region.col_span):
+                position = (covered_row, covered_col)
+                if position in owners:
+                    return "unsupported-merge-topology"
+                owners[position] = region
+
+    for (
+        (row_idx, col_idx),
+        (tc, row_span, col_span, h_merge, v_merge),
+    ) in states.items():
+        region = owners.get((row_idx, col_idx))
+        if region is None:
+            if h_merge or v_merge or row_span != 1 or col_span != 1:
+                return "unsupported-merge-topology"
+            continue
+
+        is_anchor = row_idx == region.row and col_idx == region.col
+        expected_row_span = region.row_span if row_idx == region.row else 1
+        expected_col_span = region.col_span if col_idx == region.col else 1
+        if (
+            row_span != expected_row_span
+            or col_span != expected_col_span
+            or h_merge != (col_idx > region.col)
+            or v_merge != (row_idx > region.row)
+        ):
+            return "unsupported-merge-topology"
+    return None
+
+
+def _table_has_unsupported_style(tbl: ET.Element) -> bool:
+    tbl_pr = tbl.find("a:tblPr", NS)
+    if tbl_pr is None:
+        return False
+    allowed_attrs = {
+        "firstRow", "bandRow", "firstCol", "lastCol", "lastRow",
+        "bandCol", "rtl",
+    }
+    if any(name not in allowed_attrs for name in tbl_pr.attrib):
+        return True
+    if any(
+        ooxml_bool(tbl_pr.attrib.get(name))
+        for name in ("firstCol", "lastCol", "lastRow", "bandCol", "rtl")
+    ):
+        return True
+    for child in tbl_pr:
+        name = child.tag.rsplit("}", 1)[-1]
+        if name == "tableStyleId":
+            continue
+        if name == "effectLst" and not child.attrib and not list(child):
+            continue
+        return True
+    return False
+
+
+_DIRECT_BORDER_TAGS = {
+    "lnL": "left",
+    "lnR": "right",
+    "lnT": "top",
+    "lnB": "bottom",
+    "lnTlToBr": "diagonal_down",
+    "lnBlToTr": "diagonal_up",
+}
+_DIRECT_BORDER_WIDTH_MAX = 20116800
+def _direct_border_payload(
+    ln: ET.Element,
+    palette: ColorPalette | None,
+) -> dict[str, Any]:
+    if set(ln.attrib) - {"w", "cap", "cmpd", "algn"}:
+        raise ValueError("unsupported border line attribute")
+    if ln.get("cap") not in {None, "flat"}:
+        raise ValueError("unsupported border cap")
+    if ln.get("cmpd") not in {None, "sng"}:
+        raise ValueError("unsupported border compound style")
+    if ln.get("algn") not in {None, "ctr"}:
+        raise ValueError("unsupported border alignment")
+    width_emu: int | None = None
+    if "w" in ln.attrib:
+        raw_width = ln.get("w", "")
+        if not raw_width.isdigit():
+            raise ValueError("invalid border width")
+        width_emu = int(raw_width)
+        if not 0 < width_emu <= _DIRECT_BORDER_WIDTH_MAX:
+            raise ValueError("invalid border width")
+
+    children = list(ln)
+    child_names = [child.tag.rsplit("}", 1)[-1] for child in children]
+    if child_names.count("noFill") == 1:
+        no_fill = next(
+            child for child in children
+            if child.tag.rsplit("}", 1)[-1] == "noFill"
+        )
+        if (
+            no_fill.attrib
+            or list(no_fill)
+            or any(
+                name not in {
+                    "noFill", "prstDash", "round", "headEnd", "tailEnd",
+                }
+                for name in child_names
+            )
+        ):
+            raise ValueError("invalid noFill border")
+        return {"style": "none"}
+

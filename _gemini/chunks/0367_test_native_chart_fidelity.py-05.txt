@@ -1,0 +1,76 @@
+        fallback = (
+            '<rect x="0" y="10" width="100" height="20" fill="#111111"/>'
+            '<rect x="0" y="34" width="120" height="20" fill="#222222"/>'
+            '<rect x="0" y="60" width="80" height="20" fill="#111111"/>'
+            '<rect x="0" y="84" width="140" height="20" fill="#222222"/>'
+        )
+        chart_data = _chart_data(payload)
+        self.assertEqual(_inferred_bar_overlap(_marker(fallback), chart_data), -20)
+
+    def test_cross_between_follows_the_fallback_start(self) -> None:
+        payload = {
+            "type": "line",
+            "categories": ["A", "B", "C", "D"],
+            "series": [{"name": "S", "values": [1, 2, 3, 4]}],
+            "plot_area": {"x": 100, "y": 0, "width": 400, "height": 100},
+        }
+        chart_data = _chart_data(payload)
+        centred = '<polyline points="150,10 250,20 350,30 450,40" fill="none" stroke="#111111"/>'
+        edged = '<polyline points="100,10 233,20 366,30 500,40" fill="none" stroke="#111111"/>'
+        self.assertEqual(_inferred_cross_between(_marker(centred), chart_data), "between")
+        self.assertEqual(_inferred_cross_between(_marker(edged), chart_data), "midCat")
+        self.assertIn('<c:crossBetween val="midCat"/>', _render(payload, edged))
+        self.assertIn('<c:crossBetween val="between"/>', _render(payload))
+
+    def test_axis_text_colour_font_and_size_are_per_axis(self) -> None:
+        payload = _bar_payload(axes={
+            "category": {"color": "#1A1A1A"},
+            "value": {"color": "#6E6E6E", "font_family": "Arial", "font_size": 16},
+        })
+        xml = _render(payload)
+        cat_ax = xml[xml.index("<c:catAx>"):xml.index("</c:catAx>")]
+        val_ax = xml[xml.index("<c:valAx>"):xml.index("</c:valAx>")]
+        self.assertIn('<a:srgbClr val="1A1A1A"/>', cat_ax)
+        self.assertIn('sz="1200"', val_ax)
+        self.assertIn('<a:srgbClr val="6E6E6E"/>', val_ax)
+        self.assertIn('<a:latin typeface="Arial"/>', val_ax)
+        with self.assertRaises(RuntimeError):
+            _chart_data(_bar_payload(axes={"value": {"color": "grey-ish"}}))
+
+    def test_tick_marks_default_to_none_and_accept_out(self) -> None:
+        self.assertIn('<c:majorTickMark val="none"/>', _render(_bar_payload()))
+        xml = _render(_bar_payload(axes={"value": {"tick_marks": "out"}}))
+        val_ax = xml[xml.index("<c:valAx>"):xml.index("</c:valAx>")]
+        self.assertIn('<c:majorTickMark val="out"/>', val_ax)
+
+
+class CompanionPlacementTests(unittest.TestCase):
+    def test_svg_first_companion_may_carry_only_its_width(self) -> None:
+        import json
+        import re
+        import tempfile
+
+        from svg_to_pptx.drawingml.converter import convert_svg_to_slide_shapes
+        from svg_to_pptx.drawingml.utils import px_to_emu
+        from svg_to_pptx.native_objects.fallback_hash import stamp_native_fallback_baseline
+
+        payload = {
+            "x": 100, "y": 100, "width": 600, "height": 300,
+            "name": "chart-note",
+            "type": "column",
+            "categories": ["A", "B"],
+            "series": [{"name": "S", "values": [1, 2]}],
+            "plot_area": {"x": 140, "y": 130, "width": 540, "height": 250},
+            "style": {"colors": ["#111111"], "text_color": "#111111"},
+            # Only the width is authored; x/y/height come from the fallback text.
+            "notes": [{"text": "Unit note", "width": 200, "font_size": 18}],
+        }
+        svg = (
+            f'<svg xmlns="{SVG_NS}" viewBox="0 0 1280 720">'
+            '<g id="chart-note" data-pptx-replace-with="chart">'
+            f'<metadata type="application/json">{json.dumps(payload)}</metadata>'
+            '<rect x="140" y="130" width="540" height="250" fill="#FFFFFF"/>'
+            '<text x="140" y="120" font-size="18" fill="#111111">Unit note</text>'
+            '<text x="410" y="400" font-size="18" fill="#111111">A</text>'
+            '<text x="410" y="400" font-size="18" fill="#111111">B</text>'
+            "</g></svg>"

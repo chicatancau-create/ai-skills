@@ -1,0 +1,28 @@
+- get transcription 翻页时，同一个 next-token 连续返回空 2 次即终止翻页，不再重试
+- **跨平台兼容性**：悟空运行环境可能是 Windows cmd / PowerShell / macOS bash，**严禁在 dws 命令中使用任何依赖特定 shell 的工具或管道**，包括但不限于：`| head`、`| grep`、`| tail`、`| wc`、`& wait`、`> %TEMP%\xxx`、`timeout /t 5`、`Start-Sleep`、`python -c "..."` 等。所有数据筛选、截断、过滤都必须通过 dws cli 自身的参数完成（`--query`/`--start`/`--end`/`--max`/`--next-token`）
+
+### 错误恢复策略（AI 遇到以下错误时必须自动执行对应恢复动作）
+
+| 错误类型 | 错误信息特征 | 恢复动作 | 严禁行为 |
+|----------|-------------|----------|----------|
+| 命令结构错误 | `unknown command "info"` / `unknown command "get"` (后无子命令) / `error[validation]: unknown flag: --start` (在 `list` 而非 `list mine/shared/all` 上) | **立即参照本文档顶部"命令层级结构"纠正**。常见错误：① `dws minutes info` → 应为 `dws minutes get info`；② `dws minutes get --id` → `get` 后缺子命令，应为 `get info/summary/transcription` 等；③ `dws minutes list --start` → `list` 后缺 scope，应为 `list mine/shared/all --start` | 严禁在命令结构报错后只换参数名不修正命令层级；严禁把 `get` 当作独立命令使用（后面必须跟 info/summary/transcription/keywords/todos/audio/batch） |
+| 参数名错误 | `unknown flag: --task-uuid` / `unknown flag: --uuid` / `unknown flag: --start-time` / `unknown flag: --end-time` | 立即调用 `dws minutes <子命令> --help` 查询正确参数名；minutes 模块统一用 `--id`，时间统一用 `--start` / `--end`（不是 `--start-time` / `--end-time`） | 严禁用同一个错误的参数名重试；严禁在不同子命令间尝试 --uuid / --task-uuid / --id 三种名称反复试错；严禁凭记忆猜测参数名，必须查 --help |
+| UUID 无效 | `taskUuid is invalid` / `dingOpenErrcode=300` | **第一时间切换策略**：调用 `dws minutes list mine --max 10 --format json` 获取真实可用的 uuid 列表，让用户选择或自动匹配最相关的一条。**真实案例中模型用同一个错 uuid 重试了 20 次全部失败——这是 minutes 模块失败率最高的错误模式，必须零容忍** | 严禁用同一个无效 uuid 重试哪怕 1 次（errcode=300 是不可重试错误）；严禁从历史对话/文档/链接中猜测 uuid；严禁从十六进制编码字符串里截取部分数字拼凑新 uuid；严禁不切 list 就放弃 |
+| 命令返回空 stdout | `get summary` / `get transcription` 返回空内容（stdout 为空，error_msg 也为空） | 1) 先调用 `dws minutes get info --id <uuid> --format json` 确认听记是否存在且状态正常；2) 如果 info 也为空或报错，说明 uuid 本身有问题，回退到 list 命令重新获取 | 严禁在 stdout 为空时重复调用同一命令超过 2 次；严禁把空返回当作"没有内容"直接告知用户而不做任何排查 |
+| 翻页 next-token 返回空 | `get transcription --next-token xxx` 返回空内容 | 同一个 next-token 返回空 **1 次**即视为到达末尾（has_more=false），立即终止翻页，基于已累积内容继续处理 | 严禁同一个 next-token 连续重试超过 2 次；严禁换不同的 next-token 值盲目尝试 |
+| 时间格式解析失败 | `cannot parse time` / `parse fail` | 标准格式三选一：`2026-03-23T14:00:00+08:00`（ISO-8601 带时区）/ `2026-03-23 14:00:00`（无时区默认 +08:00）/ `2026-03-23`（纯日期） | 严禁使用 Unix 时间戳、`2026/03/23`、`Mar 23, 2026` 等非标准格式 |
+| 权限不足 | `AUTH_PERMISSION_DENIED` / `Permission denied` / `user is not minutes creator` | 1) 如果是 `get transcription` 报权限错误，**自动降级**尝试 `get summary`（摘要通常不需要下载权限）；2) 如果降级也失败，引导用户："这份听记是别人分享给你的，你可以让原作者将你加为协作者，或者用 `dws minutes list shared` 查看共享给你的听记"；3) 如果需要其他人的听记内容，可先用 `dws minutes list shared` 确认有无共享记录 | 严禁权限报错后用同一 uuid 反复重试；严禁只回复"Permission denied"而不给用户可操作的下一步 |
+| 资源不存在 | `P_DataNotFound` / `dingOpenErrcode=404` | 与 `taskUuid is invalid`（uuid 格式错误）**区分对待**：`P_DataNotFound` 表示 uuid 格式正确但对应的听记不存在（可能已被删除或过期）。告知用户"该听记可能已被删除或已过期"，然后建议用 `dws minutes list mine` 或 `list all` 查找替代 | 严禁把 `P_DataNotFound` 和 `taskUuid is invalid` 混为一谈；严禁 `P_DataNotFound` 后还换 uuid 格式重试 |
+| 认证过期 | `not_authenticated` / `未登录` / `认证信息已失效` | 直接**重试刚才失败的命令**（最多两次），系统会自动刷新或重新授权；不要让用户重新提问。**注意**：长会话（>100 步）中 token 可能中途过期，这不是用户的问题 | 严禁认证过期后直接放弃整个任务；严禁让用户自己处理认证 |
+| 上传业务报错 | `business error: success=false` / `Server Code: ERROR`（出现在 `upload create`） | 1) 检查文件名是否含特殊字符（建议用纯英文/数字文件名重试）；2) 检查 `--file-size` 单位是否正确（必须是**字节**，不是 KB/MB）；3) 确认音频格式是否支持（mp3/mp4/wav/m4a/aac）；4) 最多重试 **1 次**，仍然失败则如实告知用户"上传服务暂时不可用"，给出错误 Trace ID 供排查 | 严禁同一参数重试超过 2 次；严禁在错误信息未变化时反复重试期望随机成功；严禁尝试 `--json` / `-f json '{"...":...}'` 等不存在的输入格式——`--format json` / `-f json` 仅控制**输出格式**，不是输入参数 |
+
+### 间接意图识别（用户 query 未直接提及听记命令时的调用策略）
+
+当用户的 query 不是直接要求"查听记/看摘要"，而是隐含需要听记数据的高阶任务时，AI 必须自动拆解并先完成听记数据采集。
+
+> **【核心判断原则】** 用户 query 中只要涉及"会议/讨论/沟通"等**口头交流**产出的信息，听记就是不可替代的数据源。即使用户没说"听记"二字，只要任务的完成依赖于"会议中说了什么"，就必须走 `dws minutes` 采集。**文档、日程、聊天记录无法替代听记**——文档是书面产出，日程只有标题和时间，聊天记录是文字沟通，唯有听记才包含会议的完整发言内容和 AI 摘要。
+
+#### 间接意图 query 模式速查表
+
+| 用户 query 模式 | 典型真实 query 示例 | 隐含的听记需求 | 正确的第一步 |
+|----------------|-------------------|---------------|-------------|

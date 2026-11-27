@@ -1,0 +1,112 @@
+        visual_children = _visible_clip_shapes(clip, parent_by_id)
+        if not visual_children and empty_clip_path_reason(elem, definitions, parent_by_id):
+            continue
+        if len(visual_children) != 1:
+            errors.add(
+                f'{clip_label} must contain exactly one direct supported shape'
+            )
+            continue
+        shape = visual_children[0]
+        shape_tag = shape.tag.rsplit('}', 1)[-1].lower()
+        if (
+            shape_tag not in _CLIP_SHAPE_TAGS
+            or shape.tag != f'{{{SVG_NS}}}{shape_tag}'
+        ):
+            errors.add(
+                f'{clip_label} child <{shape_tag}> is unsupported; use '
+                'circle, ellipse, rect, path, or polygon'
+            )
+            continue
+        if shape.get('transform'):
+            errors.add(f'{clip_label} child <{shape_tag}> cannot use transform')
+            continue
+        shape_rules = _unsupported_clip_rule_properties(shape)
+        if shape_rules:
+            errors.add(
+                f'{clip_label} child <{shape_tag}> cannot use '
+                f'{", ".join(shape_rules)}; native picture geometry has no '
+                'equivalent winding-rule control'
+            )
+            continue
+        if clip_units in {'userSpaceOnUse', 'objectBoundingBox'}:
+            if is_nested_crop_image:
+                geometry_error = _nested_crop_clip_preset_geometry_error(
+                    parent,
+                    shape,
+                    clip_units,
+                )
+            else:
+                geometry_error = _clip_preset_geometry_error(
+                    elem,
+                    shape,
+                    clip_units,
+                )
+            if geometry_error is not None:
+                errors.add(f'{clip_label} {geometry_error}')
+    return sorted(errors)
+
+
+def _resolve_clip_geometry(
+    elem: ET.Element,
+    ctx: ConvertContext,
+    raw_x: float, raw_y: float,
+    raw_w: float, raw_h: float,
+) -> str:
+    """Resolve clip-path on an image element to DrawingML geometry XML.
+
+    Supports:
+      - circle / ellipse  → prstGeom ellipse
+      - rect with rx/ry   → prstGeom roundRect
+      - path / polygon     → custGeom
+
+    Args:
+        elem: SVG element bearing a clip-path attribute.
+        ctx:  Conversion context (carries defs).
+        raw_x, raw_y: Image position in SVG space (pre-ctx-transform).
+        raw_w, raw_h: Image dimensions in SVG space (pre-ctx-transform).
+
+    Returns:
+        DrawingML geometry XML string.
+    """
+    DEFAULT = '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>'
+
+    clip_ref = elem.get('clip-path', '')
+    if not clip_ref or clip_ref == 'none':
+        return DEFAULT
+
+    clip_id = resolve_url_id(clip_ref)
+    if not clip_id or clip_id not in ctx.defs:
+        return DEFAULT
+
+    clip_elem = ctx.defs[clip_id]
+    clip_tag = clip_elem.tag.replace(f'{{{SVG_NS}}}', '')
+    if clip_tag != 'clipPath':
+        return DEFAULT
+
+    shapes = _visible_clip_shapes(clip_elem, ctx.parent_by_id)
+    if not shapes:
+        return DEFAULT
+    if len(shapes) != 1:
+        raise ValueError('clipPath must contain exactly one direct supported shape')
+    shape = shapes[0]
+
+    shape_tag = shape.tag.replace(f'{{{SVG_NS}}}', '')
+    is_obb = clip_elem.get('clipPathUnits') == 'objectBoundingBox'
+
+    # --- Circle / Ellipse → preset ellipse ---
+    if shape_tag in ('circle', 'ellipse'):
+        return '<a:prstGeom prst="ellipse"><a:avLst/></a:prstGeom>'
+
+    # --- Rect with rx/ry → preset roundRect ---
+    if shape_tag == 'rect':
+        rx_attr = shape.get('rx')
+        ry_attr = shape.get('ry')
+        rx = svg_length_x(rx_attr, ctx) if rx_attr is not None else 0.0
+        ry = svg_length_y(ry_attr, ctx) if ry_attr is not None else rx
+        if rx <= 0 and ry <= 0:
+            return DEFAULT  # plain rect clip is a no-op
+        r = max(rx, ry)
+        if is_obb:
+            r = r * min(raw_w, raw_h)
+        shorter = min(raw_w, raw_h)
+        if shorter <= 0:

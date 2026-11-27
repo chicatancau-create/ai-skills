@@ -1,0 +1,113 @@
+        rendered_h,
+        visible_source_fraction=visible_source_fraction,
+    )
+
+    r_id = _register_image_media(ctx, img_format, img_data)
+
+    # Resolve clip-path → DrawingML geometry
+    clip_geom = _resolve_clip_geometry(elem, ctx, raw_x, raw_y, raw_w, raw_h)
+    effect_xml = _element_effect_xml(elem, ctx)
+
+    # Resolve preserveAspectRatio="<align> slice" as DrawingML crop metadata.
+    # Image optimization only downscales the full source image; it never crops
+    # pixels out of the embedded media.
+    src_rect_xml = _src_rect_xml(src_rect)
+    blip_xml = _build_image_blip_xml(r_id, get_element_opacity(elem, ctx))
+
+    # Resolve preserveAspectRatio="<align> meet" by shrinking the picture
+    # frame to match the image's aspect ratio. Skipped when a real clip-path
+    # produces non-trivial geometry: such clip rectangles are defined against
+    # the original box and would no longer line up after a frame shift.
+    # A clip-path that resolves back to the default rect geometry (e.g. plain
+    # <rect> without rx/ry) is a no-op and must not block meet adjustment.
+    clip_is_noop = clip_geom == '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>'
+    meet_fit = None if not clip_is_noop else _resolve_image_meet_fit(elem, img_data, w, h)
+
+    shape_id = _claim_element_shape_id(elem, ctx)
+    if meet_fit is not None:
+        dx, dy, fit_w, fit_h = meet_fit
+        if ctx.use_transform_matrix:
+            raw_fit_x = raw_x + dx
+            raw_fit_y = raw_y + dy
+            raw_fit_w = fit_w
+            raw_fit_h = fit_h
+        else:
+            raw_fit_x = raw_x + (dx / ctx.scale_x if ctx.scale_x else dx)
+            raw_fit_y = raw_y + (dy / ctx.scale_y if ctx.scale_y else dy)
+            raw_fit_w = fit_w / ctx.scale_x if ctx.scale_x else fit_w
+            raw_fit_h = fit_h / ctx.scale_y if ctx.scale_y else fit_h
+        xfrm_attr, off_x, off_y, ext_cx, ext_cy, bounds_emu = _picture_xfrm_from_svg_rect(
+            ctx,
+            raw_fit_x,
+            raw_fit_y,
+            raw_fit_w,
+            raw_fit_h,
+            x + dx,
+            y + dy,
+            fit_w,
+            fit_h,
+            transform,
+        )
+    else:
+        xfrm_attr, off_x, off_y, ext_cx, ext_cy, bounds_emu = _picture_xfrm_from_svg_rect(
+            ctx,
+            raw_x,
+            raw_y,
+            raw_w,
+            raw_h,
+            x,
+            y,
+            w,
+            h,
+            transform,
+        )
+
+    return ShapeResult(xml=f'''<p:pic>
+<p:nvPicPr>
+<p:cNvPr id="{shape_id}" name="{_xml_escape(shape_display_name(elem, f'Image {shape_id}'))}"/>
+<p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr>
+<p:nvPr/>
+</p:nvPicPr>
+<p:blipFill>
+{blip_xml}
+{src_rect_xml}<a:stretch><a:fillRect/></a:stretch>
+</p:blipFill>
+<p:spPr>
+<a:xfrm{xfrm_attr}><a:off x="{off_x}" y="{off_y}"/>
+<a:ext cx="{ext_cx}" cy="{ext_cy}"/></a:xfrm>
+{clip_geom}
+{effect_xml}
+</p:spPr>
+</p:pic>''', bounds_emu=bounds_emu)
+
+
+# ---------------------------------------------------------------------------
+# ellipse
+# ---------------------------------------------------------------------------
+
+def convert_ellipse(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
+    """Convert SVG <ellipse> to DrawingML ellipse shape."""
+    preset_geom = _build_preset_geom_from_meta(elem)
+    raw_cx = svg_length_x(elem.get('cx'), ctx)
+    raw_cy = svg_length_y(elem.get('cy'), ctx)
+    rx_attr = elem.get('rx')
+    ry_attr = elem.get('ry')
+    raw_rx = svg_length_x(rx_attr, ctx) if rx_attr is not None else 0.0
+    raw_ry = svg_length_y(ry_attr, ctx) if ry_attr is not None else 0.0
+    if rx_attr is not None and ry_attr is None:
+        raw_ry = raw_rx
+    elif ry_attr is not None and rx_attr is None:
+        raw_rx = raw_ry
+    cx_ = ctx_x(raw_cx, ctx)
+    cy_ = ctx_y(raw_cy, ctx)
+    rx = raw_rx * ctx.scale_x
+    ry = raw_ry * ctx.scale_y
+
+    if rx <= 0 or ry <= 0:
+        return None
+
+    x = cx_ - rx
+    y = cy_ - ry
+    w = rx * 2
+    h = ry * 2
+

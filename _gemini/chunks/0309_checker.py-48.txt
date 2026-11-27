@@ -1,0 +1,95 @@
+            ):
+                page_overflow_text_ids.add(id(text_element))
+
+        if unverified:
+            sample = ', '.join(unverified[:3])
+            suffix = (
+                ''
+                if len(unverified) <= 3
+                else f', +{len(unverified) - 3} more'
+            )
+            result['warnings'].append(
+                'Cannot verify root viewBox bounds for visible text with '
+                f'unsupported or unresolved geometry: {sample}{suffix}; use '
+                'supported explicit text positioning when page fit matters '
+                '(continuation <tspan> lines repeat the parent x; a hanging '
+                'indent needs its own <text>)'
+            )
+
+        root_groups = [
+            child
+            for child in list(root)
+            if _local_name(child) == 'g'
+        ]
+        for module in root_groups:
+            if self._is_hidden_element(module, parent_by_id):
+                continue
+            resolved_module = self._resolved_root_module_bounds(module)
+            if resolved_module is None:
+                continue
+            boundary_attribute, boundary = resolved_module
+            for text_element in module.iter(f'{{{SVG_NS}}}text'):
+                if id(text_element) in page_overflow_text_ids:
+                    continue
+                estimated = estimated_by_id.get(id(text_element))
+                if estimated is None:
+                    continue
+                self._record_bounds_overflow(
+                    result,
+                    subject=self._text_diagnostic_label(text_element),
+                    inner=estimated,
+                    container=(
+                        f'{_element_label(module)} {boundary_attribute}'
+                    ),
+                    outer=boundary,
+                    repair=(
+                        # A Layout slot's bounds are its contract on every page.
+                        'reflow the text, or map the page to a Layout whose '
+                        'slot is larger; slot bounds stay as the prototype '
+                        'declares them'
+                        if module.get('data-pptx-placeholder') is not None
+                        else 'expand the root module bounds into available '
+                        'non-overlapping space; otherwise reflow the text'
+                    ),
+                    width_diagnostic=self._text_width_diagnostic(
+                        text_element,
+                        parent_by_id,
+                        font_sizes,
+                        letter_spacings,
+                        container_width=boundary[2] - boundary[0],
+                        include_headroom=True,
+                    ),
+                )
+
+    def _check_unmergeable_leading_text(self, root: ET.Element, result: Dict) -> None:
+        """Warn when leading text cannot be normalized into one PPT text frame."""
+        risky = []
+        for text_el in root.iter(f'{{{SVG_NS}}}text'):
+            if not (text_el.text or "").strip():
+                continue
+            children = list(text_el)
+            if not any(self._is_line_tspan(child) for child in children):
+                continue
+
+            reason = self._leading_text_normalizer_reject_reason(text_el)
+            if reason is not None:
+                risky.append(reason)
+
+        if risky:
+            sample = '; '.join(risky[:3])
+            suffix = '' if len(risky) <= 3 else f"; +{len(risky) - 3} more"
+            result['warnings'].append(
+                "Detected multi-line <text> with leading direct text that cannot "
+                f"be normalized into one PPT text frame ({sample}{suffix})"
+            )
+
+    def _check_fragmented_paragraph_text(
+        self,
+        root: ET.Element,
+        result: Dict,
+    ) -> None:
+        """Warn on high-confidence prose lines split into sibling text frames."""
+        helpers = (
+            _parse_project_geometry_length,
+            _resolve_project_font_sizes,
+        )

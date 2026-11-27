@@ -1,0 +1,106 @@
+        slide_animation = resolve_slide_animation_config(
+            default_animation,
+            slide_value,
+        )
+        if _INHERITANCE_SENSITIVE_ANIMATION_FIELDS & set(slide_value):
+            errors.extend(
+                _animation_parameter_errors(
+                    slide_animation,
+                    f'slide "{slide_name}" animation',
+                    inherited_effect='auto',
+                )
+            )
+            error = _bounce_support_error(
+                slide_animation,
+                f'slide "{slide_name}" animation',
+            )
+            if error:
+                errors.append(error)
+
+        groups = slide_cfg.get('groups', {})
+        if not isinstance(groups, dict):
+            continue
+        for group_id, group_cfg in groups.items():
+            if not isinstance(group_cfg, dict):
+                continue
+            path = (
+                f'slides[{json.dumps(str(slide_name), ensure_ascii=False)}]'
+                f'.groups[{json.dumps(str(group_id), ensure_ascii=False)}]'
+            )
+            try:
+                effect_entries = animation_group_effect_entries(
+                    group_cfg,
+                    path=path,
+                )
+            except ValueError:
+                continue
+            for effect_path, effect_cfg in effect_entries:
+                if not (
+                    _INHERITANCE_SENSITIVE_ANIMATION_FIELDS
+                    & set(effect_cfg)
+                ):
+                    continue
+                inherited_group_animation = {
+                    field: slide_animation[field]
+                    for field in (
+                        'effect',
+                        'effect_options',
+                        'duration',
+                        *ANIMATION_TIMING_OPTION_FIELDS,
+                        'after_effect',
+                        'sound',
+                    )
+                    if field in slide_animation
+                }
+                group_animation = resolve_slide_animation_config(
+                    inherited_group_animation,
+                    effect_cfg,
+                )
+                errors.extend(
+                    _animation_parameter_errors(
+                        group_animation,
+                        effect_path,
+                        inherited_effect='none',
+                    )
+                )
+                error = _bounce_support_error(
+                    group_animation,
+                    effect_path,
+                )
+                if error:
+                    errors.append(error)
+    return errors
+
+
+def _declared_animation_sounds(
+    config: dict[str, Any],
+) -> tuple[tuple[str, object], ...]:
+    """Return explicitly declared sidecar sound values with scope labels."""
+    sounds: list[tuple[str, object]] = []
+    defaults = config.get('defaults', {})
+    if isinstance(defaults, dict):
+        animation = defaults.get('animation', {})
+        if isinstance(animation, dict) and 'sound' in animation:
+            sounds.append(('defaults animation', animation['sound']))
+
+    slides = config.get('slides', {})
+    if not isinstance(slides, dict):
+        return tuple(sounds)
+    for slide_name, slide_cfg in slides.items():
+        if not isinstance(slide_cfg, dict):
+            continue
+        animation = slide_cfg.get('animation', {})
+        if isinstance(animation, dict) and 'sound' in animation:
+            sounds.append((f'slide "{slide_name}" animation', animation['sound']))
+        groups = slide_cfg.get('groups', {})
+        if not isinstance(groups, dict):
+            continue
+        for group_id, group_cfg in groups.items():
+            if not isinstance(group_cfg, dict):
+                continue
+            path = (
+                f'slides[{json.dumps(str(slide_name), ensure_ascii=False)}]'
+                f'.groups[{json.dumps(str(group_id), ensure_ascii=False)}]'
+            )
+            try:
+                effect_entries = animation_group_effect_entries(

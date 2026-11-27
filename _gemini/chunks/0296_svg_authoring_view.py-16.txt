@@ -1,0 +1,114 @@
+        "text_elements": sum(
+            int(document["text_elements"])
+            for document in documents
+        ),
+        "text_characters": sum(
+            int(document["text_characters"])
+            for document in documents
+        ),
+        "images": sum(int(document["images"]) for document in documents),
+        "icon_uses": sum(int(document["icon_uses"]) for document in documents),
+        "unique_icon_assets": len(total_icon_assets),
+        "placeholders": sum(
+            int(document["placeholders"])
+            for document in documents
+        ),
+        "inline_source_refs": sum(
+            int(document["inline_source_refs"])
+            for document in documents
+        ),
+        "source_proxies": sum(
+            int(document["source_proxies"])
+            for document in documents
+        ),
+        "semantic_tables": sum(
+            int(document["semantic_tables"])
+            for document in documents
+        ),
+        "semantic_shapes": sum(
+            int(document["semantic_shapes"])
+            for document in documents
+        ),
+        "machine_source_refs": manifest.get("source_ref_count"),
+    }
+    payload = {
+        "schema": AUTHORING_SUMMARY_SCHEMA,
+        "projection_kind": manifest.get("projection_kind"),
+        "authoring_root": ".",
+        "machine_manifest": AUTHORING_MANIFEST_NAME,
+        "machine_manifest_policy": "tool-only; do not load into model context",
+        "file_count": len(documents),
+        "totals": totals,
+        "documents": documents,
+    }
+    if totals["source_proxies"]:
+        payload["source_proxy_policy"] = {
+            "marker": f'{SOURCE_PROXY_ATTRIBUTE}="{SOURCE_PROXY_KIND}"',
+            "purpose": (
+                "Atomic visual preview of an immutable source-backed "
+                "PowerPoint object"
+            ),
+            "editing": (
+                "Keep unchanged to restore the native object; a Slide-local "
+                "proxy may be removed to delete it; inherited proxies must "
+                "remain; do not edit the proxy or its asset"
+            ),
+        }
+    return (
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    ).encode("utf-8")
+
+
+def write_authoring_summary(authoring_dir: Path) -> Path:
+    """Regenerate the model-readable summary from the current authoring SVGs."""
+    authoring_dir = Path(authoring_dir).resolve()
+    if not authoring_dir.is_dir():
+        raise ValueError(f"Authoring directory not found: {authoring_dir}")
+    payload = _authoring_summary_bytes(authoring_dir)
+    summary_path = authoring_dir / AUTHORING_SUMMARY_NAME
+    with tempfile.NamedTemporaryFile(
+        prefix=f".{AUTHORING_SUMMARY_NAME}.",
+        suffix=".tmp",
+        dir=authoring_dir,
+        delete=False,
+    ) as handle:
+        temporary_path = Path(handle.name)
+        handle.write(payload)
+    try:
+        temporary_path.chmod(0o644)
+        temporary_path.replace(summary_path)
+    except OSError:
+        temporary_path.unlink(missing_ok=True)
+        raise
+    return summary_path
+
+
+def _parse_adopt_source(value: str) -> tuple[str, str]:
+    match = re.fullmatch(r"([^/\\]+\.svg):(.+)", value, flags=re.IGNORECASE)
+    if match is None:
+        raise ValueError(
+            "--adopt-object must use <from.svg>:<element-id>"
+        )
+    source_name, element_id = match.groups()
+    if not element_id.strip() or element_id != element_id.strip():
+        raise ValueError("--adopt-object element id must be non-empty and trimmed")
+    return source_name, element_id
+
+
+def _authoring_page_path(
+    authoring_dir: Path,
+    name: str,
+    *,
+    label: str,
+) -> Path:
+    relative = Path(name)
+    if (
+        "/" in name
+        or "\\" in name
+        or relative.name != name
+        or relative.suffix.lower() != ".svg"
+        or name in {".", ".."}
+    ):
+        raise ValueError(f"{label} must name one SVG directly in {authoring_dir}")
+    path = (authoring_dir / name).resolve()
+    try:

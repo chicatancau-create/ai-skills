@@ -1,0 +1,97 @@
+            result['source_sha256'] = hashlib.sha256(source_bytes).hexdigest()
+            content = source_bytes.decode('utf-8')
+            root = self._parse_xml_root(content, result)
+            if root is not None:
+                self._check_viewbox(root, svg_path, result, None)
+                included_text_ids, unchanged_text_ids = (
+                    self._roundtrip_text_diff_ids(
+                        root,
+                        source_document,
+                        baseline_root,
+                        current_assets,
+                        baseline_assets,
+                    )
+                )
+                result['info']['edited_text_elements'] = len(included_text_ids)
+                self._check_semantic_shape_text(
+                    root, result, included_text_ids=included_text_ids,
+                )
+                if included_text_ids:
+                    scoped_content = self._roundtrip_text_scope_content(
+                        root,
+                        included_text_ids,
+                    )
+                    changed_font_families = (
+                        self._roundtrip_changed_font_families(
+                            root,
+                            baseline_root,
+                            included_text_ids,
+                        )
+                    )
+                    svg_contracts.check_font_size_values(scoped_content, result)
+                    self._check_fonts(
+                        scoped_content,
+                        result,
+                        font_families=changed_font_families,
+                    )
+                    self._check_text_output_geometry(
+                        root,
+                        result,
+                        included_text_ids=included_text_ids,
+                    )
+                    self._check_text_bounds(
+                        root,
+                        result,
+                        included_text_ids=included_text_ids,
+                    )
+                self._check_roundtrip_text_frames(
+                    root,
+                    result,
+                    included_text_ids,
+                    unchanged_text_ids,
+                    baseline_root=baseline_root,
+                )
+                self._check_roundtrip_unsupported_table_edits(
+                    root,
+                    result,
+                    included_text_ids,
+                )
+            result['passed'] = len(result['errors']) == 0
+        except Exception as exc:
+            result['errors'].append(f"Failed to read file: {exc}")
+            result['passed'] = False
+        return self._record_result(result)
+
+    @staticmethod
+    def _check_roundtrip_unsupported_table_edits(
+        root: ET.Element,
+        result: Dict,
+        included_text_ids: set[int],
+    ) -> None:
+        """Warn when an edited page rewrites a table the importer could not
+        carry natively: it exports as shapes and a baked grid, not ``a:tbl``."""
+        if not included_text_ids:
+            return
+        for frame in root.iter(f'{{{SVG_NS}}}g'):
+            status = frame.get('data-pptx-replacement-status') or ''
+            if not status.startswith('unsupported-table'):
+                continue
+            if not any(
+                id(text) in included_text_ids
+                for text in frame.iter(f'{{{SVG_NS}}}text')
+            ):
+                continue
+            result['warnings'].append(
+                f"{_element_label(frame)}: edited text belongs to a source table "
+                f"the importer marked {status}; this page exports the table as "
+                "positioned text over a baked grid, not a native a:tbl. Leave the "
+                "table unchanged to restore the original, or accept shape output"
+            )
+
+    @staticmethod
+    def _check_semantic_shape_text(
+        root: ET.Element,
+        result: Dict,
+        *,
+        included_text_ids: set[int] | None = None,
+    ) -> None:

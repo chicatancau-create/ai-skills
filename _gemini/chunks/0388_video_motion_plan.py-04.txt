@@ -1,0 +1,105 @@
+            "pattern": effect,
+            "mask_feather_px": round(8.0 * multiplier, 2),
+        })
+    elif effect == "swivel":
+        common.update({
+            "family": "soft_swivel",
+            "scale_from": round(1.0 - 0.025 * multiplier, 4),
+            "rotation_from_deg": round(-4.0 * multiplier, 2),
+            "blur_px": round(3.0 * multiplier, 2),
+        })
+    else:
+        raise ValueError(f"unsupported resolved animation effect for video: {effect}")
+    return common
+
+
+def _transition_plan(raw_motion: object) -> dict[str, Any]:
+    if not isinstance(raw_motion, dict):
+        return {
+            "source_effect": None,
+            "video_effect": "cut",
+            "duration_ms": 0,
+            "easing": "linear",
+        }
+    effect = raw_motion.get("effect")
+    duration = raw_motion.get("duration_ms")
+    if effect is None:
+        video_effect = "cut"
+    elif effect == "fade":
+        video_effect = "crossfade"
+    elif effect in {"push", "cover"}:
+        video_effect = "directional_push"
+    elif effect in {"wipe", "split", "strips"}:
+        video_effect = f"soft_{effect}"
+    else:
+        video_effect = "adaptive_crossfade"
+    return {
+        "source_effect": effect,
+        "video_effect": video_effect,
+        "duration_ms": duration if isinstance(duration, int) else 0,
+        "easing": "ease_in_out_cubic",
+    }
+
+
+def build_video_motion_plan(
+    trace_path: str | Path,
+    *,
+    style: str = "adaptive",
+    default_slide_duration: float = 5.0,
+) -> dict[str, Any]:
+    """Build one renderer-neutral, effect-aware video motion plan."""
+    path = Path(trace_path).resolve()
+    if style not in VIDEO_MOTION_STYLES:
+        raise ValueError(
+            f"unknown video motion style {style!r}; valid styles: "
+            f"{', '.join(VIDEO_MOTION_STYLES)}"
+        )
+    default_duration_ms = round(
+        _finite_positive_float(
+            default_slide_duration,
+            "default slide duration",
+        )
+        * 1000
+    )
+    trace = _read_json_object(path)
+    raw_slides = trace.get("slides")
+    if not isinstance(raw_slides, list) or not raw_slides:
+        raise ValueError("conversion trace must contain a non-empty slides list")
+
+    slides: list[dict[str, Any]] = []
+    total_objects = 0
+    enhanced_objects = 0
+    for raw_slide in raw_slides:
+        if not isinstance(raw_slide, dict):
+            raise ValueError("conversion trace slide entries must be objects")
+        slide_num = _positive_int(raw_slide.get("slide_num"), "slide_num")
+        svg_path = _resolve_svg_path(raw_slide.get("svg"), path)
+        canvas_emu = _parse_canvas_emu(svg_path)
+        event_index = _shape_events(raw_slide)
+
+        animation = raw_slide.get("animation", {})
+        if not isinstance(animation, dict):
+            raise ValueError(f"slide {slide_num} animation summary must be an object")
+        rows = animation.get("rows", [])
+        if not isinstance(rows, list):
+            raise ValueError(f"slide {slide_num} animation rows must be a list")
+
+        objects: list[dict[str, Any]] = []
+        for order, raw_row in enumerate(rows, 1):
+            if not isinstance(raw_row, dict):
+                raise ValueError(f"slide {slide_num} animation row must be an object")
+            shape_id = _positive_int(
+                raw_row.get("shape_id"),
+                f"slide {slide_num} animation shape_id",
+            )
+            trigger = raw_row.get("trigger")
+            if trigger == "on-click":
+                raise ValueError(
+                    f"slide {slide_num} uses on-click animation; video motion "
+                    "requires click-free after-previous or with-previous timing"
+                )
+            if trigger not in {"after-previous", "with-previous"}:
+                raise ValueError(
+                    f"slide {slide_num} has unsupported video trigger: {trigger!r}"
+                )
+            effect = raw_row.get("effect")

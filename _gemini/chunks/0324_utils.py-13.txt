@@ -1,0 +1,129 @@
+    """Extract all SVG-inheritable presentation attributes from an element."""
+    styles: dict[str, str] = {}
+    for attr in INHERITABLE_ATTRS:
+        val = elem.get(attr)
+        if val is not None:
+            styles[attr] = val
+    styles.update({
+        attr: val
+        for attr, val in parse_inline_style(elem.get('style')).items()
+        if attr in INHERITABLE_ATTRS
+    })
+    return styles
+
+
+def _get_attr(elem: ET.Element, attr: str, ctx: ConvertContext) -> str | None:
+    """Get effective attribute: element's own value first, then inherited."""
+    style_val = parse_inline_style(elem.get('style')).get(attr)
+    if style_val is not None:
+        return style_val
+    val = elem.get(attr)
+    if val is not None:
+        return val
+    return ctx.inherited_styles.get(attr)
+
+
+def ctx_x(val: float, ctx: ConvertContext) -> float:
+    """Apply context scale + translate to an X coordinate."""
+    return val * ctx.scale_x + ctx.translate_x
+
+
+def ctx_y(val: float, ctx: ConvertContext) -> float:
+    """Apply context scale + translate to a Y coordinate."""
+    return val * ctx.scale_y + ctx.translate_y
+
+
+def ctx_w(val: float, ctx: ConvertContext) -> float:
+    """Apply context scale to a width value."""
+    return val * ctx.scale_x
+
+
+def ctx_h(val: float, ctx: ConvertContext) -> float:
+    """Apply context scale to a height value."""
+    return val * ctx.scale_y
+
+
+# ---------------------------------------------------------------------------
+# Color / style parsing
+# ---------------------------------------------------------------------------
+
+_CSS_NAMED_COLORS = {
+    'black': '000000',
+    'silver': 'C0C0C0',
+    'gray': '808080',
+    'grey': '808080',
+    'white': 'FFFFFF',
+    'maroon': '800000',
+    'red': 'FF0000',
+    'purple': '800080',
+    'fuchsia': 'FF00FF',
+    'magenta': 'FF00FF',
+    'green': '008000',
+    'lime': '00FF00',
+    'olive': '808000',
+    'yellow': 'FFFF00',
+    'navy': '000080',
+    'blue': '0000FF',
+    'teal': '008080',
+    'aqua': '00FFFF',
+    'cyan': '00FFFF',
+    'orange': 'FFA500',
+    'brown': 'A52A2A',
+    'pink': 'FFC0CB',
+    'gold': 'FFD700',
+    'transparent': None,
+    'lightgray': 'D3D3D3',
+    'lightgrey': 'D3D3D3',
+    'darkgray': 'A9A9A9',
+    'darkgrey': 'A9A9A9',
+}
+
+
+def parse_inline_style(style_str: str | None) -> dict[str, str]:
+    """Parse an SVG inline style declaration into ``property: value`` pairs."""
+    styles: dict[str, str] = {}
+    if not style_str:
+        return styles
+    for part in style_str.split(';'):
+        if ':' not in part:
+            continue
+        name, value = part.split(':', 1)
+        name = name.strip().lower()
+        value = value.strip()
+        if name and value:
+            styles[name] = value
+    return styles
+
+
+def svg_hidden_reason(
+    element: ET.Element,
+    parent_by_id: dict[int, ET.Element],
+    *,
+    preserve_native_carriers: bool = False,
+) -> str | None:
+    """Resolve display suppression and inherited visibility, including overrides."""
+    visibility = None
+    current: ET.Element | None = element
+    while current is not None:
+        styles = parse_inline_style(current.get('style'))
+        display = styles.get('display', current.get('display', '')).strip().lower()
+        if display == 'none':
+            return 'display:none'
+        native_carrier = (
+            preserve_native_carriers
+            and current is element
+            and current.get('data-pptx-part') == 'geometry'
+            and current.get('data-pptx-object') in {'shape', 'connector'}
+        )
+        if visibility is None and not native_carrier:
+            value = styles.get('visibility', current.get('visibility', '')).strip().lower()
+            if value and value not in {'inherit', 'unset'}:
+                visibility = value
+        current = parent_by_id.get(id(current))
+    if visibility in {'hidden', 'collapse'}:
+        return f'visibility:{visibility}'
+    return None
+
+
+def iter_project_geometry_lengths(
+    root: ET.Element,

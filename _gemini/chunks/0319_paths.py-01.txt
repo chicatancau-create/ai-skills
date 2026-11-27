@@ -1,0 +1,130 @@
+"""SVG path parsing, normalization, and DrawingML path command generation.
+
+See references/svg-effects.md §6.9 for the project freeform grammar.
+"""
+
+from __future__ import annotations
+
+import math
+import re
+from collections import deque
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from xml.etree import ElementTree as ET
+
+from .context import AffineMatrix
+from .utils import (
+    SVG_NS,
+    parse_inline_style,
+    parse_project_geometry_length,
+    project_definition_index,
+    px_to_emu,
+    resolve_url_id,
+    transform_point,
+)
+
+
+@dataclass
+class PathCommand:
+    """A single SVG path command with its arguments."""
+    cmd: str  # M, L, C, Z, etc. (uppercase = absolute)
+    args: list[float] = field(default_factory=list)
+
+
+# Argument counts per SVG path command
+_ARG_COUNTS = {
+    'M': 2, 'm': 2, 'L': 2, 'l': 2,
+    'H': 1, 'h': 1, 'V': 1, 'v': 1,
+    'C': 6, 'c': 6, 'S': 4, 's': 4,
+    'Q': 4, 'q': 4, 'T': 2, 't': 2,
+    'A': 7, 'a': 7, 'Z': 0, 'z': 0,
+}
+
+_PATH_COMMAND_CHARS = 'MmLlHhVvCcSsQqTtAaZz'
+_PATH_NUMBER_PATTERN = (
+    r'[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?'
+)
+_PATH_TOKEN_RE = re.compile(
+    rf'(?P<command>[{_PATH_COMMAND_CHARS}])|(?P<number>{_PATH_NUMBER_PATTERN})'
+)
+_POINT_TOKEN_RE = re.compile(_PATH_NUMBER_PATTERN)
+_TOKEN_SEPARATOR_RE = re.compile(r'[ \t\r\n]*(?:,[ \t\r\n]*)?')
+_TRAILING_WHITESPACE_RE = re.compile(r'[ \t\r\n]*')
+_CANONICAL_FREEFORM_NUMBER_RE = re.compile(
+    r'-?(?:\d+(?:\.\d+)?|\.\d+)$'
+)
+
+
+@dataclass(frozen=True)
+class _GeometryToken:
+    kind: str
+    raw: str
+    offset: int
+
+
+def _tokenize_path_data(d: str) -> list[_GeometryToken]:
+    """Tokenize one complete path-data value without skipping input."""
+    if not d or not d.strip():
+        raise ValueError('path d must not be empty')
+
+    tokens: list[_GeometryToken] = []
+    cursor = 0
+    previous_kind: str | None = None
+    for match in _PATH_TOKEN_RE.finditer(d):
+        kind = 'command' if match.lastgroup == 'command' else 'number'
+        gap = d[cursor:match.start()]
+        if _TOKEN_SEPARATOR_RE.fullmatch(gap) is None:
+            raise ValueError(
+                f'path d contains unsupported syntax at offset {cursor}: {gap!r}'
+            )
+        if ',' in gap and (
+            previous_kind is None
+            or previous_kind == 'command'
+            or kind == 'command'
+        ):
+            raise ValueError(
+                f'path d has a misplaced comma at offset {cursor}'
+            )
+        tokens.append(_GeometryToken(kind, match.group(), match.start()))
+        previous_kind = kind
+        cursor = match.end()
+
+    trailing = d[cursor:]
+    if _TRAILING_WHITESPACE_RE.fullmatch(trailing) is None:
+        raise ValueError(
+            f'path d contains unsupported trailing syntax at offset '
+            f'{cursor}: {trailing!r}'
+        )
+    if not tokens:
+        raise ValueError('path d must contain a supported command')
+    return tokens
+
+
+def _finite_token_value(token: _GeometryToken, context: str) -> float:
+    value = float(token.raw)
+    if not math.isfinite(value):
+        raise ValueError(
+            f'{context} contains a non-finite number {token.raw!r} at '
+            f'offset {token.offset}'
+        )
+    return value
+
+
+def _expand_arc_argument_tokens(
+    argument_tokens: list[_GeometryToken],
+    command_token: _GeometryToken,
+) -> list[_GeometryToken]:
+    """Split compact SVG arc flags without weakening the numeric grammar."""
+    pending = deque(argument_tokens)
+    expanded: list[_GeometryToken] = []
+    argument_index = 0
+    while pending:
+        token = pending.popleft()
+        position = argument_index % _ARG_COUNTS[command_token.raw]
+        if position in {3, 4}:
+            if not token.raw or token.raw[0] not in {'0', '1'}:
+                raise ValueError(
+                    f'path arc flag at offset {token.offset} must be exactly '
+                    f'0 or 1; got {token.raw!r}'
+                )
+            expanded.append(

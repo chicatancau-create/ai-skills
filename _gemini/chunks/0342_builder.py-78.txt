@@ -1,0 +1,71 @@
+                        if source_motion.advance_after_ms is not None else None
+                    )
+
+                # --- Process notes (shared between native and legacy mode) ---
+                notes_changed = slide_patch is None or slide_patch.notes_changed
+                if not is_layout_definition and notes_changed:
+                    notes_content = (
+                        notes.get(svg_path.stem, '') if notes else ''
+                    )
+                    notes_master = _apply_slide_notes(
+                        extract_dir,
+                        rels_path,
+                        slide_num,
+                        notes_content,
+                        primary_language,
+                        enable_notes=enable_notes,
+                    )
+                    if notes_master is not None:
+                        notes_slides_created.add(slide_num)
+                        notes_master_parts_used.add(notes_master.package_part)
+                        if notes_master.created_theme_part is not None:
+                            notes_master_theme_parts_created.add(
+                                notes_master.created_theme_part
+                            )
+
+                # --- Process narration audio (shared between native and legacy mode) ---
+                svg_stem = svg_path.stem
+                audio_path = (
+                    narration_audio.get(svg_stem)
+                    if narration_audio and not is_layout_definition
+                    else None
+                )
+                if audio_path:
+                    slide_xml_path = extract_dir / 'ppt' / 'slides' / f'slide{slide_num}.xml'
+                    rels_path = extract_dir / 'ppt' / 'slides' / '_rels' / f'slide{slide_num}.xml.rels'
+
+                    ext = audio_path.suffix.lower()
+                    slide_xml, removed_rids = remove_narration(slide_xml_path.read_text(encoding='utf-8'))
+                    source_relationships = _read_relationships(rels_path)
+                    for rel_id in removed_rids:
+                        relationship = source_relationships.get(rel_id, {})
+                        if relationship.get('Target') and relationship.get('TargetMode') != 'External':
+                            replaced_narration_parts.add(_resolve_package_target(
+                                f'ppt/slides/slide{slide_num}.xml', relationship['Target'],
+                            ))
+                        _remove_relationship(rels_path, rel_id)
+                    requested_media = media_dir / f'narration{slide_num}{ext}'
+                    if (
+                        requested_media.exists()
+                        and requested_media.relative_to(extract_dir).as_posix()
+                        in replaced_narration_parts
+                        and not _part_has_relationship_references(
+                            extract_dir,
+                            requested_media.relative_to(extract_dir).as_posix(),
+                        )
+                    ):
+                        # The earlier PPT Master narration for this slide was
+                        # just unlinked; reuse its name instead of growing a
+                        # `_1`, `_1_1`, ... suffix with every re-recording.
+                        requested_media.unlink()
+                    media_name = _unused_part_path(media_dir, f'narration{slide_num}{ext}').name
+                    shutil.copy2(audio_path, media_dir / media_name)
+                    audio_exts_used.add(ext)
+
+                    poster_name = 'narration_poster.png'
+                    poster_path = media_dir / poster_name
+                    if poster_path.exists() and poster_path.read_bytes() != AUDIO_MARKER_PNG_BYTES:
+                        poster_path = _unused_part_path(media_dir, poster_name)
+                        poster_name = poster_path.name
+                    if not poster_path.exists():
+                        poster_path.write_bytes(AUDIO_MARKER_PNG_BYTES)

@@ -1,0 +1,101 @@
+    if not math.isfinite(focus_x) or not math.isfinite(focus_y):
+        return False
+    return (
+        (focus_x - 0.5) ** 2 + (focus_y - 0.5) ** 2
+        <= 0.25 + PROJECT_RADIAL_FOCUS_TOLERANCE
+    )
+
+
+def project_gradient_errors(root: ET.Element) -> list[str]:
+    """Validate the normalized native gradient authoring interface."""
+    errors: set[str] = set()
+    for gradient in root.iter():
+        tag = _svg_element_tag(gradient)
+        if tag not in PROJECT_GRADIENT_TAGS:
+            continue
+        gradient_id = gradient.get('id')
+        label = f'<{tag} id="{gradient_id}">' if gradient_id else f'<{tag}>'
+        if any(
+            gradient.get(name) is not None
+            for name in (
+                NATIVE_GRADIENT_ATTR,
+                NATIVE_GRADIENT_SHA256_ATTR,
+                NATIVE_GRADIENT_PREVIEW_SHA256_ATTR,
+            )
+        ):
+            try:
+                native = preserved_native_gradient_xml(gradient)
+            except ValueError as exc:
+                errors.add(f'{label} has invalid imported gradient payload: {exc}')
+                continue
+            if native is not None:
+                continue
+        attribute_names = {
+            name.rsplit('}', 1)[-1]
+            for name in gradient.attrib
+        }
+        if 'href' in attribute_names:
+            errors.add(
+                f'{label} cannot inherit from href/xlink:href; '
+                'define gradient stops directly'
+            )
+        if 'gradientTransform' in attribute_names:
+            errors.add(f'{label} cannot use gradientTransform')
+        if 'spreadMethod' in attribute_names:
+            errors.add(f'{label} cannot use spreadMethod')
+        gradient_units = gradient.get('gradientUnits')
+        if gradient_units not in {None, 'objectBoundingBox'}:
+            errors.add(
+                f'{label} cannot use gradientUnits={gradient_units!r}; '
+                'use normalized objectBoundingBox coordinates'
+            )
+
+        if tag == 'linearGradient':
+            coordinate_defaults = {
+                'x1': '0',
+                'y1': '0',
+                'x2': '1',
+                'y2': '0',
+            }
+            coordinates: dict[str, float] = {}
+            for coordinate_name, default in coordinate_defaults.items():
+                raw_coordinate = gradient.get(coordinate_name, default)
+                try:
+                    coordinates[coordinate_name] = (
+                        parse_project_linear_gradient_coordinate(raw_coordinate)
+                    )
+                except ValueError:
+                    errors.add(
+                        f'{label} {coordinate_name} must be a finite '
+                        'objectBoundingBox projection coordinate within '
+                        '-0.105..1.105 or -10.5%..110.5%; '
+                        f'got {raw_coordinate!r}'
+                    )
+            if len(coordinates) == 4 and (
+                math.isclose(
+                    coordinates['x1'],
+                    coordinates['x2'],
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                )
+                and math.isclose(
+                    coordinates['y1'],
+                    coordinates['y2'],
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                )
+            ):
+                errors.add(
+                    f'{label} linear gradient axis must not collapse to one '
+                    'point; use different x1/y1 and x2/y2 coordinates'
+                )
+        else:
+            radial_coordinates: dict[str, float] = {}
+            for coordinate_name in ('cx', 'cy', 'r', 'fx', 'fy'):
+                raw_coordinate = gradient.get(coordinate_name)
+                if raw_coordinate is None:
+                    continue
+                try:
+                    coordinate = parse_project_gradient_ratio(raw_coordinate)
+                except ValueError:
+                    errors.add(

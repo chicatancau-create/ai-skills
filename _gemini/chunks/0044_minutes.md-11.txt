@@ -1,0 +1,123 @@
+  dws minutes hot-word list
+```
+
+查询当前用户配置的所有听记热词列表。无需传入额外参数，系统自动识别当前用户身份。返回用户已添加的全部热词，适用于查看已有热词、去重检查等场景。
+
+### 查找替换听记文字
+```
+Usage:
+  dws minutes replace-text [flags]
+Example:
+  dws minutes replace-text --id <taskUuid> --search "旧文字" --replace "新文字"
+Flags:
+      --id string        听记 taskUuid (必填)
+      --search string    要查找的文字 (必填)
+      --replace string   替换为的新文字 (必填)
+```
+
+把听记中所有出现的原文字替换为目标文字，包括转写段落和纪要摘要中出现的原文字都会被替换。区分大小写，精确匹配。
+
+**重要 — 执行前必须检查特殊字符并提示用户确认：**
+用户输入的原始文本（`--search`）或目标文本（`--replace`）中可能携带特殊字符（如引号 `"` `'` `"` `"`、书名号 `《》`、括号 `【】()（）`、星号 `*`、反斜杠 `\`、换行符、Markdown 格式符号等）。这些特殊字符在转写原文中**通常不存在**，会导致精确匹配失败（替换 0 处）。
+
+AI **必须在执行 `replace-text` 之前**检查用户输入，若发现特殊字符，**先向用户确认**：
+
+> "我注意到你输入的文本中包含特殊字符（如 `…`），转写原文中通常不会包含这些字符，直接匹配可能找不到。建议去掉特殊字符后再替换：
+>
+> - 原始文本：`XXX` → 建议改为：`YYY`
+> - 目标文本：`AAA` → 建议改为：`BBB`
+>
+> 使用去掉特殊字符的版本执行替换？[是] [否，使用原始输入]"
+
+- 用户确认 → 使用清理后的文本执行替换
+- 用户选择原始输入 → 按原样执行，尊重用户意图
+- **严禁不提示就自行去掉特殊字符**——用户可能确实需要匹配带特殊字符的文本
+
+**重要 — 执行后必须主动引导用户添加热词（避免长期反复识别错）：**
+`replace-text` 仅修正**当前这一篇听记**的文字，**不会影响后续新听记的语音识别结果**。如果用户替换的是一个**长期容易被识别错的专有名词、人名、产品名**（如把"付工"改成"悟空"、把"非书"改成"飞书"），AI **必须在 `replace-text` 成功后主动追问用户**：
+
+> "我已经把这篇听记里的『旧文字』替换为『新文字』。如果这个词以后也容易被识别错，建议把它加到个人热词里，后续新听记就不会再识别错了。要我现在帮你执行 `dws minutes hot-word add --words "新文字"` 吗？"
+
+用户确认后立即调用 `hot-word add`。**严禁只做替换不引导**——这会让用户每次都要手动改一次，体验非常差。
+
+### 创建文件上传会话或者文件转听记或者链接转听记
+```
+Usage:
+  dws minutes upload create [flags]
+Example:
+  dws minutes upload create --file-name "meeting.mp4" --file-size 102400
+  dws minutes upload create --file-name "meeting.mp4" --file-size 102400 --title "周会录音"
+  dws minutes upload create --file-name "meeting.mp4" --file-size 102400 --input-language "zh" --enable-message-card
+Flags:
+      --file-name string        文件名（含后缀），如 meeting.mp4 (必填)
+      --file-size int           文件大小（字节）(必填，正整数)
+      --title string            听记标题，不传时默认使用文件名去掉后缀 (可选)
+      --template-id string      纪要生成使用的模板 ID (可选)
+      --input-language string   ASR 识别的源语言 (可选)
+      --enable-message-card     是否推送闪记卡片消息 (可选，默认 false)
+```
+
+创建文件上传会话，获取预签名上传 URL。调用方拿到 URL 后，直接用 HTTP PUT 将文件上传到该 URL。必须与 `upload complete` 配合使用：
+1. 调用 `upload create` 获取预签名上传 URL 和 sessionId
+2. HTTP PUT 预签名上传 URL 上传文件（不带 HEADER）
+3. 调用 `upload complete` 传入 sessionId 完成创建
+
+### 完成文件上传并创建听记
+```
+Usage:
+  dws minutes upload complete [flags]
+Example:
+  dws minutes upload complete --session-id <sessionId>
+Flags:
+      --session-id string   上传会话 ID，来自 upload create 返回的 sessionId (必填)
+```
+
+文件上传完成后，调用此命令创建听记。必须在 `upload create` 之后、预签名 URL 上传完成后调用。幂等：同一 sessionId 重复调用直接返回已有任务，不会重复创建。
+
+### 取消文件上传会话
+```
+Usage:
+  dws minutes upload cancel [flags]
+Example:
+  dws minutes upload cancel --session-id <sessionId>
+Flags:
+      --session-id string   要取消的会话 sessionId (必填)
+```
+
+取消 `upload create` 创建的上传会话，释放服务端资源。用于在上传前或上传失败后取消会话。
+
+### 批量添加听记成员并设置权限
+```
+Usage:
+  dws minutes permission add [flags]
+Example:
+  dws minutes permission add --ids <uuid1,uuid2> --member-uids 123456,789012 --policy 3
+  dws minutes permission add --ids <uuid> --member-uids 123456 --policy 2 --cover
+  dws minutes permission add --ids <uuid> --member-uids 123456 --policy 3 --sub-resources "OrigContent,Summary"
+  dws minutes permission add --uuids <uuid1,uuid2> --member-uids 123456 --policy 3
+  dws minutes permission add --task-uuids <uuid1,uuid2> --member-uids 123456 --policy 3
+Flags:
+      --ids string            听记 taskUuid 列表，逗号分隔 (必填)
+      --uuids string          --ids 的别名
+      --task-uuids string     --ids 的别名
+      --member-uids string    成员钉钉 UID 列表，逗号分隔 (必填)
+      --policy int            权限类型: 0=管理员, 1=所有者, 2=可编辑, 3=可查看/下载, 4=仅查看 (必填)
+      --cover                 是否覆盖已有权限 (可选，默认 false)
+      --sub-resources string  权限子模块，逗号分隔: OrigContent/Summary/Analysis/Note (可选)
+```
+
+批量给多个听记增加成员，并设置成员的权限。
+
+**权限类型说明：**
+
+| --policy 值 | 含义 | 说明 |
+|------------|------|------|
+| 0 | 管理员 | 可管理听记的所有设置和成员权限 |
+| 1 | 所有者 | 听记的所有者，拥有最高权限 |
+| 2 | 可编辑 | 可编辑听记的纪要、待办等内容 |
+| 3 | 可查看/下载 | 可查看和下载听记内容，不可编辑 |
+| 4 | 仅查看 | 仅可查看听记内容，不可下载 |
+
+**权限子模块说明（--sub-resources，可选）：**
+
+| 子模块 | 含义 |

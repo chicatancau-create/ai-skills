@@ -1,0 +1,94 @@
+_FALLBACK_CHART_COLORS = (
+    "#4472C4", "#ED7D31", "#A5A5A5", "#FFC000",
+    "#5B9BD5", "#70AD47", "#264478", "#9E480E",
+)
+_COLOR_MODIFIERS_WITH_VALUE = {
+    "alpha", "alphaMod", "alphaOff", "hueMod", "hueOff", "lumMod",
+    "lumOff", "satMod", "satOff", "shade", "tint",
+}
+_COLOR_MODIFIERS_WITHOUT_VALUE = {"comp", "gray", "inv"}
+
+
+def _resolved_solid_fill(
+    fill: ET.Element,
+    palette: ColorPalette | None,
+) -> tuple[str, float]:
+    if fill.attrib or len(fill) != 1:
+        raise _UnsupportedChart("unsupported-chart-series-style")
+    color = find_color_elem(fill)
+    if color is None or color is not fill[0]:
+        raise _UnsupportedChart("unsupported-chart-series-style")
+    tag = _local_name(color.tag)
+    allowed_attrs = {
+        "srgbClr": {"val"},
+        "schemeClr": {"val"},
+        "sysClr": {"val", "lastClr"},
+        "prstClr": {"val"},
+        "hslClr": {"hue", "sat", "lum"},
+        "scrgbClr": {"r", "g", "b"},
+    }.get(tag)
+    if allowed_attrs is None or not set(color.attrib).issubset(allowed_attrs):
+        raise _UnsupportedChart("unsupported-chart-series-style")
+    required = {
+        "srgbClr": {"val"}, "schemeClr": {"val"}, "prstClr": {"val"},
+        "hslClr": {"hue", "sat", "lum"}, "scrgbClr": {"r", "g", "b"},
+    }.get(tag, set())
+    if not required.issubset(color.attrib):
+        raise _UnsupportedChart("unsupported-chart-series-style")
+    for modifier in color:
+        modifier_name = _local_name(modifier.tag)
+        if modifier_name in _COLOR_MODIFIERS_WITH_VALUE:
+            if set(modifier.attrib) != {"val"} or list(modifier):
+                raise _UnsupportedChart("unsupported-chart-series-style")
+            try:
+                modifier_value = float(modifier.attrib["val"])
+            except (TypeError, ValueError, OverflowError):
+                raise _UnsupportedChart("unsupported-chart-series-style") from None
+            if not math.isfinite(modifier_value):
+                raise _UnsupportedChart("unsupported-chart-series-style")
+        elif modifier_name in _COLOR_MODIFIERS_WITHOUT_VALUE:
+            if modifier.attrib or list(modifier):
+                raise _UnsupportedChart("unsupported-chart-series-style")
+        else:
+            raise _UnsupportedChart("unsupported-chart-series-style")
+    try:
+        resolved, alpha = resolve_color(color, palette)
+    except (TypeError, ValueError, OverflowError):
+        raise _UnsupportedChart("unsupported-chart-series-style") from None
+    if resolved is None or not math.isfinite(alpha):
+        raise _UnsupportedChart("unsupported-chart-series-style")
+    return resolved.upper(), max(0.0, min(1.0, alpha))
+
+
+def _resolved_line(
+    line: ET.Element,
+    palette: ColorPalette | None,
+) -> _LinePaint:
+    if not set(line.attrib).issubset({"w", "cap"}):
+        raise _UnsupportedChart("unsupported-chart-series-style")
+    raw_width = line.attrib.get("w")
+    if raw_width is None:
+        width = 1.5
+    else:
+        if re.fullmatch(r"[0-9]+", raw_width) is None:
+            raise _UnsupportedChart("unsupported-chart-series-style")
+        width = int(raw_width) / 9525.0
+        if not 0 <= width <= 1000:
+            raise _UnsupportedChart("unsupported-chart-series-style")
+    cap_aliases = {None: "round", "rnd": "round", "sq": "square", "flat": "butt"}
+    cap = cap_aliases.get(line.attrib.get("cap"))
+    if cap is None:
+        raise _UnsupportedChart("unsupported-chart-series-style")
+
+    fill_nodes: list[ET.Element] = []
+    for child in line:
+        name = _local_name(child.tag)
+        if name in {"solidFill", "noFill"}:
+            fill_nodes.append(child)
+        elif name == "prstDash":
+            if child.attrib != {"val": "solid"} or list(child):
+                raise _UnsupportedChart("unsupported-chart-series-style")
+        elif name in {"round", "bevel"}:
+            if child.attrib or list(child):
+                raise _UnsupportedChart("unsupported-chart-series-style")
+        elif name == "miter":

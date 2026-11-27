@@ -1,0 +1,68 @@
+                    self.assertEqual(resolve_cert_reqs(tls.call_args.kwargs['cert_reqs']), ssl.CERT_REQUIRED)
+                    self.assertIsNone(tls.call_args.kwargs['assert_hostname'])
+
+    def test_requests_connects_only_to_validated_ipv4_and_ipv6_answers(self) -> None:
+        first, second = _http_socket(), _http_socket()
+        first.connect.side_effect = OSError('unreachable')
+        answers = _dns_answer('8.8.8.8') + _dns_answer('2001:4860:4860::8888')
+        with patch.object(web_to_md, 'curl_requests', None), \
+                patch.object(socket, 'getaddrinfo', return_value=answers), \
+                patch.object(socket, 'socket', side_effect=[first, second]):
+            response = web_to_md._http_get('http://public.example:8080/')
+            self.assertEqual(response.content, b'public')
+            first.connect.assert_called_once_with(('8.8.8.8', 8080))
+            first.close.assert_called_once()
+            second.connect.assert_called_once_with(('2001:4860:4860::8888', 8080))
+
+    def test_curl_pins_public_addresses_despite_rebinding_at_transport(self) -> None:
+        connected = []
+
+        def get(url, **kwargs):
+            # The answer available at connect time has changed. A pinned backend
+            # uses RESOLVE instead of consulting it for its destination.
+            rebound = socket.getaddrinfo('mp.weixin.qq.com', None, type=socket.SOCK_STREAM)
+            self.assertEqual(rebound[0][4][0], '169.254.169.254')
+            options = kwargs['curl_options']
+            self.assertEqual(options[web_to_md.CurlOpt.RESOLVE], ['mp.weixin.qq.com:443:8.8.8.8'])
+            connected.extend(options[web_to_md.CurlOpt.RESOLVE][0].split(':')[2:])
+            self.assertEqual(options[web_to_md.CurlOpt.PROXY], '')
+            self.assertEqual(kwargs['impersonate'], web_to_md._CURL_IMPERSONATE)
+            self.assertIs(kwargs['allow_redirects'], False)
+            return Mock(url=url, status_code=200)
+
+        with patch.object(web_to_md, 'curl_requests', SimpleNamespace(get=get)), \
+                patch.object(socket, 'getaddrinfo', side_effect=[
+                    _dns_answer('8.8.8.8'), _dns_answer('169.254.169.254'), _dns_answer('8.8.8.8'),
+                ]):
+            web_to_md._http_get('https://mp.weixin.qq.com/')
+        self.assertEqual(connected, ['8.8.8.8'])
+
+    def test_curl_recomputes_pins_for_each_redirect_and_explicit_port(self) -> None:
+        calls = []
+        start = 'https://mp.weixin.qq.com/start'
+        final = 'https://images.example:8443/photo'
+
+        def get(url, **kwargs):
+            calls.append((url, kwargs['curl_options'][web_to_md.CurlOpt.RESOLVE]))
+            headers = _CurlHeaders({'Location': final}) if url == start else _CurlHeaders()
+            return Mock(url=url, status_code=302 if url == start else 200, headers=headers)
+
+        def resolve(host, *args, **kwargs):
+            return _dns_answer('8.8.8.8' if host == 'mp.weixin.qq.com' else '2001:4860:4860::8888')
+
+        with patch.object(web_to_md, 'curl_requests', SimpleNamespace(get=get)), \
+                patch.object(socket, 'getaddrinfo', side_effect=resolve):
+            web_to_md._http_get(start, stream=True)
+        self.assertEqual(calls, [
+            (start, ['mp.weixin.qq.com:443:8.8.8.8']),
+            (final, ['images.example:8443:[2001:4860:4860::8888]']),
+        ])
+
+    def test_private_opt_in_uses_the_regular_requests_connection(self) -> None:
+        sock = _http_socket()
+        with patch.dict(web_to_md.CONFIG, allow_private_hosts=True), \
+                patch.dict(web_to_md.os.environ, {'NO_PROXY': '*', 'no_proxy': '*'}), \
+                patch.object(web_to_md, 'curl_requests', None), \
+                patch.object(socket, 'getaddrinfo', return_value=_dns_answer('127.0.0.1', 80)), \
+                patch.object(socket, 'socket', return_value=sock):
+            self.assertEqual(web_to_md._http_get('http://127.0.0.1/').content, b'public')

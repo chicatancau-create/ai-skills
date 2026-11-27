@@ -1,0 +1,118 @@
+    # Import lazily to avoid the native-object package's dependency on this
+    # shared DrawingML utility module during initialization.
+    from ..native_objects.marker_attributes import native_replacement_kind
+
+    return any(
+        native_replacement_kind(descendant) in {'table', 'chart', 'formula'}
+        for descendant in _iter_visual_transform_tree(elem)
+    )
+
+
+def _project_thick_circle_ids(
+    root: ET.Element,
+) -> set[int]:
+    thick_circle_ids: set[int] = set()
+
+    def visit(
+        elem: ET.Element,
+        inherited: dict[str, str] | None = None,
+    ) -> None:
+        arc_styles = _transform_arc_styles(elem, inherited)
+        if _is_project_thick_circle(elem, arc_styles):
+            thick_circle_ids.add(id(elem))
+        for child in elem:
+            visit(child, arc_styles)
+
+    visit(root)
+    return thick_circle_ids
+
+
+_PROJECT_STROKE_STYLE_ATTRIBUTES = (
+    'stroke-dasharray',
+    'stroke-dashoffset',
+    'stroke-linecap',
+    'stroke-linejoin',
+    'vector-effect',
+)
+
+
+def iter_project_stroke_styles(
+    root: ET.Element,
+) -> Iterator[tuple[ET.Element, str, str, str]]:
+    """Yield project line-style values with their declaration source."""
+    for elem in root.iter():
+        for attribute in _PROJECT_STROKE_STYLE_ATTRIBUTES:
+            raw = elem.get(attribute)
+            if raw is not None:
+                yield elem, attribute, raw, 'attribute'
+        inline_style = parse_inline_style(elem.get('style'))
+        for attribute in _PROJECT_STROKE_STYLE_ATTRIBUTES:
+            raw = inline_style.get(attribute)
+            if raw is not None:
+                yield elem, attribute, raw, 'inline style'
+
+
+def project_stroke_style_errors(root: ET.Element) -> list[str]:
+    """Return blocking line-style grammar and mapping errors for preflight."""
+    thick_circle_ids = _project_thick_circle_ids(root)
+    errors: set[str] = set()
+    for elem, attribute, raw, source in iter_project_stroke_styles(root):
+        label = _transform_element_label(elem)
+        try:
+            if attribute == 'stroke-dasharray':
+                parse_project_stroke_dasharray(
+                    raw,
+                    allow_zero_gap=id(elem) in thick_circle_ids,
+                )
+            elif attribute == 'stroke-dashoffset':
+                if source != 'attribute':
+                    raise ValueError(
+                        'is supported only as a direct attribute on a '
+                        'thick-circle arc'
+                    )
+                parse_project_geometry_length(raw, attribute)
+                if id(elem) not in thick_circle_ids:
+                    raise ValueError(
+                        'is supported only on a circle that satisfies the '
+                        'thick-circle arc contract'
+                    )
+            else:
+                parse_project_stroke_enum(attribute, raw)
+        except ValueError as exc:
+            errors.add(f'{label} {source} {attribute}={raw!r}: {exc}')
+    return sorted(errors)
+
+
+def _contains_thick_circle(elem: ET.Element, thick_circle_ids: set[int]) -> bool:
+    return any(
+        id(descendant) in thick_circle_ids
+        for descendant in _iter_visual_transform_tree(elem)
+    )
+
+
+def _is_unit_axis_reflection(
+    operations: tuple[tuple[str, tuple[float, ...]], ...],
+) -> bool:
+    """Return whether a transform is translation plus an unscaled axis flip."""
+    has_explicit_flip = any(
+        (
+            name == 'scale'
+            and (
+                args[0] < 0
+                or (len(args) > 1 and args[1] < 0)
+            )
+        )
+        or (
+            name == 'matrix'
+            and (args[0] < 0 or args[3] < 0)
+        )
+        for name, args in operations
+    )
+    if not has_explicit_flip:
+        return False
+    matrix = _transform_operations_matrix(operations)
+    a, b, c, d, _e, _f = matrix
+    return (
+        abs(b) <= 1e-9
+        and abs(c) <= 1e-9
+        and math.isclose(abs(a), 1.0, abs_tol=1e-9)

@@ -1,0 +1,69 @@
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    # CLI --backend overrides the value loaded from .env
+    if args.backend:
+        os.environ["IMAGE_BACKEND"] = args.backend
+
+    backend, backend_name = _resolve_backend()
+    image_size = (
+        args.image_size
+        or BACKEND_REGISTRY[backend_name]["default_image_size"]
+    )
+    print(f"Using backend: {backend_name}\n")
+
+    if args.manifest:
+        concurrency = _resolve_concurrency(args.concurrency)
+        try:
+            _, failed, _ = _run_manifest(
+                manifest, args.manifest, backend,
+                initial_concurrency=concurrency,
+                image_size=image_size,
+                output_dir=str(manifest_output_dir),
+                model=args.model,
+            )
+        except KeyboardInterrupt:
+            print("\n\nInterrupted by user. Partial progress preserved in manifest.")
+            sys.exit(130)
+        md_path = render_manifest_md_to_file(args.manifest, manifest)
+        print(f"Rendered Markdown sidecar: {md_path}")
+        sys.exit(1 if failed else 0)
+
+    # Single-image mode. Backfill the historical default prompt only here, so
+    # plain generation is byte-for-byte unchanged while edit mode still requires
+    # an explicit instruction (enforced above).
+    prompt = args.prompt if args.prompt is not None else "a beautiful landscape"
+
+    gen_kwargs = {
+        "prompt": prompt,
+        "aspect_ratio": args.aspect_ratio,
+        "image_size": image_size,
+        "output_dir": args.output,
+        "filename": args.filename,
+        "model": args.model,
+    }
+    if args.reference_image is not None:
+        if not getattr(backend, "SUPPORTS_REFERENCE_IMAGE", False):
+            print(
+                f"Error: backend '{backend_name}' does not support image editing "
+                "(--reference-image). Use a backend that does "
+                "(currently: gemini, openai)."
+            )
+            sys.exit(1)
+        gen_kwargs["reference_image"] = args.reference_image
+
+    try:
+        backend.generate(**gen_kwargs)
+    except (ValueError, FileNotFoundError) as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+    except RuntimeError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print("\n\nInterrupted by user.")
+        sys.exit(130)
+
+
+if __name__ == "__main__":
+    main()

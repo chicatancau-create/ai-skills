@@ -1,0 +1,62 @@
+                self.assertEqual(actual.find('.//a:srcRect', NS).attrib, crop)
+                self.assertEqual(actual.find('.//a:prstGeom', NS).get('prst'), 'roundRect')
+
+    def test_empty_clip_is_omitted_from_checker_coordinate_measurement(self) -> None:
+        self._clipped_image('<rect visibility="hidden"/>')
+        tree = ET.parse(self.svg_path)
+        tree.getroot().find('{http://www.w3.org/2000/svg}image').set('x', '100000000000000000000')
+        tree.write(self.svg_path, encoding='utf-8')
+        self.assertFalse(self._check()['errors'])
+        self.assertFalse(self._export().findall('.//p:pic', NS))
+
+    def test_clip_still_rejects_multiple_visible_shapes(self) -> None:
+        self._clipped_image('<rect x="100" y="100" width="200" height="100"/>' * 2)
+        self.assertTrue(any('exactly one' in error for error in self._check()['errors']))
+        with self.assertRaisesRegex(SvgNativeConversionError, 'exactly one'):
+            self._export()
+        self._clipped_image('<rect visibility="hidden"/><circle display="none"/>')
+        self.assertFalse(self._export().findall('.//p:pic', NS))
+
+    def test_nested_crop_uses_visible_clip_shape_and_omits_empty_clip(self) -> None:
+        for hidden in (False, True):
+            with self.subTest(hidden=hidden):
+                self._svg(
+                    '<defs><clipPath id="clip"><circle display="none"/>'
+                    '<rect x="0.25" y="0.25" width="0.5" height="0.5" rx="0.1" '
+                    f'visibility="{"hidden" if hidden else "visible"}"/></clipPath></defs>'
+                    '<svg x="100" y="100" width="200" height="200" viewBox="0.25 0.25 0.5 0.5" '
+                    'data-pptx-crop="1" overflow="hidden" preserveAspectRatio="none">'
+                    '<image x="0" y="0" width="1" height="1" preserveAspectRatio="none" '
+                    f'href="{PNG_DATA}" clip-path="url(#clip)"/></svg>'
+                )
+                self.assertFalse(self._check()['errors'])
+                pictures = self._export().findall('.//p:pic', NS)
+                self.assertEqual(len(pictures), 0 if hidden else 1)
+                if not hidden:
+                    self.assertEqual(pictures[0].find('.//a:prstGeom', NS).get('prst'), 'roundRect')
+                    self.assertEqual(pictures[0].find('.//a:srcRect', NS).attrib,
+                                     {'l': '25000', 't': '25000', 'r': '25000', 'b': '25000'})
+
+    def test_zero_width_strokes_export_no_fill_including_style_and_inheritance(self) -> None:
+        for width in ('0', '0.5'):
+            for placement in ('attribute', 'style', 'inherited_attribute', 'inherited_style'):
+                with self.subTest(width=width, placement=placement):
+                    attribute = (f'style="stroke-width:{width}"' if placement.endswith('style')
+                                 else f'stroke-width="{width}"')
+                    direct = '' if placement.startswith('inherited') else attribute
+                    parent = attribute if placement.startswith('inherited') else ''
+                    self._svg(
+                        f'<g stroke="#123456" data-pptx-bounds="80 80 340 100" {parent}>'
+                        f'<line x1="100" y1="100" x2="200" y2="150" {direct}/>'
+                        f'<rect x="300" y="100" width="100" height="50" {direct}/></g>'
+                    )
+                    self.assertFalse(self._check()['errors'])
+                    strokes = self._export().findall('.//p:sp/p:spPr/a:ln', NS)
+                    self.assertEqual(len(strokes), 2)
+                    for stroke in strokes:
+                        if width == '0':
+                            self.assertEqual(stroke.attrib, {})
+                            self.assertIsNotNone(stroke.find('a:noFill', NS))
+                            self.assertIsNone(stroke.find('a:solidFill', NS))
+                        else:
+                            self.assertEqual(stroke.get('w'), '4762')

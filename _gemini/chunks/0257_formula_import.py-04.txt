@@ -1,0 +1,109 @@
+        elif hidden and rising:
+            command = "cancel"
+        elif hidden and falling:
+            command = "bcancel"
+        elif not hidden and not rising and not falling:
+            command = "boxed"
+        else:
+            raise FormulaImportError("unsupported reversible border-box properties")
+        return f"\\{command}{{{_serialize_argument(element, 'e')}}}"
+    if name in {"e", "deg", "den", "fName", "lim", "num", "sub", "sup"}:
+        return _serialize_children(element, alignment=alignment)
+    raise FormulaImportError(f"unsupported reversible Office Math element: m:{name}")
+
+
+def _serialize_optional_argument(owner: ET.Element, name: str) -> str:
+    element = owner.find(f"{_M}{name}")
+    return _serialize_children(element) if element is not None else ""
+
+
+def _scripted(base: str, subscript: str, superscript: str) -> str:
+    if subscript:
+        base += f"_{{{subscript}}}"
+    if superscript:
+        base += f"^{{{superscript}}}"
+    return base
+
+
+def _serialize_run(run: ET.Element, *, alignment: bool) -> str:
+    text_element = run.find(f"{_M}t")
+    value = text_element.text or "" if text_element is not None else ""
+    properties = run.find(f"{_M}rPr")
+    literal = _on_property(properties, "lit")
+    normal = _on_property(properties, "nor")
+    source = _escape_text(value, alignment=alignment and not literal, text_mode=normal)
+    if not source:
+        return ""
+    drawing = run.find(f"{_A}rPr")
+    if normal:
+        typeface = ""
+        if drawing is not None:
+            latin = drawing.find(f"{_A}latin")
+            typeface = latin.get("typeface", "") if latin is not None else ""
+        text_command = {
+            "Arial": "textsf",
+            "Courier New": "texttt",
+        }.get(typeface, "text")
+        source = f"\\{text_command}{{{source}}}"
+        if drawing is not None and _drawing_on(drawing, "b"):
+            source = f"\\textbf{{{source}}}"
+        if drawing is not None and _drawing_on(drawing, "i"):
+            source = f"\\textit{{{source}}}"
+    else:
+        script = _property_child_value(properties, "scr")
+        style = _property_child_value(properties, "sty")
+        command = {
+            "sans-serif": "mathsf",
+            "monospace": "mathtt",
+            "double-struck": "mathbb",
+            "script": "mathcal",
+            "fraktur": "mathfrak",
+        }.get(script or "")
+        if command is None:
+            command = {
+                "p": "mathrm",
+                "b": "mathbf",
+                "i": "mathit",
+                "bi": "boldsymbol",
+            }.get(style or "")
+        if command is not None:
+            source = f"\\{command}{{{source}}}"
+    color = _drawing_color(drawing)
+    if color is not None:
+        source = f"\\textcolor{{#{color}}}{{{source}}}"
+    return source
+
+
+def _escape_text(value: str, *, alignment: bool, text_mode: bool) -> str:
+    parts: list[str] = []
+    for character in value:
+        if character in _SPACING_LATEX and not text_mode:
+            parts.append(_SPACING_LATEX[character])
+        elif character == " " and not text_mode:
+            parts.append(r"\ ")
+        elif character == "&":
+            parts.append("&" if alignment else r"\&")
+        elif character in "{}_%#$":
+            parts.append("\\" + character)
+        elif character == "\\":
+            parts.append(r"\backslash{}")
+        elif character == "~" and not text_mode:
+            parts.append(r"\text{~}")
+        elif character == "^" and not text_mode:
+            parts.append(r"\text{^}")
+        else:
+            parts.append(character)
+    return "".join(parts)
+
+
+def _delimiter(value: str, *, side: str) -> str:
+    if not value:
+        return "."
+    if value == "|":
+        return "|"
+    command = _DELIMITER_COMMANDS.get(value)
+    if command is not None:
+        if value == "‖" and side == "left":
+            command = r"\lVert"
+        if value == "‖" and side == "right":
+            command = r"\rVert"

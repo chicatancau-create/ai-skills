@@ -1,0 +1,62 @@
+  Write-Report observation caller '' read 'The caller token determines effective access; unconfined execution does not imply elevation.' @{ sid = $meSid; integrity = $integrity }
+  :paths foreach ($requested in $Path) {
+    $currentPath = $requested
+    $full = Get-NormalizedPath $requested
+    $currentPath = $full
+    Write-Line ('PATH={0}' -f $full)
+    if (-not (Test-Path -LiteralPath $full)) {
+      Write-Line '  MISSING'
+      Write-Line 'VERDICT=NOT_THIS_CLASS'
+      Write-Decision $mode $full skipped 'The requested path does not exist; no ACL was read or changed for it.'
+      $refused++
+      break paths
+    }
+
+    $factsByPath = @{}
+    $inspectOrder = @()
+    $packageTargets = @()
+    $targetFacts = $null
+    foreach ($ancestor in (Get-Ancestors -FullPath $full)) {
+      if (-not (Test-Path -LiteralPath $ancestor)) { continue }
+      $facts = Get-ObjectFacts -FullPath $ancestor -MeSid $meSid
+      $factsByPath[$facts.Object] = $facts
+      $inspectOrder += $facts.Object
+      if ($ancestor -eq $full) { $targetFacts = $facts }
+      Write-Line ('  OBJECT={0} READABLE={1}{2}' -f $facts.Object, $facts.Readable, $(if ($facts.Readable) { '' } else { ' ERROR=' + $facts.Error }))
+      if ($facts.Readable) {
+        Write-Line ('    OWNER={0} IS_CURRENT_USER={1} MY_RIGHTS=[{2}] WRITE_DAC={3} WRITE_OWNER={4} LOW_LABEL={5}' -f $facts.Owner, $facts.OwnerIsMe, $facts.MyRights, $facts.HasWriteDac, $facts.HasWriteOwner, $facts.LowLabel)
+        foreach ($ace in $facts.PackageAces) { Write-Line ('    PACKAGE_ACE {0}' -f $ace) }
+        foreach ($sid in ($facts.OtherAppContainerSids | Sort-Object -Unique)) { Write-Line ('    OTHER_S1_15 SID={0} (reported only)' -f $sid) }
+      }
+      if ($facts.PackageAces.Count -gt 0) { $packageTargets += $facts.Object }
+    }
+
+    # The precondition is judged on the requested path itself. Ancestors above the
+    # tree DSH grants are not part of that grant, so their ownership and rights would
+    # otherwise mark every healthy path as a precondition failure.
+    if ($null -eq $targetFacts) { throw "The requested path disappeared before its ACL could be inspected: $full" }
+    $unreadable = -not $targetFacts.Readable
+    $needsPrecondition = (-not $unreadable) -and
+      ((-not $targetFacts.HasWriteDac) -or (-not $targetFacts.HasWriteOwner))
+
+    # A directory the caller cannot provision is the workspace root half the time: the sandbox
+    # reports its own failure there while the conflicting entry sits deeper. Examine that
+    # subtree before the verdict so the classification and its packageObjects describe what
+    # this run will actually repair.
+    $ownsRoot = $full -ieq (Get-NormalizedPath $AllowRoot)
+    if (-not $Restore -and $targetFacts.Errors.Count -eq 0 -and [System.IO.Directory]::Exists($full) -and ($needsPrecondition -or $ownsRoot)) {
+      $scan = Get-SubtreePackageSources -Root $full -Limit $SCAN_LIMIT
+      foreach ($object in $scan.sources) {
+        if ($packageTargets -notcontains $object) { $packageTargets += $object }
+        if (-not $factsByPath.ContainsKey($object)) {
+          $scanned = Get-ObjectFacts -FullPath $object -MeSid $meSid
+          $factsByPath[$scanned.Object] = $scanned
+        }
+      }
+      Write-Report observation subtree_scan $full $(if ($scan.failed -gt 0) { 'partial' } else { 'read' }) 'The caller cannot provision this directory, or it is the authorized root, so explicit package allow ACEs under it were collected in the same run; no reparse point or managed application tree is entered.' @{
+        visited = $scan.visited; packageSources = @($scan.sources); truncated = [bool]$scan.truncated; unreadable = [int]$scan.failed
+      }
+      Write-Line ('SCAN {0} VISITED={1} PACKAGE_SOURCES={2}{3}{4}' -f $full, $scan.visited, @($scan.sources).Count, $(if ($scan.truncated) { ' TRUNCATED' } else { '' }), $(if ($scan.failed -gt 0) { " UNREADABLE=$($scan.failed)" } else { '' }))
+      if ($scan.truncated) { $script:scanTruncated = $true }
+    }
+

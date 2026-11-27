@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""Regressions for dogfood template publication, typography and geometry.
+
+Usage:
+    python3 -m unittest tests.test_template_flow_batch4
+
+Dependencies:
+    Standard library and the script runtime dependencies.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import io
+import json
+import sys
+import tempfile
+import unittest
+import zipfile
+from pathlib import Path
+from unittest.mock import patch
+from xml.etree import ElementTree as ET
+
+SCRIPTS = Path(__file__).resolve().parents[1]
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+
+import mirror_template_materialize as mirror  # noqa: E402
+import pptx_template_import  # noqa: E402
+from svg_quality.checker import SVGQualityChecker  # noqa: E402
+from svg_quality.slot_capacity import slot_capacity_report  # noqa: E402
+from svg_to_pptx.drawingml.utils import parse_font_family, unsafe_exported_font_faces  # noqa: E402
+from svg_to_pptx.drawingml.theme_fonts import MasterTextStyleSpec  # noqa: E402
+from svg_to_pptx.pptx_package.builder import create_pptx_with_native_svg  # noqa: E402
+from svg_to_pptx.pptx_package.template_structure import parse_template_slide  # noqa: E402
+from template_text_slots import analyze_template_text_slots  # noqa: E402
+
+SVG_NS = 'http://www.w3.org/2000/svg'
+NS = {'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
+      'p': 'http://schemas.openxmlformats.org/presentationml/2006/main'}
+PNG = ('data:image/png;base64,'
+       'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC')
+
+
+def _page(body: str, attributes: str = '') -> str:
+    return (f'<svg xmlns="{SVG_NS}" viewBox="0 0 1280 720" font-family="Arial" '
+            'data-pptx-master="m" data-pptx-master-name="Master" '
+            f'data-pptx-layout="l" data-pptx-layout-name="Layout" {attributes}>{body}</svg>')
+
+
+class TemplateFlowBatch4Tests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+
+    def _write(self, name: str, content: str) -> Path:
+        path = self.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding='utf-8')
+        return path
+
+    def test_s1_materializer_uses_resolved_workspace_scope(self) -> None:
+        svg = self._write('source.svg', _page(
+            '<text x="100" y="100" font-size="24">Source</text>'))
+        pptx = self.root / 'source.pptx'
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(create_pptx_with_native_svg(
+                [svg], pptx, resource_root=self.root, verbose=False, use_compat_mode=False,
+                master_text_style_spec=MasterTextStyleSpec(3000, 1800)))
+            imported = self.root / 'imported'
+            with patch.object(sys, 'argv', ['pptx_template_import.py', str(pptx),
+                                           '-o', str(imported), '--inheritance-mode', 'both']):
+                self.assertEqual(pptx_template_import.main(), 0)
+        fake_script = self.root / 'skill/scripts/mirror_template_materialize.py'
+        library = self.root / 'skill/templates/decks'
+        library.mkdir(parents=True)
+        outside = self.root / 'outside'
+        outside.mkdir()
+        (library / 'escaped').symlink_to(outside, target_is_directory=True)
+        with patch.object(mirror, '__file__', str(fake_script)):
+            for destination, kind, expected in (
+                (self.root / 'project', 'deck', 'design_spec.deck.TODO.md'),
+                (self.root / 'project-layout', 'layout', 'design_spec.layout.TODO.md'),
+                (library / 'example', 'deck', 'design_spec.md'),
+                (library.parent / 'layouts/example', 'layout', 'design_spec.md'),
+                (library / 'escaped/project', 'deck', 'design_spec.deck.TODO.md'),
+            ):
+                with self.subTest(destination=destination):

@@ -1,0 +1,116 @@
+                f"marker: {text!r}. Add the expected label or remove show_legend."
+            )
+
+    companion_entries = _chart_companion_entries(
+        payload,
+        include_title=False,
+        include_subtitle_as_caption=False,
+    )
+    missing_companion: list[str] = []
+    for item in companion_entries:
+        text = _normalized_fallback_text(item.get("text"))
+        if text and text not in fallback_texts:
+            missing_companion.append(text)
+    if missing_companion:
+        sample = ", ".join(repr(text) for text in missing_companion[:5])
+        suffix = "" if len(missing_companion) <= 5 else f", and {len(missing_companion) - 5} more"
+        warnings.append(
+            "Native PPTX chart companion text is not visible inside the fallback "
+            "marker and may appear only after --native-charts-and-tables: "
+            f"{sample}{suffix}. "
+            "Keep companion metadata aligned with visible chart annotations."
+        )
+    warnings.extend(_native_chart_style_color_warnings(elem, payload))
+    chart_data = _chart_data(payload)
+    warnings.extend(_native_chart_point_color_warnings(elem, payload, chart_data))
+    warnings.extend(_native_chart_radial_warnings(elem, payload, chart_data))
+    warnings.extend(_native_chart_tile_color_warnings(elem, payload, chart_data))
+    warnings.extend(_native_chart_reverse_text_warnings(elem, payload, chart_data))
+    warnings.extend(_native_chart_line_marker_warnings(elem, payload, chart_data))
+    warnings.extend(_native_chart_area_warnings(elem, payload, chart_data))
+    warnings.extend(_native_chart_category_order_warnings(elem, payload, chart_data))
+    return warnings
+
+
+def _text_box_xml(
+    ctx: ConvertContext,
+    *,
+    text: str,
+    role: str,
+    off_x: int,
+    off_y: int,
+    ext_cx: int,
+    ext_cy: int,
+    font_size: int,
+    color: str | None,
+    align: str = "l",
+    bold: bool = False,
+    font_face: str | None = None,
+    anchor: str = "t",
+) -> str:
+    shape_id = ctx.next_id()
+    align_key = _compact_key(align)
+    algn = {
+        "center": "ctr",
+        "centre": "ctr",
+        "ctr": "ctr",
+        "middle": "ctr",
+        "right": "r",
+        "r": "r",
+        "left": "l",
+        "l": "l",
+    }.get(align_key, "l")
+    fill_xml = (
+        f'<a:solidFill><a:srgbClr val="{color}"/></a:solidFill>'
+        if color else ""
+    )
+    bold_attr = ' b="1"' if bold else ""
+    lang = detect_text_lang(text, ctx.primary_language)
+    run_rtl = '<a:rtl val="1"/>' if text_has_rtl_characters(text) else ''
+    run_properties_xml = (
+        f'{fill_xml}{_font_face_xml(font_face, ctx.primary_language)}'
+        f'{run_rtl}'
+    )
+    rtl_attr = (
+        ' rtl="1"'
+        if text_uses_rtl(text, ctx.primary_language)
+        else ''
+    )
+    name = _xml_escape(f"Chart {role.title()} {shape_id}")
+    return f'''<p:sp>
+<p:nvSpPr>
+<p:cNvPr id="{shape_id}" name="{name}"/>
+<p:cNvSpPr txBox="1"/><p:nvPr/>
+</p:nvSpPr>
+<p:spPr>
+<a:xfrm><a:off x="{off_x}" y="{off_y}"/><a:ext cx="{ext_cx}" cy="{ext_cy}"/></a:xfrm>
+<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+<a:noFill/>
+<a:ln><a:noFill/></a:ln>
+</p:spPr>
+<p:txBody>
+<a:bodyPr wrap="square" lIns="0" tIns="0" rIns="0" bIns="0" anchor="{anchor}" anchorCtr="0"/>
+<a:lstStyle/>
+<a:p><a:pPr algn="{algn}"{rtl_attr}/>
+<a:r><a:rPr lang="{lang}" sz="{font_size}"{bold_attr}>{run_properties_xml}</a:rPr><a:t>{_xml_escape(text)}</a:t></a:r>
+</a:p>
+</p:txBody>
+</p:sp>'''
+
+
+def _chart_companion_entries(
+    payload: dict[str, Any],
+    *,
+    include_title: bool,
+    include_subtitle_as_caption: bool,
+) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+
+    def add(role: str, value: Any) -> None:
+        if value is None:
+            return
+        values = value if isinstance(value, list) else [value]
+        for item in values:
+            if isinstance(item, dict):
+                text = _first_present(item.get("text"), item.get("value"), item.get("content"))
+                if text:

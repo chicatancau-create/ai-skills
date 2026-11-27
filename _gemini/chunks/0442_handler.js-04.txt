@@ -1,0 +1,59 @@
+  if (pendingSweepCount > 0) {
+    const plural = pendingSweepCount === 1 ? 'y' : 'ies';
+    reminderContent +=
+      `\n\n**Pending triage:** ${pendingSweepCount} auto-detected error entr${plural} ` +
+      `(Source: ${SWEEP_SOURCE}) in \`.learnings/ERRORS.md\` await review. ` +
+      'Confirm, resolve, or delete them when convenient.';
+  }
+
+  const cleanedBootstrapFiles = event.context.bootstrapFiles.filter(
+    (file, index, files) =>
+      !isInjectedReminderFile(file) ||
+      files.findIndex((candidate) => isInjectedReminderFile(candidate)) === index,
+  );
+
+  const reminderFile = {
+    name: REMINDER_NAME,
+    path: REMINDER_PATH,
+    content: reminderContent,
+    missing: false,
+    virtual: true,
+  };
+
+  const existingIndex = cleanedBootstrapFiles.findIndex((file) => isInjectedReminderFile(file));
+  if (existingIndex === -1) {
+    cleanedBootstrapFiles.push(reminderFile);
+  } else {
+    cleanedBootstrapFiles[existingIndex] = reminderFile;
+  }
+
+  event.context.bootstrapFiles = cleanedBootstrapFiles;
+}
+
+const handler = async (event) => {
+  // Safety checks for event structure
+  if (!event || typeof event !== 'object') {
+    return;
+  }
+  if (!event.context || typeof event.context !== 'object') {
+    return;
+  }
+
+  try {
+    if (event.type === 'agent' && event.action === 'bootstrap') {
+      await handleBootstrap(event);
+      return;
+    }
+    if (event.type === 'command' && (event.action === 'new' || event.action === 'reset')) {
+      await handleSessionEndSweep(event);
+    }
+  } catch (err) {
+    // Never break the gateway on hook failure.
+    if (process.env.SELF_IMPROVEMENT_HOOK_DEBUG) {
+      console.error('[self-improvement] hook failed:', err);
+    }
+  }
+};
+
+module.exports = handler;
+module.exports.default = handler;

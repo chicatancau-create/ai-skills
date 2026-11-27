@@ -1,0 +1,89 @@
+            if char.isspace():
+                while self.position < len(self.source) and self.source[self.position].isspace():
+                    self.position += 1
+                append_child(children, Text(" ", _TEXT_STYLE))
+                continue
+            if char == "\\":
+                parser = _LatexParser(self.source[self.position:], display=self.display)
+                node = parser._parse_complete_atom()
+                self.position += parser.position
+                append_child(children, node)
+                continue
+            if char == "{":
+                raw, self.position = _read_raw_group(self.source, self.position)
+                if raw in {"(", ")", "[", "]"}:
+                    append_child(children, Text(raw, _ROMAN_STYLE))
+                    continue
+                body = _ChemParser(raw, display=self.display).parse()
+                append_child(children, body)
+                continue
+            if char in "([":
+                append_child(children, self._parse_grouped_formula(char))
+                continue
+            if char.isupper():
+                append_child(children, self._parse_element())
+                continue
+            if char.isdigit():
+                append_child(children, self._parse_number(children))
+                continue
+            if char == "^" and self._standalone_marker():
+                self.position += 1
+                append_child(children, Text("↑", _ROMAN_STYLE))
+                continue
+            if char in "^_":
+                if self._has_right_script_base(children):
+                    base = children.pop()
+                    append_child(children, self._parse_explicit_scripts(base))
+                else:
+                    append_child(children, self._parse_isotope())
+                continue
+            if char in "+-":
+                if self._is_bond_dash():
+                    self.position += 1
+                    append_child(children, Text("‒", _ROMAN_STYLE))
+                elif (
+                    children
+                    and self.position > 0
+                    and not self.source[self.position - 1].isspace()
+                ):
+                    self._attach_charge(children)
+                else:
+                    self.position += 1
+                    append_child(children, Text("+" if char == "+" else "−", _ROMAN_STYLE))
+                continue
+            if char == "*":
+                self.position += 1
+                append_child(children, Text("·", _ROMAN_STYLE))
+                continue
+            if char == "=":
+                self.position += 1
+                append_child(children, Text("=", _ROMAN_STYLE))
+                continue
+            if char == "v" and self._standalone_marker():
+                self.position += 1
+                append_child(children, Text("↓", _ROMAN_STYLE))
+                continue
+            if char.islower():
+                start = self.position
+                while self.position < len(self.source) and self.source[self.position].islower():
+                    self.position += 1
+                word = self.source[start:self.position]
+                following = self.position
+                while following < len(self.source) and self.source[following].isspace():
+                    following += 1
+                is_variable = (
+                    len(word) == 1
+                    and following < len(self.source)
+                    and self.source[following].isupper()
+                )
+                style = None if is_variable else _ROMAN_STYLE
+                append_child(children, Text(word, style))
+                continue
+            self.position += 1
+            append_child(children, Text("−" if char == "-" else char, _ROMAN_STYLE))
+        return Sequence(tuple(children))
+
+    def _parse_element(self) -> Node:
+        start = self.position
+        self.position += 1
+        while self.position < len(self.source) and self.source[self.position].islower():

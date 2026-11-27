@@ -1,0 +1,77 @@
+    shows = ET.SubElement(root, '{%s}custShowLst' % NS['p'])
+    show = ET.SubElement(shows, '{%s}custShow' % NS['p'], {'name': 'Demo', 'id': '42'})
+    slides = ET.SubElement(show, '{%s}sldLst' % NS['p'])
+    ET.SubElement(slides, '{%s}sld' % NS['p'], {
+        '{%s}id' % NS['r']: root.find('p:sldIdLst/p:sldId', NS).get('{%s}id' % NS['r']),
+    })
+    entries['ppt/presentation.xml'] = _xml(root)
+    props = ET.fromstring(entries['ppt/presProps.xml'])
+    show_pr = ET.SubElement(props, '{%s}showPr' % NS['p'])
+    ET.SubElement(show_pr, '{%s}custShow' % NS['p'], {'id': '42'})
+    entries['ppt/presProps.xml'] = _xml(props)
+    if action:
+        root = ET.fromstring(entries['ppt/slides/slide1.xml'])
+        ET.SubElement(root.find('.//p:sp/p:nvSpPr/p:cNvPr', NS), '{%s}hlinkClick' % NS['a'], {
+            'action': 'ppaction://customshow?id=42&return=true',
+        })
+        entries['ppt/slides/slide1.xml'] = _xml(root)
+
+
+def _diagram_fixture(entries: dict) -> None:
+    root = ET.fromstring(entries['ppt/slides/slide1.xml'])
+    frame = ET.fromstring(
+        f'<p:graphicFrame xmlns:p="{NS["p"]}" xmlns:a="{NS["a"]}" xmlns:r="{NS["r"]}" '
+        'xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram">'
+        '<p:nvGraphicFramePr><p:cNvPr id="90" name="Diagram"/><p:cNvGraphicFramePr/>'
+        '<p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x="6000000" y="1000000"/>'
+        '<a:ext cx="2000000" cy="1000000"/></p:xfrm><a:graphic>'
+        '<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram">'
+        '<dgm:relIds r:dm="rIdDiagram"/></a:graphicData></a:graphic></p:graphicFrame>'
+    )
+    root.find('p:cSld/p:spTree', NS).append(frame)
+    entries['ppt/slides/slide1.xml'] = _xml(root)
+    entries['ppt/diagrams/data1.xml'] = (
+        '<dgm:dataModel xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" '
+        'xmlns:dsp="http://schemas.microsoft.com/office/drawing/2008/diagram">'
+        '<dgm:extLst><dsp:dataModelExt relId="rIdDrawing"/></dgm:extLst></dgm:dataModel>'
+    ).encode()
+    entries['ppt/diagrams/drawing1.xml'] = b'<drawing xmlns="urn:test">Native drawing</drawing>'
+    _add_relationship(entries, 'ppt/slides/slide1.xml', 'rIdDiagram', 'diagramData', '../diagrams/data1.xml')
+    _add_relationship(entries, 'ppt/slides/slide1.xml', 'rIdDrawing', 'diagramDrawing', '../diagrams/drawing1.xml')
+
+
+class EditNativeBatchBTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.source = self.root / 'source.pptx'
+        self.workspace = self.root / 'workspace'
+        self.serial = 0
+
+    def import_source(self, **kwargs) -> None:
+        _source(self.source, **kwargs)
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            convert_pptx_to_svg(self.source, self.workspace, ConvertOptions(inheritance_mode='both', roundtrip=True))
+
+    def page(self, index: int = 1) -> tuple[Path, ET.Element]:
+        path = self.workspace / 'authoring-svg-flat' / f'slide_{index:02d}.svg'
+        return path, ET.parse(path).getroot()
+
+    def plan(self, sources: list[int]) -> None:
+        pages = []
+        for index, source in enumerate(sources):
+            row = {'source_slide': source}
+            if source in sources[:index]:
+                name = f'copy_{index}.svg'
+                original, _ = self.page(source)
+                original.with_name(name).write_bytes(original.read_bytes())
+                row['svg'] = name
+            pages.append(row)
+        (self.workspace / 'page_plan.json').write_text(json.dumps({
+            'schema': 'ppt-master.roundtrip-page-plan.v1', 'pages': pages,
+        }), encoding='utf-8')
+
+    def materialize(self):
+        self.serial += 1
+        return materialize_flat_authoring_roundtrip(

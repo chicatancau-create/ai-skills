@@ -1,0 +1,89 @@
+    raise RuntimeError("No image was returned. The server may have refused the edit request.")
+
+
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║  Public Entry Point                                             ║
+# ╚══════════════════════════════════════════════════════════════════╝
+
+def generate(prompt: str,
+             aspect_ratio: str = "1:1", image_size: str = "1K",
+             output_dir: str = None, filename: str = None,
+             model: str = None, max_retries: int = MAX_RETRIES,
+             reference_image: str = None) -> str:
+    """
+    OpenAI-compatible image generation (or image-to-image edit) with retry.
+
+    Reads credentials from the current process environment or a `.env` file:
+      OPENAI_API_KEY
+      OPENAI_BASE_URL
+      OPENAI_MODEL (optional override)
+
+    Args:
+        prompt: Prompt text (edit instruction when reference_image is set)
+        aspect_ratio: Aspect ratio, mapped to OpenAI size
+        image_size: Image size, mapped to OpenAI quality
+        output_dir: Output directory
+        filename: Output filename (without extension)
+        model: Model name (default: gpt-image-2)
+        max_retries: Maximum number of retries
+        reference_image: Optional source image path. When set, the request
+            goes to /v1/images/edits (image-to-image) instead of
+            /v1/images/generations.
+
+    Returns:
+        Path of the saved image file
+    """
+    if model is None:
+        model = os.environ.get("OPENAI_MODEL") or DEFAULT_MODEL
+
+    image_size = normalize_image_size(image_size)
+
+    if aspect_ratio not in LEGACY_COMPAT_ASPECT_RATIO_TO_SIZE:
+        supported = list(LEGACY_COMPAT_ASPECT_RATIO_TO_SIZE.keys())
+        raise ValueError(
+            f"Unsupported aspect ratio '{aspect_ratio}' for OpenAI backend. "
+            f"Supported: {supported}"
+        )
+
+    _validate_request_options(
+        model,
+        aspect_ratio,
+        image_size,
+        editing=reference_image is not None,
+    )
+
+    api_key = os.environ.get("OPENAI_API_KEY")
+    base_url = os.environ.get("OPENAI_BASE_URL")
+    if not api_key:
+        raise ValueError(
+            "No API key found. Set OPENAI_API_KEY in the current environment or a .env file."
+        )
+
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            if reference_image is not None:
+                return _edit_image(api_key, prompt, reference_image,
+                                   aspect_ratio, image_size, output_dir,
+                                   filename, model, base_url)
+            return _generate_image(api_key, prompt,
+                                   aspect_ratio, image_size, output_dir,
+                                   filename, model, base_url)
+        except Exception as e:
+            last_error = e
+            if is_permanent_error(e):
+                raise
+            if attempt < max_retries and is_rate_limit_error(e):
+                delay = retry_delay(attempt, rate_limited=True)
+                print(f"\n  [WARN] Rate limit hit (attempt {attempt + 1}/{max_retries + 1}). "
+                      f"Waiting {delay}s before retry...")
+                time.sleep(delay)
+            elif attempt < max_retries:
+                delay = retry_delay(attempt, rate_limited=False)
+                print(f"\n  [WARN] Error (attempt {attempt + 1}/{max_retries + 1}): {e}. "
+                      f"Retrying in {delay}s...")
+                time.sleep(delay)
+            else:
+                break
+
+    raise RuntimeError(f"Failed after {max_retries + 1} attempts. Last error: {last_error}")

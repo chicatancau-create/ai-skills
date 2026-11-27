@@ -1,0 +1,128 @@
+        ).replace("+00:00", "Z"),
+        "provider": backend.provider,
+        "model": model,
+        "voice_ref": voice_ref,
+        "audio_format": backend.extension.lstrip("."),
+    }
+    if settings:
+        manifest["settings"] = settings
+    if writes_subtitles:
+        manifest["subtitles"] = {
+            "format": "srt",
+            "timing": (
+                "character" if backend.provider == "elevenlabs" else "word"
+            ),
+            "max_visible_chars": args.subtitle_max_chars,
+        }
+    return manifest
+
+
+def _publish_manifest(path: Path, manifest: dict[str, object]) -> None:
+    descriptor, staged_path = temporary_path(path, ".tmp")
+    try:
+        with os.fdopen(
+            descriptor,
+            "w",
+            encoding="utf-8",
+            newline="\n",
+        ) as stream:
+            descriptor = -1
+            json.dump(manifest, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(staged_path, path)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        staged_path.unlink(missing_ok=True)
+
+
+async def _generate_edge_jobs(
+    jobs: list[AudioJob],
+    subtitle_dir: Path,
+    *,
+    voice: str,
+    rate: str,
+    pitch: str = "+0Hz",
+    volume: str = "+0%",
+    subtitle_max_chars: int,
+    concurrency: int,
+) -> list[BaseException | None]:
+    """Generate ordered Edge jobs with bounded slide-level concurrency."""
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def generate_job(job: AudioJob) -> None:
+        async with semaphore:
+            await backend_edge.generate(
+                job.text,
+                job.output_path,
+                voice=voice,
+                rate=rate,
+                pitch=pitch,
+                volume=volume,
+                subtitle_path=subtitle_dir / f"{job.output_path.stem}.srt",
+                subtitle_max_chars=subtitle_max_chars,
+            )
+
+    raw_results = await asyncio.gather(
+        *(generate_job(job) for job in jobs),
+        return_exceptions=True,
+    )
+    return [
+        result if isinstance(result, BaseException) else None
+        for result in raw_results
+    ]
+
+
+def _normalize_voice_option_args(argv: list[str]) -> list[str]:
+    """Keep signed voice values from being interpreted as argparse options."""
+    normalized: list[str] = []
+    index = 0
+    while index < len(argv):
+        option = argv[index]
+        if (
+            option in {"--rate", "--pitch", "--volume"}
+            and index + 1 < len(argv)
+            and re.fullmatch(r"-\d+(?:\.\d+)?(?:%|Hz)?", argv[index + 1])
+        ):
+            normalized.append(f"{option}={argv[index + 1]}")
+            index += 2
+        else:
+            normalized.append(option)
+            index += 1
+    return normalized
+
+
+def main(argv: list[str] | None = None) -> int:
+    _load_tts_env_file()
+
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("project_path", type=Path, nargs="?")
+    parser.add_argument("-o", "--output", type=Path, default=None)
+    parser.add_argument(
+        "--provider",
+        choices=["edge", "elevenlabs", "minimax", "qwen", "cosyvoice"],
+        default="edge",
+        help="audio generation backend (default: edge)",
+    )
+    parser.add_argument(
+        "--voice",
+        default=None,
+        help="edge-tts voice ShortName. For elevenlabs, --voice-id is preferred.",
+    )
+    parser.add_argument(
+        "--voice-id",
+        default=None,
+        help="provider voice ID/name. If omitted for cloud providers, --voice is used as a fallback.",
+    )
+    parser.add_argument(
+        "--rate",
+        default="+0%",
+        help='edge-tts speaking rate, e.g. "+0%%", "-10%%", "+15%%" (default: +0%%). Ignored by cloud providers.',
+    )
+    parser.add_argument(
+        "--pitch", default="+0Hz",

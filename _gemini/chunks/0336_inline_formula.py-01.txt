@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""
+PPT Master - Native Inline Formula Contract
+
+Validate SVG inline-formula markers and build editable PowerPoint math runs.
+
+See references/native-formula.md for the owning inline-formula contract.
+
+Usage:
+    Imported by the SVG quality checker and SVG-to-PPTX text converter.
+
+Examples:
+    <tspan data-pptx-inline-formula="x_i^2">xᵢ²</tspan>
+
+Dependencies:
+    None (only uses standard library and local PPT Master modules)
+"""
+
+from __future__ import annotations
+
+from xml.etree import ElementTree as ET
+
+from ..drawingml.utils import parse_inline_style, parse_svg_color
+from .formula_compiler import (
+    FormulaCompileError,
+    compile_latex_to_inline_omml,
+)
+from .formula_run_properties import (
+    merge_formula_control_properties,
+    merge_formula_run_properties,
+    serialize_styled_formula_omml,
+)
+
+
+SVG_NS = "http://www.w3.org/2000/svg"
+DML_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+OFFICE_REL_NS = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+)
+MATH_NS = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+A14_NS = "http://schemas.microsoft.com/office/drawing/2010/main"
+MC_NS = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+INLINE_FORMULA_ATTR = "data-pptx-inline-formula"
+_SVG_TEXT = f"{{{SVG_NS}}}text"
+_SVG_TSPAN = f"{{{SVG_NS}}}tspan"
+_SVG_A = f"{{{SVG_NS}}}a"
+_MATH_RUN = f"{{{MATH_NS}}}r"
+_DML_RUN_PROPERTIES = f"{{{DML_NS}}}rPr"
+_POSITION_ATTRIBUTES = ("x", "y", "dx", "dy")
+_PARAGRAPH_ATTRIBUTES = (
+    "data-paragraph-line-height",
+    "data-paragraph-line-break",
+    "data-paragraph-soft-break",
+    "data-paragraph-space-before",
+)
+_NON_OUTPUT_ANCESTORS = frozenset({
+    "clipPath",
+    "desc",
+    "defs",
+    "filter",
+    "linearGradient",
+    "marker",
+    "mask",
+    "metadata",
+    "pattern",
+    "radialGradient",
+    "style",
+    "symbol",
+    "title",
+})
+
+for _prefix, _uri in (("a", DML_NS), ("m", MATH_NS)):
+    try:
+        ET.register_namespace(_prefix, _uri)
+    except (ValueError, AttributeError):
+        pass
+
+
+def _marker_label(elem: ET.Element) -> str:
+    elem_id = (elem.get("id") or "").strip()
+    return f"<tspan id={elem_id!r}>" if elem_id else "<tspan>"
+
+
+def inline_formula_marker_errors(root: ET.Element) -> list[str]:
+    """Return strict authoring errors for every inline-formula marker."""
+    errors: list[str] = []
+    parent_map = {child: parent for parent in root.iter() for child in parent}
+    markers = [
+        elem for elem in root.iter()
+        if elem.get(INLINE_FORMULA_ATTR) is not None
+    ]
+
+    for marker in markers:
+        label = _marker_label(marker)
+        if marker.tag != _SVG_TSPAN:
+            tag = marker.tag.rsplit("}", 1)[-1]
+            errors.append(
+                f"{INLINE_FORMULA_ATTR} is only valid on <tspan>, found <{tag}>"
+            )
+            continue
+
+        if marker.get("data-pptx-replace-with") is not None:
+            errors.append(
+                f"{label} cannot also declare data-pptx-replace-with"
+            )
+
+        source = marker.get(INLINE_FORMULA_ATTR) or ""
+        if not source.strip():
+            errors.append(f"{label} requires non-empty {INLINE_FORMULA_ATTR}")
+        else:
+            try:
+                compile_latex_to_inline_omml(source)
+            except FormulaCompileError as exc:
+                errors.append(f"{label} has unsupported inline LaTeX: {exc}")
+
+        if list(marker):
+            errors.append(
+                f"{label} must contain preview text directly and cannot nest elements"
+            )
+        if not (marker.text or "").strip():
+            errors.append(f"{label} requires non-empty visible SVG preview text")
+        elif marker.text != marker.text.strip():
+            errors.append(
+                f"{label} preview cannot contain leading or trailing whitespace; "
+                "place spacing in the surrounding text"
+            )
+

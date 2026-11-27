@@ -1,0 +1,110 @@
+            raise _UnsupportedChart("unsupported-chart-axis-options")
+        if label_offset not in {None, "100"}:
+            raise _UnsupportedChart("unsupported-chart-axis-options")
+        if no_multi_level not in {None, "0"}:
+            raise _UnsupportedChart("unsupported-chart-axis-options")
+    elif any(
+        value is not None
+        for value in (label_alignment, label_offset, no_multi_level, auto)
+    ):
+        raise _UnsupportedChart("unsupported-chart-axis-options")
+    if axis_kind == "dateAx":
+        if _element_val(axis.find("c:baseTimeUnit", C_NS)) not in {None, "days"}:
+            raise _UnsupportedChart("unsupported-chart-axis-options")
+    elif axis.find("c:baseTimeUnit", C_NS) is not None:
+        raise _UnsupportedChart("unsupported-chart-axis-options")
+    return config
+
+
+def _single_axis_contract(
+    plot_area: ET.Element,
+    plot: ET.Element,
+    *,
+    category_kind: str,
+    cross_between: str,
+) -> dict[str, dict[str, Any]]:
+    axes_by_id = _axis_nodes_by_id(plot_area)
+    cat_id, cat_axis, val_id, val_axis = _plot_axis_pair(plot, axes_by_id)
+    if set(axes_by_id) != {cat_id, val_id}:
+        raise _UnsupportedChart("unsupported-chart-axis-options")
+    if _local_name(cat_axis.tag) != ("dateAx" if category_kind == "date" else "catAx"):
+        raise _UnsupportedChart("unsupported-chart-axis-options")
+    category = _axis_config_from_xml(
+        cat_axis,
+        role="category",
+        expected_cross_axis_id=val_id,
+        allowed_crosses={"autoZero"},
+        expected_cross_between=None,
+    )
+    value = _axis_config_from_xml(
+        val_axis,
+        role="value",
+        expected_cross_axis_id=cat_id,
+        allowed_crosses={"autoZero"},
+        expected_cross_between=cross_between,
+    )
+    return {"category": category, "value": value}
+
+
+def _xy_axis_contract(
+    plot_area: ET.Element,
+    plot: ET.Element,
+) -> dict[str, dict[str, Any]]:
+    """Return the closed two-value-axis contract used by XY charts."""
+    axes_by_id = _axis_nodes_by_id(plot_area)
+    plot_axis_nodes = plot.findall("c:axId", C_NS)
+    if len(plot_axis_nodes) != 2 or any(
+        set(node.attrib) != {"val"} or list(node)
+        for node in plot_axis_nodes
+    ):
+        raise _UnsupportedChart("unsupported-chart-axis-options")
+    axis_ids = [_element_val(node) for node in plot_axis_nodes]
+    if any(not axis_id for axis_id in axis_ids) or len(set(axis_ids)) != 2:
+        raise _UnsupportedChart("unsupported-chart-axis-options")
+    if set(axes_by_id) != set(axis_ids):
+        raise _UnsupportedChart("unsupported-chart-axis-options")
+
+    resolved = [
+        (str(axis_id), axes_by_id.get(str(axis_id)))
+        for axis_id in axis_ids
+    ]
+    if any(
+        axis is None or _local_name(axis.tag) != "valAx"
+        for _, axis in resolved
+    ):
+        raise _UnsupportedChart("unsupported-chart-axis-options")
+    horizontal = [
+        (axis_id, axis)
+        for axis_id, axis in resolved
+        if axis is not None
+        and _element_val(axis.find("c:axPos", C_NS)) in {"b", "t"}
+    ]
+    vertical = [
+        (axis_id, axis)
+        for axis_id, axis in resolved
+        if axis is not None
+        and _element_val(axis.find("c:axPos", C_NS)) in {"l", "r"}
+    ]
+    if len(horizontal) != 1 or len(vertical) != 1:
+        raise _UnsupportedChart("unsupported-chart-axis-options")
+
+    x_id, x_axis = horizontal[0]
+    y_id, y_axis = vertical[0]
+    x_config = _axis_config_from_xml(
+        x_axis,
+        role="x",
+        expected_cross_axis_id=y_id,
+        allowed_crosses={"autoZero"},
+        expected_cross_between="midCat",
+    )
+    y_config = _axis_config_from_xml(
+        y_axis,
+        role="y",
+        expected_cross_axis_id=x_id,
+        allowed_crosses={"autoZero"},
+        expected_cross_between="midCat",
+    )
+    return {"x": x_config, "y": y_config}
+
+
+def _validate_legacy_axes(payload: dict[str, Any], plot_area: ET.Element) -> None:

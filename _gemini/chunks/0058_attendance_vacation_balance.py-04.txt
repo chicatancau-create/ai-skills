@@ -1,0 +1,98 @@
+                leave_type,
+                EXTERNAL_BALANCE_UNAVAILABLE_MESSAGE,
+            )
+        if is_no_balance_message(error) or is_not_applicable_message(error):
+            return build_message_balance_records([user_id], leave_type, str(error))
+        raise
+    records = normalize_query_records(payload, [user_id], leave_type)
+    if records:
+        return records
+    return build_message_balance_records([user_id], leave_type, str(batch_error))
+
+
+def query_balance_records(
+    user_ids: list[str],
+    leave_types: list[dict[str, str]],
+    inspect: bool,
+) -> list[dict[str, Any]]:
+    all_records: list[dict[str, Any]] = []
+    for leave_index, leave_type in enumerate(leave_types, start=1):
+        leave_code = leave_type["code"]
+        cmn.log(f"[balance] 查询假期规则 {leave_index}/{len(leave_types)}：{leave_type['name']}({leave_code})")
+        for batch_index, batch in enumerate(cmn.chunk_users(user_ids, MAX_USERS_PER_BALANCE_BATCH), start=1):
+            cmn.log(f"[balance] 查询第 {batch_index} 批，{len(batch)} 人")
+            try:
+                payload = query_balance_payload(batch, leave_code)
+            except cmn.DwsCallError as error:
+                if is_external_leave_type(leave_type) and not error.is_permission_error:
+                    cmn.warn(
+                        f"[balance] 外部假期规则 {leave_type['name']}({leave_code}) 查询失败，"
+                        "按外部规则暂无余额处理"
+                    )
+                    records = build_message_balance_records(
+                        batch,
+                        leave_type,
+                        EXTERNAL_BALANCE_UNAVAILABLE_MESSAGE,
+                    )
+                    all_records.extend(records)
+                    continue
+                if is_no_balance_message(error):
+                    cmn.warn(
+                        f"[balance] 假期规则 {leave_type['name']}({leave_code}) 没有余额，"
+                        "按不限制余额处理"
+                    )
+                    records = build_message_balance_records(batch, leave_type, str(error))
+                    all_records.extend(records)
+                    continue
+                if is_not_applicable_message(error):
+                    cmn.warn(
+                        f"[balance] 假期规则 {leave_type['name']}({leave_code}) 依赖员工时间字段，"
+                        "改为逐个员工查询并将缺失配置的员工标为不适用"
+                    )
+                    for user_id in batch:
+                        all_records.extend(query_single_user_after_batch_error(user_id, leave_type, error))
+                    continue
+                raise
+
+            records = normalize_query_records(payload, batch, leave_type)
+            if inspect and leave_index == 1 and batch_index == 1:
+                cmn.log("[inspect] vacation balance first record:\n" + json.dumps(records[:1], ensure_ascii=False, indent=2))
+            all_records.extend(records)
+    cmn.log(f"[balance] 获取到 {len(all_records)} 条余额记录")
+    return all_records
+
+
+def extract_user_id(record: dict[str, Any], fallback_users: list[str]) -> str:
+    user_id = first_nonempty(record, USER_ID_KEYS)
+    if user_id:
+        return str(user_id)
+    if len(fallback_users) == 1:
+        return fallback_users[0]
+    return ""
+
+
+def build_leave_columns(
+    leave_types: list[dict[str, str]],
+    balance_records: list[dict[str, Any]],
+    keywords: list[str],
+) -> list[dict[str, str]]:
+    columns: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    for leave_type in leave_types:
+        code = leave_type["code"]
+        name = leave_type["name"]
+        if keywords and not any(keyword in name for keyword in keywords):
+            continue
+        seen.add(code)
+        columns.append(leave_type)
+
+    for record in balance_records:
+        code = first_nonempty(record, LEAVE_CODE_KEYS)
+        name = first_nonempty(record, LEAVE_NAME_KEYS)
+        if not code and not name:
+            continue
+        code_str = str(code or name)
+        name_str = str(name or code)
+        if code_str in seen:
+            continue

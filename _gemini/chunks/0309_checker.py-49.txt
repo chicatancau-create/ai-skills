@@ -1,0 +1,117 @@
+        if any(helper is None for helper in helpers):
+            return
+        try:
+            font_sizes = _resolve_project_font_sizes(root)
+        except ValueError:
+            return
+
+        parent_by_id = {
+            id(child): parent
+            for parent in root.iter()
+            for child in list(parent)
+        }
+        unchanged_groups = self._unchanged_txbody_group_ids(root)
+        style_properties = (
+            'fill',
+            'fill-opacity',
+            'font-family',
+            'font-style',
+            'font-weight',
+            'letter-spacing',
+            'opacity',
+            'stroke',
+            'stroke-opacity',
+            'stroke-width',
+            'text-decoration',
+        )
+
+        def line_record(element: ET.Element) -> Dict | None:
+            if (
+                _local_name(element) != 'text'
+                or list(element)
+                or element.get('x') is None
+                or element.get('y') is None
+                or any(element.get(name) is not None for name in ('dx', 'dy'))
+                or element.get('transform') is not None
+                or self._is_hidden_element(element, parent_by_id)
+                or self._has_ancestor_id(
+                    element,
+                    parent_by_id,
+                    unchanged_groups,
+                )
+            ):
+                return None
+            text = (element.text or '').strip()
+            compact_text = re.sub(r'\s+', '', text)
+            if (
+                not compact_text
+                or ('{{' in text and '}}' in text)
+                or _PARAGRAPH_LIST_MARKER_RE.match(text)
+            ):
+                return None
+            anchor = (
+                _effective_presentation_value(
+                    element,
+                    'text-anchor',
+                    parent_by_id,
+                )
+                or 'start'
+            ).strip().lower()
+            if anchor != 'start':
+                return None
+            try:
+                x = _parse_project_geometry_length(element.get('x'), 'x')
+                y = _parse_project_geometry_length(element.get('y'), 'y')
+                font_size = float(font_sizes[id(element)])
+            except (KeyError, TypeError, ValueError):
+                return None
+            if font_size <= 0:
+                return None
+            style = tuple(
+                (
+                    _effective_presentation_value(
+                        element,
+                        name,
+                        parent_by_id,
+                    )
+                    or ''
+                ).strip().lower()
+                for name in style_properties
+            )
+            return {
+                'chars': len(compact_text),
+                'font_size': font_size,
+                'style': style,
+                'text': text,
+                'x': x,
+                'y': y,
+            }
+
+        suspects: List[str] = []
+        for group in list(root):
+            if (
+                _local_name(group) != 'g'
+                or self._is_hidden_element(group, parent_by_id)
+            ):
+                continue
+            current_run: List[Dict] = []
+
+            def flush_run() -> None:
+                if len(current_run) < 2:
+                    return
+                total_chars = sum(line['chars'] for line in current_run)
+                longest_line = max(line['chars'] for line in current_run)
+                if (
+                    total_chars < _PARAGRAPH_LINE_MIN_TOTAL_CHARS
+                    or longest_line < _PARAGRAPH_LINE_MIN_LONGEST_CHARS
+                ):
+                    return
+                first = current_run[0]
+                last = current_run[-1]
+                suspects.append(
+                    f'{_element_label(group)} x={first["x"]:.1f}, '
+                    f'y={first["y"]:.1f}..{last["y"]:.1f}, '
+                    f'{len(current_run)} lines'
+                )
+
+            for child in list(group):

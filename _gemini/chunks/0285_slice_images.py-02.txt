@@ -1,0 +1,114 @@
+def parse_inset(spec: str) -> tuple[float, float]:
+    """Parse `--inset` as one fraction or `H,V`; both must lie in [0, 0.5)."""
+    parts = [part.strip() for part in str(spec).split(",")]
+    if len(parts) not in (1, 2) or not all(parts):
+        raise ValueError("--inset must be one fraction or H,V")
+    try:
+        values = [float(part) for part in parts]
+    except ValueError as exc:
+        raise ValueError("--inset must be one fraction or H,V") from exc
+    if not all(0.0 <= value < 0.5 for value in values):
+        raise ValueError("--inset must be in [0, 0.5)")
+    return (values[0], values[-1])
+
+
+def parse_hex(value: str) -> tuple[int, int, int]:
+    """Parse '#RRGGBB' / 'RRGGBB' into an (r, g, b) tuple."""
+    h = value.strip().lstrip("#")
+    if len(h) != 6 or any(c not in "0123456789abcdefABCDEF" for c in h):
+        raise ValueError(f"--bg must be a 6-digit hex color, got {value!r}")
+    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+
+def _safe_basename(name: str) -> str:
+    """Reject path components in an output name — this tool writes bare files only."""
+    base = name.strip()
+    if (not base or base in {".", ".."} or ".." in base
+            or "/" in base or "\\" in base or Path(base).is_absolute()):
+        raise ValueError(f"unsafe output name {name!r}: must be a bare filename, no path parts")
+    return base
+
+
+def _sample_border_bg(rgb: Image.Image) -> tuple[int, int, int]:
+    """Estimate a background candidate from a cell's border ring."""
+    w, h = rgb.size
+    border = max(1, min(_BG_SAMPLE_BORDER, w, h))
+    px = rgb.load()
+    pixels = []
+
+    for y in range(border):
+        for x in range(w):
+            pixels.append(px[x, y])
+
+    bottom_start = max(border, h - border)
+    for y in range(bottom_start, h):
+        for x in range(w):
+            pixels.append(px[x, y])
+
+    right_start = max(border, w - border)
+    for y in range(border, bottom_start):
+        for x in range(border):
+            pixels.append(px[x, y])
+        for x in range(right_start, w):
+            pixels.append(px[x, y])
+
+    return tuple(round(median(channel)) for channel in zip(*pixels))  # type: ignore[return-value]
+
+
+def _sample_pixels(rgb: Image.Image) -> list[tuple[int, int, int]]:
+    """Return a bounded RGB sample for background-candidate scoring."""
+    sample = rgb.copy()
+    sample.thumbnail(
+        (_BG_SAMPLE_MAX_SIDE, _BG_SAMPLE_MAX_SIDE),
+        Image.Resampling.NEAREST,
+    )
+    raw = sample.tobytes()
+    return list(zip(raw[0::3], raw[1::3], raw[2::3]))
+
+
+def _dominant_bg_candidate(
+    pixels: list[tuple[int, int, int]],
+) -> tuple[int, int, int]:
+    """Estimate the dominant flat field from quantized sampled pixels."""
+    buckets = Counter(
+        tuple(channel // _BG_BUCKET_SIZE for channel in pixel)
+        for pixel in pixels
+    )
+    dominant_bucket = buckets.most_common(1)[0][0]
+    members = [
+        pixel
+        for pixel in pixels
+        if tuple(channel // _BG_BUCKET_SIZE for channel in pixel) == dominant_bucket
+    ]
+    return tuple(round(median(channel)) for channel in zip(*members))  # type: ignore[return-value]
+
+
+def _background_coverage(
+    pixels: list[tuple[int, int, int]],
+    candidate: tuple[int, int, int],
+    tolerance: int,
+) -> int:
+    """Count sampled pixels close enough to a background candidate."""
+    return sum(
+        max(abs(pixel[index] - candidate[index]) for index in range(3)) <= tolerance
+        for pixel in pixels
+    )
+
+
+def _sample_bg(cell: Image.Image, tolerance: int) -> tuple[int, int, int]:
+    """Choose the background candidate that covers most of the cell."""
+    rgb = cell.convert("RGB")
+    pixels = _sample_pixels(rgb)
+    candidates = (
+        _sample_border_bg(rgb),
+        _dominant_bg_candidate(pixels),
+    )
+    return max(
+        candidates,
+        key=lambda candidate: _background_coverage(pixels, candidate, tolerance),
+    )
+
+
+def _sample_sheet_border(
+    sheet: Image.Image,
+    *,

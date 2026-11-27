@@ -1,0 +1,114 @@
+    no_bound = len(group_bound_class_ids) == 0
+    no_global = len(all_classes) == 0
+
+    if no_bound and no_global:
+        warn(f"无法获取考勤组绑定班次和全局班次列表，跳过班次校验（将依赖服务端校验）")
+        return
+
+    use_global_fallback = no_bound
+    if use_global_fallback:
+        warn(f"未能从考勤组「{group_name}」详情中提取绑定班次列表，降级为全局班次校验")
+        check_set = set(all_classes.keys())
+    else:
+        check_set = group_bound_class_ids
+
+    invalid_class_ids: set[int] = set()
+
+    for schedule in schedules:
+        is_rest = str(schedule.get("isRest", "N")).upper()
+        if is_rest == "Y":
+            continue
+        class_id = int(schedule.get("classId", 0))
+        if class_id != 0 and class_id not in check_set:
+            invalid_class_ids.add(class_id)
+
+    if invalid_class_ids:
+        invalid_names = [all_classes.get(cid, f"ID:{cid}") for cid in sorted(invalid_class_ids)]
+        if use_global_fallback:
+            error(f"以下班次不在可用班次列表中: {', '.join(invalid_names)}")
+        else:
+            error(f"以下班次不属于考勤组「{group_name}」: {', '.join(invalid_names)}")
+        log(f"「{group_name}」可用班次:")
+        available_ids = check_set if not use_global_fallback else set(all_classes.keys())
+        for cid in sorted(available_ids):
+            cname = all_classes.get(cid, f"ID:{cid}")
+            log(f"  - {cname} (ID: {cid})")
+        raise SystemExit(1)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 日期格式标准化
+# ─────────────────────────────────────────────────────────────────────────────
+
+def normalize_work_date(work_date: Any) -> str:
+    """将 workDate 统一转换为 yyyy-MM-dd HH:mm:ss 格式。"""
+    if isinstance(work_date, (int, float)):
+        timestamp = work_date / 1000 if work_date > 1e12 else work_date
+        return datetime.fromtimestamp(timestamp).strftime(DATETIME_FMT)
+
+    date_str = str(work_date).strip()
+
+    for fmt in (DATETIME_FMT, DATE_FMT):
+        try:
+            parsed = datetime.strptime(date_str, fmt)
+            return parsed.strftime(DATETIME_FMT)
+        except ValueError:
+            continue
+
+    raise ValueError(f"无法解析日期格式: {work_date!r}，请使用 YYYY-MM-DD 格式")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 回显排班内容
+# ─────────────────────────────────────────────────────────────────────────────
+
+def print_schedule_preview(
+    group_name: str,
+    group_id: int,
+    schedules: list[dict],
+    available_classes: dict[int, str],
+    user_names: dict[str, str],
+) -> None:
+    """向 stdout 打印排班预览表格供用户确认。"""
+    print("\n📋 排班确认")
+    print(f"\n考勤组: {group_name} (ID: {group_id})")
+
+    dates = sorted({s.get("workDate", "")[:10] for s in schedules})
+    if dates:
+        print(f"排班日期: {dates[0]} ~ {dates[-1]}")
+
+    print(f"\n{'员工姓名':<12} {'日期':<14} {'班次':<16} {'是否排休':<8}")
+    print("-" * 54)
+
+    for schedule in sorted(schedules, key=lambda s: (s.get("userId", ""), s.get("workDate", ""))):
+        user_id = schedule.get("userId", "")
+        user_name = user_names.get(user_id, user_id)
+        work_date = str(schedule.get("workDate", ""))[:10]
+        class_id = int(schedule.get("classId", 0))
+        is_rest = str(schedule.get("isRest", "N")).upper()
+
+        if is_rest == "Y":
+            class_display = "休息"
+            rest_display = "是"
+        else:
+            class_display = available_classes.get(class_id, f"未知班次(ID:{class_id})")
+            rest_display = "否"
+
+        print(f"{user_name:<12} {work_date:<14} {class_display:<16} {rest_display:<8}")
+
+    print(f"\n共 {len(schedules)} 条排班记录")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 执行排班
+# ─────────────────────────────────────────────────────────────────────────────
+
+def execute_schedule_import(group_id: int, schedules: list[dict]) -> None:
+    """调用 dws attendance schedule import 执行排班。"""
+    log(f"🚀 正在执行排班导入 ({len(schedules)} 条记录) ...")
+
+    schedules_json = json.dumps(schedules, ensure_ascii=False)
+
+    try:
+        result = run_dws([
+            "attendance", "schedule", "import",

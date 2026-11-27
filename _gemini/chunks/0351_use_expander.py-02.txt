@@ -1,0 +1,101 @@
+    if len(parts) != 4:
+        raise UseExpansionError(
+            '<symbol> referenced by <use> must define a four-number viewBox'
+        )
+    try:
+        values = tuple(float(part) for part in parts)
+    except ValueError as exc:
+        raise UseExpansionError(
+            f'<symbol> viewBox contains a non-numeric value: {raw!r}'
+        ) from exc
+    if not all(math.isfinite(value) for value in values):
+        raise UseExpansionError(f'<symbol> viewBox must be finite, got {raw!r}')
+    min_x, min_y, width, height = values
+    if width <= 0 or height <= 0:
+        raise UseExpansionError(
+            f'<symbol> viewBox width/height must be positive, got {raw!r}'
+        )
+    return min_x, min_y, width, height
+
+
+def _symbol_viewport_transform(symbol: ET.Element, use_elem: ET.Element) -> str:
+    """Map one symbol viewBox into the use element's explicit viewport."""
+    for attr in ('refX', 'refY'):
+        if symbol.get(attr) is not None:
+            raise UseExpansionError(
+                f'<symbol> {attr} is not supported by local <use> expansion'
+            )
+
+    min_x, min_y, view_width, view_height = _parse_viewbox(symbol)
+    width = _numeric_length(use_elem, 'width')
+    height = _numeric_length(use_elem, 'height')
+    if width is None or height is None or width <= 0 or height <= 0:
+        raise UseExpansionError(
+            '<use> referencing <symbol> requires positive numeric width and height'
+        )
+
+    raw_aspect = symbol.get('preserveAspectRatio', 'xMidYMid meet').strip()
+    parts = raw_aspect.split()
+    if parts and parts[0] == 'defer':
+        parts.pop(0)
+    align = parts[0] if parts else 'xMidYMid'
+    mode = parts[1] if len(parts) > 1 else 'meet'
+    if len(parts) > 2 or mode not in {'meet', 'slice'}:
+        raise UseExpansionError(
+            f'Unsupported symbol preserveAspectRatio: {raw_aspect!r}'
+        )
+
+    if align == 'none':
+        if len(parts) > 1:
+            raise UseExpansionError(
+                f'Unsupported symbol preserveAspectRatio: {raw_aspect!r}'
+            )
+        scale_x = width / view_width
+        scale_y = height / view_height
+        translate_x = -min_x * scale_x
+        translate_y = -min_y * scale_y
+    else:
+        alignments = {
+            'xMinYMin': (0.0, 0.0), 'xMidYMin': (0.5, 0.0), 'xMaxYMin': (1.0, 0.0),
+            'xMinYMid': (0.0, 0.5), 'xMidYMid': (0.5, 0.5), 'xMaxYMid': (1.0, 0.5),
+            'xMinYMax': (0.0, 1.0), 'xMidYMax': (0.5, 1.0), 'xMaxYMax': (1.0, 1.0),
+        }
+        if align not in alignments:
+            raise UseExpansionError(
+                f'Unsupported symbol preserveAspectRatio: {raw_aspect!r}'
+            )
+        if mode == 'slice':
+            raise UseExpansionError(
+                'symbol preserveAspectRatio="... slice" requires viewport clipping, '
+                'which local <use> expansion does not approximate'
+            )
+        scale = min(width / view_width, height / view_height)
+        scale_x = scale_y = scale
+        align_x, align_y = alignments[align]
+        translate_x = (width - view_width * scale) * align_x - min_x * scale
+        translate_y = (height - view_height * scale) * align_y - min_y * scale
+
+    return (
+        f'matrix({_fmt_number(scale_x)} 0 0 {_fmt_number(scale_y)} '
+        f'{_fmt_number(translate_x)} {_fmt_number(translate_y)})'
+    )
+
+
+class _LocalUseExpander:
+    """Materialize static same-document SVG use references."""
+
+    def __init__(self, root: ET.Element):
+        self.root = root
+        self.targets: dict[str, ET.Element] = {}
+        self.duplicate_ids: set[str] = set()
+        self.used_ids: set[str] = set()
+        self.instance_index = 0
+        self.instances_started = 0
+        self.expanded = 0
+        for elem in root.iter():
+            elem_id = elem.get('id')
+            if not elem_id:
+                continue
+            self.used_ids.add(elem_id)
+            if elem_id in self.targets:
+                self.duplicate_ids.add(elem_id)

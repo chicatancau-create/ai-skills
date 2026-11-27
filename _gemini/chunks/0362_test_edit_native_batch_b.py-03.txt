@@ -1,0 +1,86 @@
+            self.workspace, self.workspace / 'authoring-svg-flat', self.workspace / f'materialized{self.serial}',
+        )
+
+    def export(self, *, native: bool = False) -> Path:
+        self.serial += 1
+        path = self.root / f'output{self.serial}.pptx'
+        log = io.StringIO()
+        args = [str(self.workspace), '--roundtrip', '-o', str(path)]
+        if native:
+            args.append('--native-charts-and-tables')
+        with redirect_stdout(log), redirect_stderr(log):
+            status = export_main(args)
+        self.assertEqual(status, 0, log.getvalue())
+        self.assertTrue(path.is_file(), log.getvalue())
+        return path
+
+    def edit_text(self) -> None:
+        path, root = self.page()
+        node = next(node for node in root.iter() if node.text and 'Bonjour' in node.text)
+        node.text = node.text.replace('Bonjour', 'Bonsoir')
+        path.write_bytes(_xml(root))
+
+    def assert_jump(self, path: Path, slide: int, expected: str, count: int = 1) -> None:
+        with zipfile.ZipFile(path) as archive:
+            root = ET.fromstring(archive.read(f'ppt/slides/slide{slide}.xml'))
+            rels = ET.fromstring(archive.read(f'ppt/slides/_rels/slide{slide}.xml.rels'))
+            targets = {node.get('Id'): node.get('Target') for node in rels}
+            jumps = [targets[node.get('{%s}id' % NS['r'])] for node in root.iter()
+                     if node.get('action') == 'ppaction://hlinksldjump']
+            self.assertEqual(jumps, [expected] * count)
+
+    def test_b1_inherited_shape_jump_reorders_after_text_edit(self) -> None:
+        self.import_source(mutate=_link_fixture)
+        self.edit_text()
+        self.plan([1, 3, 2])
+        self.assert_jump(self.export(), 1, 'slide2.xml')
+
+    def test_b1_inherited_text_jump_allows_subset(self) -> None:
+        self.import_source(mutate=lambda entries: _link_fixture(entries, text=True))
+        self.edit_text()
+        self.plan([1, 3])
+        self.assert_jump(self.export(), 1, 'slide2.xml')
+
+    def test_b1_text_link_provenance_survives_new_sibling_run(self) -> None:
+        self.import_source(mutate=lambda entries: _link_fixture(entries, text=True))
+        path, root = self.page()
+        text = root.find('.//s:text', NS)
+        prefix = ET.Element('{%s}tspan' % NS['s'])
+        prefix.text = 'New '
+        text.insert(0, prefix)
+        path.write_bytes(_xml(root))
+        self.plan([1, 3])
+        self.assert_jump(self.export(), 1, 'slide2.xml')
+
+    def test_b1_deleted_link_allows_omitted_target(self) -> None:
+        self.import_source(mutate=_link_fixture)
+        path, root = self.page()
+        for node in root.iter():
+            node.attrib.pop('data-pptx-shape-hyperlink', None)
+        for parent in list(root.iter()):
+            for node in list(parent):
+                if node.tag == '{%s}a' % NS['s']:
+                    index = list(parent).index(node)
+                    parent.remove(node)
+                    for child in reversed(list(node)):
+                        parent.insert(index, child)
+        path.write_bytes(_xml(root))
+        self.plan([1])
+        with zipfile.ZipFile(self.export()) as archive:
+            self.assertNotIn(b'hlinksldjump', archive.read('ppt/slides/slide1.xml'))
+
+    def test_b1_shape_hyperlink_and_text_link_both_remap(self) -> None:
+        def links(entries):
+            _link_fixture(entries, text=True)
+            root = ET.fromstring(entries['ppt/slides/slide1.xml'])
+            ET.SubElement(root.find('.//p:sp/p:nvSpPr/p:cNvPr', NS), '{%s}hlinkClick' % NS['a'], {
+                '{%s}id' % NS['r']: 'rIdJump', 'action': 'ppaction://hlinksldjump',
+            })
+            entries['ppt/slides/slide1.xml'] = _xml(root)
+        self.import_source(mutate=links)
+        _, root = self.page()
+        self.assertTrue(any(node.get('data-pptx-shape-hyperlink') for node in root.iter()))
+        self.edit_text()
+        self.plan([1, 3])
+        self.assert_jump(self.export(), 1, 'slide2.xml', 2)
+

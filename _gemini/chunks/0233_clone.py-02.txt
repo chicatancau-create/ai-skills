@@ -1,0 +1,102 @@
+    extension = posixpath.splitext(part)[1].lstrip(".").lower()
+    if not extension:
+        return None
+    for default in content_root.findall(_qn(CT_NS, "Default")):
+        if (default.attrib.get("Extension") or "").lower() == extension:
+            return default.attrib.get("ContentType")
+    return None
+
+
+def _part_is_xml(content_root: ET.Element, part: str) -> bool:
+    content_type = (_part_content_type(content_root, part) or "").lower()
+    return (
+        content_type.endswith("+xml")
+        or content_type in {"application/xml", "text/xml"}
+        or posixpath.splitext(part)[1].lower() in {".xml", ".vml"}
+    )
+
+
+def _is_shared(rel_type: str | None) -> bool:
+    return bool(rel_type) and rel_type in SHARED_REL_TYPES
+
+
+def _clone_part_private_deps(
+    rels_root: ET.Element,
+    *,
+    owner_part: str,
+    entries: dict[str, bytes],
+    content_root: ET.Element,
+    allocate: Callable[[str], str],
+    cloned: dict[str, str],
+    skipped_rel_types: frozenset[str],
+) -> None:
+    """Rewrite ``rels_root`` in place, cloning each private target it references.
+
+    ``cloned`` maps an already-handled source part to its clone so a single slide
+    that references the same asset twice reuses one copy.
+    """
+    for rel in rels_root.findall(_qn(REL_NS, "Relationship")):
+        if (rel.attrib.get("TargetMode") or "").strip().lower() == "external":
+            continue
+        rel_type = rel.attrib.get("Type")
+        target = rel.attrib.get("Target")
+        if not target:
+            raise RuntimeError(
+                f"{owner_part} relationship {rel.attrib.get('Id')!r} has no Target"
+            )
+        source_part = _normalize_part(target, owner_part)
+        if source_part not in entries:
+            raise RuntimeError(
+                f"{owner_part} relationship {rel.attrib.get('Id')!r} targets "
+                f"missing part {source_part}"
+            )
+        if _is_shared(rel_type) or rel_type in skipped_rel_types:
+            continue
+        if source_part.startswith("ppt/media/"):
+            continue
+        content_type = _override_content_type(content_root, source_part)
+
+        new_part = cloned.get(source_part)
+        if new_part is None:
+            new_part = allocate(source_part)
+            entries[new_part] = entries[source_part]
+            cloned[source_part] = new_part
+            if content_type is not None:
+                _add_content_type_override(content_root, new_part, content_type)
+
+            sub_rels_name = _rels_name_for_part(source_part)
+            sub_rels_data = entries.get(sub_rels_name)
+            if sub_rels_data is not None:
+                try:
+                    sub_rels_root = ET.fromstring(sub_rels_data)
+                except ET.ParseError as exc:
+                    raise RuntimeError(
+                        f"Cannot parse relationships part {sub_rels_name}: {exc}"
+                    ) from exc
+                _clone_part_private_deps(
+                    sub_rels_root,
+                    owner_part=new_part,
+                    entries=entries,
+                    content_root=content_root,
+                    allocate=allocate,
+                    cloned=cloned,
+                    skipped_rel_types=skipped_rel_types,
+                )
+                entries[_rels_name_for_part(new_part)] = _xml_bytes(sub_rels_root)
+
+        rel.set("Target", _relative_target(owner_part, new_part))
+
+
+def deep_clone_slide_private_parts(
+    slide_rels_root: ET.Element,
+    *,
+    new_slide_part: str,
+    entries: dict[str, bytes],
+    content_root: ET.Element,
+    allocate: Callable[[str], str],
+    skipped_rel_types: frozenset[str] = SKIPPED_REL_TYPES,
+) -> dict[str, str]:
+    """Give one cloned slide private copies of its private dependency parts.
+
+    Mutates ``slide_rels_root`` (rewriting targets) and ``entries`` (adding the
+    cloned parts and their content-type overrides). ``allocate`` is shared across

@@ -1,0 +1,99 @@
+# 考勤 (attendance) 命令参考
+
+> **【开源版命令可用性提示】** 当前开源 dws 已落地 P0 5 条命令：`attendance check result`、`attendance check record`、`attendance group search`、`attendance vacation balance`、`attendance vacation types`。文档中其余 P1 阶段命令（`class` / `overtime` / `adjustment` / `group settings` / `report` / `schedule` / `boss-check` 等共 28 条）暂未通过服务发现推全，调用会返回 `unknown command`，将在后续批次落地。
+
+> **【必读】日期范围严格计算规则 — 所有含 --start/--end 或 --from/--to 的命令均适用**
+>
+> **禁止随意猜测日期范围，必须按以下规则精确计算后再组装命令参数：**
+>
+> | 用户表达 | --start（含）| --end（含）| 说明 |
+> |---------|------------|------------|------|
+> | 本周 / 这周 / 当周 | 本周**周一** | 本周**周日** | 周一为一周的第一天，周日为最后一天 |
+> | 上周 / 上一周 | 上周**周一** | 上周**周日** | 同上，往前推一周 |
+> | 本月 / 这个月 / 当月 | 本月 **1 日** | 本月**最后一天**（28/29/30/31）| 必须计算当月实际天数 |
+> | 上月 / 上个月 | 上月 **1 日** | 上月**最后一天** | 同上，往前推一个月 |
+> | 今天 / 今日 | **今天** | **今天** | start == end |
+> | 昨天 | **昨天** | **昨天** | start == end |
+>
+> **必须遵守：**
+> 1. **本周一定是周一到周日**，严禁将"本周"解释为周一到周五或其他任意范围。
+> 2. **本月一定是 1 日到该月实际最后一天**，严禁将"本月"截断为 1 日到 28 日或其他固定天数。
+> 3. 计算日期时必须参考当前系统时间，不得使用硬编码或模糊估算。
+> 4. 如果用户指定了具体日期范围（如"4月1日到4月15日"），直接使用用户给定的范围，不套用上述规则。
+> 5. 日期格式统一按各命令要求：`shift list` / `check result` 等使用 `YYYY-MM-DD`；`report query-data` / `report query-leave` 等使用 `yyyy-MM-dd HH:mm:ss`（start 取当天 `00:00:00`，end 取当天 `23:59:59`）。
+
+## 命令总览
+
+
+### 查询打卡结果
+```
+Usage:
+  dws attendance check result [flags]
+Example:
+  dws attendance check result --users userId1,userId2 --start 2026-04-01 --end 2026-04-30 --limit 50
+Flags:
+      --start string  起始日期, 格式 YYYY-MM-DD (必填)
+      --end string    结束日期, 格式 YYYY-MM-DD, 不超过 1 个月 (必填)
+      --limit int     分页大小, 默认 100, 范围 1-1000 (可选)
+      --offset int    分页偏移量, 默认 0 (可选)
+      --users string  用户 ID 列表, 逗号分隔, 最多 100 个 (必填)
+```
+
+返回每条记录含：用户 ID、工作日期、时间结果（Normal/Late/Early/Absenteeism/NotSigned）、位置结果、计划打卡时间、实际打卡时间、打卡流水 ID。时间跨度不超过 1 个月，最多 100 人。
+
+### 查询打卡流水
+```
+Usage:
+  dws attendance check record [flags]
+Example:
+  dws attendance check record --users userId1 --start 2026-04-01 --end 2026-04-30
+Flags:
+      --start string  起始日期, 格式 YYYY-MM-DD (必填)
+      --end string    结束日期, 格式 YYYY-MM-DD, 不超过 1 个月 (必填)
+      --users string  用户 ID 列表, 逗号分隔 (必填)
+```
+
+返回每条记录含：用户 ID、实际打卡时间、打卡地址、打卡经纬度、打卡类型（OnDuty/OffDuty）、定位方式（Map/Wifi/etc）。时间跨度不超过 1 个月。
+
+### 查询审批单
+```
+Usage:
+  dws attendance approve list [flags]
+Example:
+  dws attendance approve list --users userId1 --types overtime,leave --start 2026-04-01 --end 2026-04-30
+Flags:
+      --start string  起始日期, 格式 YYYY-MM-DD (必填)
+      --end string    结束日期, 格式 YYYY-MM-DD (必填)
+      --types string  审批类型, 逗号分隔: overtime/trip/leave/patch (必填)
+      --users string  用户 ID 列表, 逗号分隔 (必填)
+```
+
+审批类型映射：overtime=加班, trip=出差, leave=请假, patch=补卡。返回每条记录含：用户 ID、审批标签、审批子类型、审批类型、生效时间、时长、时长单位、流程实例 ID。
+
+### 查询补卡/请假/加班审批提交链接 (必须走引导流程)
+```
+Usage:
+  dws attendance approve templates [flags]
+Example:
+  dws attendance approve templates --type leave
+  dws attendance approve templates --type REPAIR_CHECK
+  dws attendance approve templates --type 加班
+Flags:
+      --type string      审批类型：repair-check/patch/补卡、leave/请假、overtime/加班，或 REPAIR_CHECK/LEAVE/OVERTIME（必填）
+```
+
+当用户提到需要提交补卡、请假或加班时，优先使用该命令查询考勤审批表单模板提交链接，并引导用户点击返回的 `submitUrl` 提交。
+`corpId` 和 `opUserId` 由系统参数自动注入，无需通过命令参数传入。
+审批类型映射：补卡=`REPAIR_CHECK`，请假=`LEAVE`，加班=`OVERTIME`。返回结果为列表，每条记录包含 `approveType`、`formName`、`processCode`、`submitUrl`。
+#### 引导用户自主选择合适的表单模板流程
+如果返回多个表单模板，必须将多个可用模板都返回给用户，并引导用户根据实际场景自主选择合适的模板提交：
+- 请假场景：可根据 `formName` 将与用户请假类型更匹配的模板放在前面展示。例如用户明确说年假、事假、病假、调休时，将名称中包含对应假期类型的模板靠前；如果用户只泛化表达“请假”，将名称最通用的请假模板靠前，例如“请假”“员工请假”“通用请假”等，避免把专项或特殊场景模板放在最前。
+- 补卡/加班场景：可将名称与“补卡”或“加班”最直接匹配的模板放在前面展示。
+- 回复用户时不要直接裸露任何 `submitUrl`，所有返回的表单模板都必须使用 Markdown 可点击链接格式展示：`[formName](submitUrl)`，例如 `[员工请假](https://...)`。如存在更匹配的模板，可以放在列表前面，但不要只返回推荐模板，必须同时返回其它可用模板供用户选择，且每个模板都应是用户可直接点击的 Markdown 链接。
+
+### 导入排班记录（排班 = 为员工安排工作日期和班次, 写场景接口，必须走二次确认流程）
+```
+Usage:
+  dws attendance schedule import [flags]
+Example:
+  dws attendance schedule import --group-id 123456 \

@@ -1,0 +1,88 @@
+                'Unable to import PPTX preset metadata validator; '
+                'cannot verify native shape restoration'
+            )
+            return
+
+        issues = set()
+        for elem in marked:
+            tag = _local_name(elem)
+            elem_id = elem.get('id')
+            label = f'<{tag} id="{elem_id}">' if elem_id else f'<{tag}>'
+            for error in _validate_preset_geometry_metadata(elem):
+                issues.add(f'{label} has invalid PPTX shape metadata: {error}')
+        if _validate_authored_preset_tree is None:
+            if any(
+                elem.get(_AUTHORING_ATTR) is not None
+                for elem in root.iter()
+            ):
+                issues.add(
+                    'Unable to import authored PPTX preset validator'
+                )
+        else:
+            for error in _validate_authored_preset_tree(root):
+                issues.add(f'Invalid authored PPTX preset: {error}')
+        if (
+            _svg_preset_preview_fingerprint is None
+            or _resolve_preset_preview_hash is None
+        ):
+            issues.add('Unable to import PPTX preset preview fingerprint validator')
+        else:
+            for elem in root.iter():
+                if (
+                    _local_name(elem) != 'g'
+                    or elem.get('data-pptx-object') not in {'shape', 'connector'}
+                    or elem.get('data-pptx-prst') is None
+                ):
+                    continue
+                try:
+                    expected = _resolve_preset_preview_hash(elem)
+                except ValueError as exc:
+                    elem_id = elem.get('id') or '(no id)'
+                    issues.add(
+                        f'<g id="{elem_id}"> has an invalid PPTX preset '
+                        f'preview contract: {exc}'
+                    )
+                    continue
+                if expected is None:
+                    continue
+                actual = _svg_preset_preview_fingerprint(elem)
+                if actual != expected:
+                    elem_id = elem.get('id') or '(no id)'
+                    issues.add(
+                        f'<g id="{elem_id}"> has a stale PPTX preset preview; '
+                        'update the native carrier or restore the generated detail paths'
+                    )
+        result['errors'].extend(sorted(issues))
+        if (
+            _authored_preset_encoding is not None
+            and _validate_authored_preset_group is not None
+        ):
+            expanded = [
+                elem.get('id') or '(no id)'
+                for elem in root.iter()
+                if _authored_preset_encoding(elem) == 'expanded'
+                and not _validate_authored_preset_group(elem)
+            ]
+            if expanded:
+                examples = ', '.join(expanded[:3])
+                suffix = '' if len(expanded) <= 3 else f', +{len(expanded) - 3} more'
+                result['warnings'].append(
+                    'Compatible expanded authored-preset fragment(s) detected '
+                    f'({len(expanded)}: {examples}{suffix}). New project-authored '
+                    'pages and templates use the compact helper form; the '
+                    'expanded carrier/preview form remains readable for compatibility. '
+                    'No change is required while it remains ordinary Slide-local input.'
+                )
+        inherited_paint = _compact_preset_ancestor_paint(root)
+        if inherited_paint:
+            examples = ', '.join(
+                f'{element_id} ({"/".join(properties)})'
+                for element_id, properties in inherited_paint[:3]
+            )
+            suffix = (
+                ''
+                if len(inherited_paint) <= 3
+                else f', +{len(inherited_paint) - 3} more'
+            )
+            result['warnings'].append(
+                'Compact authored preset(s) use compatible ancestor paint or '

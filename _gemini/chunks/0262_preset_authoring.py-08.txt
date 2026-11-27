@@ -1,0 +1,127 @@
+    if re.fullmatch(r"url\(#[A-Za-z_][A-Za-z0-9_.:-]*\)", raw_filter) is None:
+        raise ValueError(
+            'Authored preset filter must use exact local filter="url(#id)" syntax'
+        )
+    return raw_filter
+
+
+def _normalize_adjustments(
+    adjustments: Mapping[str, str | int | float],
+) -> dict[str, str]:
+    normalized: dict[str, str] = {}
+    for name, value in adjustments.items():
+        if isinstance(value, bool):
+            raise ValueError(f"Adjustment {name!r} must not be boolean")
+        if isinstance(value, int):
+            formula = f"val {value}"
+        elif isinstance(value, float):
+            if not math.isfinite(value) or not value.is_integer():
+                raise ValueError(
+                    f"Numeric adjustment {name!r} must be a finite integer"
+                )
+            formula = f"val {int(value)}"
+        else:
+            formula = str(value).strip()
+            if len(formula.split()) == 1:
+                formula = f"val {formula}"
+        normalized[str(name)] = formula
+    return normalized
+
+
+def _validate_adjustments(
+    preset: str,
+    adjustments: Mapping[str, str | int | float],
+) -> None:
+    registry = get_preset_registry()
+    if preset not in registry:
+        raise ValueError(f"Unknown DrawingML preset shape: {preset!r}")
+    for name, formula in adjustments.items():
+        if not isinstance(formula, str) or not formula.strip():
+            raise ValueError(f"Adjustment {name!r} requires a formula")
+        parts = formula.split()
+        if parts[0] not in SUPPORTED_OPERATORS:
+            raise ValueError(
+                f"Adjustment {name!r} must use a DrawingML formula operator"
+            )
+        if parts[0] == "val" and len(parts) == 2:
+            try:
+                float(parts[1])
+            except ValueError:
+                pass
+            else:
+                if _INTEGER_RE.fullmatch(parts[1]) is None:
+                    raise ValueError(
+                        f"Adjustment {name!r} val operand must be an integer "
+                        "coordinate"
+                    )
+    if not adjustments:
+        return
+    evaluated = registry.evaluate(
+        preset,
+        100000,
+        100000,
+        adjustments=adjustments,
+    )
+    for name, value in evaluated.adjustments.items():
+        if name not in adjustments:
+            continue
+        if not OOXML_COORDINATE_MIN <= value <= OOXML_COORDINATE_MAX:
+            raise ValueError(
+                f"Adjustment {name!r} evaluates outside OOXML coordinate range"
+            )
+
+
+def _has_visible_fill(style: Mapping[str, str]) -> bool:
+    return (
+        style.get("fill", "none") != "none"
+        and float(style.get("fill-opacity", "1")) > 0
+    )
+
+
+def _has_visible_stroke(style: Mapping[str, str]) -> bool:
+    return (
+        style.get("stroke", "none") != "none"
+        and float(style.get("stroke-opacity", "1")) > 0
+        and float(style.get("stroke-width", "1")) > 0
+    )
+
+
+def _is_unexpected_carrier_attr(name: str) -> bool:
+    if name in {
+        "d",
+        "data-pptx-preview-sha256",
+        "data-pptx-part",
+        "data-pptx-shape-name",
+        "visibility",
+        "pointer-events",
+        *_SEMANTIC_ATTRS,
+        *_PRESENTATION_ATTRS,
+    }:
+        return False
+    return not name.startswith(_ADJUSTMENT_PREFIX)
+
+
+def _is_unexpected_group_attr(name: str, *, compact: bool) -> bool:
+    allowed = {
+        "id",
+        "transform",
+        "data-pptx-preview-sha256",
+        "data-pptx-shape-name",
+        *_SEMANTIC_ATTRS,
+    }
+    if compact:
+        allowed.update(_PRESENTATION_ATTRS)
+        allowed.update(_TEMPLATE_ATOM_ATTRS)
+    if name in allowed:
+        return False
+    if name.startswith(_ADJUSTMENT_PREFIX):
+        return False
+    if name.startswith("data-pptx-runtime-") or name.startswith("aria-"):
+        return False
+    return name not in {"role", "tabindex"}
+
+
+def _carrier_path(paths) -> str:
+    return " ".join(path.d for path in paths).strip()
+
+

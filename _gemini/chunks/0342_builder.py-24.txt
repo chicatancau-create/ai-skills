@@ -1,0 +1,112 @@
+    content = rels_path.read_text(encoding="utf-8")
+    rel_id = None
+    for existing_id, attrs in _read_relationships(rels_path).items():
+        if attrs.get("Type") == SLIDE_LAYOUT_REL_TYPE:
+            rel_id = existing_id
+            break
+    if rel_id is None:
+        raise RuntimeError(f"No slide layout relationship in {rels_path}")
+    pattern = re.compile(
+        rf'(<Relationship\b[^>]*\bId="{re.escape(rel_id)}"[^>]*\bTarget=")[^"]*(")'
+    )
+    new_content, replaced = pattern.subn(rf"\g<1>{target}\g<2>", content, count=1)
+    if not replaced:
+        raise RuntimeError(f"Could not retarget layout relationship in {rels_path}")
+    rels_path.write_text(new_content, encoding="utf-8")
+
+
+_BASELINE_LAYOUT_ROLE_TOKENS = (
+    ("Cover", frozenset({"cover", "frontcover"}), ("封面",)),
+    (
+        "Agenda",
+        frozenset({"agenda", "contents", "outline", "toc"}),
+        ("目录", "议程"),
+    ),
+    (
+        "Section",
+        frozenset({"chapter", "divider", "section", "transition"}),
+        ("章节", "过渡页"),
+    ),
+    (
+        "Closing",
+        frozenset({"closing", "end", "ending", "qa", "thankyou", "thanks"}),
+        ("封底", "结束", "结尾", "结语", "致谢", "谢谢"),
+    ),
+)
+
+
+def _baseline_layout_role(svg_path: Path) -> str:
+    """Use explicit page semantics, then fall back to conservative filename roles."""
+    semantic_role = page_layout_name_from_svg(svg_path)
+    if semantic_role:
+        return semantic_role
+    stem = svg_path.stem.casefold()
+    tokens = {
+        token
+        for token in re.split(r"[^0-9a-z]+", stem)
+        if token and not token.isdigit()
+    }
+    for role, english_tokens, cjk_tokens in _BASELINE_LAYOUT_ROLE_TOKENS:
+        if tokens.intersection(english_tokens) or any(
+            token in stem for token in cjk_tokens
+        ):
+            return role
+    return "Content"
+
+
+def _layout_identity(layout_path: Path) -> tuple[str, bool]:
+    """Return a layout's picker name and master-shape visibility."""
+    root = ET.parse(layout_path).getroot()
+    c_sld = root.find(f"{{{PML_NS}}}cSld")
+    name = c_sld.attrib.get("name", "") if c_sld is not None else ""
+    return name, root.attrib.get("showMasterSp", "1") != "0"
+
+
+def _shared_explicit_slide_background(
+    extract_dir: Path,
+    slide_nums: list[int],
+) -> str | None:
+    """Return one exact background only when every family slide carries it."""
+    backgrounds: list[str] = []
+    for slide_num in slide_nums:
+        slide_path = extract_dir / "ppt" / "slides" / f"slide{slide_num}.xml"
+        background = _extract_slide_background_xml(
+            slide_path.read_text(encoding="utf-8")
+        )
+        if background is None:
+            return None
+        backgrounds.append(background)
+    if not backgrounds or len(set(backgrounds)) != 1:
+        return None
+    return backgrounds[0]
+
+
+def _extract_baseline_layout_families(
+    extract_dir: Path,
+    structure: PptxStructureContext,
+    svg_files: list[Path],
+    *,
+    verbose: bool = False,
+) -> int:
+    """Build conservative post-generation layout families for a free SVG deck."""
+    families: dict[tuple[str, str, bool], list[int]] = {}
+    base_layouts: dict[tuple[str, str, bool], str] = {}
+    for slide_num, svg_path in enumerate(svg_files, 1):
+        rels_path = (
+            extract_dir
+            / "ppt"
+            / "slides"
+            / "_rels"
+            / f"slide{slide_num}.xml.rels"
+        )
+        layout_target = _find_relationship_target(rels_path, SLIDE_LAYOUT_REL_TYPE)
+        if not layout_target:
+            raise RuntimeError(f"Slide {slide_num} has no slide layout relationship")
+        layout_part = _resolve_package_target(
+            f"ppt/slides/slide{slide_num}.xml", layout_target
+        )
+        layout_name, show_master_shapes = _layout_identity(extract_dir / layout_part)
+        role = _baseline_layout_role(svg_path)
+        if role == "Content" and layout_name == COVER_LAYOUT_NAME:
+            role = COVER_LAYOUT_NAME
+        key = (

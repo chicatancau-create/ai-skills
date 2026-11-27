@@ -1,0 +1,106 @@
+def _mark_unchanged_preset_previews(root: ET.Element) -> None:
+    """Snapshot visible preset layers before exporter preprocessing."""
+    for group in root.iter():
+        if group.tag.replace(f'{{{SVG_NS}}}', '') != 'g':
+            continue
+        if (
+            group.get('data-pptx-object') not in {'shape', 'connector'}
+            or group.get('data-pptx-prst') is None
+        ):
+            continue
+        try:
+            expected = resolve_preset_preview_hash(group)
+        except ValueError as exc:
+            raise SvgNativeConversionError(
+                f'Invalid preset preview fingerprint contract: {exc}'
+            ) from exc
+        if expected is None:
+            continue
+        actual = svg_preset_preview_fingerprint(group)
+        group.set(_PREVIEW_UNCHANGED_ATTR, '1' if expected == actual else '0')
+
+
+def _require_unchanged_preset_preview(group: ET.Element) -> None:
+    try:
+        expected = resolve_preset_preview_hash(group)
+    except ValueError as exc:
+        raise SvgNativeConversionError(
+            f'Invalid preset preview fingerprint contract: {exc}'
+        ) from exc
+    if expected is None:
+        return
+    snapshot = group.get(_PREVIEW_UNCHANGED_ATTR)
+    if snapshot == '1':
+        return
+    if snapshot is None and svg_preset_preview_fingerprint(group) == expected:
+        return
+    raise SvgNativeConversionError(
+        'Visible preset preview was edited without updating its native '
+        'data-pptx-prst/frame/adjustment carrier; export stopped to avoid '
+        'silently discarding the SVG edit'
+    )
+
+
+def _decode_unchanged_txbody(
+    group: ET.Element,
+    metadata: ET.Element,
+    *,
+    trust_runtime_snapshot: bool = True,
+) -> tuple[str, bool] | None:
+    expected_hash = metadata.get('data-pptx-text-sha256')
+    if not expected_hash:
+        raise SvgNativeConversionError('txbody metadata requires a text hash')
+    snapshot = (
+        group.get(_TXBODY_UNCHANGED_ATTR)
+        if trust_runtime_snapshot else None
+    )
+    unchanged = snapshot == '1' or (
+        snapshot != '0'
+        and svg_text_fingerprint(group) == expected_hash
+    )
+    if metadata.get('data-pptx-encoding') != 'base64':
+        raise SvgNativeConversionError('txbody metadata requires base64 encoding')
+    try:
+        raw = base64.b64decode((metadata.text or '').strip(), validate=True)
+        txbody = ET.fromstring(raw)
+        decoded = raw.decode('utf-8')
+    except (ValueError, binascii.Error, UnicodeDecodeError, ET.ParseError) as exc:
+        raise SvgNativeConversionError(f'Invalid txbody metadata: {exc}') from exc
+    if txbody.tag != (
+        '{http://schemas.openxmlformats.org/presentationml/2006/main}txBody'
+    ):
+        raise SvgNativeConversionError('txbody metadata payload must be p:txBody')
+    if has_relationship_attributes(txbody):
+        raise SvgNativeConversionError(
+            'txbody metadata must not contain part-local relationship attributes'
+        )
+    if not unchanged:
+        if txbody_has_run_effects(txbody):
+            raise SvgNativeConversionError(
+                'Visible text or typography was edited while the source '
+                'txBody contains run-level effects; export stopped to avoid '
+                'silently discarding those effects'
+            )
+        return None
+    return decoded, txbody_has_run_effects(txbody)
+
+
+def _append_shape_text(
+    shape: ShapeResult,
+    txbody_xml: str,
+) -> ShapeResult:
+    if not shape.xml.lstrip().startswith('<p:sp>') or not shape.xml.rstrip().endswith('</p:sp>'):
+        raise SvgNativeConversionError('Native txBody can only attach to p:sp')
+    closing = shape.xml.rfind('</p:sp>')
+    return ShapeResult(
+        xml=(
+            shape.xml[:closing]
+            + txbody_xml
+            + '\n'
+            + shape.xml[closing:]
+        ),
+        bounds_emu=shape.bounds_emu,
+    )
+
+
+def _make_semantic_geometry_carrier_visible(element: ET.Element) -> None:

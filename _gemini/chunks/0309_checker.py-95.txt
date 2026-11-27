@@ -1,0 +1,100 @@
+        # Pass 1: explicit roster section, any roman numeral.
+        sections = list(re.finditer(
+            r"^##\s+[IVX]+\.\s+(?:(?:SVG\s+)?Page Roster|Page Structure|Pages|Page Types)\b.*?(?=^##\s+|\Z)",
+            spec_text,
+            re.MULTILINE | re.DOTALL | re.IGNORECASE,
+        ))
+        roster_scope = next(
+            (
+                section.group(0)
+                for section in sections
+                if re.match(
+                    r"^##\s+[IVX]+\.\s+(?:SVG\s+)?Page Roster\b",
+                    section.group(0),
+                    re.IGNORECASE,
+                )
+            ),
+            None,
+        )
+        scope = roster_scope or next(
+            (
+                section.group(0)
+                for section in sections
+                if re.search(r"[`\(][0-9A-Za-z_]+\.svg[`\)]", section.group(0))
+            ),
+            sections[0].group(0) if sections else None,
+        )
+
+        # Pass 2: full document. We *only* trust this scan when the explicit
+        # roster scan came up empty (no `<stem>.svg` references inside it) —
+        # otherwise the explicit section's deliberate roster wins over loose
+        # mentions elsewhere.
+        explicit_scope = bool(
+            scope and re.search(r"[`\(][0-9A-Za-z_]+\.svg[`\)]", scope)
+        )
+        if explicit_scope:
+            text = scope
+        else:
+            text = spec_text
+
+        stems: List[str] = []
+        seen: set = set()
+        # Accept backtick-quoted (`01_cover.svg`) and parenthesized
+        # (01_cover.svg) forms — existing specs use either.
+        svg_ref_re = re.compile(r"[`\(]([0-9A-Za-z_]+\.svg)[`\)]")
+        for match in svg_ref_re.finditer(text):
+            stem = match.group(1)[:-4]
+            if stem in seen or (not explicit_scope and not re.match(r"^\d", stem)):
+                continue
+            seen.add(stem)
+            stems.append(stem)
+
+        # If the explicit §VI scan listed bare stems (without .svg), accept
+        # those as fallback — but only when they were inside that section.
+        if not stems and scope:
+            for match in re.finditer(r"`([0-9]{2}[a-z]?_[A-Za-z0-9_]+)`", scope):
+                stem = match.group(1)
+                if stem in seen:
+                    continue
+                seen.add(stem)
+                stems.append(stem)
+
+        return stems
+
+    @classmethod
+    def _lookup_template_contract(
+        cls, stem: str, *,
+        overrides: Dict[str, Tuple[str, ...]] | None = None,
+    ) -> Tuple[str, ...] | None:
+        """Resolve a SVG stem to its expected placeholder set.
+
+        Resolution order, first hit wins:
+        1. ``overrides[stem]`` — frontmatter entry for the exact filename
+        2. ``overrides[<page_type_prefix>]`` — frontmatter entry for the
+           variant's parent type (e.g. ``03_content`` for
+           ``03a_content_two_col``)
+        3. ``DEFAULT_PLACEHOLDER_CONVENTION[<page_type>]`` — keyed by the
+           type token alone, so it applies regardless of where the type
+           lands in the template's presentation-order numbering
+
+        Returns ``None`` for stems with no matching convention or override —
+        e.g. extension pages like ``05_section_break``. ``()`` (empty tuple)
+        is a valid value meaning "no expected placeholders" — used to
+        explicitly silence the default convention.
+        """
+        overrides = overrides or {}
+        if stem in overrides:
+            return overrides[stem]
+
+        # Variant convention: <NN><letter>?_<rest>; strip the letter to find
+        # the parent type prefix, e.g. "03a_content_two_col" -> "03_content".
+        match = re.match(r"^(\d{2})([a-z])?_([a-z]+)", stem)
+        if not match:
+            return None
+        num, _letter, kind = match.groups()
+        key = f"{num}_{kind}"
+        if key in overrides:
+            return overrides[key]
+        return cls.DEFAULT_PLACEHOLDER_CONVENTION.get(kind)
+
+    def _print_result(self, result: Dict):

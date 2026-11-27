@@ -1,0 +1,90 @@
+                mismatch = next(
+                    index
+                    for index, (actual, expected) in enumerate(
+                        zip(source_order or [], expected_order)
+                    )
+                    if actual != expected
+                )
+                findings.append(
+                    Finding(
+                        severity="error",
+                        code="REGISTRY_ID_ORDER",
+                        message=(
+                            f"{name} browse order expects {expected_order[mismatch]} "
+                            f"at position {mismatch + 1}; found {source_order[mismatch]}"
+                        ),
+                        path=source,
+                    )
+                )
+            if extra_ids:
+                findings.append(
+                    Finding(
+                        severity="error",
+                        code="REGISTRY_IDS_EXTRA",
+                        message=(
+                            f"{name} defines unexpected canonical ids: "
+                            + ", ".join(extra_ids)
+                        ),
+                        path=source,
+                    )
+                )
+        index_labels: list[str] | None = None
+        index_targets: list[str] | None = None
+        if config.get("validate_index_links") is True:
+            if config.get("kind") != "directory":
+                raise AuditError(
+                    f"Registry {name} enables validate_index_links but is not a directory"
+                )
+            index_matches = list(
+                _REGISTRY_INDEX_ENTRY_RE.finditer(_read_utf8(root / source))
+            )
+            index_labels = [match.group("label") for match in index_matches]
+            index_targets = [match.group("target") for match in index_matches]
+            for label, target in zip(index_labels, index_targets):
+                if label != target:
+                    findings.append(
+                        Finding(
+                            severity="error",
+                            code="REGISTRY_INDEX_LABEL_TARGET_MISMATCH",
+                            message=(
+                                f"{name} index label {label!r} points to {target!r}"
+                            ),
+                            path=source,
+                        )
+                    )
+            for field_name, values in (
+                ("label", index_labels),
+                ("target", index_targets),
+            ):
+                duplicates = sorted(
+                    value for value, count in Counter(values).items() if count > 1
+                )
+                if duplicates:
+                    findings.append(
+                        Finding(
+                            severity="error",
+                            code="REGISTRY_INDEX_DUPLICATE",
+                            message=(
+                                f"{name} index repeats {field_name}(s): "
+                                + ", ".join(duplicates)
+                            ),
+                            path=source,
+                        )
+                    )
+                index_ids = set(values)
+                if index_ids != ids:
+                    missing = sorted(str(item) for item in ids - index_ids)
+                    extra = sorted(str(item) for item in index_ids - ids)
+                    findings.append(
+                        Finding(
+                            severity="error",
+                            code="REGISTRY_INDEX_MISMATCH",
+                            message=(
+                                f"{name} index {field_name}s differ from registry files; "
+                                f"missing={missing}, extra={extra}"
+                            ),
+                            path=source,
+                        )
+                    )
+        terms = [_normalize_paragraph(str(item)) for item in config.get("reference_terms", [])]
+        source_name = Path(source).name

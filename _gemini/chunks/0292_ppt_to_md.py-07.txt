@@ -1,0 +1,100 @@
+    for index, item in enumerate(series, start=1):
+        series_name = _chart_series_name(item, index)
+        try:
+            values = list(item.values)
+        except (ValueError, TypeError, AttributeError, KeyError):
+            warnings.append(f"{series_name}: series values are unavailable")
+            continue
+        series_data.append((series_name, values))
+
+    row_count = max(
+        len(categories),
+        max((len(values) for _, values in series_data), default=0),
+    )
+    if not series_data or row_count == 0:
+        return _chart_data_unavailable(
+            header,
+            "chart has no readable category-series data",
+            warnings=warnings,
+        )
+    point_counts = {len(values) for _, values in series_data}
+    if categories:
+        point_counts.add(len(categories))
+    if len(point_counts) > 1:
+        warnings.append("category/series point counts differ; missing cells are blank")
+
+    table_header = (["Category"] if categories else ["#"]) + [
+        series_name for series_name, _ in series_data
+    ]
+    lines = [header]
+    lines.extend(_chart_warning_lines(warnings))
+    lines.extend([
+        "",
+        "| " + " | ".join(table_header) + " |",
+        "| " + " | ".join(["---"] * len(table_header)) + " |",
+    ])
+    for row_index in range(row_count):
+        if categories:
+            label = categories[row_index] if row_index < len(categories) else ""
+        else:
+            label = str(row_index + 1)
+        cells = [label]
+        for _, values in series_data:
+            value = values[row_index] if row_index < len(values) else None
+            cells.append(_chart_value_cell(value))
+        lines.append("| " + " | ".join(cells) + " |")
+    return "\n".join(lines)
+
+
+def chart_to_markdown(chart: object, name: str) -> str:
+    """Render category, scatter, and bubble data without flattening chart semantics.
+
+    A native PowerPoint chart stores its data in embedded XML, not in any text
+    frame. Public python-pptx APIs cover category values and scatter/bubble Y
+    values, but not XY X coordinates or bubble sizes. Read only those missing
+    display caches from the series XML. Preserve every readable value and emit
+    explicit warnings for missing dimensions or series rather than discarding
+    the chart's remaining content.
+    """
+    header, chart_type = _chart_header(chart, name)
+    try:
+        series = list(chart.series)
+    except (ValueError, TypeError, AttributeError, KeyError):
+        return _chart_data_unavailable(header, "chart series are unavailable")
+    if not series:
+        return _chart_data_unavailable(header, "chart has no readable series")
+
+    family = _chart_family(chart_type, series)
+    if family in {"scatter", "bubble"}:
+        return _xy_chart_to_markdown(series, family=family, header=header)
+    return _category_chart_to_markdown(chart, series, header)
+
+
+def _chart_reference_id(element: object) -> str | None:
+    """Return the first chart relationship id carried by an OOXML shape subtree."""
+    for descendant in element.iter():
+        if descendant.tag.rsplit("}", 1)[-1] != "chart":
+            continue
+        relationship_id = descendant.get(f"{{{RELATIONSHIP_NS}}}id")
+        if relationship_id:
+            return relationship_id
+    return None
+
+
+def _unexposed_chartex_markdown(
+    slide: object,
+    emitted_relationship_ids: set[str],
+) -> list[str]:
+    """Report ChartEx objects omitted from ``slide.shapes`` by python-pptx."""
+    blocks: list[str] = []
+    seen_relationship_ids: set[str] = set()
+    slide_element = getattr(slide, "element", None)
+    if slide_element is None:
+        slide_element = getattr(slide, "_element", None)
+    if slide_element is None:
+        return blocks
+    for graphic_data in slide_element.iter(f"{{{DRAWINGML_NS}}}graphicData"):
+        if graphic_data.get("uri") != CHARTEX_URI:
+            continue
+        relationship_id = _chart_reference_id(graphic_data)
+        if relationship_id and (

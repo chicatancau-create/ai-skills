@@ -1,0 +1,144 @@
+router.delete('/users/:id', authenticate, authorize('admin'), deleteUser);
+```
+
+### Auth Token Automatic Refresh
+
+```typescript
+// lib/api-client.ts — transparent refresh on 401
+async function apiWithRefresh<T>(path: string, options: RequestInit = {}): Promise<T> {
+  try {
+    return await api<T>(path, options);
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) {
+      const refreshed = await api<{ accessToken: string }>('/api/auth/refresh', {
+        method: 'POST',
+        credentials: 'include',  // send httpOnly cookie
+      });
+      setAuthToken(refreshed.accessToken);
+      return api<T>(path, options);  // retry
+    }
+    throw err;
+  }
+}
+```
+
+---
+
+## 7. Logging & Observability (MEDIUM-HIGH)
+
+### Structured JSON Logging
+
+```typescript
+// ✅ Structured — parseable, filterable, alertable
+logger.info('Order created', {
+  orderId: order.id, userId: user.id, total: order.total,
+  items: order.items.length, duration_ms: Date.now() - startTime,
+});
+// Output: {"level":"info","msg":"Order created","orderId":"ord_123",...}
+
+// ❌ Unstructured — useless at scale
+console.log(`Order created for user ${user.id} with total ${order.total}`);
+```
+
+### Log Levels
+
+| Level | When | Production? |
+|-------|------|------------|
+| error | Requires immediate attention | ✅ Always |
+| warn | Unexpected but handled | ✅ Always |
+| info | Normal operations, audit trail | ✅ Always |
+| debug | Dev troubleshooting | ❌ Dev only |
+
+### Rules
+
+```
+✅ Request ID in every log entry (propagated via middleware)
+✅ Log at layer boundaries (request in, response out, external call)
+❌ Never log passwords, tokens, PII, or secrets
+❌ Never use console.log in production code
+```
+
+---
+
+## 8. Background Jobs & Async (MEDIUM)
+
+### Rules
+
+```
+✅ All jobs must be IDEMPOTENT (same job running twice = same result)
+✅ Failed jobs → retry (max 3) → dead letter queue → alert
+✅ Workers run as SEPARATE processes (not threads in API server)
+
+❌ Never put long-running tasks in request handlers
+❌ Never assume job runs exactly once
+```
+
+### Idempotent Job Pattern
+
+```typescript
+async function processPayment(data: { orderId: string }) {
+  const order = await orderRepo.findById(data.orderId);
+  if (order.paymentStatus === 'completed') return;  // already processed
+  await paymentGateway.charge(order);
+  await orderRepo.updatePaymentStatus(order.id, 'completed');
+}
+```
+
+---
+
+## 9. Caching Patterns (MEDIUM)
+
+### Cache-Aside (Lazy Loading)
+
+```typescript
+async function getUser(id: string): Promise<User> {
+  const cached = await redis.get(`user:${id}`);
+  if (cached) return JSON.parse(cached);
+
+  const user = await userRepo.findById(id);
+  if (!user) throw new NotFoundError('User', id);
+
+  await redis.set(`user:${id}`, JSON.stringify(user), 'EX', 900);  // 15min TTL
+  return user;
+}
+```
+
+### Rules
+
+```
+✅ ALWAYS set TTL — never cache without expiry
+✅ Invalidate on write (delete cache key after update)
+✅ Use cache for reads, never for authoritative state
+
+❌ Never cache without TTL (stale data is worse than slow data)
+```
+
+| Data Type | Suggested TTL |
+|-----------|---------------|
+| User profile | 5-15 min |
+| Product catalog | 1-5 min |
+| Config / feature flags | 30-60 sec |
+| Session | Match session duration |
+
+---
+
+## 10. File Upload Patterns (MEDIUM)
+
+### Option A: Presigned URL (Recommended for Large Files)
+
+```
+Client → GET /api/uploads/presign?filename=photo.jpg&type=image/jpeg
+Server → { uploadUrl: "https://s3.../presigned", fileKey: "uploads/abc123.jpg" }
+Client → PUT uploadUrl (direct to S3, bypasses your server)
+Client → POST /api/photos { fileKey: "uploads/abc123.jpg" }  (save reference)
+```
+
+**Backend:**
+```typescript
+app.get('/api/uploads/presign', authenticate, async (req, res) => {
+  const { filename, type } = req.query;
+  const key = `uploads/${crypto.randomUUID()}-${filename}`;
+  const url = await s3.getSignedUrl('putObject', {
+    Bucket: process.env.S3_BUCKET, Key: key,
+    ContentType: type, Expires: 300,  // 5 min
+  });

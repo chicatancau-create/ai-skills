@@ -1,0 +1,110 @@
+    opacity: float | None = None,
+) -> str:
+    """Build <a:effectLst> with <a:glow> from SVG filter element.
+
+    Used for filters that have feGaussianBlur without meaningful feOffset,
+    typically title glow or highlight effects.
+    """
+    if filter_elem is None:
+        return ''
+
+    p = parse_project_filter_params(filter_elem)
+    rad = project_filter_drawingml_coordinates(p, 'glow')['rad']
+    opacity_multiplier = 1.0 if opacity is None else opacity
+    alpha_val = quantize_ooxml_alpha(p['opacity'] * opacity_multiplier)
+
+    return f'''<a:effectLst>
+<a:glow rad="{rad}">
+<a:srgbClr val="{p['color']}"><a:alpha val="{alpha_val}"/></a:srgbClr>
+</a:glow>
+</a:effectLst>'''
+
+
+def classify_filter_effect(filter_elem: ET.Element) -> str | None:
+    """Classify an SVG filter into a supported DrawingML effect kind."""
+    if filter_elem is None:
+        return None
+
+    p = parse_project_filter_params(filter_elem)
+    return 'shadow' if p['has_offset'] else 'glow'
+
+
+def build_effect_xml(
+    filter_elem: ET.Element,
+    opacity: float | None = None,
+) -> str:
+    """Build effect XML by classifying the SVG filter as shadow or glow.
+
+    Classification rules:
+    - feOffset with non-zero dx/dy → outer shadow
+    - No feOffset or zero offset → glow effect
+    """
+    if filter_elem is None:
+        return ''
+
+    effect_kind = classify_filter_effect(filter_elem)
+    if effect_kind == 'shadow':
+        return build_shadow_xml(filter_elem, opacity)
+    if effect_kind == 'glow':
+        return build_glow_xml(filter_elem, opacity)
+    return ''
+
+
+def get_element_opacity(
+    elem: ET.Element,
+    ctx: ConvertContext | None = None,
+) -> float | None:
+    """Get local opacity multiplied by any approximated ancestor group alpha."""
+    base = ctx.opacity_multiplier if ctx is not None else 1.0
+    if ctx is not None:
+        op = _get_attr(elem, 'opacity', ctx)
+    else:
+        op = parse_inline_style(elem.get('style')).get('opacity') or elem.get('opacity')
+    if op is None:
+        return base if base < 1.0 else None
+    val = base * parse_opacity(op)
+    return val if val < 1.0 else None
+
+
+def get_fill_opacity(
+    elem: ET.Element,
+    ctx: ConvertContext | None = None,
+) -> float | None:
+    """Get effective fill opacity combining 'opacity' and 'fill-opacity'.
+
+    Returns:
+        Combined opacity value, or None if fully opaque.
+    """
+    base = ctx.opacity_multiplier if ctx is not None else 1.0
+
+    op = _get_attr(elem, 'opacity', ctx) if ctx else elem.get('opacity')
+    if op is not None:
+        base *= parse_opacity(op)
+
+    fill_op = _get_attr(elem, 'fill-opacity', ctx) if ctx else elem.get('fill-opacity')
+    if fill_op is not None:
+        base *= parse_opacity(fill_op)
+
+    return base if base < 1.0 else None
+
+
+def get_stroke_opacity(
+    elem: ET.Element,
+    ctx: ConvertContext | None = None,
+) -> float | None:
+    """Get effective stroke opacity combining 'opacity' and 'stroke-opacity'.
+
+    Returns:
+        Combined opacity value, or None if fully opaque.
+    """
+    base = ctx.opacity_multiplier if ctx is not None else 1.0
+
+    op = _get_attr(elem, 'opacity', ctx) if ctx else elem.get('opacity')
+    if op is not None:
+        base *= parse_opacity(op)
+
+    stroke_op = _get_attr(elem, 'stroke-opacity', ctx) if ctx else elem.get('stroke-opacity')
+    if stroke_op is not None:
+        base *= parse_opacity(stroke_op)
+
+    return base if base < 1.0 else None

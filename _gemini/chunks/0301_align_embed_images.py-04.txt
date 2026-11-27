@@ -1,0 +1,109 @@
+        image.set('href', value)
+
+
+def _nested_crop_image_ids(root: ET.Element) -> set[int]:
+    """Return child image identities from valid nested crop transports."""
+    image_ids: set[int] = set()
+    for elem in root.iter(f'{{{SVG_NS}}}svg'):
+        if elem is root:
+            continue
+        try:
+            crop = parse_project_nested_svg_crop(elem)
+        except ValueError:
+            continue
+        image_ids.add(id(crop.image))
+    return image_ids
+
+
+def _process_one_image(
+    image: ET.Element,
+    svg_dir: Path,
+    *,
+    compress: bool,
+    max_dimension: int | None,
+    image_scale: float,
+    preserve_source_pixels: bool,
+    verbose: bool,
+) -> tuple[bool, str | None]:
+    """Align (slice/meet) and embed a single <image>.
+
+    Returns ``(processed, error)`` where *processed* is True iff the image
+    was rewritten and *error* is a short message when something went wrong
+    (the image is left untouched in that case).
+    """
+    href = _get_href(image)
+    if not href:
+        return False, None
+    if href.lower().startswith('data:'):
+        payload_error = svg_data_uri_payload_error(href)
+        if payload_error is not None:
+            return False, payload_error
+        return False, None  # already inline
+
+    img_path = _resolve_image_path(href, svg_dir)
+    if img_path is None:
+        return False, f'unresolved href: {href[:60]}'
+
+    try:
+        with open(img_path, 'rb') as fh:
+            raw_bytes = fh.read()
+    except OSError as exc:
+        return False, f'read failed: {exc}'
+
+    if img_path.suffix.lower() in _OFFICE_VECTOR_EXTENSIONS:
+        if verbose:
+            print(f'   [INFO] {img_path.name}: Office vector left external for native PPTX passthrough')
+        return False, None
+
+    if _is_svg_image(img_path, raw_bytes):
+        payload_error = svg_image_payload_error(raw_bytes)
+        if payload_error is not None:
+            return False, f'{img_path.name}: {payload_error}'
+        _embed_raw_image(image, img_path, raw_bytes)
+        if verbose:
+            print(f'   [OK] {img_path.name} (svg, embedded as-is)')
+        return True, None
+
+    img = _load_pil_image(img_path)
+    if img is None:
+        return False, 'PIL open failed'
+
+    # Multi-frame images (animated GIF / WebP / APNG): every PIL transform
+    # and re-save below operates on frame 0 only, silently flattening the
+    # animation — and the "original bytes are smaller" fallback never fires
+    # because one frame is always smaller than all frames. Embed the raw
+    # bytes untouched and keep the geometry attributes (including
+    # preserveAspectRatio, which the native converter maps to srcRect
+    # non-destructively). Animated assets skip re-encode, resize, and the
+    # size cap.
+    if getattr(img, 'is_animated', False):
+        _embed_raw_image(image, img_path, raw_bytes)
+        if max_dimension and max(img.size) > max_dimension:
+            print(f'   [WARN] {img_path.name}: animated image kept as-is '
+                  f'({img.size[0]}x{img.size[1]} exceeds max dimension '
+                  f'{max_dimension}px); animations are exempt from size limits')
+        if verbose:
+            print(f'   [OK] {img_path.name} (animated, embedded as-is)')
+        return True, None
+
+    geometry_normalized = _has_exif_geometry_transform(img)
+    img = _prepare_raster_for_geometry(img)
+    box_x = _parse_float(image.get('x'))
+    box_y = _parse_float(image.get('y'))
+    box_w = _parse_float(image.get('width'))
+    box_h = _parse_float(image.get('height'))
+    if (
+        not math.isfinite(box_w)
+        or not math.isfinite(box_h)
+        or box_w <= 0
+        or box_h <= 0
+    ):
+        return False, 'zero-sized box'
+
+    par_attr = image.get('preserveAspectRatio') or ''
+    par_attr = par_attr.strip()
+
+    # ------------------------------------------------------------------
+    # Decide the spatial transform
+    # ------------------------------------------------------------------
+    final_img: 'PILImage' = img

@@ -1,0 +1,99 @@
+"""ConvertContext — shared state passed through the SVG → DrawingML pipeline."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+from xml.etree import ElementTree as ET
+from dataclasses import dataclass, field
+
+if TYPE_CHECKING:
+    from .theme_colors import ThemeColorSpec
+    from .theme_fonts import ThemeFontSpec
+
+AffineMatrix = tuple[float, float, float, float, float, float]
+IDENTITY_MATRIX: AffineMatrix = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+
+TEXT_FLOW_PRESERVE = 'preserve'
+TEXT_FLOW_REFLOW = 'reflow'
+TEXT_FLOW_SPLIT = 'split'
+TEXT_FLOW_MODES = frozenset({
+    TEXT_FLOW_PRESERVE,
+    TEXT_FLOW_REFLOW,
+    TEXT_FLOW_SPLIT,
+})
+
+
+def resolve_text_flow(
+    text_flow: str | None = None,
+    merge_paragraphs: bool | None = None,
+) -> str:
+    """Resolve the public text-layout options to one internal mode."""
+    if text_flow is not None and merge_paragraphs is not None:
+        raise ValueError(
+            'text_flow and legacy merge_paragraphs cannot be used together'
+        )
+    if merge_paragraphs is not None:
+        return TEXT_FLOW_REFLOW if merge_paragraphs else TEXT_FLOW_SPLIT
+    resolved = TEXT_FLOW_PRESERVE if text_flow is None else text_flow
+    if resolved not in TEXT_FLOW_MODES:
+        choices = ', '.join(sorted(TEXT_FLOW_MODES))
+        raise ValueError(
+            f'unsupported text_flow {resolved!r}; expected one of: {choices}'
+        )
+    return resolved
+
+
+@dataclass
+class ShapeResult:
+    """Internal conversion result carrying XML plus resolved EMU bounds."""
+
+    xml: str
+    bounds_emu: tuple[int, int, int, int] | None = None
+
+
+@dataclass
+class ConvertContext:
+    """Shared context passed through the SVG → DrawingML conversion pipeline.
+
+    Derived via child() during recursive SVG tree traversal to accumulate
+    translate / scale / inherited style information.
+    """
+
+    defs: dict[str, ET.Element] = field(default_factory=dict)
+    id_counter: int = 2  # 1 is reserved for spTree root
+    # Imported PPTX shape ids are reserved before conversion so newly authored
+    # SVG elements cannot steal an id referenced by a native connector.
+    reserved_shape_ids: frozenset[int] = frozenset()
+    source_shape_id_map: dict[tuple[str, str], int] = field(default_factory=dict)
+    claimed_shape_ids: set[int] = field(default_factory=set)
+    referenced_shape_ids: set[int] = field(default_factory=set)
+    slide_num: int = 1
+    # Public presentation roster size, used to fail closed on #slide-N links.
+    slide_count: int | None = None
+    translate_x: float = 0.0
+    translate_y: float = 0.0
+    scale_x: float = 1.0
+    scale_y: float = 1.0
+    viewport_width: float = 1280.0
+    viewport_height: float = 720.0
+    transform_matrix: AffineMatrix = IDENTITY_MATRIX
+    use_transform_matrix: bool = False
+    filter_id: str | None = None
+    media_files: dict[str, bytes] = field(default_factory=dict)
+    rel_entries: list[dict[str, str]] = field(default_factory=list)
+    package_files: dict[str, bytes] = field(default_factory=dict)
+    content_type_overrides: dict[str, str] = field(default_factory=dict)
+    rel_id_counter: int = 2  # rId1 reserved for slideLayout
+    svg_dir: Path | None = None
+    # Explicit project boundary for deterministic resource resolution. Public
+    # conversion entry points require it; recursive child contexts retain it.
+    resource_root: Path | None = None
+    inherited_styles: dict[str, str] = field(default_factory=dict)
+    # Shared ancestry for visibility overrides and native geometry carriers.
+    parent_by_id: dict[int, ET.Element] = field(default_factory=dict)
+    # Effective SVG font sizes keyed by element identity. Shared resolution
+    # keeps relative sizes and em tracking identical across checker/exporter.
+    text_font_sizes: dict[int, float] = field(default_factory=dict)
+    # Effective source-pixel tracking resolved where each declaration occurs.
+    text_letter_spacings: dict[int, float] = field(default_factory=dict)

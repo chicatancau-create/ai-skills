@@ -1,0 +1,94 @@
+                    f"binding {binding!r}; use carrier or proxy"
+                )
+            carrier_descendants = [
+                child for child in elem.iter()
+                if child is not elem
+                and child.get('data-pptx-carrier') is not None
+            ]
+            visual_children = [
+                child for child in list(elem)
+                if child.tag.rsplit('}', 1)[-1] not in _NON_VISUAL_SVG_TAGS
+            ]
+            direct_carriers = [
+                child for child in visual_children
+                if (child.get('data-pptx-carrier') or '').strip().lower()
+                == 'true'
+            ]
+            nested_carriers = [
+                child for child in carrier_descendants
+                if parent_by_id.get(id(child)) is not elem
+            ]
+            if nested_carriers:
+                names = ', '.join(
+                    child.get('id') or f"<{child.tag.rsplit('}', 1)[-1]}>"
+                    for child in nested_carriers
+                )
+                errors.append(
+                    f"{svg_path.name}: placeholder slot {element_id} has nested "
+                    f"carrier marker(s): {names}; the carrier must be a direct child"
+                )
+            if binding == 'carrier':
+                if len(visual_children) != 1 or len(direct_carriers) != 1:
+                    errors.append(
+                        f"{svg_path.name}: placeholder slot {element_id} requires "
+                        "exactly one visual direct child, marked "
+                        "data-pptx-carrier=\"true\""
+                    )
+            if binding == 'proxy':
+                if placeholder != 'object':
+                    errors.append(
+                        f"{svg_path.name}: proxy binding is allowed only for an "
+                        f"object placeholder, not {placeholder!r}"
+                    )
+                if carrier_descendants:
+                    errors.append(
+                        f"{svg_path.name}: proxy placeholder slot {element_id} must "
+                        "not declare a visible placeholder carrier"
+                    )
+                if not visual_children:
+                    errors.append(
+                        f"{svg_path.name}: proxy placeholder slot {element_id} must "
+                        "contain visible Slide-local content"
+                    )
+
+        carrier_value = elem.get('data-pptx-carrier')
+        if carrier_value is not None:
+            if carrier_value.strip().lower() != 'true':
+                errors.append(
+                    f"{svg_path.name}: {element_id} "
+                    "data-pptx-carrier must equal true"
+                )
+            if parent is None or not (
+                parent.get('data-pptx-placeholder') or ''
+            ).strip():
+                errors.append(
+                    f"{svg_path.name}: placeholder carrier {element_id} must be a "
+                    "direct child of a root placeholder slot"
+                )
+
+        if tag in _NON_VISUAL_SVG_TAGS and (layer or placeholder):
+            errors.append(
+                f"{svg_path.name}: non-visual {element_id} cannot carry "
+                "Master/Layout/placeholder ownership"
+            )
+
+    return list(dict.fromkeys(errors))
+
+
+def _normalize_hex_rgb(value: str) -> str | None:
+    """Normalize 3/4/6/8-digit HEX to alpha-free ``RRGGBB``."""
+    if not HEX_VALUE_RE.fullmatch(value):
+        return None
+    color = value[1:]
+    if len(color) in {3, 4}:
+        color = ''.join(channel * 2 for channel in color)
+    return color[:6].upper()
+
+
+# Cheap numeric envelope for font-size role enforcement. Semantic role assignment
+# is prompt-owned; Checker only verifies that a used value is close to at least
+# one declared size anchor.
+FONT_SIZE_ANCHOR_TOLERANCE_PX = 2.0
+SPARSE_UNDECLARED_FONT_SIZE_MAX_OCCURRENCES = 2
+
+# Oversampling alone does not imply distortion and is often harmless for small

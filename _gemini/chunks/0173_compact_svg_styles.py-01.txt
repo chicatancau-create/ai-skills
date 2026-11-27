@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""
+PPT Master - Legacy SVG Inherited Style Migration
+
+Diagnose or migrate older SVG authoring files to root/group defaults plus local
+overrides. New authoring code calls the tree-level implementation before its
+first write; the CLI is not a standard post-generation step.
+
+Usage:
+    python3 scripts/compact_svg_styles.py <svg-file-or-directory> [--inplace]
+
+Examples:
+    python3 scripts/compact_svg_styles.py projects/example/svg_output --inplace
+    python3 scripts/compact_svg_styles.py imported/authoring-svg-flat
+
+Dependencies:
+    None (standard library only).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import stat
+import sys
+import tempfile
+from collections import Counter
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+from xml.etree import ElementTree as ET
+
+from console_encoding import configure_utf8_stdio
+from pptx_to_svg.preset_authoring import authored_preset_encoding
+from svg_to_pptx.drawingml.utils import INHERITABLE_ATTRS
+
+configure_utf8_stdio()
+
+SVG_NS = "http://www.w3.org/2000/svg"
+XLINK_NS = "http://www.w3.org/1999/xlink"
+INHERITABLE_ATTRIBUTES = tuple(INHERITABLE_ATTRS)
+_DEFINITION_SUBTREES = frozenset({
+    "clipPath",
+    "defs",
+    "filter",
+    "linearGradient",
+    "marker",
+    "mask",
+    "pattern",
+    "radialGradient",
+    "symbol",
+})
+_UNSAFE_PRESENTATION_VALUE_TOKENS = (
+    "!important",
+    "var(",
+)
+_CSS_WIDE_VALUES = frozenset({
+    "inherit",
+    "initial",
+    "revert",
+    "revert-layer",
+    "unset",
+})
+_CONTEXT_DEPENDENT_VALUES = frozenset({
+    "context-fill",
+    "context-stroke",
+    "currentcolor",
+})
+_URL_FUNCTION_RE = re.compile(r"url\([^)]*\)", re.IGNORECASE)
+
+ET.register_namespace("", SVG_NS)
+
+
+@dataclass
+class StyleCompactionStats:
+    """Count semantics-preserving authoring-style reductions."""
+
+    root_font_defaults: int = 0
+    root_style_declarations_normalized: int = 0
+    container_style_declarations_normalized: int = 0
+    group_defaults_promoted: int = 0
+    shadowed_attributes_removed: int = 0
+    redundant_attributes_removed: int = 0
+    redundant_style_declarations_removed: int = 0
+
+    @property
+    def changed_declarations(self) -> int:
+        return (
+            self.root_font_defaults
+            + self.root_style_declarations_normalized
+            + self.container_style_declarations_normalized
+            + self.group_defaults_promoted
+            + self.shadowed_attributes_removed
+            + self.redundant_attributes_removed
+            + self.redundant_style_declarations_removed
+        )
+
+    def merge(self, other: "StyleCompactionStats") -> None:
+        self.root_font_defaults += other.root_font_defaults
+        self.root_style_declarations_normalized += (
+            other.root_style_declarations_normalized
+        )
+        self.container_style_declarations_normalized += (
+            other.container_style_declarations_normalized
+        )
+        self.group_defaults_promoted += other.group_defaults_promoted
+        self.shadowed_attributes_removed += other.shadowed_attributes_removed
+        self.redundant_attributes_removed += other.redundant_attributes_removed
+        self.redundant_style_declarations_removed += (
+            other.redundant_style_declarations_removed
+        )
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "root_font_defaults": self.root_font_defaults,
+            "root_style_declarations_normalized": (
+                self.root_style_declarations_normalized
+            ),
+            "container_style_declarations_normalized": (
+                self.container_style_declarations_normalized
+            ),
+            "group_defaults_promoted": self.group_defaults_promoted,
+            "shadowed_attributes_removed": self.shadowed_attributes_removed,
+            "redundant_attributes_removed": self.redundant_attributes_removed,
+            "redundant_style_declarations_removed": (

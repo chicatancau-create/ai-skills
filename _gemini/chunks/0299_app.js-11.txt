@@ -1,0 +1,101 @@
+            if (SKIP_TAGS.indexOf(tag) !== -1) return;
+            if (el === svg) return;
+            el.classList.add("svg-selectable");
+        });
+
+        svg.addEventListener("click", function (e) {
+            // Skip the synthetic click that follows a rubber-band drag-release.
+            if (suppressNextSvgClick) {
+                suppressNextSvgClick = false;
+                return;
+            }
+            var target = e.target;
+            // Blank-area click on the svg root → clear selection.
+            if (target === svg) {
+                clearSelection();
+                return;
+            }
+            // Ignore clicks bubbling out of non-interactive subtrees.
+            if (target.closest && target.closest("defs, style, title, desc")) return;
+            // Backend assign_temp_ids() guarantees every element has an id, so
+            // closest("[id]") will always find a hit. The exclusion of `svg`
+            // itself routes "click outside any real shape" to clearSelection.
+            // Icon placeholders are expanded only for browser preview. If a
+            // click lands on a generated child, edit the disk-backed data-icon
+            // group instead of an inner preview-only node.
+            var picked = e.altKey && target.closest
+                ? target.closest("g[id]")
+                : null;
+            picked = picked || (target.closest && target.closest("[data-icon][id]")) ||
+                target.closest("[id]");
+            if (!picked || picked === svg) {
+                clearSelection();
+                return;
+            }
+            selectElement(picked, e.ctrlKey || e.metaKey);
+        });
+    }
+
+    // ================================================================
+    //  4.  selectElement
+    // ================================================================
+    function selectElement(elem, addToSelection) {
+        var eid = elem.id;
+        if (!eid) return;
+
+        if (addToSelection) {
+            // Ctrl+click: toggle this element
+            if (selectedElementIds.has(eid)) {
+                selectedElementIds.delete(eid);
+                elem.classList.remove("svg-selected");
+            } else {
+                selectedElementIds.add(eid);
+                elem.classList.add("svg-selected");
+            }
+        } else {
+            // Normal click: clear others, select only this one
+            selectedElementIds.forEach(function (id) {
+                if (id !== eid) {
+                    var old = svgContent.querySelector("#" + CSS.escape(id));
+                    if (old) old.classList.remove("svg-selected");
+                }
+            });
+            selectedElementIds.clear();
+            selectedElementIds.add(eid);
+            elem.classList.add("svg-selected");
+        }
+
+        updateSelectionPanel();
+    }
+
+    // ================================================================
+    //  5.  clearSelection
+    // ================================================================
+    function clearSelection() {
+        selectedElementIds.forEach(function (id) {
+            var el = svgContent.querySelector("#" + CSS.escape(id));
+            if (el) el.classList.remove("svg-selected");
+        });
+        selectedElementIds.clear();
+        updateSelectionPanel();
+    }
+
+    function updateSelectionPanel() {
+        var propsEl = elementPropsEl;
+        var count = selectedElementIds.size;
+
+        if (count === 0) {
+            selectedElementEl.classList.add("empty");
+            selectedElementEl.textContent = t("empty_selected_element");
+            annotationInput.style.display = "none";
+            annotationText.value = "";
+            propsEl.style.display = "none";
+            propsEl.innerHTML = "";
+            return;
+        }
+
+        selectedElementEl.classList.remove("empty");
+        propsEl.style.display = "block";
+
+        if (count === 1) {
+            var eid = selectedElementIds.values().next().value;

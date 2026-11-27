@@ -1,0 +1,125 @@
+    credit text written by the Executor is uniform across providers.
+    Unknown inputs are returned trimmed but otherwise unchanged.
+    """
+    if not name:
+        return ""
+    key = name.strip().lower()
+    if not key:
+        return ""
+
+    if key in _LICENSE_NAME_CANON:
+        return _LICENSE_NAME_CANON[key]
+
+    cc_match = _CC_PATTERN.match(key)
+    if cc_match:
+        suffix_raw, version = cc_match.group(1), cc_match.group(2)
+        suffix = suffix_raw.replace(" ", "-").upper()
+        return f"CC {suffix} {version}".strip()
+
+    return name.strip()
+
+
+def classify_license(
+    license_name: str,
+    license_url: str = "",
+    provider: str = "",
+) -> Optional[str]:
+    """Classify a license string into one of the two tiers, or reject it.
+
+    Returns:
+        ``"no-attribution"`` / ``"attribution-required"`` / ``None``.
+
+    The provider hint lets us treat Pexels and Pixabay's own licenses as
+    ``no-attribution`` even when the upstream API only returns a short
+    label like ``"Pexels"``.
+    """
+    text = " ".join(
+        part.strip().lower()
+        for part in (license_name or "", license_url or "")
+        if part
+    )
+    provider_key = (provider or "").strip().lower()
+
+    if not text and not provider_key:
+        return None
+
+    if any(token in text for token in REJECTED_TOKENS):
+        return None
+
+    if any(token in text for token in NO_ATTRIBUTION_TOKENS):
+        return LICENSE_TIER_NO_ATTRIBUTION
+
+    # Provider-default fallback: pexels / pixabay items often arrive with a
+    # bare "Pexels" / "Pixabay" license string. Their site-wide license is
+    # "free for commercial use, no attribution required".
+    #
+    # Guard: require the license text to actually mention the provider name,
+    # so an empty / missing license field never silently passes as no-attribution.
+    if (
+        provider_key in {"pexels", "pixabay"}
+        and provider_key in text
+        and not any(token in text for token in ATTRIBUTION_REQUIRED_TOKENS)
+    ):
+        return LICENSE_TIER_NO_ATTRIBUTION
+
+    if any(token in text for token in ATTRIBUTION_REQUIRED_TOKENS):
+        return LICENSE_TIER_ATTRIBUTION_REQUIRED
+
+    return None  # unknown license -> reject
+
+
+# ---------------------------------------------------------------------------
+# Dataclasses
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ImageSearchRequest:
+    """A single image search intent passed to a provider."""
+
+    query: str
+    purpose: str = ""
+    orientation: str = ""  # "landscape" / "portrait" / "square" / ""
+    min_width: int = 0
+    min_height: int = 0
+    filename: str = ""
+    slide: str = ""
+    required_terms: tuple[str, ...] = ()
+    query_variants: tuple[str, ...] = ()
+
+
+@dataclass
+class AssetCandidate:
+    """One ranked candidate returned by a provider's parse_results."""
+
+    provider: str
+    title: str
+    asset_id: str = ""
+    source_page_url: str = ""
+    license_name: str = ""
+    license_url: str = ""
+    license_tier: str = ""  # one of LICENSE_TIER_* constants
+    width: int = 0
+    height: int = 0
+    download_url: str = ""
+    preview_url: str = ""
+    discovery_query: str = ""
+    author: str = ""
+    raw: Any = field(default=None)
+
+
+# ---------------------------------------------------------------------------
+# Query simplification
+# ---------------------------------------------------------------------------
+#
+# Web image APIs do keyword matching against image metadata, not semantic
+# search. Long, descriptive queries with brand names, HEX codes, and
+# composition notes return zero results. We progressively trim the query
+# down to the most concrete nouns.
+
+_NOISE_WORDS = frozenset({
+    # Brand / product names
+    "claude", "openai", "gpt", "gemini", "copilot", "chatgpt", "midjourney",
+    "stable", "diffusion", "dall-e", "cursor", "anthropic", "microsoft",
+    "google", "apple", "meta", "nvidia", "tesla",
+    # Generic filler

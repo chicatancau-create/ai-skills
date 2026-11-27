@@ -1,0 +1,100 @@
+                        ) from exc
+                if not preserved_source_animation:
+                    try:
+                        resolved_animation = validate_generated_animation_xml(
+                            final_slide_xml,
+                            expected_animation_targets,
+                            duration=expected_animation_duration,
+                            trigger=expected_animation_trigger,
+                        )
+                    except ValueError as exc:
+                        raise RuntimeError(
+                            f'Slide {slide_num} animation validation failed: {exc}'
+                        ) from exc
+
+                if conversion_trace is not None:
+                    motion_summary = (
+                        {"source_preserved": True}
+                        if resolved_motion is None
+                        else asdict(resolved_motion)
+                    )
+                    for trace_entry in reversed(conversion_trace):
+                        if trace_entry.get('slide_num') == slide_num:
+                            trace_entry['motion'] = motion_summary
+                            trace_entry['animation'] = (
+                                {"source_preserved": True}
+                                if resolved_animation is None
+                                else asdict(resolved_animation)
+                            )
+                            break
+
+                if verbose:
+                    if use_native_shapes:
+                        mode_str = " (Native)"
+                    elif use_compat_mode and not use_native_shapes:
+                        mode_str = " (PNG+SVG)" if has_any_image else " (SVG)"
+                    else:
+                        mode_str = " (SVG)"
+                    has_notes = slide_num in notes_slides_created
+                    notes_str = " +notes" if has_notes else ""
+                    narration_str = " +narration" if slide_num in narration_slides_created else ""
+                    print(
+                        f"  {progress_label} {svg_path.name}{mode_str}"
+                        f"{notes_str}{narration_str}"
+                    )
+
+                success_count += 1
+
+            except Exception as e:
+                if verbose:
+                    print(
+                        f"  {progress_label} {svg_path.name} - Error: {e}"
+                    )
+                if use_native_shapes:
+                    raise
+
+        if (
+            use_native_shapes
+            and pptx_structure == "baseline"
+            and success_count == len(svg_files)
+        ):
+            _convert_page_number_texts_to_fields(
+                extract_dir,
+                len(svg_files),
+                conversion_trace if conversion_trace is not None else structure_trace,
+                context="Baseline",
+                verbose=verbose,
+            )
+            _promote_common_slide_backgrounds_to_masters(
+                extract_dir,
+                structure,
+                len(svg_files),
+                verbose=verbose,
+            )
+            _promote_common_chrome_shapes_to_masters(
+                extract_dir,
+                structure,
+                len(svg_files),
+                conversion_trace if conversion_trace is not None else structure_trace,
+                verbose=verbose,
+            )
+            _extract_baseline_layout_families(
+                extract_dir,
+                structure,
+                svg_files,
+                verbose=verbose,
+            )
+            _promote_common_chrome_shapes_to_layouts(
+                extract_dir,
+                len(svg_files),
+                conversion_trace if conversion_trace is not None else structure_trace,
+                verbose=verbose,
+            )
+            _prune_unused_slide_layouts(
+                extract_dir,
+                structure,
+                len(svg_files),
+                verbose=verbose,
+            )
+
+        if (

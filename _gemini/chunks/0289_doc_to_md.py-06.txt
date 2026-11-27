@@ -1,0 +1,97 @@
+        return _brace(_omml_part(elem, "e")) + "_" + _brace(_omml_part(elem, "sub"))
+    if local == "sSubSup":
+        return (_brace(_omml_part(elem, "e"))
+                + "_" + _brace(_omml_part(elem, "sub"))
+                + "^" + _brace(_omml_part(elem, "sup")))
+    if local == "sPre":
+        return ("{}_" + _brace(_omml_part(elem, "sub"))
+                + "^" + _brace(_omml_part(elem, "sup"))
+                + _brace(_omml_part(elem, "e")))
+    if local == "f":
+        return r"\frac{" + _omml_part(elem, "num") + "}{" + _omml_part(elem, "den") + "}"
+    if local == "rad":
+        deg = _m_child(elem, "deg")
+        body = _omml_part(elem, "e")
+        deg_latex = _omml_to_latex(deg) if deg is not None and len(deg) else ""
+        return rf"\sqrt[{deg_latex}]{{{body}}}" if deg_latex else rf"\sqrt{{{body}}}"
+    if local == "d":
+        beg = _m_pr_val(elem, "begChr")
+        end = _m_pr_val(elem, "endChr")
+        beg = "(" if beg is None else (beg or ".")
+        end = ")" if end is None else (end or ".")
+        inner = "".join(_omml_to_latex(c) for c in elem if _local_name(c) == "e")
+        return rf"\left{beg}{inner}\right{end}"
+    if local == "nary":
+        chr_ = _m_pr_val(elem, "chr") or "∫"
+        op = NARY_OPS.get(chr_, chr_)
+        sub, sup = _m_child(elem, "sub"), _m_child(elem, "sup")
+        out = op
+        if sub is not None and len(sub):
+            out += "_" + _brace(_omml_to_latex(sub))
+        if sup is not None and len(sup):
+            out += "^" + _brace(_omml_to_latex(sup))
+        return out + _brace(_omml_part(elem, "e"))
+    if local == "func":
+        return "\\" + _omml_part(elem, "fName").strip() + _brace(_omml_part(elem, "e"))
+    if local == "limLow":
+        return _brace(_omml_part(elem, "e")) + "_" + _brace(_omml_part(elem, "lim"))
+    if local == "limUpp":
+        return _brace(_omml_part(elem, "e")) + "^" + _brace(_omml_part(elem, "lim"))
+    if local == "bar":
+        cmd = r"\underline" if _m_pr_val(elem, "pos") == "bot" else r"\overline"
+        return cmd + "{" + _omml_part(elem, "e") + "}"
+    if local == "acc":
+        cmd = ACCENT_CMDS.get(_m_pr_val(elem, "chr") or "̂", r"\hat")
+        return cmd + "{" + _omml_part(elem, "e") + "}"
+    if local == "groupChr":
+        return _omml_part(elem, "e")
+    if local == "m":
+        return _omml_matrix(elem, environment="matrix")
+    if local == "eqArr":
+        return _omml_matrix(elem, environment="aligned")
+
+    return _omml_children(elem)
+
+
+def _make_text_run(text: str) -> ET.Element:
+    """Build a <w:r><w:t xml:space="preserve">text</w:t></w:r> element."""
+    run = ET.Element(f"{{{W_NS}}}r")
+    t = ET.SubElement(run, f"{{{W_NS}}}t")
+    t.set(XML_SPACE_ATTR, "preserve")
+    t.text = text
+    return run
+
+
+def _make_text_paragraph(text: str) -> ET.Element:
+    """Build a simple Word paragraph containing text."""
+    paragraph = ET.Element(f"{{{W_NS}}}p")
+    paragraph.append(_make_text_run(text))
+    return paragraph
+
+
+def _docx_inject_math_latex(
+    input_file: Path,
+) -> tuple[Path, dict[str, str]] | None:
+    """Replace OMML equations with alphanumeric placeholders in a temp DOCX.
+
+    Returns ``(temp_file, {placeholder: latex})`` or None when the document has
+    no OMML math. Placeholders are plain ``[A-Za-z0-9]`` tokens so mammoth never
+    markdown-escapes the LaTeX; the caller swaps each token for its `$...$` value
+    after mammoth has produced the Markdown.
+    """
+    try:
+        with zipfile.ZipFile(input_file) as docx:
+            document_xml = docx.read("word/document.xml")
+    except (KeyError, zipfile.BadZipFile, OSError):
+        return None
+    try:
+        root = ET.fromstring(document_xml)
+    except ET.ParseError:
+        return None
+
+    parent_map = {child: parent for parent in root.iter() for child in parent}
+    targets: list[tuple[ET.Element, bool]] = []
+    for elem in root.iter():
+        local = _local_name(elem)
+        if local == "oMathPara":
+            targets.append((elem, True))

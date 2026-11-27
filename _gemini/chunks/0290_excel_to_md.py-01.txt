@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+"""
+Excel to Markdown Converter
+
+Supported formats:
+    .xlsx   Excel workbook
+    .xlsm   Excel macro-enabled workbook
+
+Unsupported by default:
+    .xls    Legacy binary Excel format; resave as .xlsx first
+
+All paths produce the same output convention:
+    <input>.md                     Markdown file
+"""
+
+import argparse
+import re
+import sys
+from datetime import date, datetime, time
+from pathlib import Path
+from typing import Any
+
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from console_encoding import configure_utf8_stdio  # noqa: E402
+from _batch import run_path_batch  # noqa: E402
+from _conversion_profile import write_conversion_profile_best_effort  # noqa: E402
+
+configure_utf8_stdio()
+
+
+# ─────────────────────────────────────────────────────────────
+# Format registry
+# ─────────────────────────────────────────────────────────────
+
+EXCEL_FORMATS = {".xlsx", ".xlsm"}
+LEGACY_EXCEL_FORMATS = {".xls"}
+
+
+# ─────────────────────────────────────────────────────────────
+# Shared helpers
+# ─────────────────────────────────────────────────────────────
+
+def _format_size(size: int) -> str:
+    for unit in ("B", "KB", "MB"):
+        if size < 1024:
+            return f"{size:.0f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
+
+
+def _report_result(out_file: Path) -> None:
+    size = out_file.stat().st_size
+    print(f"[OK] Saved Markdown to: {out_file} ({_format_size(size)})")
+
+
+def _is_empty(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and value.strip() == "")
+
+
+def _markdown_escape(value: str) -> str:
+    value = value.replace("\\", "\\\\")
+    value = value.replace("|", "\\|")
+    value = value.replace("\r\n", "\n").replace("\r", "\n")
+    return re.sub(r"\s*\n\s*", "<br>", value).strip()
+
+
+def _format_cell_value(value: Any) -> str:
+    if _is_empty(value):
+        return ""
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, datetime):
+        return value.isoformat(sep=" ", timespec="seconds")
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, time):
+        return value.isoformat(timespec="seconds")
+    if isinstance(value, float):
+        # Excel shows 15 significant digits; that keeps 1234567.89 exact while
+        # 0.1 + 0.2 reads as 0.3 rather than its binary expansion.
+        return _markdown_escape(repr(float(f"{value:.15g}")).removesuffix(".0"))
+    return _markdown_escape(str(value))
+
+
+def _is_numeric_value(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _sheet_state_label(sheet_state: str) -> str:
+    if sheet_state == "visible":
+        return "visible"
+    return sheet_state or "unknown"
+
+
+# ─────────────────────────────────────────────────────────────
+# Worksheet extraction
+# ─────────────────────────────────────────────────────────────
+
+def _merged_value_map(worksheet) -> dict[tuple[int, int], Any]:
+    """Return propagated values for merged cells, keyed by (row, column).
+
+    Merged regions whose top-left cell is empty are intentionally skipped.
+    These are typically formatting-only ranges that carry no textual content.
+    """
+    merged_values: dict[tuple[int, int], Any] = {}
+    for merged_range in worksheet.merged_cells.ranges:
+        value = worksheet.cell(merged_range.min_row, merged_range.min_col).value
+        if _is_empty(value):
+            continue
+        for row in range(merged_range.min_row, merged_range.max_row + 1):
+            for col in range(merged_range.min_col, merged_range.max_col + 1):
+                merged_values[(row, col)] = value
+    return merged_values
+
+
+def _cell_value(worksheet, row: int, col: int, merged_values: dict[tuple[int, int], Any]) -> Any:
+    value = worksheet.cell(row, col).value
+    if _is_empty(value):
+        return merged_values.get((row, col), value)
+    return value
+
+

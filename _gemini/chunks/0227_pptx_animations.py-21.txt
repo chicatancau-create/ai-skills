@@ -1,0 +1,127 @@
+        return None
+    if maximum is not None and number > maximum:
+        errors.append(f'{label} must be at most {maximum}; found {number}')
+        return None
+    return number
+
+
+def _direct_conditions(ctn: ET.Element) -> list[ET.Element]:
+    condition_list = ctn.find(_qn(PML_NS, 'stCondLst'))
+    if condition_list is None:
+        return []
+    return [
+        child for child in list(condition_list)
+        if child.tag == _qn(PML_NS, 'cond')
+    ]
+
+
+def _shape_index(
+    slide_root: ET.Element,
+) -> tuple[dict[int, tuple[str, bool]], list[str]]:
+    parent_map = {
+        child: parent
+        for parent in slide_root.iter()
+        for child in list(parent)
+    }
+    index: dict[int, tuple[str, bool]] = {}
+    errors: list[str] = []
+    shape_tags = {'sp', 'grpSp', 'pic', 'graphicFrame', 'cxnSp', 'contentPart'}
+    for non_visual in slide_root.iter(_qn(PML_NS, 'cNvPr')):
+        shape_id = _int_attribute(
+            non_visual,
+            'id',
+            'p:cNvPr@id',
+            errors,
+            minimum=1,
+            maximum=MAX_OOXML_UNSIGNED_INT,
+        )
+        if shape_id is None:
+            continue
+        owner = parent_map.get(non_visual)
+        while owner is not None and _local_name(owner.tag) not in shape_tags:
+            owner = parent_map.get(owner)
+        kind = _local_name(owner.tag) if owner is not None else 'unknown'
+        has_text = bool(
+            owner is not None
+            and kind == 'sp'
+            and any(
+                _local_name(element.tag) == 't' and (element.text or '').strip()
+                for element in owner.iter()
+            )
+        )
+        if shape_id in index:
+            errors.append(f'duplicate p:cNvPr@id {shape_id}')
+        else:
+            index[shape_id] = (kind, has_text)
+    return index, errors
+
+
+def _row_shape_id(row: ET.Element, errors: list[str]) -> int | None:
+    shape_ids: list[int] = []
+    for target in row.iter(_qn(PML_NS, 'spTgt')):
+        value = _int_attribute(
+            target,
+            'spid',
+            'animation p:spTgt@spid',
+            errors,
+            minimum=1,
+            maximum=MAX_OOXML_UNSIGNED_INT,
+        )
+        if value is not None:
+            shape_ids.append(value)
+    unique = sorted(set(shape_ids))
+    if len(unique) != 1:
+        errors.append(
+            'one object-animation row must resolve to exactly one shape id; '
+            f'found {unique or "none"}'
+        )
+        return None
+    return unique[0]
+
+
+def _row_filter(
+    row: ET.Element,
+    preset_class: str,
+    errors: list[str],
+) -> str | None:
+    effects = list(row.iter(_qn(PML_NS, 'animEffect')))
+    if len(effects) > 1:
+        errors.append(
+            f'object-animation row contains {len(effects)} p:animEffect nodes'
+        )
+    if not effects:
+        return None
+    effect = effects[0]
+    expected_transition = {'entr': 'in', 'exit': 'out'}.get(preset_class)
+    if expected_transition is not None and effect.get('transition') != expected_transition:
+        errors.append(
+            f'{preset_class} p:animEffect must set '
+            f'transition="{expected_transition}"'
+        )
+    return effect.get('filter')
+
+
+def _resolve_row_effect(
+    row: ET.Element,
+    filter_name: str | None,
+    errors: list[str],
+) -> tuple[tuple[str, ...], str | None, int | None, int | None]:
+    preset_class = row.get('presetClass')
+    if preset_class not in set(_PRESET_CLASS_BY_CATEGORY.values()):
+        errors.append(
+            f'unsupported p:cTn@presetClass {preset_class!r}; expected '
+            + ', '.join(sorted(set(_PRESET_CLASS_BY_CATEGORY.values())))
+        )
+        return (), preset_class, None, None
+    preset_id = _int_attribute(
+        row,
+        'presetID',
+        'object-animation p:cTn@presetID',
+        errors,
+        maximum=MAX_OOXML_UNSIGNED_INT,
+    )
+    preset_subtype = _int_attribute(
+        row,
+        'presetSubtype',
+        'object-animation p:cTn@presetSubtype',
+        errors,

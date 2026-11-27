@@ -1,0 +1,50 @@
+                    'error', label, 'attribute', name, raw,
+                    f'{label} uses unsupported text attribute {name!r}; '
+                    'native PPTX export would ignore it',
+                ))
+
+        declarations, malformed = _iter_style_declarations(elem)
+        for fragment in malformed:
+            property_hint = fragment.split(None, 1)[0].lower()
+            if (
+                inline_allowlist is not None
+                or property_hint in _TEXT_DECLARATION_PROPERTIES
+                or property_hint in _UNSUPPORTED_TEXT_PROPERTIES
+                or _is_unregistered_prefixed_text_property(property_hint)
+            ):
+                diagnostics.append(TextPropertyDiagnostic(
+                    'error', label, 'inline style', '<malformed>', fragment,
+                    f'{label} has malformed inline style declaration {fragment!r}',
+                ))
+        for name, raw in declarations:
+            handled, diagnostic = _diagnose_text_declaration(
+                elem,
+                tag=tag,
+                source='inline style',
+                name=name,
+                raw=raw,
+                font_size=font_sizes[id(elem)],
+            )
+            if diagnostic is not None:
+                diagnostics.append(diagnostic)
+            elif (
+                not handled
+                and inline_allowlist is not None
+                and name not in inline_allowlist
+            ):
+                diagnostics.append(TextPropertyDiagnostic(
+                    'error', label, 'inline style', name, raw,
+                    f'{label} uses unsupported inline text property {name!r}; '
+                    'native PPTX export would ignore it',
+                ))
+
+    return diagnostics
+
+
+def project_text_property_errors(root: ET.Element) -> list[str]:
+    """Return blocking diagnostics for the converter preflight."""
+    return [
+        diagnostic.message
+        for diagnostic in project_text_property_diagnostics(root)
+        if diagnostic.severity == 'error'
+    ]

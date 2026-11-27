@@ -1,0 +1,102 @@
+                )
+            config["tick_marks"] = tick_marks
+
+        raw_cross_between = raw_config.get("cross_between")
+        if raw_cross_between is not None:
+            if role not in {"value", "secondary_value"}:
+                raise RuntimeError(
+                    f"Native PPTX chart axes.{role}.cross_between is unsupported"
+                )
+            cross_between = {
+                "between": "between",
+                "midcat": "midCat",
+                "midcategory": "midCat",
+                "oncategories": "midCat",
+                "onticks": "midCat",
+            }.get(_compact_key(raw_cross_between))
+            if cross_between is None:
+                raise RuntimeError(
+                    f"Native PPTX chart axes.{role}.cross_between must be between or mid_category"
+                )
+            config["cross_between"] = cross_between
+
+        raw_number_format = raw_config.get("number_format")
+        if raw_number_format is not None:
+            if not isinstance(raw_number_format, str):
+                raise RuntimeError(
+                    f"Native PPTX chart axes.{role}.number_format must be a string"
+                )
+            if not raw_number_format.strip():
+                raise RuntimeError(
+                    f"Native PPTX chart axes.{role}.number_format must be non-empty"
+                )
+            config["number_format"] = raw_number_format
+
+        for field in ("minimum", "maximum", "major_unit"):
+            value = raw_config.get(field)
+            if value is None:
+                continue
+            number = _chart_number(value)
+            if field == "major_unit":
+                if role not in {"value", "secondary_value", "x", "y"}:
+                    raise RuntimeError(
+                        f"Native PPTX chart axes.{role}.major_unit is unsupported"
+                    )
+                if number <= 0:
+                    raise RuntimeError(
+                        f"Native PPTX chart axes.{role}.major_unit must be positive"
+                    )
+            config[field] = number
+        if (
+            config.get("minimum") is not None
+            and config.get("maximum") is not None
+            and config["minimum"] >= config["maximum"]
+        ):
+            raise RuntimeError(
+                f"Native PPTX chart axes.{role}.minimum must be less than maximum"
+            )
+        axes[role] = config
+    return axes
+
+
+def _category_axis_reversed(config: dict[str, Any], chart_type: str) -> bool:
+    """Bar categories read top-down in payload order unless ``reverse`` says otherwise."""
+    reverse = config.get("reverse")
+    if reverse is None:
+        return chart_type == "bar"
+    return bool(reverse)
+
+
+def _category_axis_is_date(axes: dict[str, dict[str, Any]]) -> bool:
+    return axes.get("category", {}).get("kind") == "date"
+
+
+def _chart_plot_area(payload: dict[str, Any]) -> dict[str, float] | None:
+    """Normalize an optional absolute slide-local plot-area box."""
+    raw = payload.get("plot_area")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise RuntimeError("Native PPTX chart plot_area must be an object")
+
+    box_keys = {"x", "y", "width", "height"}
+    unknown_keys = set(raw) - box_keys
+    if unknown_keys:
+        fields = ", ".join(sorted(unknown_keys))
+        raise RuntimeError(
+            f"Native PPTX chart plot_area contains unsupported field(s): {fields}"
+        )
+    missing_keys = box_keys - set(raw)
+    if missing_keys:
+        fields = ", ".join(sorted(missing_keys))
+        raise RuntimeError(
+            "Native PPTX chart plot_area requires x/y/width/height together; "
+            f"missing: {fields}"
+        )
+
+    plot_area = {
+        key: _number(raw[key], f"chart plot_area.{key}")
+        for key in ("x", "y", "width", "height")
+    }
+    if plot_area["width"] <= 0 or plot_area["height"] <= 0:
+        raise RuntimeError("Native PPTX chart plot_area width/height must be positive")

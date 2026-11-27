@@ -1,0 +1,105 @@
+    suffix: str,
+) -> Path:
+    """Resolve a project-relative structure file without allowing escape."""
+    value = raw_value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+        value = value[1:-1].strip()
+    if not value:
+        raise TemplateStructureError(
+            f"spec_lock.md pptx_structure.{field_name} cannot be empty"
+        )
+    candidate = Path(value)
+    if candidate.is_absolute():
+        raise TemplateStructureError(
+            f"spec_lock.md pptx_structure.{field_name} must be project-relative"
+        )
+    root = project_path.resolve()
+    resolved = (root / candidate).resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise TemplateStructureError(
+            f"spec_lock.md pptx_structure.{field_name} escapes the project directory"
+        ) from exc
+    if resolved.suffix.lower() != suffix:
+        raise TemplateStructureError(
+            f"spec_lock.md pptx_structure.{field_name} must reference a {suffix} file"
+        )
+    if not resolved.is_file():
+        raise TemplateStructureError(
+            f"spec_lock.md pptx_structure.{field_name} does not exist: {candidate}"
+        )
+    return resolved
+
+
+def _template_replication_mode(template_dir: Path) -> str | None:
+    """Read the optional replication mode from template design frontmatter."""
+    spec_path = template_dir / "design_spec.md"
+    try:
+        lines = spec_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    if not lines or lines[0].strip() != "---":
+        return None
+    for line in lines[1:]:
+        stripped = line.strip()
+        if stripped == "---":
+            return None
+        match = re.fullmatch(
+            r"replication_mode\s*:\s*[\"']?(standard|fidelity|mirror)[\"']?",
+            stripped,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            return match.group(1).lower()
+    return None
+
+
+def load_template_source_themes(
+    template_dir: Path,
+) -> dict[str, bytes] | None:
+    """Load exact per-Master themes carried by a Type A mirror workspace."""
+    path = template_dir / SOURCE_THEMES_FILENAME
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise TemplateStructureError(
+            f"Cannot read template source themes {path}: {exc}"
+        ) from exc
+    schema = payload.get("schema") if isinstance(payload, dict) else None
+    if not isinstance(payload, dict) or schema != SOURCE_THEMES_SCHEMA:
+        raise TemplateStructureError(
+            f"Unsupported template source theme schema: {schema!r}"
+        )
+    masters = payload.get("masters")
+    if not isinstance(masters, dict) or not masters:
+        raise TemplateStructureError(
+            f"{SOURCE_THEMES_FILENAME} requires a non-empty masters object"
+        )
+
+    themes: dict[str, bytes] = {}
+    for master_key, record in masters.items():
+        if (
+            not isinstance(master_key, str)
+            or not _MASTER_KEY_RE.fullmatch(master_key)
+        ):
+            raise TemplateStructureError(
+                f"{SOURCE_THEMES_FILENAME} has invalid Master key {master_key!r}"
+            )
+        if not isinstance(record, dict):
+            raise TemplateStructureError(
+                f"{SOURCE_THEMES_FILENAME} Master {master_key!r} must be an object"
+            )
+        if record.get("encoding") != "base64":
+            raise TemplateStructureError(
+                f"{SOURCE_THEMES_FILENAME} Master {master_key!r} must use base64"
+            )
+        encoded = record.get("payload")
+        expected_sha256 = record.get("sha256")
+        if (
+            not isinstance(encoded, str)
+            or not isinstance(expected_sha256, str)
+        ):
+            raise TemplateStructureError(

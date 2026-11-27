@@ -1,0 +1,57 @@
+                    warnings = native_object_projection_warnings(root[0], document_root=root)
+                    self.assertEqual(warnings, [])
+                    root = ET.fromstring(self._table_svg(
+                        "B" * length, header=header, column=column, mismatch="color"
+                    ))
+                    warnings = native_object_projection_warnings(root[0], document_root=root)
+                    self.assertTrue(any("not projected" in warning for warning in warnings), warnings)
+
+    def test_a06_repeated_paragraph_text_matches_each_style_occurrence(self) -> None:
+        from xml.etree import ElementTree as ET
+        from svg_to_pptx.native_objects import native_object_projection_warnings
+
+        root = ET.fromstring(self._table_svg("B"))
+        marker = root[0]
+        payload = json.loads(marker[0].text)
+        payload["rows"][0][0]["paragraphs"] = [
+            {"runs": [{"text": "SAME", "color": "#000000", "bold": False}]},
+            {"runs": [{"text": "SAME", "color": "#FF0000", "bold": True}]},
+        ]
+        marker[0].text = json.dumps(payload)
+        first_text = marker[3]
+        first_text.remove(first_text[0])
+        first_text.text = "SAME"
+        second_text = ET.SubElement(marker, first_text.tag, {
+            **first_text.attrib, "y": "175", "fill": "#FF0000", "font-weight": "bold",
+        })
+        second_text.text = "SAME"
+        self.assertEqual(native_object_projection_warnings(marker, document_root=root), [])
+        payload["rows"][0][0]["paragraphs"][1]["runs"][0]["color"] = "#000000"
+        marker[0].text = json.dumps(payload)
+        warnings = native_object_projection_warnings(marker, document_root=root)
+        self.assertTrue(any("color #FF0000" in warning for warning in warnings), warnings)
+        payload["rows"][0][0]["paragraphs"][1]["runs"][0]["color"] = "#FF0000"
+        payload["rows"][0][0]["paragraphs"][0]["runs"][0]["color"] = "#FF0000"
+        marker[0].text = json.dumps(payload)
+        warnings = native_object_projection_warnings(marker, document_root=root)
+        self.assertTrue(any("color #000000" in warning for warning in warnings), warnings)
+
+    def test_a06_header_text_keeps_exported_body_color_defaults(self) -> None:
+        from xml.etree import ElementTree as ET
+        from svg_to_pptx.native_objects import native_object_projection_warnings
+
+        for body_color in (None, "#123456"):
+            with self.subTest(body_color=body_color):
+                root = ET.fromstring(self._table_svg("B", header=True))
+                marker = root[0]
+                payload = json.loads(marker[0].text)
+                payload["rows"] = [[{"text": "AAA", "align": "l"}, {"text": "OTHER", "align": "l"}]]
+                if body_color is None:
+                    payload["style"].pop("body_text")
+                else:
+                    payload["style"]["body_text"] = body_color
+                marker[0].text = json.dumps(payload)
+                marker[3].remove(marker[3][0])
+                marker[3].set("fill", body_color or "#1F2937")
+                marker[4].set("fill", body_color or "#1F2937")
+                self.assertEqual(native_object_projection_warnings(marker, document_root=root), [])

@@ -1,0 +1,106 @@
+                            "reason": configured["reason"],
+                            "expected_fingerprint": configured["fingerprint"],
+                            "stale_reason": "missing",
+                        }
+                    )
+                    findings.append(
+                        Finding(
+                            severity="error",
+                            code="SCHEMA_ACCEPTED_STALE",
+                            message=(
+                                f"schema_grammars accepted projection for "
+                                f"{schema_field} at {path} no longer exists"
+                            ),
+                            path=manifest_label,
+                            related=[source, path],
+                        )
+                    )
+
+            if not projections and accepted_config is None:
+                continue
+            results.append(
+                {
+                    "field": schema_field,
+                    "owner": source,
+                    "owner_fingerprint": owner_fingerprint,
+                    "open": open_projections,
+                    "accepted": accepted_projections,
+                    "stale": stale_projections,
+                }
+            )
+
+        for schema_field in sorted(
+            set(accepted_by_field) - processed_accepted_fields
+        ):
+            findings.append(
+                Finding(
+                    severity="error",
+                    code="SCHEMA_ACCEPTED_STALE",
+                    message=(
+                        f"schema_grammars accepted field {schema_field} is no "
+                        "longer configured for this owner"
+                    ),
+                    path=manifest_label,
+                    related=[source],
+                )
+            )
+    results.sort(key=lambda item: item["field"])
+    return results, findings
+
+
+def _finding_key(finding: Finding) -> tuple[Any, ...]:
+    return (
+        _SEVERITY_ORDER.get(finding.severity, 9),
+        finding.code,
+        finding.path,
+        finding.line,
+        finding.message,
+    )
+
+
+def run_audit(
+    root: Path,
+    manifest_path: Path,
+    *,
+    include_near_duplicates: bool = True,
+) -> dict[str, Any]:
+    """Run the complete read-only prompt audit and return a stable report."""
+    root = root.resolve()
+    manifest = load_manifest(manifest_path)
+    encoding_name = str(manifest["encoding"])
+    paths = discover_documents(root, manifest["documents"])
+    documents = count_documents(root, paths, encoding_name)
+    token_counts = {document.path: document.tokens for document in documents}
+    findings: list[Finding] = []
+    try:
+        manifest_label = _relative_path(root, manifest_path)
+    except ValueError:
+        manifest_label = str(manifest_path.resolve())
+
+    corpus_budget = manifest["documents"].get("max_tokens")
+    corpus_tokens = sum(token_counts.values())
+    if isinstance(corpus_budget, int) and corpus_tokens > corpus_budget:
+        findings.append(
+            Finding(
+                severity="error",
+                code="BUDGET_CORPUS",
+                message=f"Corpus has {corpus_tokens} tokens; budget is {corpus_budget}",
+            )
+        )
+
+    findings.extend(audit_file_budgets(manifest.get("file_budgets", {}), token_counts))
+    registry_configs = manifest.get("registries", [])
+    registry_members: dict[str, set[Any]] = {}
+    for registry_config in registry_configs:
+        registry_name = registry_config.get("name")
+        if not isinstance(registry_name, str) or not registry_name:
+            raise AuditError("Every registry requires a name")
+        if registry_name in registry_members:
+            raise AuditError(f"Duplicate registry name: {registry_name}")
+        members, _, _, _ = _registry_ids(root, registry_config)
+        registry_members[registry_name] = members
+
+    load_sets, load_findings, covered_paths = audit_load_sets(
+        root,
+        manifest["load_sets"],
+        token_counts,

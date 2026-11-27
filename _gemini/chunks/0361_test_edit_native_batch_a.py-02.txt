@@ -1,0 +1,76 @@
+            convert_pptx_to_svg(source, project, ConvertOptions(inheritance_mode='both', roundtrip=True))
+        return project
+
+    def _export(self, project: Path, *args: str, name: str = 'result.pptx', success: bool = True):
+        output = project / name
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            result = cli.main([str(project), '--roundtrip', '-o', str(output), *args])
+        if success:
+            self.assertEqual(result, 0, stdout.getvalue() + stderr.getvalue())
+            self.assertTrue(output.is_file())
+        return output, result, stdout.getvalue(), stderr.getvalue()
+
+    def _config(self, project: Path, *, slides=None, defaults=None) -> None:
+        path = project / 'animations.json'
+        config = json.loads(path.read_text(encoding='utf-8'))
+        if slides is not None:
+            config['slides'] = slides
+        if defaults is not None:
+            config.setdefault('defaults', {}).update(defaults)
+        path.write_text(json.dumps(config), encoding='utf-8')
+
+    def _audio(self, project: Path, stem: str = 'slide_01', sample: int = 0) -> Path:
+        directory = project / 'audio'
+        directory.mkdir(exist_ok=True)
+        path = directory / f'{stem}.wav'
+        with wave.open(str(path), 'wb') as audio:
+            audio.setnchannels(1)
+            audio.setsampwidth(2)
+            audio.setframerate(8000)
+            audio.writeframes(sample.to_bytes(2, 'little', signed=True) * 1600)
+        return path
+
+    def _slide(self, path: Path, number: int = 1) -> ET.Element:
+        with zipfile.ZipFile(path) as archive:
+            return ET.fromstring(archive.read(f'ppt/slides/slide{number}.xml'))
+
+    def test_a1_animation_and_default_changes_do_not_replace_source_transition(self) -> None:
+        source = self._source()
+        for name, row, defaults in (
+            ('row', {'slide_01': {'animation': {'effect': 'none'}}}, None),
+            ('default', {}, {'animation': {'effect': 'entrance_fade'}}),
+        ):
+            with self.subTest(name=name):
+                project = self._import(source, name)
+                self._config(project, slides=row, defaults=defaults)
+                output, *_ = self._export(project)
+                root = self._slide(output)
+                self.assertEqual(ET.tostring(root.find('p:transition', NS)),
+                                 ET.tostring(self._slide(source).find('p:transition', NS)))
+                if name == 'default':
+                    self.assertIsNotNone(root.find('p:timing', NS))
+
+    def test_a1_user_edited_default_transition_replaces_deck_wide(self) -> None:
+        source = self._source()
+        project = self._import(source)
+        self._config(project, slides={}, defaults={'transition': {'effect': 'fade', 'duration': 0.4}})
+        output, *_ = self._export(project)
+        transition = self._slide(output).find('p:transition', NS)
+        self.assertIsNotNone(transition)
+        self.assertIsNotNone(transition.find('p:fade', NS))
+
+    def test_a2_explicit_none_removes_timing_and_keeps_transition_and_shapes(self) -> None:
+        source = self._source(timing=create_sequence_timing_xml([(2, 0, 'entrance_fade')]))
+        project = self._import(source)
+        self._config(project, slides={'slide_01': {'animation': {'effect': 'none'}}})
+        output, *_ = self._export(project)
+        before, after = self._slide(source), self._slide(output)
+        self.assertIsNone(after.find('p:timing', NS))
+        for xpath in ('p:transition', 'p:cSld/p:spTree'):
+            self.assertEqual(ET.tostring(before.find(xpath, NS)), ET.tostring(after.find(xpath, NS)))
+
+    def test_a1_legacy_baseline_and_unlisted_motion_are_preserved(self) -> None:
+        source = self._source(count=2, timing=create_sequence_timing_xml([(2, 0, 'entrance_fade')]))
+        project = self._import(source)
+        manifest_path = project / 'analysis/roundtrip_manifest.json'

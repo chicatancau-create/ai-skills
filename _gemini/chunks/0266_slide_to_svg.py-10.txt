@@ -1,0 +1,124 @@
+    def _resolve(zone: ET.Element) -> tuple[str | None, str]:
+        if failed:
+            return None, opaque_formula_preview(zone)
+        item = imported.get(id(zone))
+        if item is None:
+            return None, opaque_formula_preview(zone)
+        return item.latex, item.preview
+
+    return _resolve
+
+
+def _diagnose_formula_fallback(
+    ctx: AssemblyContext,
+    error: FormulaImportError,
+) -> None:
+    message = f"Office Math was not reconstructed: {error}"
+    if ctx.strict:
+        raise ValueError(message) from error
+    ctx.diagnose(
+        "formula-not-reconstructed",
+        message,
+        "render a linear text preview and preserve the relationship-free source txBody",
+    )
+
+
+def _render_block_formula(
+    node: ShapeNode,
+    ctx: AssemblyContext,
+    formula: FormulaImport,
+    *,
+    top_level: bool,
+) -> str:
+    """Emit one canonical block marker and a dependency-free SVG preview."""
+    x = fmt_num(node.xfrm.x)
+    y = fmt_num(node.xfrm.y)
+    width = fmt_num(node.xfrm.w)
+    height = fmt_num(node.xfrm.h)
+    align = formula.align
+    if align == "right":
+        preview_x = node.xfrm.x + node.xfrm.w
+        anchor = "end"
+    elif align == "left":
+        preview_x = node.xfrm.x
+        anchor = "start"
+    else:
+        preview_x = node.xfrm.x + node.xfrm.w / 2.0
+        anchor = "middle"
+    preview_y = node.xfrm.y + node.xfrm.h / 2.0 + formula.font_size_px * 0.35
+    payload = {
+        "latex": formula.latex,
+        "display": "block",
+        "font_size": formula.font_size_px,
+        "color": formula.color,
+        "align": align,
+        "language": formula.language,
+        "name": node.name or f"Formula {node.spid}",
+    }
+    metadata = (
+        '<metadata type="application/json">'
+        + _xml_escape(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+        + "</metadata>"
+    )
+    preview = (
+        f'<text x="{fmt_num(preview_x)}" y="{fmt_num(preview_y)}" '
+        f'text-anchor="{anchor}" font-family="Cambria Math" '
+        f'font-size="{fmt_num(formula.font_size_px)}" '
+        f'fill="{_xml_escape(formula.color)}">'
+        f'{_xml_escape(formula.preview)}</text>'
+    )
+    return _wrap_shape_group(
+        metadata + "\n" + preview,
+        node,
+        ctx,
+        top_level=top_level,
+        extra_attrs=[
+            'data-pptx-replace-with="formula"',
+            'data-pptx-import-source="pptx"',
+            f'data-pptx-x="{x}"',
+            f'data-pptx-y="{y}"',
+            f'data-pptx-width="{width}"',
+            f'data-pptx-height="{height}"',
+            f'data-pptx-bounds="{x} {y} {width} {height}"',
+        ],
+    )
+
+
+def _txbody_metadata(
+    tx_body: ET.Element,
+    visible_text_svg: str,
+) -> str:
+    """Preserve the native text body while its visible SVG remains authoritative."""
+    if has_relationship_attributes(tx_body):
+        # Relationship ids are part-local and cannot be copied into a newly
+        # generated slide without rebuilding the relationship target.
+        return ""
+    raw = ET.tostring(tx_body, encoding="utf-8")
+    encoded = base64.b64encode(raw).decode("ascii")
+    wrapper = ET.fromstring(
+        f'<svg xmlns="http://www.w3.org/2000/svg">{visible_text_svg}</svg>'
+    )
+    digest = svg_text_fingerprint(wrapper)
+    return (
+        '<metadata data-pptx-part="txbody" data-pptx-encoding="base64" '
+        f'data-pptx-text-sha256="{digest}">{encoded}</metadata>'
+    )
+
+
+def _placeholder_sp_pr_metadata(
+    node: ShapeNode,
+    ctx: AssemblyContext,
+) -> str:
+    """Preserve relationship-free local placeholder geometry for inheritance."""
+    if (
+        not ctx.preserve_placeholder_inheritance
+        or node.placeholder is None
+        or node.kind != SHAPE
+    ):
+        return ""
+    sp_pr = node.xml.find("p:spPr", NS)
+    if sp_pr is None or has_relationship_attributes(sp_pr):
+        return ""
+    raw = ET.tostring(sp_pr, encoding="utf-8")
+    return (
+        '<metadata data-pptx-part="placeholder-sppr" '

@@ -1,0 +1,93 @@
+        self._undeclared_size_counts_ready = False
+
+        if not dir_path.exists():
+            print(f"[ERROR] Directory does not exist: {directory}")
+            self.summary['errors'] += 1
+            self.issue_types['Input issues'] += 1
+            return []
+
+        # Brand and Style workspaces have no SVG roster. Validate their
+        # portable contracts through the same authority used by library
+        # registration, while keeping project scope independent of global
+        # indexes and directory names.
+        if self.template_mode and dir_path.is_dir():
+            nested = dir_path / 'templates'
+            spec_dir = nested if _template_spec_paths(nested) else dir_path
+            specs = _template_spec_paths(spec_dir)
+            bare = [spec for spec in specs if spec.name == 'design_spec.md']
+            qualified = [spec for spec in specs if spec.name != 'design_spec.md']
+            if bare and qualified:
+                self._template_issues.append((
+                    'error',
+                    'spec_naming',
+                    'design_spec.md and design_spec.<kind>.<id>.md cannot share '
+                    f'{spec_dir}; rename the bare spec to its kind-qualified name',
+                ))
+                return self.results
+            try:
+                from register_template import (
+                    SpecParseError,
+                    validate_qualified_spec_identity,
+                )
+                for spec in qualified:
+                    validate_qualified_spec_identity(spec)
+            except ImportError as exc:
+                self._template_issues.append((
+                    'error',
+                    'spec_naming',
+                    f'Qualified Design Spec validator could not be imported: {exc}',
+                ))
+                return self.results
+            except (OSError, SpecParseError) as exc:
+                self._template_issues.append((
+                    'error',
+                    'spec_naming',
+                    str(exc),
+                ))
+                return self.results
+            declared_kinds = [
+                kind
+                for spec in qualified
+                for kind in [_spec_declared_kind(spec)]
+                if kind is not None
+            ]
+            duplicate_kinds = sorted({
+                kind for kind in declared_kinds
+                if declared_kinds.count(kind) > 1
+            })
+            if duplicate_kinds:
+                self._template_issues.append((
+                    'error',
+                    'spec_naming',
+                    f'{spec_dir} declares the same kind more than once: '
+                    + ', '.join(duplicate_kinds),
+                ))
+                return self.results
+            active_roster_spec = _roster_spec_path(spec_dir)
+            shadowed_deck_specs = [
+                spec
+                for spec in _roster_spec_paths(spec_dir)
+                if spec != active_roster_spec
+                and _spec_declared_kind(spec) == 'deck'
+            ]
+            for spec in shadowed_deck_specs:
+                try:
+                    from register_template import (
+                        SpecParseError,
+                        validate_shadowed_deck_spec,
+                    )
+                    declared_pages = self._extract_spec_roster(
+                        spec.read_text(encoding='utf-8')
+                    )
+                    validate_shadowed_deck_spec(spec, declared_pages)
+                except ImportError as exc:
+                    self._template_issues.append((
+                        'error',
+                        'deck_contract',
+                        f'Shadowed Deck validator could not be imported: {exc}',
+                    ))
+                    return self.results
+                except (OSError, SpecParseError) as exc:
+                    self._template_issues.append((
+                        'error',
+                        'deck_contract',

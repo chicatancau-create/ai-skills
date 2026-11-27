@@ -1,0 +1,72 @@
+| `<circle>` | `cx`, `cy`, `r` |
+| `<ellipse>` | `cx`, `cy`, `rx`, `ry` |
+| `<image>` | `x`, `y`, `width`, `height` |
+| `<svg>` | `x`, `y`, `width`, `height` |
+| `<use>` | `x`, `y`, `width`, `height` |
+
+Every non-zero inline geometry value is one finite `px` literal, such as
+`120px` or `-8.5px`; exact zero may be unitless. `width`, `height`, `rx`,
+`ry`, and `r` must be non-negative. Percentages, `auto`, `calc()`, `var()`,
+`!important`, `inherit`, and every other unit are forbidden. Line endpoints,
+text positions, path data, and polygon/polyline points remain XML attributes.
+
+`<style>`, `class`, selector rules, external stylesheets, and imported styles
+remain forbidden. This contract is only for literal declarations in an
+element's own `style` attribute; PPT Master does not compute CSS cascade or
+custom properties. Root canvas authority remains the `viewBox`, regardless of
+root `<svg>` compatibility width/height values. The shared coordinate and
+geometry implementation is
+[`utils.py`](../svg_to_pptx/drawingml/utils.py).
+
+---
+
+## §2.2 Group opacity
+
+DrawingML has no isolated group-alpha model. The converter accepts
+`<g opacity="...">` and inline group `opacity` by multiplying group alpha into
+descendants. That path is `Approximate`; nested group/child alpha multiplies,
+and `--native-charts-and-tables` rejects transparent native table/chart
+markers. The quality checker reports a non-blocking fidelity warning so
+existing or intentionally authored input can continue without modification.
+New `svg_output/` puts alpha on the affected descendant paint, text run,
+picture, or supported effect instead.
+
+---
+
+## §4 Canvas and packaging boundaries
+
+**Canvas authority**: `viewBox="0 0 W H"` with positive integer pixels.
+Numerically equivalent spellings and positive fractional imported dimensions
+remain compatible; export quantizes once at `1 SVG px = 9,525 EMU`.
+Invalid/non-finite values, non-zero origin, non-positive size, or unsupported
+PowerPoint dimensions are errors. Optional root `width`/`height` do not
+override `viewBox`. Root `<svg>` transform is forbidden; nested crop and
+`<symbol viewBox>` keep their own contracts.
+
+**Native PowerPoint background promotion**: outside structured mode, the first
+eligible visual layer may be a direct full-canvas `<rect>` or one inside a
+simple single-child group. Its fill must have a registered native mapping
+(solid, linear/radial gradient, or preset pattern), and it must have no
+transform, filter, clip, rounding, or visible stroke. Export writes the fill as
+Slide `p:bg`; image elements remain pictures. Structured routes use the
+narrower explicit solid-background ownership contract in
+[`pptx-structure-interface.md`](../../references/pptx-structure-interface.md).
+
+**Flat packaging**: `pptx_structure.mode: flat` keeps represented objects
+Slide-local; export emits one clean Master plus Blank Layout, removes stock
+content placeholders/Layout inventory, and retains the standard
+date/footer/slide-number hooks. Without a Layout/Deck owner, Quick uses the
+same ownership with converter-default theme scaffolding. Reusable Layouts are
+mapped through `page_layouts` / `page_pptx_layouts` in Default and inferred
+from the complete structured SVG roster in Quick; ownership is never inferred
+from repeated Slide-local geometry.
+
+**Root-group bounds checks**: every visible direct root `<g>` except a compact
+helper-authored preset atom declares root-coordinate
+`data-pptx-bounds="x y width height"`. The checker fails ordinary root-group
+overlap exceeding `1px` on both axes (structured slots, structural-role groups,
+and off-canvas Morph staging groups are exempt; structured Slide-local groups
+are not). It compares each subcanvas with the root `viewBox`, and estimable
+descendant text — including both multiline `<tspan>` forms — with the
+subcanvas using the shared per-run width estimate, inline-formula height
+envelope, and DrawingML wrapping headroom; it separately compares estimable

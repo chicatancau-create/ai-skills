@@ -1,0 +1,129 @@
+            continue
+        master_path.write_text(promoted_master_xml, encoding="utf-8")
+
+        for slide_num in dominant_slides:
+            slide_path = extract_dir / "ppt" / "slides" / f"slide{slide_num}.xml"
+            slide_xml = slide_path.read_text(encoding="utf-8")
+            slide_path.write_text(
+                _remove_slide_background_xml(slide_xml),
+                encoding="utf-8",
+            )
+            promoted += 1
+
+    if verbose and promoted:
+        print(f"  Baseline master background: promoted {promoted} slide background(s)")
+    return promoted
+
+
+_CHROME_TRACE_TOKENS = (
+    "logo",
+    "footer",
+    "header",
+    "watermark",
+    "chrome",
+    "pagenumber",
+    "slidenumber",
+    "pagenum",
+    "slidenum",
+)
+_TOP_LEVEL_SHAPE_TAGS = {
+    f"{{{PML_NS}}}sp",
+    f"{{{PML_NS}}}grpSp",
+    f"{{{PML_NS}}}pic",
+    f"{{{PML_NS}}}cxnSp",
+    f"{{{PML_NS}}}graphicFrame",
+    f"{{{MC_NS}}}AlternateContent",
+}
+_FLAT_SYSTEM_PLACEHOLDER_TYPES = frozenset({"dt", "ftr", "sldNum"})
+_REL_ATTRS = {
+    f"{{{REL_NS}}}embed",
+    f"{{{REL_NS}}}link",
+    f"{{{REL_NS}}}id",
+}
+
+
+def _chrome_token_from_svg_id(svg_id: str | None) -> str | None:
+    """Return the baseline chrome token encoded in a source SVG id."""
+    if not svg_id:
+        return None
+    lower = svg_id.lower()
+    compact = re.sub(r"[-_\s]+", "", lower)
+    if compact in _CHROME_TRACE_TOKENS:
+        return compact
+    split_tokens = {token for token in re.split(r"[-_\s]+", lower) if token}
+    for token in _CHROME_TRACE_TOKENS:
+        if token in split_tokens:
+            return token
+    return None
+
+
+def _trace_chrome_shape_ids(
+    trace: dict[str, Any] | None,
+) -> dict[str, list[str]]:
+    """Map chrome token to generated top-level shape ids for one slide."""
+    result: dict[str, list[str]] = {}
+    if not trace:
+        return result
+    for event in trace.get("events", []):
+        if event.get("decision") != "native":
+            continue
+        if event.get("animation_override"):
+            # Explicitly animated chrome stays slide-local.
+            continue
+        semantic_role = event.get("data-pptx-role")
+        placeholder = event.get("data-pptx-placeholder")
+        has_explicit_semantics = (
+            semantic_role is not None or placeholder is not None
+        )
+        token = (
+            chrome_token_from_markers(semantic_role, placeholder)
+            if has_explicit_semantics
+            else _chrome_token_from_svg_id(event.get("id"))
+        )
+        shape_id = event.get("shape_id")
+        if token and shape_id is not None:
+            shape_ids = result.setdefault(token, [])
+            normalized_shape_id = str(shape_id)
+            if normalized_shape_id not in shape_ids:
+                shape_ids.append(normalized_shape_id)
+    return result
+
+
+def _trace_native_shape_ids(
+    trace: dict[str, Any] | None,
+) -> dict[str, list[str]]:
+    """Map every traced SVG id to generated top-level shape ids."""
+    result: dict[str, list[str]] = {}
+    if not trace:
+        return result
+    for event in trace.get("events", []):
+        if event.get("decision") != "native":
+            continue
+        svg_id = event.get("id")
+        shape_id = event.get("shape_id")
+        if not svg_id or shape_id is None:
+            continue
+        shape_ids = result.setdefault(str(svg_id), [])
+        normalized = str(shape_id)
+        if normalized not in shape_ids:
+            shape_ids.append(normalized)
+    return result
+
+
+def _shape_id(elem: ET.Element) -> str | None:
+    for cnv in elem.iter(f"{{{PML_NS}}}cNvPr"):
+        return cnv.attrib.get("id")
+    return None
+
+
+def _set_shape_name(elem: ET.Element, name: str) -> None:
+    """Give one top-level shape a deterministic read-back identity."""
+    for cnv in elem.iter(f"{{{PML_NS}}}cNvPr"):
+        cnv.set("name", name)
+        return
+    raise TemplateStructureError(
+        f"Cannot name structured shape {name!r}: p:cNvPr is missing"
+    )
+
+
+def _apply_morph_shape_names(

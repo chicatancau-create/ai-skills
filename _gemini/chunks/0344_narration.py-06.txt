@@ -1,0 +1,112 @@
+            raise ValueError(f"narration source root p:timing must follow {label}")
+    extension_index = _root_extension_index(slide)
+    if extension_index is not None and timing_index > extension_index:
+        raise ValueError("narration source root p:timing must precede p:extLst")
+
+
+def _insert_root_timing(slide: ET.Element, timing: ET.Element) -> None:
+    extension_index = _root_extension_index(slide)
+    insert_at = extension_index if extension_index is not None else len(slide)
+    slide.insert(insert_at, timing)
+
+
+def _animation_timing_branches(
+    slide: ET.Element,
+) -> tuple[ET.Element | None, list[ET.Element]]:
+    """Return the root timing anchor and every active/fallback timing branch."""
+    direct = [
+        child for child in slide
+        if child.tag == _qn(PML_NS, "timing")
+    ]
+    alternates: list[tuple[ET.Element, list[ET.Element]]] = []
+    for child in slide:
+        if child.tag != _qn(MARKUP_COMPATIBILITY_NS, "AlternateContent"):
+            continue
+        timings = [
+            timing
+            for branch in list(child)
+            for timing in list(branch)
+            if timing.tag == _qn(PML_NS, "timing")
+        ]
+        if timings:
+            alternates.append((child, timings))
+    if direct and alternates:
+        raise ValueError(
+            "narration source contains both direct and AlternateContent timing"
+        )
+    if len(direct) > 1 or len(alternates) > 1:
+        raise ValueError("narration source has multiple root animation timings")
+    if direct:
+        return direct[0], direct
+    if alternates:
+        anchor, timings = alternates[0]
+        if len(timings) != 2:
+            raise ValueError(
+                "narration source animation AlternateContent must contain "
+                "one Choice and one Fallback timing"
+            )
+        return anchor, timings
+    nested = list(slide.iter(_qn(PML_NS, "timing")))
+    if nested:
+        raise ValueError(
+            "narration source contains unsupported non-root p:timing"
+        )
+    return None, []
+
+
+def inject_narration(
+    slide_xml: str,
+    *,
+    shape_id: int,
+    shape_name: str,
+    audio_rid: str,
+    media_rid: str,
+    poster_rid: str,
+    start_delay: float = 0.0,
+) -> str:
+    """Inject a hidden narration shape and delayed slide-entry autoplay timing."""
+    if isinstance(shape_id, bool) or not isinstance(shape_id, int) or shape_id <= 0:
+        raise ValueError("narration shape_id must be a positive integer")
+    if shape_id > MAX_OOXML_UNSIGNED_INT:
+        raise ValueError(
+            "narration shape_id exceeds the OOXML unsigned-integer limit: "
+            f"{shape_id}"
+        )
+    start_delay_seconds = validate_seconds(
+        start_delay,
+        "narration start delay",
+        allow_zero=True,
+    )
+    start_delay_ms = round(start_delay_seconds * 1000)
+    if start_delay_ms > MAX_OOXML_UNSIGNED_INT:
+        raise ValueError(
+            "narration start delay exceeds the OOXML unsigned-integer limit: "
+            f"{start_delay_ms} ms"
+        )
+
+    slide_xml, _removed_relationships = remove_narration(slide_xml)
+    root = parse_source_xml(slide_xml)
+    if root.tag != _qn(PML_NS, "sld"):
+        raise ValueError("narration source XML root must be p:sld")
+    common_slide_data = _direct_child(root, _qn(PML_NS, "cSld"), "p:sld/p:cSld")
+    shape_tree = _direct_child(
+        common_slide_data,
+        _qn(PML_NS, "spTree"),
+        "p:cSld/p:spTree",
+    )
+
+    shape_ids = _numeric_ids(
+        root.iter(_qn(PML_NS, "cNvPr")),
+        "shape",
+        minimum=1,
+    )
+    if shape_id in shape_ids:
+        raise ValueError(f"narration shape id already exists on slide: {shape_id}")
+    timing_anchor, timing_branches = _animation_timing_branches(root)
+    timing_id_sets = [
+        _numeric_ids(timing.iter(_qn(PML_NS, "cTn")), "timing node")
+        for timing in timing_branches
+    ]
+    timing_ids = [
+        timing_id
+        for timing_set in timing_id_sets

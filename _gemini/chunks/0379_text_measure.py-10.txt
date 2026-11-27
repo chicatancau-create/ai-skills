@@ -1,0 +1,77 @@
+    calibrate.add_argument('--json', action='store_true')
+    for command in (measure, wrap, box):
+        command.add_argument('--json', action='store_true')
+        _add_style_arguments(command)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    configure_utf8_stdio()
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.command == 'calibrate':
+        return _run_calibrate(args)
+    style = dict(
+        size=args.size,
+        family=args.family,
+        weight=args.weight,
+        letter_spacing=args.letter_spacing,
+        include_headroom=not args.no_headroom,
+    )
+
+    if args.command == 'measure':
+        if args.stdin and args.text:
+            parser.error('measure accepts positional TEXT or --stdin, not both')
+        if not args.stdin and not args.text:
+            parser.error('measure requires positional TEXT or --stdin')
+        texts = sys.stdin.read().splitlines() if args.stdin else args.text
+        results = [{'text': text, 'width': measure_text(text, **style)} for text in texts]
+        if args.json:
+            print(json.dumps(results, ensure_ascii=False))
+        else:
+            sys.stdout.write(''.join(f'{item["width"]:.1f}\t{item["text"]}\n' for item in results))
+        return 0
+
+    if args.command == 'wrap':
+        if args.stdin and args.text is not None:
+            parser.error('wrap accepts positional TEXT or --stdin, not both')
+        if not args.stdin and args.text is None:
+            parser.error('wrap requires positional TEXT or --stdin')
+        text = sys.stdin.read().rstrip('\r\n') if args.stdin else args.text
+        lines, widths, oversized = wrap_text(text, max_width=args.max_width, **style)
+        for token, width in oversized:
+            warning = f'Warning: token exceeds max width ({width:.1f} > {args.max_width:.1f}): {token}'
+            print(warning, file=sys.stderr)
+        if args.json:
+            height = (len(lines) - 1) * args.dy + 1.2 * args.size
+            payload = dict(lines=lines, widths=widths, max_width=args.max_width, height=height)
+            print(json.dumps(payload, ensure_ascii=False))
+        else:
+            print(_render_wrapped_svg(lines, x=args.x, dy=args.dy, y=args.y))
+        return 0
+
+    if args.lines > 1 and args.dy is None:
+        parser.error('box requires --dy when --lines is greater than 1')
+    if args.width is None and len(args.text) != args.lines:
+        parser.error('box without --width requires one positional TEXT per line')
+    if args.width is not None and args.text:
+        parser.error('box accepts positional TEXT only when --width is omitted')
+    width = args.width
+    if width is None:
+        width = max(measure_text(text, **style) for text in args.text)
+    bounds = text_box(
+        x=args.x, baseline_y=args.y, size=args.size, lines=args.lines, dy=args.dy or 0.0,
+        width=width, anchor=args.anchor,
+    )
+    rounded = {key: round(value, 2) for key, value in bounds.items()}
+    if args.json:
+        print(json.dumps(rounded, ensure_ascii=False))
+    else:
+        values = ' '.join(_format_number(bounds[key]) for key in ('x', 'y', 'width', 'height'))
+        top, bottom = _format_number(bounds['top']), _format_number(bounds['bottom'])
+        print(f'data-pptx-bounds="{values}"\ttop={top}\tbottom={bottom}')
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

@@ -1,0 +1,91 @@
+        kind = raw.get("kind")
+        workspace_path = raw.get("workspacePath")
+        materialized = raw.get("materialized")
+        source_sha256 = raw.get("sha256")
+        raw_owner_parts = raw.get("ownerParts")
+        if not isinstance(package_part, str) or not package_part:
+            raise RuntimeError(f"{context}.packagePart must be a non-empty string")
+        package_path = PurePosixPath(package_part)
+        if (
+            package_path.is_absolute()
+            or ".." in package_path.parts
+            or "\\" in package_part
+            or not any(
+                package_part.startswith(prefix)
+                for prefix in (
+                    "ppt/media/",
+                    "ppt/embeddings/",
+                    "ppt/model3d/",
+                )
+            )
+        ):
+            raise RuntimeError(
+                f"{context}.packagePart is outside the supported PPTX payload roots"
+            )
+        if package_part in seen_package_parts:
+            raise RuntimeError(f"{context} repeats package part {package_part!r}")
+        if not isinstance(kind, str) or not kind:
+            raise RuntimeError(f"{context}.kind must be a non-empty string")
+        if not isinstance(workspace_path, str) or not workspace_path:
+            raise RuntimeError(f"{context}.workspacePath must be a non-empty string")
+        relative = Path(workspace_path)
+        if (
+            relative.drive
+            or relative.anchor
+            or relative.is_absolute()
+            or ".." in relative.parts
+        ):
+            raise RuntimeError(f"{context}.workspacePath must stay project-relative")
+        resolved = (workspace_root / relative).resolve()
+        try:
+            resolved.relative_to(workspace_root)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"{context}.workspacePath resolves outside the project"
+            ) from exc
+        if not isinstance(materialized, bool):
+            raise RuntimeError(f"{context}.materialized must be a boolean")
+        if materialized and not resolved.is_file():
+            raise RuntimeError(
+                f"Materialized round-trip resource is missing: {workspace_path}"
+            )
+        if (
+            not isinstance(source_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", source_sha256) is None
+        ):
+            raise RuntimeError(f"{context}.sha256 must be a lowercase SHA-256")
+        if not isinstance(raw_owner_parts, list) or not all(
+            isinstance(value, str) and value
+            for value in raw_owner_parts
+        ):
+            raise RuntimeError(f"{context}.ownerParts must be an array of parts")
+        payload = resolved.read_bytes() if materialized else None
+        current_sha256 = _sha256(payload) if payload is not None else None
+        spec = WorkspaceResourceSpec(
+            package_part=package_part,
+            kind=kind,
+            workspace_path=relative,
+            materialized=materialized,
+            source_sha256=source_sha256,
+            current_sha256=current_sha256,
+            owner_parts=tuple(raw_owner_parts),
+        )
+        specs.append(spec)
+        if payload is not None and spec.changed:
+            changed_payloads.append((spec, payload))
+        seen_package_parts.add(package_part)
+
+    if changed_payloads:
+        source_path = source_pptx_path(workspace_root)
+        if not source_path.is_file():
+            raise RuntimeError(
+                "Changed round-trip resources require the preserved source PPTX: "
+                f"{source_path}"
+            )
+        try:
+            with zipfile.ZipFile(source_path) as package:
+                defaults, overrides = _package_content_types(package)
+                names = set(package.namelist())
+                for spec, payload in changed_payloads:
+                    if spec.package_part not in names:
+                        raise RuntimeError(

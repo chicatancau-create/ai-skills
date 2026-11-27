@@ -1,0 +1,96 @@
+        raise SvgPictureError(f"{context} must contain finite coordinates")
+    bounds = Bounds(*values)
+    if bounds.width <= 0 or bounds.height <= 0:
+        raise SvgPictureError(f"{context} width and height must be positive")
+    return bounds
+
+
+def _parse_key_values(values: list[str], option: str) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for raw in values:
+        key, separator, value = raw.partition("=")
+        key = key.strip()
+        if not separator or not key or not value.strip():
+            raise SvgPictureError(f"{option} expects ID=value, got {raw!r}")
+        if key in parsed:
+            raise SvgPictureError(f"{option} repeats selector {key!r}")
+        parsed[key] = value.strip()
+    return parsed
+
+
+def _measure_bounds(source: Path, selectors: list[str]) -> dict[str, Bounds]:
+    try:
+        from playwright.sync_api import Error as PlaywrightError
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise SvgPictureError(
+            "Playwright is required to measure this target; install it or pass --bounds ID=x,y,w,h"
+        ) from exc
+
+    script = """
+    (ids) => Object.fromEntries(ids.map((id) => {
+      const element = document.getElementById(id);
+      const root = element && element.ownerSVGElement;
+      const rootMatrix = root && root.getScreenCTM();
+      if (!element || !root || !rootMatrix) throw new Error(`Cannot measure ${id}`);
+      const rect = element.getBoundingClientRect();
+      const inverse = rootMatrix.inverse();
+      const points = [
+        new DOMPoint(rect.left, rect.top), new DOMPoint(rect.right, rect.top),
+        new DOMPoint(rect.right, rect.bottom), new DOMPoint(rect.left, rect.bottom),
+      ].map((point) => point.matrixTransform(inverse));
+      const xs = points.map((point) => point.x);
+      const ys = points.map((point) => point.y);
+      return [id, {
+        x: Math.min(...xs), y: Math.min(...ys),
+        width: Math.max(...xs) - Math.min(...xs),
+        height: Math.max(...ys) - Math.min(...ys),
+      }];
+    }))
+    """
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page(viewport={"width": 1920, "height": 1080})
+            page.route("http://**/*", lambda route: route.abort())
+            page.route("https://**/*", lambda route: route.abort())
+            page.goto(source.resolve().as_uri(), wait_until="load")
+            page.evaluate("document.fonts ? document.fonts.ready : Promise.resolve()")
+            measured = page.evaluate(script, selectors)
+            browser.close()
+    except (PlaywrightError, OSError, RuntimeError) as exc:
+        raise SvgPictureError(
+            "Browser measurement failed; pass explicit --bounds ID=x,y,w,h if needed: "
+            f"{exc}"
+        ) from exc
+
+    return {
+        selector: _parse_bounds(
+            ",".join(str(measured[selector][field]) for field in ("x", "y", "width", "height")),
+            f"measured bounds for {selector}",
+        )
+        for selector in selectors
+    }
+
+
+def _resolve_bounds(
+    source: Path,
+    targets: dict[str, ET.Element],
+    overrides: dict[str, str],
+    mode: str,
+    padding: float,
+) -> dict[str, tuple[Bounds, str]]:
+    resolved: dict[str, tuple[Bounds, str]] = {}
+    measure: list[str] = []
+    for selector, target in targets.items():
+        if selector in overrides:
+            resolved[selector] = (_parse_bounds(overrides[selector], f"--bounds {selector}"), "explicit")
+            continue
+        frame = target.get("data-pptx-frame")
+        if mode != "measure" and frame:
+            resolved[selector] = (_parse_bounds(frame, f"{selector} data-pptx-frame"), "data-pptx-frame")
+            continue
+        if mode == "frame":
+            raise SvgPictureError(
+                f"Selector {selector!r} has no data-pptx-frame; pass --bounds or use --bounds-mode measure"
+            )

@@ -1,0 +1,101 @@
+    renderer's font has (a taller face moves the text up, never down onto
+    the plot); ``text-anchor`` decides which edge ``x`` names.
+    """
+    if _chart_title_is_bounded(payload):
+        include_title = True
+    fallback_texts = (
+        [
+            record
+            for record in _fallback_text_records(fallback)
+            if record.x is not None and record.y is not None
+        ]
+        if fallback is not None
+        else []
+    )
+    entries = _chart_companion_entries(
+        payload,
+        include_title=include_title,
+        include_subtitle_as_caption=include_subtitle_as_caption,
+    )
+    if not entries:
+        return []
+
+    chart_off_x, chart_off_y, chart_ext_cx, chart_ext_cy = chart_bounds
+    shapes: list[ShapeResult] = []
+    below_index = 0
+    for item in entries:
+        role = str(item.get("role") or "note")
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        font_size = _font_size_hpt(item.get("font_size", item.get("fontSize")), 16 if role == "title" else 12)
+        if role == "title" and item.get("font_size") is None and item.get("fontSize") is None:
+            font_size = title_font_size
+        elif item.get("font_size") is None and item.get("fontSize") is None:
+            font_size = note_font_size
+
+        color = _hex_or_none(item.get("color")) or chart_style.get("text_color")
+        font_face = _chart_text_entry_font_face(item, chart_style.get("font_face"))
+        align = str(item.get("align") or ("ctr" if role == "title" else "l"))
+        bold = bool(item.get("bold", role == "title"))
+        explicit_box = _chart_companion_box(item)
+        width_only = _chart_companion_width_only(item)
+        if explicit_box is not None:
+            off_x, off_y, ext_cx, ext_cy = explicit_box
+        elif role == "title":
+            off_x = chart_off_x
+            off_y = chart_off_y
+            ext_cx = chart_ext_cx
+            ext_cy = px_to_emu(28)
+        else:
+            off_x = chart_off_x
+            off_y = _powerpoint_emu_value(
+                chart_off_y + chart_ext_cy + px_to_emu(4 + below_index * 18),
+                "companion text y",
+            )
+            ext_cx = chart_ext_cx
+            ext_cy = px_to_emu(16)
+            below_index += 1
+        if width_only is not None:
+            ext_cx = width_only
+        anchor = "t"
+        matches = [
+            record for record in fallback_texts
+            if record.text == _normalized_fallback_text(text)
+        ]
+        if len(matches) == 1 and ctx is not None:
+            record = matches[0]
+            font_px = font_size / 100 / 0.75
+            anchor_x = ctx_x(record.x, ctx)
+            baseline_y = ctx_y(record.y, ctx)
+            width_px = ext_cx / px_to_emu(1)
+            left_px = {
+                "middle": anchor_x - width_px / 2,
+                "end": anchor_x - width_px,
+            }.get(record.anchor, anchor_x)
+            bottom_px = baseline_y + font_px * 0.25
+            off_x = _powerpoint_emu_value(px_to_emu(left_px), "companion text x")
+            off_y = _powerpoint_emu_value(px_to_emu(bottom_px - font_px * 1.6), "companion text y")
+            ext_cy = px_to_emu(font_px * 1.6)
+            anchor = "b"
+            align = {"middle": "ctr", "end": "r"}.get(record.anchor, "l")
+        text_xml = _text_box_xml(
+            ctx,
+            text=text,
+            role=role,
+            off_x=off_x,
+            off_y=off_y,
+            ext_cx=ext_cx,
+            ext_cy=ext_cy,
+            font_size=font_size,
+            color=color,
+            align=align,
+            bold=bold,
+            font_face=font_face,
+            anchor=anchor,
+        )
+        shapes.append(ShapeResult(
+            xml=text_xml,
+            bounds_emu=(off_x, off_y, off_x + ext_cx, off_y + ext_cy),
+        ))
+    return shapes

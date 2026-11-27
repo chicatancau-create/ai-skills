@@ -1,0 +1,137 @@
+    "word-spacing",
+})
+_ROOT_TYPOGRAPHY_ATTRIBUTES = (
+    "font-family",
+    "font-size",
+    "font-style",
+    "font-weight",
+    "letter-spacing",
+    "text-anchor",
+    "text-decoration",
+    "word-spacing",
+)
+_TEXT_PRESENTATION_ATTRIBUTES = frozenset(_ROOT_TYPOGRAPHY_ATTRIBUTES)
+_TEXT_PRESENTATION_CONTAINERS = frozenset({
+    "a",
+    "g",
+    "svg",
+    "text",
+    "tspan",
+})
+_AGGREGATE_GROUP_ATTRIBUTES = frozenset({
+    "clip-path",
+    "filter",
+    "mask",
+    "mix-blend-mode",
+    "opacity",
+})
+_URL_REFERENCE_RE = re.compile(r"url\(\s*(['\"]?)#([^)'\"\s]+)\1\s*\)")
+_CSS_ID_RE = re.compile(r"#([A-Za-z_][A-Za-z0-9_.:-]*)")
+_SAFE_KEY_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+_TRANSFORM_NUMBER = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
+_AXIS_REFLECTION_RE = re.compile(
+    rf"^\s*translate\(\s*({_TRANSFORM_NUMBER})[\s,]+"
+    rf"({_TRANSFORM_NUMBER})\s*\)\s*"
+    rf"scale\(\s*({_TRANSFORM_NUMBER})[\s,]+"
+    rf"({_TRANSFORM_NUMBER})\s*\)\s*"
+    rf"translate\(\s*({_TRANSFORM_NUMBER})[\s,]+"
+    rf"({_TRANSFORM_NUMBER})\s*\)\s*$"
+)
+_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+class MirrorMaterializationError(RuntimeError):
+    """Reject incomplete, ambiguous, or unsafe mirror materialization input."""
+
+
+@dataclass(frozen=True)
+class SourceRefRecord:
+    source_path: tuple[int, ...]
+    initial_authoring_subtree_sha256: str
+
+
+@dataclass(frozen=True)
+class AuthoringDocument:
+    name: str
+    authoring_path: Path
+    source_path: Path
+    source_sha256: str
+    source_refs: dict[str, SourceRefRecord]
+    initial_authoring_sha256: str = ""
+
+
+@dataclass(frozen=True)
+class VectorAssetRecord:
+    icon: str
+    asset_path: Path
+    origin_document: str
+    expected_sha256: str
+    source_refs: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SlotPlan:
+    slot_id: str
+    semantic_role: str
+    placeholder_type: str | None
+    idx: int | None
+    shape_id: str
+    bounds: tuple[float, float, float, float]
+
+
+@dataclass
+class RestorationStats:
+    # Retained for report compatibility. Mirror materialization no longer
+    # rehydrates visible source subtrees, so this counter remains zero.
+    rehydrated_refs: int = 0
+    fallback_refs: int = 0
+    structural_refs: int = 0
+    semantic_refs: int = 0
+    detached_connector_endpoints: int = 0
+    upright_text_compensations: int = 0
+
+    def merge(self, other: "RestorationStats") -> None:
+        self.rehydrated_refs += other.rehydrated_refs
+        self.fallback_refs += other.fallback_refs
+        self.structural_refs += other.structural_refs
+        self.semantic_refs += other.semantic_refs
+        self.detached_connector_endpoints += other.detached_connector_endpoints
+        self.upright_text_compensations += other.upright_text_compensations
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "rehydrated_refs": self.rehydrated_refs,
+            "fallback_refs": self.fallback_refs,
+            "structural_refs": self.structural_refs,
+            "semantic_refs": self.semantic_refs,
+            "detached_connector_endpoints": self.detached_connector_endpoints,
+            "upright_text_compensations": self.upright_text_compensations,
+        }
+
+
+@dataclass
+class MaterializedFile:
+    relative_path: Path
+    payload: bytes
+
+
+def _json_bytes(payload: dict[str, object]) -> bytes:
+    return (
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    ).encode("utf-8")
+
+
+def _compact_json_bytes(payload: dict[str, object]) -> bytes:
+    return (
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+
+
+def _template_execution_manifest_files(
+    materialized_roots: list[tuple[Path, ET.Element]],
+    source_import: dict[str, object] | None,
+    source_package_sha256: str | None = None,
+    source_geometry_unchanged: bool = False,
+) -> list[MaterializedFile]:
+    """Serialize one compact roster plus per-prototype text-slot sidecars."""
+    templates: list[dict[str, object]] = []

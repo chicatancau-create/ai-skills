@@ -1,0 +1,106 @@
+        and math.isclose(abs(d), 1.0, abs_tol=1e-9)
+        and (a < 0 or d < 0)
+    )
+
+
+def _transform_semantic_error(
+    elem: ET.Element,
+    operations: tuple[tuple[str, tuple[float, ...]], ...],
+    *,
+    is_root: bool,
+    thick_circle_ids: set[int],
+) -> str | None:
+    tag = _svg_element_tag(elem)
+    names = tuple(name for name, _args in operations)
+    label = _transform_element_label(elem)
+
+    if is_root:
+        return (
+            'Root <svg> transform is unsupported; apply transforms to child '
+            'elements or groups'
+        )
+
+    if tag == 'text':
+        if all(name == 'translate' for name in names):
+            return None
+        if len(names) == 1 and names[0] == 'rotate':
+            return None
+        return (
+            f'{label} text transform must be a translate-only list or one '
+            'rotate operation; text scale, matrix, and mixed operations are '
+            'not mapped'
+        )
+
+    if tag in _TRANSFORM_CONTAINER_TAGS:
+        if _contains_native_marker(elem):
+            if all(name in {'translate', 'scale'} for name in names):
+                return None
+            return (
+                f'{label} native replacement marker transforms support only '
+                'translate and scale'
+            )
+        if _contains_thick_circle(elem, thick_circle_ids):
+            if all(name == 'translate' for name in names):
+                return None
+            return (
+                f'{label} contains a thick-circle arc shorthand; ancestor '
+                'transforms must be translate-only'
+            )
+        if _is_unit_axis_reflection(operations):
+            # Imported PowerPoint groups encode flipH/flipV as a translate /
+            # unit-scale / translate list. The converter distributes that
+            # signed unit scale to child geometry and text positions without
+            # scaling font metrics, so this exact no-shear case is lossless.
+            return None
+        if supports_full_project_transform(elem):
+            if 'matrix' in names and _contains_rounded_rect(elem):
+                return (
+                    f'{label} matrix transform cannot target a rounded '
+                    'rectangle subtree'
+                )
+            return None
+        if all(name == 'translate' for name in names):
+            return None
+        if len(names) == 1 and names[0] == 'rotate':
+            return None
+        return (
+            f'{label} contains text or another non-matrix visual; its transform '
+            'must be a translate-only list or one rotate operation'
+        )
+
+    if tag in _FULL_TRANSFORM_TAGS:
+        if id(elem) in thick_circle_ids:
+            if len(names) == 1 and names[0] == 'rotate':
+                return None
+            return (
+                f'{label} thick-circle arc transform must be one rotate '
+                'operation'
+            )
+        if tag == 'rect' and 'matrix' in names and _has_positive_rounding(elem):
+            return f'{label} rounded rectangles cannot use matrix transforms'
+        return None
+
+    if tag == 'svg' and supports_full_project_transform(elem):
+        return None
+
+    return f'{label} has no registered project transform mapping'
+
+
+def project_transform_errors(root: ET.Element) -> list[str]:
+    """Return blocking transform grammar and mapping errors for preflight."""
+    parent_by_id = {
+        id(child): parent
+        for parent in root.iter()
+        for child in list(parent)
+    }
+    thick_circle_ids = _project_thick_circle_ids(root)
+    parsed: dict[int, tuple[AffineMatrix, bool]] = {}
+    errors: set[str] = set()
+
+    for elem, raw in iter_project_transforms(root):
+        label = _transform_element_label(elem)
+        restricted_ancestor = None
+        current = parent_by_id.get(id(elem))
+        while current is not None:
+            current_tag = _svg_element_tag(current)
+            if current_tag in _TRANSFORM_DEFINITION_BOUNDARIES:

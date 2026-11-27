@@ -1,0 +1,98 @@
+    # into one annotated <text>. Preserve keeps visual lines as DrawingML hard
+    # breaks; reflow joins wrapping lines; split keeps one frame per line.
+    from ..tspan_flattener import flatten_positional_tspans
+    flattened = flatten_positional_tspans(
+        tree,
+        merge_paragraphs=text_flow != TEXT_FLOW_SPLIT,
+        preserve_line_breaks=text_flow == TEXT_FLOW_PRESERVE,
+    )
+    if flattened:
+        trace_steps.append({
+            'action': 'flatten-positional-tspans',
+            'text_flow': text_flow,
+            # Compatibility field for older trace readers.
+            'merge_paragraphs': text_flow != TEXT_FLOW_SPLIT,
+        })
+        if verbose:
+            print(f'  Lowered positional <tspan> using {text_flow} text flow')
+
+    inline_formula_count_after_text_lowering = sum(
+        1 for elem in root.iter()
+        if elem.get(INLINE_FORMULA_ATTR) is not None
+    )
+    hyperlink_count_after_text_lowering = sum(
+        1 for elem in root.iter()
+        if (
+            elem.tag == f'{{{SVG_NS}}}a'
+            or elem.get(SHAPE_HYPERLINK_ATTR) is not None
+        )
+    )
+    if (
+        inline_formula_count_after_text_lowering
+        != inline_formula_count_before_text_lowering
+    ):
+        raise SvgNativeConversionError(
+            f'{svg_path.name}: positional text lowering changed inline formula '
+            f'marker count from {inline_formula_count_before_text_lowering} '
+            f'to {inline_formula_count_after_text_lowering}'
+        )
+    if hyperlink_count_after_text_lowering != hyperlink_count_before_text_lowering:
+        raise SvgNativeConversionError(
+            f'{svg_path.name}: positional text lowering changed hyperlink '
+            f'count from {hyperlink_count_before_text_lowering} '
+            f'to {hyperlink_count_after_text_lowering}'
+        )
+    _require_inline_formula_markers(root, svg_path)
+    _require_project_hyperlinks(
+        root,
+        svg_path,
+        slide_count=slide_count,
+    )
+    _require_project_text_properties(root, svg_path)
+    try:
+        text_font_sizes = resolve_project_font_sizes(root)
+        text_letter_spacings = resolve_project_letter_spacings(
+            root,
+            text_font_sizes,
+        )
+    except ValueError as exc:
+        raise SvgNativeConversionError(
+            f'{svg_path.name}: invalid project text-metric inheritance: {exc}'
+        ) from exc
+
+    unsupported = collect_unsupported_visuals(root)
+    if unsupported:
+        preview = '; '.join(unsupported[:8])
+        suffix = '' if len(unsupported) <= 8 else f'; +{len(unsupported) - 8} more'
+        raise SvgNativeConversionError(
+            f'{svg_path.name}: unsupported visual SVG element(s): {preview}{suffix}'
+        )
+
+    defs = collect_defs(root)
+    source_shape_id_map = _build_source_shape_id_map(root)
+    root_opacity = get_element_opacity(root)
+    ctx = ConvertContext(
+        defs=defs,
+        reserved_shape_ids=frozenset(source_shape_id_map.values()),
+        source_shape_id_map=source_shape_id_map,
+        slide_num=slide_num,
+        slide_count=slide_count,
+        viewport_width=viewport_width,
+        viewport_height=viewport_height,
+        svg_dir=Path(svg_path).parent,
+        resource_root=resource_root,
+        text_flow=text_flow,
+        image_optimize=image_optimize,
+        image_max_dimension=image_max_dimension,
+        image_sizing=image_sizing,
+        image_scale=image_scale,
+        image_quality=image_quality,
+        native_objects_enabled=native_objects,
+        animation_group_overrides=animation_group_overrides or frozenset(),
+        trace_events=trace_events,
+        theme_font_spec=theme_font_spec,
+        theme_color_spec=theme_color_spec,
+        primary_language=primary_language,
+        inherited_styles=_extract_inheritable_styles(root),
+        opacity_multiplier=1.0 if root_opacity is None else root_opacity,
+        parent_by_id={id(child): parent for parent in root.iter() for child in parent},

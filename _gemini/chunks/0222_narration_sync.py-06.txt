@@ -1,0 +1,129 @@
+def _effective_slide_animation(
+    config: dict[str, Any],
+    slide_cfg: dict[str, Any],
+) -> SlideAnimationSettings:
+    defaults = config.get("defaults", {})
+    if not isinstance(defaults, dict):
+        raise ValueError('Canonical animations.json field "defaults" must be an object')
+    default_animation = _animation_scope(
+        defaults,
+        label="Canonical animations.json defaults",
+    )
+    slide_animation = _animation_scope(
+        slide_cfg,
+        label="Canonical animations.json slide",
+    )
+    effect = normalize_animation_effect(
+        slide_animation.get(
+            "effect",
+            default_animation.get("effect", "none"),
+        )
+    )
+    duration_ms = animation_seconds_to_milliseconds(
+        slide_animation.get(
+            "duration",
+            default_animation.get("duration", 0.4),
+        ),
+        "canonical animation duration",
+        allow_zero=False,
+    )
+    stagger_ms = animation_seconds_to_milliseconds(
+        slide_animation.get(
+            "stagger",
+            default_animation.get("stagger", 0.5),
+        ),
+        "canonical animation stagger",
+        allow_zero=True,
+    )
+    trigger = normalize_animation_trigger(
+        slide_animation.get(
+            "trigger",
+            default_animation.get("trigger", "after-previous"),
+        )
+    )
+    timing_options = {
+        field: (
+            slide_animation[field]
+            if field in slide_animation
+            else default_animation[field]
+        )
+        for field in ANIMATION_TIMING_OPTION_FIELDS
+        if field in slide_animation or field in default_animation
+    }
+    return SlideAnimationSettings(
+        effect=effect,
+        duration_ms=duration_ms,
+        stagger_ms=stagger_ms,
+        trigger=trigger,
+        timing_options=timing_options,
+    )
+
+
+def _animation_playback_duration_ms(
+    duration_ms: int,
+    timing_options: dict[str, Any],
+    *,
+    label: str,
+) -> int:
+    """Return schedule duration after repeat and auto-reverse parameters."""
+    if 'repeat_duration' in timing_options:
+        return animation_seconds_to_milliseconds(
+            timing_options['repeat_duration'],
+            f'{label} repeat_duration',
+            allow_zero=False,
+        )
+    one_play = duration_ms * (
+        2 if timing_options.get('auto_reverse') is True else 1
+    )
+    repeat_count = timing_options.get('repeat_count', 1)
+    if (
+        isinstance(repeat_count, bool)
+        or not isinstance(repeat_count, (int, float))
+        or not math.isfinite(float(repeat_count))
+        or float(repeat_count) <= 0
+    ):
+        raise ValueError(f'{label} repeat_count must be a positive number')
+    return max(1, round(one_play * float(repeat_count)))
+
+
+def _active_group_effect_entries(
+    slide_name: str,
+    group_id: str,
+    group_cfg: dict[str, Any],
+    slide_effect: str | None,
+) -> tuple[tuple[int | None, str, dict[str, Any]], ...]:
+    """Return active legacy or multi-effect rows with stable write locations."""
+    group_path = (
+        f'slides[{json.dumps(slide_name, ensure_ascii=False)}]'
+        f'.groups[{json.dumps(group_id, ensure_ascii=False)}]'
+    )
+    effect_entries = animation_group_effect_entries(
+        group_cfg,
+        path=group_path,
+    )
+    is_multi_effect = 'effects' in group_cfg
+    active: list[tuple[int | None, str, dict[str, Any]]] = []
+    for index, (effect_path, effect_cfg) in enumerate(effect_entries):
+        effect = normalize_animation_effect(
+            effect_cfg.get("effect", slide_effect)
+        )
+        if effect is None:
+            continue
+        active.append((
+            index if is_multi_effect else None,
+            effect_path,
+            effect_cfg,
+        ))
+    return tuple(active)
+
+
+def _group_is_animated(
+    slide_name: str,
+    group_id: str,
+    group_cfg: dict[str, Any],
+    slide_effect: str | None,
+) -> bool:
+    return bool(
+        _active_group_effect_entries(
+            slide_name,
+            group_id,

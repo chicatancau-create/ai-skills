@@ -1,0 +1,123 @@
+  dws attendance vacation records [flags]
+Example:
+  dws attendance vacation records --user USER_ID --leave-code a1b2c3d4-e5f6-7890-abcd-ef1234567890 --start 2026-04-01 --end 2026-04-22
+Flags:
+      --user string        指定查询员工 ID (必填)
+      --leave-code string  假期规则 code (必填, 不传则无法查询)
+      --start string       查询开始日期, 格式 YYYY-MM-DD (必填)
+      --end string         查询结束日期, 格式 YYYY-MM-DD (必填)
+```
+
+调用 MCP 工具 get_leave_balance_records 查询指定员工的假期余额变更记录。例如：查询某员工年假变更历史、请假扣减记录等。`--leave-code` 可通过 `vacation types` 获取。认证信息（corpId、opUserId）由系统自动注入。
+
+### 更新假期规则（写场景接口，必须走二次确认流程）
+
+**强制执行流程**：此命令为写操作，Agent 调用时必须遵守以下流程：
+1. 先向用户展示待执行操作的完整参数摘要
+2. 使用 `ask_human` 或返回待确认状态，等待用户明确确认
+3. 用户确认后，再传 `--user-say-yes=true` 执行命令
+
+**禁止未经用户确认直接执行或自动添加 `--user-say-yes=true`。**
+
+```
+Usage:
+  dws attendance vacation update-type [flags]
+Example:
+  # 更新假期规则名称
+  dws attendance vacation update-type --leave-code a1b2c3d4-e5f6-7890-abcd-ef1234567890 --name "事假（修改版）"
+
+  # 更新假期单位
+  dws attendance vacation update-type --leave-code a1b2c3d4-e5f6-7890-abcd-ef1234567890 --unit hour --per-hours 8
+
+  # 更新适用范围
+  dws attendance vacation update-type --leave-code a1b2c3d4-e5f6-7890-abcd-ef1234567890 --visibility-rules '[{"type":"dept","visible":["1","2","3"]}]'
+Flags:
+      --leave-code string        假期编码（必填）
+      --name string              假期名称（可选）
+      --unit string              假期单位：day/halfDay/hour（可选）
+      --paid bool                是否带薪假期（可选，默认 false）
+      --per-hours int            一天折算小时数（可选）
+      --when-can-leave string    新员工请假规则：entry/formal（可选）
+      --visibility-rules string  适用范围规则 JSON 数组（可选）
+      --user-say-yes             用户已确认，跳过交互式确认提示
+                                 Agent 调用时传 true 前必须完成用户二次确认
+```
+
+调用 MCP 工具 save_leave_type 更新已有假期规则。`--leave-code` 必填，指定要更新的假期规则编码。其他字段均为可选，仅需传入要修改的字段。除 `--leave-code` 外，必须至少传入一个更新字段。
+
+####  强制执行流程：Agent 调用 `vacation update-type`
+
+`vacation update-type` 是写操作，会修改假期规则配置。Agent 调用时 **必须按以下流程执行**，**禁止**在未确认的情况下直接提交：
+
+1. **识别写操作**：用户表达"更新假期规则 / 修改假期类型 / 编辑假期规则"等意图时，命中 `vacation update-type`。
+2. **收集必要参数**：必须明确 `--leave-code`，以及至少一个更新字段（`--name`、`--unit`、`--paid`、`--per-hours`、`--when-can-leave`、`--visibility-rules`）。
+3. **前置查询当前规则**：需先调用 `vacation types` 确认该规则是否存在及当前配置。
+4. **展示待写入数据并等待确认**：向用户展示假期编码、要更新的字段及新值，并询问是否确认执行。**必须等待用户明确确认**。
+5. **用户确认后再执行保存**：**只有用户明确确认后**，才可以传 `--user-say-yes=true` 执行 `dws attendance vacation update-type ... --format json`。
+
+确认话术示例：
+
+```text
+即将更新假期规则，请确认：
+- 假期编码：a1b2c3d4-e5f6-7890-abcd-ef1234567890
+- 更新内容：
+  - 名称：事假 → 事假（修改版）
+
+是否确认执行更新？
+```
+
+如用户明确要求跳过确认，可传 `--user-say-yes=true`；否则默认必须等待确认。
+
+#### 强制执行流程：Agent 调用 `vacation save-balance`
+
+`vacation save-balance` 是写操作，会直接替换员工的假期余额（SET 接口，而非 ADD）。Agent 调用时 **必须按以下流程执行**，**禁止**在未确认的情况下直接提交：
+
+1. **识别写操作**：用户表达"设置假期余额 / 调整假期额度 / 更新假期余额 / 增加假期余额 / 发放年假 / 给员工加年假"等意图时，命中 `vacation save-balance`。
+2. **前置查询当前余额**：必须先调用 `vacation balance --users <target> --leave-code <code>` 获取当前余额，因为这是 SET 接口，传入值会直接替换而非累加。
+3. **收集必要参数**：必须明确 `--target`（目标员工）、`--leave-code`（假期编码）、`--num`（新余额数量）、`--reason`（变更原因），以及可选参数 `--start/--end`（有效期）。
+4. **计算变更并展示确认**：向用户展示目标员工、假期类型、当前余额、新余额、差额（增加或减少）、变更原因、有效期等，并询问是否确认执行。**必须等待用户明确确认**。
+5. **用户确认后再执行保存**：**只有用户明确确认后**，才可以传 `--user-say-yes=true` 执行 `dws attendance vacation save-balance ... --format json`。
+
+确认话术示例：
+
+**设置余额场景**：
+```text
+即将设置员工假期余额，请确认：
+- 目标员工：张三（user001）
+- 假期类型：年假（leaveCode: a1b2c3d4-e5f6-7890-abcd-ef1234567890）
+- 当前余额：5 天
+- 新余额：8 天
+- 变更差额：+3 天（增加）
+- 变更原因：年度发放
+- 有效期：2024-01-01 至 2024-12-31
+
+是否确认执行设置？
+```
+
+**减少余额场景**：
+```text
+即将设置员工假期余额，请确认：
+- 目标员工：李四（user002）
+- 假期类型：年假（leaveCode: a1b2c3d4-e5f6-7890-abcd-ef1234567890）
+- 当前余额：10 天
+- 新余额：2 天
+- 变更差额：-8 天（减少）
+- 变更原因：请假扣减
+
+注意：此操作将大幅减少余额，请确认是否继续？
+
+是否确认执行设置？
+```
+
+如用户明确要求跳过确认，可传 `--user-say-yes=true`；否则默认必须等待确认。
+
+### 设置员工假期余额
+```
+Usage:
+  dws attendance vacation save-balance [flags]
+Example:
+  # 设置员工年假余额为8天
+  dws attendance vacation save-balance --target user001 \
+    --leave-code a1b2c3d4-e5f6-7890-abcd-ef1234567890 --num 8 --reason "年度发放"
+
+  # 设置带有效期的假期余额

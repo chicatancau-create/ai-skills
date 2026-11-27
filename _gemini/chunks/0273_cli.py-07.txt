@@ -1,0 +1,106 @@
+    def _image_destination_name(
+        self,
+        images_dir: Path,
+        source_file: Path,
+        namespace: str,
+        existing_manifest: dict[str, dict],
+        occupied_names: set[str],
+    ) -> str:
+        """Return a short unique image filename for the runtime image pool."""
+        candidate = images_dir / source_file.name
+        if candidate.name.casefold() not in occupied_names:
+            return source_file.name
+        try:
+            meta = existing_manifest.get(candidate.name, {})
+            if (
+                meta.get("source_namespace") == namespace
+                and candidate.is_file()
+                and filecmp.cmp(source_file, candidate, shallow=False)
+            ):
+                return candidate.name
+        except OSError:
+            pass
+
+        stem = source_file.stem
+        suffix = source_file.suffix
+        counter = 2
+        while True:
+            candidate = images_dir / f"{stem}_{counter}{suffix}"
+            if candidate.name.casefold() not in occupied_names:
+                return candidate.name
+            try:
+                meta = existing_manifest.get(candidate.name, {})
+                if (
+                    meta.get("source_namespace") == namespace
+                    and candidate.is_file()
+                    and filecmp.cmp(source_file, candidate, shallow=False)
+                ):
+                    return candidate.name
+            except OSError:
+                pass
+            counter += 1
+
+    def _propagate_image_assets(self, asset_dir: Path, project_dir: Path) -> None:
+        """Copy converter-generated image assets and manifest into project images/.
+
+        Filenames are preserved when possible because source Markdown commonly
+        uses short names that are meaningful in context. Only real collisions
+        receive a compact numeric suffix.
+        """
+        manifest_path = asset_dir / "image_manifest.json"
+        if not manifest_path.is_file():
+            return
+
+        try:
+            source_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"[WARN] Cannot read image manifest {manifest_path}: {exc}")
+            return
+        try:
+            source_data = _validate_image_manifest(source_payload, manifest_path)
+        except RuntimeError as exc:
+            print(f"[WARN] {exc}")
+            return
+
+        images_dir = project_dir / "images"
+        namespace = self._namespace_from_asset_dir(asset_dir)
+        destination_manifest = images_dir / "image_manifest.json"
+        existing_data = _read_existing_image_manifest(destination_manifest)
+        images_dir.mkdir(parents=True, exist_ok=True)
+
+        existing_manifest = {
+            item["filename"]: item
+            for item in existing_data
+        }
+        occupied_names = {
+            path.name.casefold()
+            for path in images_dir.iterdir()
+            if path.is_file()
+        }
+        rename_map: dict[str, str] = {}
+
+        copied_count = 0
+        for source_file in sorted(asset_dir.iterdir()):
+            if not source_file.is_file():
+                continue
+            if source_file.suffix.lower() not in IMAGE_ASSET_SUFFIXES:
+                continue
+            new_name = self._image_destination_name(
+                images_dir,
+                source_file,
+                namespace,
+                existing_manifest,
+                occupied_names,
+            )
+            destination = images_dir / new_name
+            if source_file.resolve() != destination.resolve():
+                shutil.copy2(source_file, destination)
+            occupied_names.add(new_name.casefold())
+            rename_map[source_file.name] = new_name
+            copied_count += 1
+
+        rebased_items: list[dict] = []
+        for item in source_data:
+            if not isinstance(item, dict):
+                continue
+            original = item.get("filename")

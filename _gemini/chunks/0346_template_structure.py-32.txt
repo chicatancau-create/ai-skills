@@ -1,0 +1,98 @@
+    actual_slides = {spec.slide_num for spec in specs}
+    prototype_slides = set(prototypes)
+    missing_prototypes = sorted(actual_slides - prototype_slides)
+    extra_prototypes = sorted(prototype_slides - actual_slides)
+    if missing_prototypes:
+        errors.append(
+            "spec_lock.md page_layouts is missing generated page(s): "
+            + ", ".join(f"P{slide_num:02d}" for slide_num in missing_prototypes)
+        )
+    if require_complete_roster and extra_prototypes:
+        errors.append(
+            "spec_lock.md page_layouts references absent page(s): "
+            + ", ".join(f"P{slide_num:02d}" for slide_num in extra_prototypes)
+        )
+    for spec in specs:
+        reference = prototypes.get(spec.slide_num)
+        if reference is None:
+            errors.append(
+                f"{spec.svg_path.name}: spec_lock.md page_layouts is missing "
+                f"prototype P{spec.slide_num:02d}"
+            )
+            continue
+        try:
+            prototype = parse_template_slide(reference.svg_path, spec.slide_num)
+        except TemplateStructureError as exc:
+            errors.append(str(exc))
+            continue
+
+        try:
+            literal_visual = (
+                structure_lock.template_reuse_scope == "mirror"
+                if structure_lock.template_reuse_scope is not None
+                else reference.replication_mode == "mirror"
+            )
+            expected_master_structure = _structure_subtree_signature(
+                prototype.svg_path,
+                prototype.master_elements,
+                include_skin=literal_visual,
+                asset_identity=literal_visual,
+                ignore_json_native_preview=literal_visual,
+            )
+            actual_master_structure = _structure_subtree_signature(
+                spec.svg_path,
+                spec.master_elements,
+                include_skin=literal_visual,
+                asset_identity=literal_visual,
+                ignore_json_native_preview=literal_visual,
+            )
+        except TemplateStructureError as exc:
+            errors.append(str(exc))
+            continue
+        if (
+            spec.master_key != prototype.master_key
+            or spec.master_name != prototype.master_name
+            or tuple(item.contract_signature() for item in spec.master_elements)
+            != tuple(
+                item.contract_signature() for item in prototype.master_elements
+            )
+            or actual_master_structure != expected_master_structure
+        ):
+            master_difference = (
+                _mirror_structure_difference(
+                    prototype,
+                    spec,
+                    prototype.master_elements,
+                )
+                if literal_visual
+                else None
+            )
+            errors.append(
+                f"{spec.svg_path.name}: template Master structure differs "
+                f"from prototype {reference.svg_path.name}; strict and adaptive "
+                "routes must retain its ids, topology, geometry, data-pptx-* "
+                "metadata, and content"
+                + (
+                    " including mirror visual styling"
+                    if literal_visual
+                    else "; fills, strokes, and gradients may be repainted"
+                )
+                + (
+                    f"; first difference: {master_difference}"
+                    if master_difference else ""
+                )
+            )
+
+        if literal_visual:
+            try:
+                protected_slide_ids = (
+                    _mirror_ordinary_slide_ids(prototype)
+                    | _mirror_ordinary_slide_ids(spec)
+                )
+                expected_slide_visual = _mirror_slide_local_signature(
+                    prototype,
+                    protected_slide_ids,
+                )
+                actual_slide_visual = _mirror_slide_local_signature(
+                    spec,
+                    protected_slide_ids,

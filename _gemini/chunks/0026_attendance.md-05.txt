@@ -1,0 +1,77 @@
+- 外勤：`enableOutsideCheck`(bool) `enableOutsideCameraCheck/Remark/Apply`(bool) `outsideCheckApproveMode`(NO_NEED_APPROVE/APPROVE_FIRST/CHECK_FIRST/APPROVE_EVERYTIME) `outSideCheckApplyType`(1全天/2上班/3下班) `forbidHideOutSideAddress`(bool) `enableOutSideUpdateNormalCheck`(下班时允许外勤卡更新内勤卡) `enableOnDutyNormalUpdateOutsideCheck`(上班时允许内勤卡更新外勤卡)
+- 打卡方式：`enableCameraCheck/openCameraCheck` `openFaceCheck` `enableFaceStrictMode` `enableFaceBeauty`(bool) `onlyMachineCheck`(bool) `permitMaxBeaconCount`(number) `disableCheckWhenRest`(bool，休息日打卡需审批，只在固定班制和排班制生效)
+- 固定班制设置（FIXED）：`defaultClassId`(number) `workDayClassList`([]number，共7个值代表周日到周六每天的班次id，为0表示当天休息，如[0,1279240003,0,0,0,0,0]表示只有周一上班)
+- 排班制设置（TURN）：`disableCheckWithoutSchedule`(bool，true=未排班时禁止打卡) `enableEmpSelectClass`(未排班时员工可选班次) `enableScheduleAutoMatch`(未排班时系统自动匹配)
+  - 循环排班（非必填，不设置则由管理员手动排班）：`cycleDays`(number) `startCycleDate`(时间戳，毫秒) `cycleScheduleList`([]对象: cycleName/groupId/isValid(Y/N)/itemList[{classId/className/isValid}])
+- 自由工时设置（NONE）：`workDays`([1-7]，1=周一7=周日) `freeCheckDayStartMinOffset`(number，距0点分钟数) `freeCheckCoreTime`(最短工作时长，分钟) `freeCheckDemandWorkMinutes`(要求打卡时长，分钟) `freeCheckSettingVO`(对象: freeCheckType(CYCLE上下班交替/MAX_TIME_UPDATE最大时间打卡)/freeWorkDayLackSwitch/freeOnDutyLackMinOffset/freeOffDutyLackMinOffset/delimitOffsetMinutesBetweenDays/freeCheckGapVO{onOffCheckGapMinutes/offOnCheckGapMinutes}) `freeGroupSpecialDayVO`(对象: specialOnDutyDays[]/specialOffDutyDays[])
+
+### 创建考勤组 (写场景接口，必须走二次确认流程)
+**强制执行流程**：此命令为写操作，Agent 调用时必须遵守以下流程：
+1. 先向用户展示待执行操作的完整参数摘要，包括考勤组名称、类型、班次列表等
+2. 使用 `ask_human` 或返回待确认状态，等待用户明确确认
+3. 用户确认后，再传全局 `--yes` 执行命令
+
+**禁止未经用户确认直接执行或自动添加 `--yes`。**
+```
+Usage:
+  dws attendance group create [flags]
+Example:
+  dws attendance group create --name "研发考勤组" --type FIXED --group-vo '{"defaultClassId":1170996821,"workDayClassList":[0,1170996821,0,0,0,0,0]}' --timeout 10
+  dws attendance group create --name "自由工时分组" --type NONE --timeout 10
+Flags:
+      --name string      考勤组名称 (必填)
+      --type string      考勤组类型：FIXED 固定班制 / TURN 排班制 / NONE 自由工时 (必填)
+      --owner string     考勤组主负责人 userId (可选)
+      --group-vo string  完整 groupVO JSON 字符串，用于传入复杂子对象 (可选)
+```
+
+创建一个新的考勤组。`--name` 和 `--type` 必填，`--type` 必须为 FIXED/TURN/NONE 之一。
+
+**条件必填（type=FIXED 固定班制时）**：`--group-vo` 必须包含 `workDayClassList`（工作日班次列表，不能为空，共 7 个值，代表周日到周六每天的班次 ID，为 0 表示当天休息）和 `defaultClassId`（默认班次 ID，不能为 null）。
+
+`--group-vo` 可用字段说明（与 `group update` 的 `--group-vo` 一致，均可选，只需包含要设置的字段）：
+
+【基础信息】
+  id            number    考勤组 id（创建时无需传入，由服务端分配）
+  name          string    考勤组名称（必填）
+  type          string    考勤组类型：FIXED（固定班制）/ TURN（排班制）/ NONE（自由工时）（必填）
+  owner         string    考勤组主负责人 userId
+  managerList   []string  考勤组子负责人 userId 列表
+  skipHolidays  bool      节假日自动排休（只有固定班制和自由工时考勤组生效）
+  defaultGroup  bool      是否默认考勤组
+  classIds      []number  所选班次 id 列表(只有固定班制和排班制才有班次，自由工时没有)
+
+【打卡范围与定位】
+  trimDistance                      number    定位允许微调距离（米）
+  enablePositionOfGps               bool      打卡是否允许开启 GPS 定位
+  enablePositionOfWifi              bool      打卡是否允许开启 Wifi 定位
+  enablePositionOfBle               bool      打卡是否允许开启蓝牙定位
+  enableMacCheck                    bool      开启 MAC 地址校验
+  checkDistanceType                 string    打卡距离类型：NORMAL(正常) / OUTER_ADDRESS(仅允许在外勤地址打卡)
+  wifiCompanyId                     number    允许打卡的 Wifi 公司 ID
+
+【打卡地址】
+  positions  []object  打卡地址列表，每个对象字段：
+    title     string  地址名称
+    address   string  详细地址
+    latitude  number  纬度
+    longitude number  经度
+    offset    number  该地址允许的打卡范围（米）
+
+【打卡 Wifi】
+  wifis  []object  打卡 Wifi 列表，每个对象字段：
+    ssid    string  Wifi 名称
+    macAddr string  MAC 地址
+    groupId number  所属考勤组 ID
+
+【蓝牙设备】
+  bleDeviceVOList  []object  蓝牙设备列表，每个对象字段：
+    name         string  设备名称
+    deviceUid    string  设备 ID
+    sn           string  序列号
+    productType  string  产品类型
+    devServId    number  设备服务 ID
+
+【外勤打卡设置】
+  enableOutsideCheck                 bool    是否允许外勤打卡
+  openOutsideCameraCheck             bool    外勤打卡是否开启拍照

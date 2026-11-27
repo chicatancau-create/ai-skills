@@ -1,0 +1,67 @@
+                errors = self._check()['errors']
+                self.assertTrue(any('huge' in error and 'OOXML' in error for error in errors), errors)
+                with self.assertRaises(SvgNativeConversionError):
+                    self._export()
+
+    def test_coordinates_inside_ooxml_range_still_export(self) -> None:
+        for x in (-10, OOXML_COORDINATE_MAX // 9525):
+            with self.subTest(x=x):
+                self._svg(f'<rect id="valid" x="{x}" y="100" width="20" height="10" fill="#123456"/>')
+                self.assertFalse(self._check()['errors'])
+                self.assertEqual(self._shape_colors(self._export()), ['123456'])
+
+    def test_hidden_rect_is_omitted_for_attributes_and_style(self) -> None:
+        for hiding in ('visibility="hidden"', 'style="visibility:hidden"',
+                       'display="none"', 'style="display:none"'):
+            with self.subTest(hiding=hiding):
+                self._svg(
+                    f'<rect id="hidden" x="100" y="100" width="200" height="100" fill="#FF0000" {hiding}/>'
+                    '<rect id="shown" x="400" y="100" width="200" height="100" fill="#00FF00"/>'
+                )
+                self.assertEqual(self._shape_colors(self._export()), ['00FF00'])
+                report = self._check()
+                self.assertFalse(report['errors'])
+                self.assertTrue(any('hidden' in warning and 'not be exported' in warning
+                                    for warning in report['warnings']), report['warnings'])
+
+    def _clipped_image(self, shapes: str, clip_attributes: str = '') -> None:
+        self._svg(
+            f'<defs><clipPath id="clip" {clip_attributes}>{shapes}</clipPath></defs>'
+            '<image id="picture" x="100" y="100" width="200" height="100" '
+            f'preserveAspectRatio="xMidYMid slice" href="{PNG_DATA}" clip-path="url(#clip)"/>'
+        )
+
+    def test_hidden_clip_shapes_omit_picture_and_report_empty_clip(self) -> None:
+        for hiding in ('visibility="hidden"', 'style="visibility:hidden"',
+                       'display="none"', 'style="display:none"'):
+            for inherited in (False, True):
+                with self.subTest(hiding=hiding, inherited=inherited):
+                    self._clipped_image(
+                        '<rect x="100" y="100" width="200" height="100" '
+                        f'{"" if inherited else hiding}/>',
+                        hiding if inherited else '',
+                    )
+                    self.assertFalse(self._export().findall('.//p:pic', NS))
+                    report = self._check()
+                    self.assertFalse(report['errors'], report['errors'])
+                    self.assertTrue(any(
+                        'Hidden element <image id="picture"> will not be exported' in warning
+                        and 'empty clip: url(#clip)' in warning and 'advisory only' in warning
+                        for warning in report['warnings']
+                    ), report['warnings'])
+
+    def test_visible_clip_keeps_picture_crop_and_ignores_hidden_siblings(self) -> None:
+        visible = '<rect x="100" y="100" width="200" height="100" rx="10"/>'
+        self._clipped_image(visible)
+        picture = self._export().find('.//p:pic', NS)
+        crop = picture.find('.//a:srcRect', NS).attrib
+        self.assertEqual(crop, {'l': '0', 't': '25000', 'r': '0', 'b': '25000'})
+        for shapes, clip_attributes in (
+            ('<circle cx="200" cy="150" r="50" visibility="hidden"/>' + visible, ''),
+            (visible + '<rect display="none" width="1" height="1"/>', ''),
+            (visible.replace('rx="10"', 'rx="10" visibility="visible"'), 'visibility="hidden"'),
+        ):
+            with self.subTest(shapes=shapes, clip_attributes=clip_attributes):
+                self._clipped_image(shapes, clip_attributes)
+                self.assertFalse(self._check()['errors'])
+                actual = self._export().find('.//p:pic', NS)

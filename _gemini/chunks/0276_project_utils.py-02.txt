@@ -1,0 +1,122 @@
+        if normalized_format in CANVAS_FORMATS:
+            result['format'] = normalized_format
+            result['format_name'] = CANVAS_FORMATS[normalized_format]['name']
+            result['name'] = dir_name[:len(full_match.group('name'))]
+            return result
+
+    # Fallback: only match trailing `_format` to avoid deleting parts of the project name
+    sorted_formats = sorted(CANVAS_FORMATS.keys(), key=len, reverse=True)
+    for fmt_key in sorted_formats:
+        if re.search(rf'_{re.escape(fmt_key)}(?:_\d{{8}})?$', dir_name_lower):
+            result['format'] = fmt_key
+            result['format_name'] = CANVAS_FORMATS[fmt_key]['name']
+            break
+
+    # Extract project name (only remove trailing date and format suffix)
+    name = re.sub(r'_\d{8}$', '', dir_name)
+    if result['format'] != 'unknown':
+        name = re.sub(rf'_{re.escape(result["format"])}$', '', name, flags=re.IGNORECASE)
+    result['name'] = name
+
+    return result
+
+
+def get_project_info(project_path: str) -> Dict:
+    """
+    Get detailed project information.
+
+    Args:
+        project_path: Project directory path
+
+    Returns:
+        Project information dictionary
+    """
+    project_path = Path(project_path)
+    # ``.`` or ``..`` carry no name of their own; parse the real directory name.
+    dir_name = project_path.resolve().name
+
+    # Parse directory name
+    parsed = parse_project_name(dir_name)
+
+    info = {
+        'path': str(project_path),
+        'dir_name': dir_name,
+        'name': parsed['name'],
+        'format': parsed['format'],
+        'format_name': parsed['format_name'],
+        'date': parsed['date'],
+        'date_formatted': parsed['date_formatted'],
+        'exists': project_path.exists(),
+        'svg_count': 0,
+        'has_spec': False,
+        'has_readme': False,
+        'has_source': False,
+        'source_count': 0,
+        'spec_file': None,
+        'svg_files': []
+    }
+
+    if not project_path.exists():
+        return info
+
+    # Check README.md
+    info['has_readme'] = (project_path / 'README.md').exists()
+
+    # Check design specification files (current standard + legacy names)
+    for spec_file in _DESIGN_SPEC_NAMES:
+        if (project_path / spec_file).exists():
+            info['has_spec'] = True
+            info['spec_file'] = spec_file
+            break
+
+    # Check source documents
+    legacy_source_file = project_path / '来源文档.md'
+    sources_dir = project_path / 'sources'
+    info['has_source'] = legacy_source_file.exists() or sources_dir.exists()
+
+    if sources_dir.exists():
+        info['source_count'] = len([p for p in sources_dir.iterdir() if p.is_file()])
+
+    # Count SVG files
+    svg_output = project_path / 'svg_output'
+    if svg_output.exists():
+        svg_files = discover_slide_svgs(svg_output)
+        info['svg_count'] = len(svg_files)
+        info['svg_files'] = [f.name for f in svg_files]
+
+    # Get canvas format details
+    if info['format'] in CANVAS_FORMATS:
+        info['canvas_info'] = CANVAS_FORMATS[info['format']]
+
+    return info
+
+
+def validate_communication_trace(
+    project_path: str | Path,
+    *,
+    check_lock: bool = True,
+    check_design: bool = True,
+) -> List[str]:
+    """Validate either or both communication-trace surfaces."""
+    root = Path(project_path)
+    design_spec = next(
+        (root / name for name in _DESIGN_SPEC_NAMES if (root / name).is_file()),
+        None,
+    )
+    if design_spec is None or not (check_lock or check_design):
+        return []
+
+    errors: List[str] = []
+    lock_path = root / 'spec_lock.md'
+    if check_lock:
+        if not lock_path.is_file():
+            return [
+                'Communication trace: missing spec_lock.md with a '
+                '## communication section.',
+            ]
+        try:
+            lock_text = lock_path.read_text(encoding='utf-8-sig')
+        except OSError as exc:
+            return [f'Communication trace: unable to read specification files: {exc}']
+
+        communication_match = re.search(

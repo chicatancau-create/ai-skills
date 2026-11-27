@@ -1,0 +1,87 @@
+def _prepare_url(url: str) -> str:
+    """Return the client's URL only when both parsers agree on its hostname."""
+    _check_url_characters(url)
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise _UnsafeUrlError("Only HTTP(S) URLs with a hostname are allowed")
+        prepared = requests.PreparedRequest()
+        prepared.prepare_url(url, None)
+        hostname = parse_url(prepared.url).host
+        # The raw hostname must survive preparation unchanged, so a host the
+        # client decodes differently (percent-encoded labels) is refused. An IDN
+        # host legitimately becomes punycode; compare its IDNA form. urllib3
+        # keeps IPv6 brackets; urlparse does not.
+        raw_host = parsed.hostname
+        if not raw_host.isascii():
+            try:
+                raw_host = raw_host.encode("idna").decode("ascii")
+            except UnicodeError as exc:
+                raise _UnsafeUrlError(f"Invalid internationalized hostname: {exc}") from exc
+        if not hostname or raw_host.lower() != hostname.strip("[]").lower():
+            raise _UnsafeUrlError("Refusing URL with inconsistent parsed hostnames")
+        return prepared.url
+    except (ValueError, requests.exceptions.RequestException) as exc:
+        if isinstance(exc, _UnsafeUrlError):
+            raise
+        raise _UnsafeUrlError(f"Invalid URL: {exc}") from exc
+
+
+def _resolve_public_addresses(hostname: str) -> list:
+    """Resolve once and validate every address before any socket is created."""
+    try:
+        addresses = [ipaddress.ip_address(hostname)]
+    except ValueError:
+        try:
+            addresses = [
+                ipaddress.ip_address(info[4][0])
+                for info in socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+            ]
+        except (OSError, ValueError) as exc:
+            raise _UnsafeUrlError(f"Cannot validate URL hostname {hostname}: {exc}") from exc
+    if not addresses:
+        raise _UnsafeUrlError(f"Cannot resolve URL hostname {hostname}")
+    if CONFIG["allow_private_hosts"]:
+        return addresses
+    for address in addresses:
+        scoped = getattr(address, "scope_id", None)
+        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+            address = address.ipv4_mapped
+        if (address.is_loopback or address.is_link_local
+                or address.is_private or address.is_unspecified
+                or address.is_multicast or address.is_reserved
+                or scoped
+                or any(address in network for network in _NON_PUBLIC_IPV4_NETWORKS)):
+            raise _UnsafeUrlError(
+                f"Refusing non-public URL target: {hostname} resolves to {address} "
+                "(pass --allow-private-hosts for intranet or localhost pages)"
+            )
+    return list(dict.fromkeys(addresses))
+
+
+def _validate_public_url(url: str) -> tuple[str, list]:
+    """Return the prepared URL and its validated addresses for transport use."""
+    prepared = _prepare_url(url)
+    hostname = parse_url(prepared).host.strip("[]")
+    return prepared, _resolve_public_addresses(hostname)
+
+
+class _PublicConnectionMixin:
+    """Keep urllib3's hostname/TLS handling but connect only to checked IPs."""
+
+    def _new_conn(self):
+        from urllib3.exceptions import ConnectTimeoutError, NewConnectionError
+        from urllib3.util import Timeout
+
+        addresses = _resolve_public_addresses(self._dns_host)
+        error = None
+        for address in addresses:
+            sock = None
+            try:
+                family = socket.AF_INET6 if address.version == 6 else socket.AF_INET
+                sock = socket.socket(family, socket.SOCK_STREAM)
+                for option in self.socket_options or ():
+                    sock.setsockopt(*option)
+                if self.timeout is not Timeout.DEFAULT_TIMEOUT:
+                    sock.settimeout(self.timeout)
+                if self.source_address:

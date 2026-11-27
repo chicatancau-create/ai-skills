@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+"""
+PPT Master - Explicit SVG Picture Asset Extractor
+
+Extract explicitly selected ``<g id>`` elements from one SVG into tight,
+self-contained SVG picture assets. Each selected group is replaced in place by
+one ``<image>`` at the same parent index, so native export produces one
+PowerPoint ``p:pic`` instead of a DrawingML group.
+
+This tool is intentionally selection-only. It does not discover repeated
+objects, infer Master/Layout structure, or change the native-shape semantics of
+``extract_svg_assets.py``.
+
+Usage:
+    python3 scripts/extract_svg_pictures.py page.svg --select emblem \
+        --images-dir project/images -o project/svg_output/page.svg
+
+Examples:
+    python3 scripts/extract_svg_pictures.py imported/slide_01.svg \
+        --select shape-15 --resource-root imported \
+        --images-dir imported/images --inplace
+    python3 scripts/extract_svg_pictures.py source.svg --select complex-art \
+        --bounds complex-art=80,120,320,240 --images-dir work/images \
+        -o work/normalized.svg
+
+Dependencies:
+    Standard library. Playwright is optional for targets without an explicit
+    ``--bounds`` value or imported ``data-pptx-frame`` metadata.
+
+See workflows/create-template.md and scripts/docs/svg-pipeline.md.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import copy
+import hashlib
+import json
+import math
+import mimetypes
+import os
+import re
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from urllib.parse import unquote, urlsplit, urlunsplit
+from xml.etree import ElementTree as ET
+
+from console_encoding import configure_utf8_stdio
+from svg_authoring_view import (
+    AUTHORING_MANIFEST_NAME,
+    write_authoring_summary,
+)
+
+configure_utf8_stdio()
+
+SVG_NS = "http://www.w3.org/2000/svg"
+XLINK_NS = "http://www.w3.org/1999/xlink"
+GEOMETRY_ROOT_ATTRS = {"viewBox", "width", "height", "x", "y", "transform"}
+PRESERVED_IMAGE_ATTRS = {
+    "aria-label",
+    "data-name",
+    "data-pptx-layer",
+    "data-pptx-role",
+    "data-pptx-shape-name",
+    "id",
+}
+SEMANTIC_MARKERS = {
+    "data-icon",
+    "data-pptx-authoring",
+    "data-pptx-import-source",
+    "data-pptx-placeholder",
+    "data-pptx-replace-with",
+}
+SEMANTIC_PREFIXES = (
+    "data-pptx-fallback-",
+    "data-pptx-native",
+    "data-pptx-placeholder-",
+    "data-pptx-replace",
+)
+VISUAL_TAGS = {
+    "circle",
+    "ellipse",
+    "image",
+    "line",
+    "path",
+    "polygon",
+    "polyline",
+    "rect",
+    "svg",
+    "text",
+    "use",
+}
+UNSAFE_PICTURE_TAGS = {
+    "animate",
+    "animateMotion",
+    "animateTransform",
+    "foreignObject",
+    "script",
+    "set",
+}
+_URL_RE = re.compile(r"url\(\s*(['\"]?)([^)'\"]+)\1\s*\)", re.IGNORECASE)
+_FRAME_SPLIT_RE = re.compile(r"[\s,]+")
+
+ET.register_namespace("", SVG_NS)
+ET.register_namespace("xlink", XLINK_NS)
+
+
+class SvgPictureError(RuntimeError):
+    """Raised when an explicit picture extraction cannot be completed safely."""
+
+
+@dataclass(frozen=True)
+class Bounds:
+    """One positive rectangle in source-root user coordinates."""
+
+    x: float
+    y: float
+    width: float
+    height: float
+
+@dataclass
+class ExtractionPlan:
+    """Prepared output for one selected source group."""
+
+    selector: str
+    asset_path: Path
+    href: str
+    bounds: Bounds
+    bounds_source: str
+    asset_bytes: bytes
+    dependency_ids: list[str]
+    embedded_resources: list[str]
+
+
+def _local(tag: object) -> str:
+    return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
+
+
+def _fmt(value: float) -> str:
+    rounded = round(value, 6)
+    if rounded == 0:
+        rounded = 0.0
+    return f"{rounded:.6f}".rstrip("0").rstrip(".")
+
+
+def _padded_bounds(bounds: Bounds, padding: float) -> Bounds:
+    return Bounds(
+        bounds.x - padding,
+        bounds.y - padding,
+        bounds.width + 2 * padding,
+        bounds.height + 2 * padding,
+    )
+
+
+def _parse_svg(path: Path) -> tuple[ET.ElementTree, ET.Element]:

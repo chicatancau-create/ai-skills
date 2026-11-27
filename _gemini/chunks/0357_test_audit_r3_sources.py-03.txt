@@ -1,0 +1,72 @@
+            for host in self.NON_PUBLIC:
+                with self.subTest(host=host):
+                    url = f"http://{host}/"
+                    response = Mock(url=url)
+                    with patch.object(requests.Session, "get", return_value=response) as transport:
+                        self.assertIs(web_to_md._http_get(url), response)
+                        transport.assert_called_once()
+
+
+class RemoteDocumentRedirectTests(unittest.TestCase):
+    def _convert(self, root: Path, body: bytes, suffix: str, content_type: str):
+        start = "http://8.8.8.8/download?id=123"
+        final = f"http://8.8.8.8/report{suffix}"
+        routes = {
+            start: (302, {"Location": final}, b""),
+            final: (200, {"Content-Type": content_type}, body),
+        }
+        output = root / "converted.md"
+        with patch.object(web_to_md, "curl_requests", None), \
+                patch.dict(web_to_md.CONFIG, allow_private_hosts=False), \
+                patch.object(socket, "getaddrinfo", side_effect=AssertionError("Unexpected DNS")), \
+                patch.object(socket.socket, "connect", side_effect=AssertionError("Unexpected network")), \
+                _memory_transport(routes) as (visited, _), contextlib.redirect_stdout(io.StringIO()):
+            result = web_to_md.process_url(start, str(output), download_images=False)
+        self.assertTrue(result[0], result)
+        self.assertEqual([request.url for request in visited], [start, final])
+        profile = json.loads(profile_path_for(output).read_text(encoding="utf-8"))
+        self.assertEqual(profile["source"]["url"], start)
+        return output, profile
+
+    def test_a05_redirected_octet_stream_docx_uses_document_backend(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = DocxSourceRegressionTests()._docx(root)
+            body = source.read_bytes()
+            output, profile = self._convert(root, body, ".docx", "application/octet-stream")
+            self.assertIn("Source data", output.read_text(encoding="utf-8"))
+            self.assertIn("| 2026 | 54321 |", output.read_text(encoding="utf-8"))
+            self.assertEqual(output.with_suffix(".docx").read_bytes(), body)
+            self.assertEqual(profile["converter"], "doc_to_md.py")
+
+    def test_a05_redirected_pdf_magic_still_uses_pdf_backend(self) -> None:
+        import fitz
+
+        with tempfile.TemporaryDirectory() as tmp, fitz.open() as document:
+            page = document.new_page()
+            page.insert_text((72, 72), "Expected revenue 54321")
+            body = document.tobytes()
+            output, profile = self._convert(Path(tmp), body, "", "application/octet-stream")
+            self.assertIn("Expected revenue 54321", output.read_text(encoding="utf-8"))
+            self.assertEqual(output.with_suffix(".pdf").read_bytes(), body)
+            self.assertEqual(profile["converter"], "pdf_to_md.py")
+
+
+class DocxSourceRegressionTests(unittest.TestCase):
+    W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    C = "http://schemas.openxmlformats.org/drawingml/2006/chart"
+    PKG = "http://schemas.openxmlformats.org/package/2006/relationships"
+    CHART = (
+        f'<c:chartSpace xmlns:c="{C}"><c:chart><c:plotArea><c:barChart>'
+        '<c:barDir val="col"/><c:grouping val="clustered"/>'
+        '<c:ser><c:idx val="0"/><c:order val="0"/>'
+        '<c:tx><c:v>Revenue</c:v></c:tx>'
+        '<c:cat><c:strRef><c:f>Sheet1!$A$2</c:f><c:strCache><c:ptCount val="1"/>'
+        '<c:pt idx="0"><c:v>2026</c:v></c:pt></c:strCache></c:strRef></c:cat>'
+        '<c:val><c:numRef><c:f>Sheet1!$B$2</c:f><c:numCache><c:ptCount val="1"/>'
+        '<c:pt idx="0"><c:v>54321</c:v></c:pt></c:numCache></c:numRef></c:val>'
+        '</c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>'
+    )
+
+    def _docx(

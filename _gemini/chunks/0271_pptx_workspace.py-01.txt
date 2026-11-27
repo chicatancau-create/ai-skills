@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+"""
+PPT Master - PPTX Semantic Workspace
+
+Own the semantic on-disk paths and package-resource inventory shared by PPTX
+import, template preparation, and source-preserving SVG round trips.
+
+Usage:
+    Imported by pptx_to_svg.py, pptx_template_import.py, and svg_to_pptx.py.
+
+Examples:
+    inventory = inventory_package_resources(package)
+    write_workspace_resources(workspace, inventory)
+
+Dependencies:
+    None (only uses standard library)
+"""
+
+from __future__ import annotations
+
+import hashlib
+import io
+import json
+import posixpath
+import re
+import zipfile
+from collections import defaultdict
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from xml.etree import ElementTree as ET
+
+
+SOURCE_PPTX_PATH = Path("sources/source.pptx")
+NATIVE_STRUCTURE_PATH = Path("analysis/native_structure.json")
+ROUNDTRIP_MANIFEST_PATH = Path("analysis/roundtrip_manifest.json")
+ROUNDTRIP_PAGE_PLAN_PATH = Path("page_plan.json")
+TEMPLATE_MANIFEST_PATH = Path("analysis/manifest.json")
+CONVERSION_REPORT_PATH = Path("validation/conversion-report.json")
+AUTHORING_SVG_FLAT_DIR = Path("authoring-svg-flat")
+AUTHORING_SVG_DIR = Path("authoring-svg")
+ROUNDTRIP_SVG_ROOT = Path("analysis/roundtrip-svg")
+ROUNDTRIP_LAYERED_SVG_DIR = ROUNDTRIP_SVG_ROOT / "layered"
+ROUNDTRIP_FLAT_SVG_DIR = ROUNDTRIP_SVG_ROOT / "flat"
+REMOVED_WORKSPACE_ENTRIES = (
+    Path("assets"),
+    Path("conversion-report.json"),
+    Path("manifest.json"),
+    Path("native_structure.json"),
+    Path("source_template.pptx"),
+    Path("svg_flat"),
+)
+
+IMAGE_EXTENSIONS = frozenset({
+    ".avif",
+    ".bmp",
+    ".emf",
+    ".gif",
+    ".jpeg",
+    ".jpg",
+    ".png",
+    ".svg",
+    ".tif",
+    ".tiff",
+    ".webp",
+    ".wmf",
+})
+VIDEO_EXTENSIONS = frozenset({
+    ".avi",
+    ".m4v",
+    ".mkv",
+    ".mov",
+    ".mp4",
+    ".mpeg",
+    ".mpg",
+    ".webm",
+    ".wmv",
+})
+AUDIO_EXTENSIONS = frozenset({
+    ".aac",
+    ".aif",
+    ".aiff",
+    ".flac",
+    ".m4a",
+    ".mp3",
+    ".oga",
+    ".ogg",
+    ".wav",
+    ".wma",
+})
+
+_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+_DOC_REL_NS = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+)
+_TRANSITION_TAG = (
+    "{http://schemas.openxmlformats.org/presentationml/2006/main}transition"
+)
+_REL_ATTR_PREFIX = f"{{{_DOC_REL_NS}}}"
+_CONTENT_TYPES_NS = (
+    "http://schemas.openxmlformats.org/package/2006/content-types"
+)
+_FORMAT_BY_EXTENSION = {
+    ".3mf": frozenset({"3mf"}),
+    ".aac": frozenset({"aac"}),
+    ".aif": frozenset({"aiff"}),
+    ".aiff": frozenset({"aiff"}),
+    ".avif": frozenset({"avif"}),
+    ".avi": frozenset({"avi"}),
+    ".bmp": frozenset({"bmp"}),
+    ".doc": frozenset({"ole"}),
+    ".docm": frozenset({"ooxml-docx"}),
+    ".docx": frozenset({"ooxml-docx"}),
+    ".dotm": frozenset({"ooxml-docx"}),
+    ".dotx": frozenset({"ooxml-docx"}),
+    ".emf": frozenset({"emf"}),
+    ".eps": frozenset({"postscript"}),
+    ".flac": frozenset({"flac"}),
+    ".gif": frozenset({"gif"}),
+    ".glb": frozenset({"glb"}),
+    ".jpeg": frozenset({"jpeg"}),
+    ".jpg": frozenset({"jpeg"}),
+    ".ico": frozenset({"ico"}),
+    ".m4a": frozenset({"iso-bmff"}),
+    ".m4v": frozenset({"iso-bmff"}),
+    ".mkv": frozenset({"ebml"}),
+    ".mov": frozenset({"iso-bmff"}),
+    ".mp3": frozenset({"mp3"}),
+    ".mp4": frozenset({"iso-bmff"}),
+    ".mpeg": frozenset({"mpeg"}),
+    ".mpg": frozenset({"mpeg"}),
+    ".oga": frozenset({"ogg"}),
+    ".ogg": frozenset({"ogg"}),
+    ".png": frozenset({"png"}),
+    ".pdf": frozenset({"pdf"}),
+    ".potm": frozenset({"ooxml-pptx"}),
+    ".potx": frozenset({"ooxml-pptx"}),
+    ".ppt": frozenset({"ole"}),
+    ".pptm": frozenset({"ooxml-pptx"}),
+    ".pptx": frozenset({"ooxml-pptx"}),
+    ".svg": frozenset({"svg"}),
+    ".tif": frozenset({"tiff"}),
+    ".tiff": frozenset({"tiff"}),
+    ".wav": frozenset({"wav"}),
+    ".wdp": frozenset({"wdp"}),
+    ".webm": frozenset({"ebml"}),
+    ".webp": frozenset({"webp"}),

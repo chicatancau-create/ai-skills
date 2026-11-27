@@ -1,0 +1,71 @@
+                )
+                self.assertNotEqual(code, 0)
+                self.assertEqual(stdout, '')
+                self.assertIn('--tolerance must be finite', stderr)
+
+    def test_nonfinite_tuple_parameters_identify_component(self):
+        cases = (
+            ('bar', '--area', ['--data', 'A:10,B:20'], '0,0,{},100', 2),
+            ('bar', '--value-range', ['--data', 'A:10,B:20'], '0,{}', 1),
+            ('pie', '--center', ['--data', 'A:10,B:20'], '{},100', 0),
+            ('radar', '--center', ['--data', 'A:10,B:20,C:30'], '100,{}', 1),
+            ('line', '--area', ['--data', 'A:10,B:20'], '0,{},100,100', 1),
+            ('line', '--x-range', ['--data', 'A:10,B:20'], '0,{}', 1),
+            ('line', '--y-range', ['--data', 'A:10,B:20'], '0,{}', 1),
+            ('grid', '--area', ['--rows', '2', '--cols', '3'], '0,0,100,{}', 3),
+        )
+        for value in ('NaN', 'Infinity', '-Infinity'):
+            for chart, option, required, template, index in cases:
+                with self.subTest(chart=chart, option=option, value=value):
+                    code, stdout, stderr = self._run_calculator(
+                        ['calc', chart, *required, f'{option}={template.format(value)}']
+                    )
+                    self.assertNotEqual(code, 0)
+                    self.assertEqual(stdout, '')
+                    self.assertIn(f'{option}[{index}] must be finite', stderr)
+
+    def test_nonfinite_data_identifies_point_without_category_fallback(self):
+        for value in ('NaN', 'Infinity', '-Infinity'):
+            for chart in ('bar', 'pie', 'radar', 'line'):
+                with self.subTest(chart=chart, value=value):
+                    code, stdout, stderr = self._run_calculator(
+                        ['calc', chart, '--data', f'A:10,B:{value},C:30']
+                    )
+                    self.assertNotEqual(code, 0)
+                    self.assertEqual(stdout, '')
+                    self.assertIn("--data point 2 ('B')", stderr)
+                    self.assertIn('must be finite', stderr)
+            for data in (f'1:10,{value}:20', f'A:10,{value}:20'):
+                with self.subTest(data=data):
+                    code, stdout, stderr = self._run_calculator(['calc', 'line', '--data', data])
+                    self.assertNotEqual(code, 0)
+                    self.assertEqual(stdout, '')
+                    self.assertIn('--data point 2 x must be finite', stderr)
+
+    def test_finite_inputs_preserve_gap_boundaries_and_chart_modes(self):
+        cases = [
+            ['calc', 'bar', '--data', 'A:10,B:20', '--gap-width=0'],
+            ['calc', 'bar', '--data', 'A:10,B:20', '--gap-width=150', '--horizontal'],
+            ['calc', 'pie', '--data', 'A:10,B:20', '--center=100,100', '--radius=50'],
+            ['calc', 'radar', '--data', 'A:10,B:20,C:30', '--max-value=40'],
+            ['calc', 'line', '--data', 'A:10,B:20', '--slot-midpoints'],
+            ['calc', 'line', '--data', '0:10,1:20', '--x-range=0,1', '--y-range=0,30'],
+            ['calc', 'grid', '--rows=2', '--cols=3', '--padding=0', '--gap=10'],
+        ]
+        for argv in cases:
+            with self.subTest(argv=argv):
+                code, stdout, stderr = self._run_calculator(argv)
+                self.assertEqual(code, 0, stderr)
+                self.assertTrue(stdout)
+                self.assertNotRegex(stdout.lower(), r'\b(?:nan|inf|infinity)\b')
+
+    def test_nonfinite_json_config_and_expected_coordinates_identify_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_file = root / 'config.json'
+            expected_file = root / 'expected.json'
+            svg_file = root / 'chart.svg'
+            svg_file.write_text('<svg><rect id="bar_a" x="0" y="10"/></svg>', encoding='utf-8')
+            for value in (float('nan'), float('inf'), float('-inf')):
+                configs = (
+                    ({'type': 'bar', 'data': {'A': value}}, 'config.data.A'),

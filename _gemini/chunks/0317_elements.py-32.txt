@@ -1,0 +1,93 @@
+            raw_box_y = (box_y - ctx.translate_y) / sy
+            box_x = ctx.translate_x + sx * (a * raw_box_x + e)
+            box_y = ctx.translate_y + sy * (d * raw_box_y + f)
+    elif translate_only and use_axis_transform:
+        _a, _b, _c, _d, e, f = parse_transform_matrix(text_transform)
+        matrix_a, matrix_b, matrix_c, matrix_d, _matrix_e, _matrix_f = (
+            ctx.transform_matrix
+        )
+        box_x += matrix_a * e + matrix_c * f
+        box_y += matrix_b * e + matrix_d * f
+
+    # Text rotation. SVG's rotate(angle [cx cy]) rotates around (cx, cy), but
+    # DrawingML's <a:xfrm rot="..."> rotates the shape around its own center.
+    # When a pivot is given (and differs from the box center), translate the
+    # box so its center lands where SVG would place the rotated visual center —
+    # otherwise rotated y-axis labels etc. drift to the wrong location.
+    text_rot = 0
+    if rotate_only:
+        rotate_args = text_operations[0][1]
+        angle_deg = rotate_args[0]
+        if reflect_x != reflect_y:
+            angle_deg = -angle_deg
+        text_rot = int(angle_deg * ANGLE_UNIT)
+        if len(rotate_args) == 3:
+            if use_axis_transform:
+                pivot_x, pivot_y = transform_point(
+                    ctx.transform_matrix,
+                    rotate_args[1],
+                    rotate_args[2],
+                )
+            else:
+                pivot_x = ctx_x(rotate_args[1], ctx)
+                pivot_y = ctx_y(rotate_args[2], ctx)
+            cx_box = box_x + box_w / 2
+            cy_box = box_y + box_h / 2
+            rad = math.radians(angle_deg)
+            dx = cx_box - pivot_x
+            dy = cy_box - pivot_y
+            new_cx = pivot_x + dx * math.cos(rad) - dy * math.sin(rad)
+            new_cy = pivot_y + dx * math.sin(rad) + dy * math.cos(rad)
+            box_x = new_cx - box_w / 2
+            box_y = new_cy - box_h / 2
+
+    # Alignment
+    algn_map = {'start': 'l', 'middle': 'ctr', 'end': 'r'}
+    algn = algn_map.get(text_anchor, 'l')
+
+    # Shadow effect
+    shape_effect_xml = ''
+    text_effect_xml = ''
+    filt_id = get_effective_filter_id(elem, ctx)
+    if filt_id and filt_id in ctx.defs:
+        filter_elem = ctx.defs[filt_id]
+        effect_kind = classify_filter_effect(filter_elem)
+        if effect_kind == 'glow':
+            text_effect_xml = build_effect_xml(
+                filter_elem,
+                get_element_opacity(elem, ctx),
+            )
+        elif effect_kind == 'shadow':
+            shape_effect_xml = build_effect_xml(
+                filter_elem,
+                get_element_opacity(elem, ctx),
+            )
+
+    shape_id = _claim_element_shape_id(elem, ctx)
+    rot_attr = f' rot="{text_rot}"' if text_rot else ''
+
+    if paragraph_runs is not None:
+        # SVG dy(px) -> hundredths-of-a-point: dy_pt = dy_px * 0.75, then x100.
+        line_spc_val = round(line_height_px * FONT_PX_TO_HUNDREDTHS_PT)
+        ln_spc_xml = f'<a:lnSpc><a:spcPts val="{line_spc_val}"/></a:lnSpc>'
+        paragraph_xml_chunks = []
+        for line, extra_px, bullet in zip(paragraph_runs, paragraph_space_before, paragraph_bullets):
+            spc_bef_xml = ''
+            if extra_px > 0:
+                spc_bef_val = round(extra_px * FONT_PX_TO_HUNDREDTHS_PT)
+                spc_bef_xml = f'<a:spcBef><a:spcPts val="{spc_bef_val}"/></a:spcBef>'
+            runs_inner = '\n'.join(_build_run_xml(r, fonts, ctx, text_effect_xml) for r in line)
+            first_text_run = next(
+                (run for run in line if not run.get('_line_break')),
+                None,
+            )
+            effective_line_spacing = (
+                ''
+                if any(run.get(_INLINE_FORMULA_KEY) is not None for run in line)
+                else ln_spc_xml
+            )
+            p_pr_xml = _paragraph_pr_xml(
+                algn=algn,
+                font_size=(
+                    float(first_text_run.get('font_size', font_size))
+                    if first_text_run is not None

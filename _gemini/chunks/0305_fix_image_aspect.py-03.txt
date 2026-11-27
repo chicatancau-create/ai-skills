@@ -1,0 +1,97 @@
+            ET.register_namespace(prefix, uri)
+        else:
+            ET.register_namespace('', uri)
+    
+    try:
+        tree = ET.parse(svg_path)
+        root = tree.getroot()
+    except ET.ParseError as e:
+        print(f"  [ERROR] Cannot parse SVG: {e}")
+        return 0
+    
+    # Find all image elements
+    fixed_count = 0
+    
+    # Check image elements with and without namespace
+    for ns_prefix in ['', '{http://www.w3.org/2000/svg}']:
+        for image_elem in root.iter(f'{ns_prefix}image'):
+            # Get href attribute (supports xlink:href and href)
+            href = image_elem.get('{http://www.w3.org/1999/xlink}href')
+            if href is None:
+                href = image_elem.get('href')
+            if href is None:
+                continue
+            
+            # Get current dimensions and position
+            try:
+                x = float(image_elem.get('x', 0))
+                y = float(image_elem.get('y', 0))
+                width = float(image_elem.get('width', 0))
+                height = float(image_elem.get('height', 0))
+            except (ValueError, TypeError):
+                continue
+            
+            if width <= 0 or height <= 0:
+                continue
+            
+            # Get preserveAspectRatio
+            par = image_elem.get('preserveAspectRatio', 'xMidYMid meet')
+            
+            # Parse preserveAspectRatio
+            # Format: <align> [<meetOrSlice>]
+            # e.g.: xMidYMid meet, xMidYMid slice, none
+            par_parts = par.split()
+            align = par_parts[0] if par_parts else 'xMidYMid'
+            meet_or_slice = par_parts[1] if len(par_parts) > 1 else 'meet'
+            
+            if align == 'none':
+                # If none, no fix needed
+                continue
+            
+            # Get original image dimensions
+            img_width, img_height = get_image_dimensions(href, svg_dir)
+            if img_width is None or img_height is None:
+                continue
+            
+            # Calculate fitted dimensions
+            mode = 'slice' if meet_or_slice == 'slice' else 'meet'
+            new_width, new_height, offset_x, offset_y = calculate_fitted_dimensions(
+                img_width, img_height, width, height, mode
+            )
+            
+            # Check if modification is needed
+            tolerance = 0.5  # Allowed tolerance
+            if (abs(new_width - width) < tolerance and 
+                abs(new_height - height) < tolerance):
+                # Dimensions are already correct, no modification needed
+                continue
+            
+            if verbose:
+                img_name = os.path.basename(href.split('?')[0][:50] if not href.startswith('data:') else '[base64]')
+                print(f"  [FIX] {img_name}")
+                print(f"        Original image: {img_width}x{img_height} (ratio: {img_width/img_height:.3f})")
+                print(f"        Original box: {width}x{height} @ ({x}, {y})")
+                print(f"        New box: {new_width:.1f}x{new_height:.1f} @ ({x + offset_x:.1f}, {y + offset_y:.1f})")
+            
+            if not dry_run:
+                # Update attributes
+                image_elem.set('x', f'{x + offset_x:.1f}')
+                image_elem.set('y', f'{y + offset_y:.1f}')
+                image_elem.set('width', f'{new_width:.1f}')
+                image_elem.set('height', f'{new_height:.1f}')
+                # Remove preserveAspectRatio since dimensions are now correct
+                if 'preserveAspectRatio' in image_elem.attrib:
+                    del image_elem.attrib['preserveAspectRatio']
+            
+            fixed_count += 1
+    
+    if not dry_run and fixed_count > 0:
+        # Save modifications
+        tree.write(svg_path, encoding='unicode', xml_declaration=True)
+    
+    return fixed_count
+
+
+def main() -> None:
+    """Run the CLI entry point."""
+    parser = argparse.ArgumentParser(

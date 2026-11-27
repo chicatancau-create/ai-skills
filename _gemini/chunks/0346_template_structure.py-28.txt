@@ -1,0 +1,115 @@
+                svg_path=svg_path,
+                asset_identity=True,
+            ),
+        )
+        for name, value in root.attrib.items()
+        if (
+            name.rsplit("}", 1)[-1] not in _STRUCTURE_ATTRS
+            and not name.rsplit("}", 1)[-1].startswith("data-")
+        )
+    ))
+    css_rules = _scope_css_signature(root, comparison_elements, svg_path)
+    references: set[str] = set()
+    for element in comparison_elements:
+        references.update(_svg_reference_ids(element))
+    for _selector, declarations in css_rules:
+        references.update(
+            match.group(2)[1:]
+            for match in _CSS_URL_RE.finditer(declarations)
+            if match.group(2).startswith("#")
+        )
+
+    definitions_by_id: dict[str, ET.Element] = {}
+    for definitions in root.iter():
+        if _local_tag(definitions) != "defs":
+            continue
+        for definition in definitions.iter():
+            definition_id = (definition.get("id") or "").strip()
+            if definition_id:
+                definitions_by_id[definition_id] = definition
+
+    pending = list(references)
+    resolved: set[str] = set()
+    while pending:
+        reference = pending.pop()
+        if reference in resolved:
+            continue
+        resolved.add(reference)
+        definition = definitions_by_id.get(reference)
+        if definition is not None:
+            pending.extend(_svg_reference_ids(definition) - resolved)
+    definition_signatures = tuple(
+        (
+            reference,
+            _element_tree_signature(
+                definitions_by_id[reference],
+                include_skin=True,
+                include_text=True,
+                svg_path=svg_path,
+                asset_identity=True,
+            ) if reference in definitions_by_id else ("missing", reference),
+        )
+        for reference in sorted(resolved)
+    )
+    return root_attrs, css_rules, definition_signatures
+
+
+def _structure_subtree_signature(
+    svg_path: Path,
+    elements: tuple[TemplateElementSpec, ...],
+    *,
+    include_skin: bool = False,
+    include_text: bool = True,
+    asset_identity: bool = False,
+    ignore_json_native_preview: bool = False,
+) -> tuple[tuple[str, tuple[object, ...]], ...]:
+    """Read structural or literal-visual signatures for direct SVG children."""
+    try:
+        root = _parse_svg_root(svg_path)
+        materialize_inline_geometry_properties(root)
+    except (OSError, ET.ParseError, NativePayloadError, GeometryStyleError) as exc:
+        raise TemplateStructureError(
+            f"{svg_path.name}: unable to compare template prototype structure: {exc}"
+        ) from exc
+    direct_by_id = {
+        (child.get("id") or "").strip(): child
+        for child in root
+        if (child.get("id") or "").strip()
+    }
+    signatures: list[tuple[str, tuple[object, ...]]] = []
+    for item in elements:
+        child = direct_by_id.get(item.element_id)
+        if child is None:
+            raise TemplateStructureError(
+                f"{svg_path.name}: structure element {item.element_id!r} is no "
+                "longer a direct SVG child"
+            )
+        signatures.append((
+            item.element_id,
+            _element_tree_signature(
+                child,
+                include_skin=include_skin,
+                include_text=include_text,
+                svg_path=svg_path,
+                asset_identity=asset_identity,
+                ignore_json_native_preview=ignore_json_native_preview,
+            ),
+        ))
+    if include_skin:
+        selected = tuple(
+            direct_by_id[item.element_id]
+            for item in elements
+            if item.element_id in direct_by_id
+        )
+        signatures.append((
+            "__visual_resources__",
+            _scope_visual_resources_signature(
+                root,
+                selected,
+                svg_path,
+                ignore_json_native_preview=ignore_json_native_preview,
+            ),
+        ))
+    return tuple(signatures)
+
+

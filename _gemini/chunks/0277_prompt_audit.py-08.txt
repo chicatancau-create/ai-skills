@@ -1,0 +1,122 @@
+) -> list[Paragraph]:
+    """Extract prose blocks for duplicate and registry analysis."""
+    minimum = int(config.get("min_chars", 100))
+    paragraphs: list[Paragraph] = []
+
+    for document in documents:
+        if not document.path.endswith(".md"):
+            continue
+        block: list[str] = []
+        block_line = 1
+        in_fence = False
+
+        def flush() -> None:
+            nonlocal block
+            text = "\n".join(block).strip()
+            block = []
+            if len(text) < minimum:
+                return
+            normalized = _normalize_paragraph(text)
+            words = tuple(_WORD_RE.findall(normalized))
+            if not normalized or not words:
+                return
+            paragraphs.append(
+                Paragraph(
+                    path=document.path,
+                    line=block_line,
+                    text=text,
+                    normalized=normalized,
+                    words=words,
+                )
+            )
+
+        for line_number, line in enumerate(document.text.splitlines(), start=1):
+            if _FENCE_RE.match(line):
+                flush()
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                continue
+            if not line.strip() or _HEADING_RE.match(line) or line.strip() == "---":
+                flush()
+                continue
+            if not block:
+                block_line = line_number
+            block.append(line)
+        flush()
+
+    return paragraphs
+
+
+def extract_registry_blocks(documents: list[Document]) -> list[Paragraph]:
+    """Extract unfiltered Markdown blocks, including headings and fenced examples."""
+    blocks: list[Paragraph] = []
+    for document in documents:
+        if not document.path.endswith(".md"):
+            continue
+        lines: list[str] = []
+        block_line = 1
+
+        def flush() -> None:
+            nonlocal lines
+            text = "\n".join(lines).strip()
+            lines = []
+            if not text:
+                return
+            normalized = _normalize_paragraph(text)
+            blocks.append(
+                Paragraph(
+                    path=document.path,
+                    line=block_line,
+                    text=text,
+                    normalized=normalized,
+                    words=tuple(_WORD_RE.findall(normalized)),
+                )
+            )
+
+        for line_number, line in enumerate(document.text.splitlines(), start=1):
+            if not line.strip():
+                flush()
+                continue
+            if not lines:
+                block_line = line_number
+            lines.append(line)
+        flush()
+    return blocks
+
+
+def find_exact_duplicates(
+    paragraphs: list[Paragraph],
+) -> tuple[list[dict[str, Any]], int]:
+    """Find normalized prose blocks copied across files."""
+    groups: dict[str, list[Paragraph]] = defaultdict(list)
+    for paragraph in paragraphs:
+        groups[paragraph.normalized].append(paragraph)
+
+    duplicates: list[dict[str, Any]] = []
+    for normalized, items in groups.items():
+        if len({item.path for item in items}) < 2:
+            continue
+        paths = sorted({item.path for item in items})
+        locations = sorted(
+            ({"path": item.path, "line": item.line} for item in items),
+            key=lambda item: (item["path"], item["line"]),
+        )
+        duplicates.append(
+            {
+                "kind": "exact",
+                "fingerprint": _duplicate_fingerprint(*(item.text for item in items)),
+                "paths": paths,
+                "chars": len(normalized),
+                "preview": normalized[:180],
+                "locations": locations,
+            }
+        )
+    duplicates.sort(key=lambda item: (-item["chars"], item["locations"][0]["path"]))
+    return duplicates, len(duplicates)
+
+
+def find_near_duplicates(
+    paragraphs: list[Paragraph],
+    config: dict[str, Any],
+) -> tuple[list[dict[str, Any]], int]:

@@ -1,0 +1,113 @@
+            f"Unsupported shape Boolean operation {operation!r}; use {allowed}"
+        )
+    source_id_list = _validate_source_ids(source_ids)
+    _validate_output_id(output_id)
+    style_overrides = _validate_style_overrides(style)
+
+    source_path = Path(svg_file)
+    try:
+        root = ET.parse(source_path).getroot()
+    except ET.ParseError as exc:
+        raise ValueError(f"Cannot parse SVG {source_path}: {exc}") from exc
+    if _local_name(root.tag) != "svg":
+        raise ValueError(f"Shape Boolean source must have an SVG root: {source_path}")
+    if any(_local_name(element.tag) == "style" for element in root.iter()):
+        raise ValueError(
+            "Shape Boolean does not resolve embedded CSS; use explicit SVG "
+            "presentation attributes on the operands"
+        )
+
+    parents = {
+        child: parent
+        for parent in root.iter()
+        for child in list(parent)
+    }
+    elements_by_id, duplicate_ids = _index_element_ids(root)
+    selected: list[ET.Element] = []
+    for source_id in source_id_list:
+        if source_id in duplicate_ids:
+            raise ValueError(
+                f"Shape Boolean source id {source_id!r} is not unique"
+            )
+        element = elements_by_id.get(source_id)
+        if element is None:
+            raise ValueError(f"Shape Boolean source id not found: {source_id!r}")
+        selected.append(element)
+
+    pathops = _load_pathops()
+    operands = [
+        _element_to_pathops(
+            element,
+            parents,
+            pathops,
+            font_dirs=font_dirs,
+        )
+        for element in selected
+    ]
+    inherited_style = _materialize_baked_stroke_style(
+        _effective_style(selected[0], parents),
+        _combined_transform(_element_chain(selected[0], parents)),
+    )
+    inherited_style.update(style_overrides)
+
+    if normalized_operation == "fragment":
+        results = _fragment_paths(operands, pathops)
+        fragments: list[str] = []
+        for index, result in enumerate(results, start=1):
+            result_id = f"{output_id}-{index}"
+            _validate_result_id_collision(
+                result_id,
+                elements_by_id,
+                source_id_list,
+            )
+            fragments.append(
+                _serialize_result_path(
+                    result,
+                    result_id,
+                    inherited_style,
+                    pathops,
+                )
+            )
+        return "\n".join(fragments)
+
+    result = _merge_paths(normalized_operation, operands, pathops)
+    if _path_is_empty(result):
+        raise ValueError(
+            f"Shape Boolean {normalized_operation} produced no filled area"
+        )
+    _validate_result_id_collision(output_id, elements_by_id, source_id_list)
+    return _serialize_result_path(
+        result,
+        output_id,
+        inherited_style,
+        pathops,
+    )
+
+
+def _validate_source_ids(source_ids: Sequence[str]) -> list[str]:
+    if isinstance(source_ids, (str, bytes)):
+        raise ValueError("Shape Boolean source_ids must be a sequence of ids")
+    values = list(source_ids)
+    if len(values) < 2:
+        raise ValueError("Shape Boolean requires at least two source ids")
+    if any(not isinstance(value, str) or not value for value in values):
+        raise ValueError("Shape Boolean source ids must be non-empty strings")
+    if len(set(values)) != len(values):
+        raise ValueError("Shape Boolean source ids must be unique")
+    return values
+
+
+def _validate_output_id(output_id: str) -> None:
+    if not isinstance(output_id, str) or _ID_RE.fullmatch(output_id) is None:
+        raise ValueError(f"Invalid SVG output id: {output_id!r}")
+
+
+def _validate_style_overrides(
+    style: Mapping[str, str] | None,
+) -> dict[str, str]:
+    if style is None:
+        return {}
+    unknown = sorted(set(style) - set(_STYLE_OVERRIDE_ATTRS))
+    if unknown:
+        raise ValueError(
+            "Unsupported shape Boolean style override(s): "

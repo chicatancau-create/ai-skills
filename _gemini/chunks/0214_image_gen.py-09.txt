@@ -1,0 +1,104 @@
+
+    source_path = Path(saved_path)
+    validate_image_file(str(source_path))
+
+    if source_path.resolve() != target_path.resolve():
+        try:
+            image_bytes = source_path.read_bytes()
+        except OSError as exc:
+            raise RuntimeError(
+                f"Could not read image output {source_path}: {exc}"
+            ) from exc
+        save_image_bytes(image_bytes, str(target_path))
+
+    validate_image_file(str(target_path))
+    return str(target_path)
+
+
+def _run_manifest(manifest: dict, manifest_path: str, backend_module, *,
+                  initial_concurrency: int,
+                  image_size: str,
+                  output_dir: str,
+                  model: str | None) -> tuple[int, int, int]:
+    """Run Pending/Failed items through the backend with adaptive concurrency.
+
+    Strategy:
+      - Verify every `Generated` item's target before treating it as done;
+        missing or unreadable output returns to `Failed` for this run.
+      - Start at `initial_concurrency` workers per batch.
+      - On any rate-limit error in a batch, halve concurrency (min 1) and
+        requeue the rate-limited items within a fixed attempt budget.
+      - A rate limit at concurrency 1 or after the budget is exhausted is
+        recorded as `status: Failed` + `last_error`; the current run then stops
+        without switching providers.
+      - Per-item failures are recorded as `status: Failed` + `last_error`
+        and not retried within this run. `Failed` remains retryable and
+        non-terminal; the Step 5 gate must resolve it by rerunning this
+        manifest or marking the item `Needs-Manual`.
+      - Global auth or billing errors stop new batches; untouched rows remain
+        retryable. Permanent model or request errors fail only their own row.
+      - Status is written back to the manifest file after each completion;
+        a Ctrl-C in the middle still preserves done items.
+      - `Needs-Manual` items are skipped (user processes them externally).
+
+    Returns (ok_count, failed_count, skipped_count).
+    """
+    manifest_output_dir = Path(manifest_path).resolve().parent
+    if Path(output_dir).resolve() != manifest_output_dir:
+        raise ValueError(
+            "Manifest outputs must stay beside image_prompts.json: "
+            f"expected {manifest_output_dir}, got {Path(output_dir).resolve()}"
+        )
+    output_dir = str(manifest_output_dir)
+
+    from image_backends.backend_common import (
+        is_global_permanent_error,
+        is_permanent_error,
+        is_rate_limit_error,
+        validate_image_file,
+    )
+
+    items = manifest["items"]
+    repaired_generated = False
+    for item in items:
+        if item["status"] != STATUS_GENERATED:
+            continue
+        target_path = Path(output_dir) / item["filename"]
+        try:
+            validate_image_file(str(target_path))
+        except RuntimeError as exc:
+            item["status"] = STATUS_FAILED
+            item["last_error"] = (
+                f"Generated file validation failed: {exc}"
+            )[:500]
+            repaired_generated = True
+            print(
+                f"  [RETRY] {item['filename']} was marked Generated but its "
+                f"target is invalid: {exc}"
+            )
+    if repaired_generated:
+        save_manifest(manifest_path, manifest)
+
+    pending_idx = [
+        i for i, it in enumerate(items) if it["status"] in RETRYABLE_STATUSES
+    ]
+    total = len(pending_idx)
+    skipped = len(items) - total
+
+    if total == 0:
+        print(
+            f"[Manifest] Nothing to do — all {len(items)} items already in "
+            "a terminal state (Generated / Needs-Manual)."
+        )
+        return 0, 0, skipped
+
+    print(
+        f"\n[Manifest] {total} item(s) to generate, "
+        f"{skipped} already done. concurrency={initial_concurrency}\n"
+    )
+
+    queue: list[int] = list(pending_idx)
+    ok_count = 0
+    fail_count = 0
+    current = max(1, initial_concurrency)
+    state_lock = threading.Lock()

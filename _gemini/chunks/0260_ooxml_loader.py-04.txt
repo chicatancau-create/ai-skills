@@ -1,0 +1,101 @@
+    def _load_slides(self) -> None:
+        assert self.zip is not None and self.presentation is not None
+        # presentation.xml has <p:sldIdLst><p:sldId r:id="rId..."/></p:sldIdLst>
+        # in document order.
+        sld_id_lst = self.presentation.xml.find("p:sldIdLst", NS)
+        if sld_id_lst is None:
+            return
+
+        for index, sld_id in enumerate(sld_id_lst.findall("p:sldId", NS), start=1):
+            rid = sld_id.attrib.get(f"{{{NS['r']}}}id")
+            if not rid:
+                continue
+            slide_path = self.presentation.resolve_rel(rid)
+            if not slide_path:
+                continue
+            slide_part = self._load_part(slide_path)
+            if slide_part is None:
+                continue
+            layout = self._resolve_layout(slide_part)
+            master = self._resolve_master(layout) if layout else None
+            self._slides.append(SlideRef(
+                index=index, part=slide_part, layout=layout, master=master,
+            ))
+
+    def _resolve_layout(self, slide: PartRef) -> PartRef | None:
+        for info in slide.rels.values():
+            if info.get("type") == REL_TYPES["slideLayout"]:
+                target = info["target"]
+                cached = self._layouts.get(target)
+                if cached is None:
+                    cached = self._load_part(target)
+                    if cached is not None:
+                        self._layouts[target] = cached
+                return cached
+        return None
+
+    def _resolve_master(self, layout: PartRef) -> PartRef | None:
+        for info in layout.rels.values():
+            if info.get("type") == REL_TYPES["slideMaster"]:
+                target = info["target"]
+                cached = self._masters.get(target)
+                if cached is None:
+                    cached = self._load_part(target)
+                    if cached is not None:
+                        self._masters[target] = cached
+                return cached
+        return None
+
+    def resolve_theme(self, master: PartRef | None) -> PartRef | None:
+        """Return the theme part referenced by a slide master."""
+        if master is None:
+            return None
+        for info in master.rels.values():
+            if info.get("type") == REL_TYPES["theme"]:
+                target = info["target"]
+                cached = self._themes.get(target)
+                if cached is None:
+                    cached = self._load_part(target)
+                    if cached is not None:
+                        self._themes[target] = cached
+                return cached
+        return None
+
+    def resolve_table_styles(self) -> PartRef | None:
+        """Return the presentation-level table style list, when usable.
+
+        Table style definitions are optional and some producers emit only the
+        built-in style id.  A missing or malformed style part must therefore
+        not prevent otherwise valid slides from being converted.
+        """
+        if self._table_styles_loaded:
+            return self._table_styles
+        self._table_styles_loaded = True
+
+        target: str | None = None
+        if self.presentation is not None:
+            for info in self.presentation.rels.values():
+                if info.get("type") == REL_TYPES["tableStyles"]:
+                    target = info.get("target")
+                    break
+        if target is None:
+            target = "ppt/tableStyles.xml"
+
+        try:
+            self._table_styles = self._load_part(target)
+        except RuntimeError:
+            self._table_styles = None
+        return self._table_styles
+
+    # ------------------- public iteration -------------------
+
+    def iter_slides(self) -> Iterator[SlideRef]:
+        yield from self._slides
+
+    @property
+    def slide_count(self) -> int:
+        return len(self._slides)
+
+    def get_slide(self, index: int) -> SlideRef | None:
+        """1-based index lookup."""
+        if 1 <= index <= len(self._slides):

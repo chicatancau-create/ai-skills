@@ -1,0 +1,107 @@
+        print(
+            "  Explicit Layout structure: "
+            f"{len(states_by_master)} master(s), "
+            f"{len(specs_by_layout)} layout(s), "
+            f"{master_shape_count} master element(s), "
+            f"{layout_shape_count} layout element(s), "
+            f"{len(slide_backgrounds)} slide background(s), "
+            f"{placeholder_count} placeholder definition(s)"
+        )
+    return (
+        expected_backgrounds,
+        expected_shape_rosters,
+        layout_parts_by_key,
+        master_parts_by_key,
+    )
+
+
+def _apply_preserved_structure(
+    extract_dir: Path,
+    specs: list[TemplateSlideSpec],
+    contract: NativeStructureContract,
+    conversion_traces: list[dict[str, Any]] | None,
+    *,
+    verbose: bool = False,
+) -> None:
+    """Drop preview-only inherited layers and bind content to source placeholders."""
+    states = _template_runtime_slides(extract_dir, specs, conversion_traces)
+    removed_preview_shapes = 0
+    removed_preview_backgrounds = 0
+    placeholder_count = 0
+    for state in states:
+        removed_background = False
+        for item in state.spec.elements:
+            if item.layer not in {"master", "layout"}:
+                continue
+            shape = _template_shape_for_item(state, item)
+            if shape is not None:
+                _remove_template_shape(state, shape)
+                removed_preview_shapes += 1
+                continue
+            if removed_background:
+                raise TemplateStructureError(
+                    f"{state.spec.svg_path.name}: multiple inherited preview "
+                    "backgrounds resolved to one slide background"
+                )
+            common_slide = state.root.find(f"{{{PML_NS}}}cSld")
+            background = (
+                common_slide.find(f"{{{PML_NS}}}bg")
+                if common_slide is not None
+                else None
+            )
+            if common_slide is None or background is None:
+                raise TemplateStructureError(
+                    f"{state.spec.svg_path.name}: inherited preview background "
+                    "did not produce a removable slide background"
+                )
+            common_slide.remove(background)
+            removed_background = True
+            removed_preview_backgrounds += 1
+
+        layout = contract.layout(state.spec.layout_key)
+        for item, source_placeholder in match_native_placeholders(state.spec, layout):
+            shape = _template_shape_for_item(state, item)
+            if shape is None:
+                raise TemplateStructureError(
+                    f"{state.spec.svg_path.name}: placeholder {item.element_id!r} "
+                    "cannot resolve to a slide background"
+                )
+            _patch_slide_placeholder(
+                shape,
+                item,
+                source_placeholder.idx,
+                source_placeholder.placeholder_type,
+            )
+            placeholder_count += 1
+        _write_xml_tree(state.slide_path, state.tree)
+
+    if verbose:
+        print(
+            "  Preserved structure: "
+            f"{len({spec.layout_key for spec in specs})} source layout(s), "
+            f"{removed_preview_shapes} preview shape(s) removed, "
+            f"{removed_preview_backgrounds} preview background(s) removed, "
+            f"{placeholder_count} source placeholder binding(s)"
+        )
+
+
+def _promote_common_chrome_shapes_to_masters(
+    extract_dir: Path,
+    structure: PptxStructureContext,
+    slide_count: int,
+    conversion_traces: list[dict[str, Any]] | None,
+    *,
+    verbose: bool = False,
+) -> int:
+    """Promote explicit repeated chrome SVG ids to their shared master."""
+    if not conversion_traces:
+        return 0
+    trace_by_slide = {
+        int(trace.get("slide_num", 0)): trace
+        for trace in conversion_traces
+        if trace.get("slide_num") is not None
+    }
+    if len(trace_by_slide) < slide_count:
+        return 0
+
+    slides_by_master: dict[str, list[int]] = {}

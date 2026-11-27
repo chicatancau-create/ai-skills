@@ -1,0 +1,110 @@
+                    video_narration_start_ms - powerpoint_narration_start_ms
+                ),
+                correlation=correlation,
+                audio_path=audio_path,
+            )
+        )
+        previous_video_slide_start_ms = video_slide_start_ms
+        powerpoint_slide_start_ms += timing.transition_ms + timing.advance_ms
+
+    return VideoTimelineCalibration(
+        slides=tuple(slides),
+        powerpoint_timeline_ms=timeline_ms,
+    )
+
+
+def _merge_subtitles_result(
+    project_path: Path,
+    *,
+    pptx_path: Path,
+    subtitle_dir: Path,
+    output_path: Path,
+    force: bool,
+    audio_dir: Path | None = None,
+    video_path: Path | None = None,
+) -> SubtitleMergeResult:
+    """Merge local SRT files on the PPTX or exported-video timeline."""
+    targets_by_slide, _anonymous_groups = scan_project_targets(project_path)
+    slide_names = list(targets_by_slide)
+    if not slide_names:
+        raise ValueError(f"No SVG slides found under: {project_path / 'svg_output'}")
+
+    local_subtitle_paths = [
+        subtitle_dir / f"{slide_name}.srt"
+        for slide_name in slide_names
+    ]
+    _reject_output_alias(
+        output_path,
+        [pptx_path, *local_subtitle_paths, *([video_path] if video_path else [])],
+        label="Merged subtitle",
+    )
+    _require_replaceable(output_path, force)
+    timings = _read_powerpoint_timings(pptx_path, len(slide_names))
+    theoretical_starts, timeline_ms = _powerpoint_audio_starts(timings)
+    local_cues = {
+        slide_name: _parse_srt(subtitle_dir / f"{slide_name}.srt")
+        for slide_name in slide_names
+    }
+    video_adjustments: list[int] = []
+    correlations: list[float] = []
+
+    if video_path is None:
+        audio_starts = theoretical_starts
+    else:
+        resolved_audio_dir = audio_dir or project_path / "audio"
+        calibration = calibrate_video_timeline(
+            slide_names=slide_names,
+            pptx_path=pptx_path,
+            audio_dir=resolved_audio_dir,
+            video_path=video_path,
+            subtitle_dir=subtitle_dir,
+        )
+        if calibration.powerpoint_timeline_ms != timeline_ms:
+            raise ValueError("Video calibration and subtitle timelines differ")
+        audio_starts = [
+            slide.video_narration_start_ms
+            for slide in calibration.slides
+        ]
+        correlations = [slide.correlation for slide in calibration.slides]
+        audio_paths = [slide.audio_path for slide in calibration.slides]
+        _reject_output_alias(
+            output_path,
+            audio_paths,
+            label="Merged subtitle",
+        )
+        video_adjustments = [
+            actual - theoretical
+            for actual, theoretical in zip(audio_starts, theoretical_starts)
+        ]
+
+    merged_cues: list[SubtitleCue] = []
+
+    for slide_name, audio_start_ms, timing in zip(
+        slide_names,
+        audio_starts,
+        timings,
+    ):
+        slide_cues = local_cues[slide_name]
+        narration_window_ms = timing.advance_ms - timing.narration_delay_ms
+        if slide_cues[-1].end_ms > narration_window_ms:
+            raise ValueError(
+                f"{slide_name}.srt ends at "
+                f"{_seconds_from_ms(slide_cues[-1].end_ms):.3f}s, after the "
+                "available narration window before PowerPoint advances at "
+                f"{_seconds_from_ms(narration_window_ms):.3f}s"
+            )
+        for cue in slide_cues:
+            merged_cue = SubtitleCue(
+                cue.start_ms + audio_start_ms,
+                cue.end_ms + audio_start_ms,
+                cue.text,
+            )
+            if merged_cues and merged_cue.start_ms < merged_cues[-1].end_ms:
+                raise ValueError(
+                    f"Video-calibrated subtitle overlap before slide {slide_name}"
+                )
+            merged_cues.append(merged_cue)
+
+    _atomic_write_text(output_path, _format_srt(merged_cues))
+    return SubtitleMergeResult(
+        slide_count=len(slide_names),

@@ -1,0 +1,146 @@
+    latin_face = _resolve_theme_typeface(
+        latin_face,
+        theme_fonts,
+        text=text,
+        lang=lang,
+        alt_lang=alt_lang,
+    )
+    ea_face = _resolve_theme_typeface(
+        ea_face,
+        theme_fonts,
+        text=text,
+        lang=lang,
+        alt_lang=alt_lang,
+    )
+    cs_face = _resolve_theme_typeface(
+        cs_face,
+        theme_fonts,
+        text=text,
+        lang=lang,
+        alt_lang=alt_lang,
+    )
+
+    # No typeface anywhere in the chain means the theme's minor font pair.
+    latin_face = latin_face or theme_fonts.get("minorLatin") or None
+    ea_face = ea_face or theme_fonts.get("minorEastAsia") or None
+    font_family = _build_font_stack(latin_face, ea_face, cs_face)
+    hyperlink_href: str | None = None
+    if rpr is not None and hyperlink_resolver is not None:
+        hyperlink = rpr.find("a:hlinkClick", NS)
+        if hyperlink is not None:
+            hyperlink_href = hyperlink_resolver(
+                hyperlink.attrib.get(f"{{{NS['r']}}}id", ""),
+                hyperlink.attrib.get("action", ""),
+            )
+
+    return TextRun(
+        text=text,
+        font_size_px=font_size_px,
+        font_family=font_family,
+        fill=fill,
+        fill_opacity=fill_opacity,
+        defs=defs,
+        bold=bold,
+        italic=italic,
+        underline=underline,
+        strikethrough=strikethrough,
+        letter_spacing_px=letter_spacing_px,
+        hyperlink_href=hyperlink_href,
+    )
+
+
+def _lst_style_level_prs(
+    lst_styles: tuple[ET.Element, ...],
+    level: int,
+) -> tuple[ET.Element, ...]:
+    """Return txBody/lstStyle paragraph properties for a paragraph level."""
+    level_idx = min(max(level, 0), 8) + 1
+    level_prs: list[ET.Element] = []
+    for lst_style in lst_styles:
+        lvl_pr = lst_style.find(f"a:lvl{level_idx}pPr", NS)
+        if lvl_pr is not None:
+            level_prs.append(lvl_pr)
+    return tuple(level_prs)
+
+
+def _child_chain(
+    sources: tuple[ET.Element | None, ...],
+    path: str,
+) -> ET.Element | None:
+    for src in sources:
+        if src is None:
+            continue
+        child = src.find(path, NS)
+        if child is not None:
+            return child
+    return None
+
+
+def _emu_px_attr_chain(
+    sources: tuple[ET.Element | None, ...],
+    attr: str,
+    default: float,
+) -> float:
+    value = _attr_chain(sources, attr)
+    if value is None:
+        return default
+    try:
+        return emu_to_px(int(value))
+    except ValueError:
+        return default
+
+
+def _line_height_ratio(sources: tuple[ET.Element | None, ...]) -> float:
+    ln_spc = _child_chain(sources, "a:lnSpc")
+    if ln_spc is None:
+        return DEFAULT_LINE_HEIGHT_RATIO
+    spc_pct = ln_spc.find("a:spcPct", NS)
+    if spc_pct is None:
+        return DEFAULT_LINE_HEIGHT_RATIO
+    try:
+        return float(spc_pct.attrib.get("val", "100000")) / 100000.0
+    except ValueError:
+        return DEFAULT_LINE_HEIGHT_RATIO
+
+
+def _spacing_points_px(
+    sources: tuple[ET.Element | None, ...],
+    path: str,
+) -> float:
+    spacing = _child_chain(sources, path)
+    if spacing is None:
+        return 0.0
+    try:
+        return hundredths_pt_to_px(int(spacing.attrib.get("val", "0")))
+    except ValueError:
+        return 0.0
+
+
+def _attr_chain(sources: tuple[ET.Element | None, ...], attr: str) -> str | None:
+    """Return the first non-empty value of `attr` from any source element."""
+    for src in sources:
+        if src is None:
+            continue
+        v = src.attrib.get(attr)
+        if v is not None:
+            return v
+    return None
+
+
+def _typeface(rpr: ET.Element | None, child_tag: str) -> str | None:
+    if rpr is None:
+        return None
+    elem = rpr.find(f"a:{child_tag}", NS)
+    if elem is None:
+        return None
+    val = elem.attrib.get("typeface")
+    return val or None
+
+
+def _typeface_chain(
+    sources: tuple[ET.Element | None, ...],
+    child_tag: str,
+) -> str | None:
+    for src in sources:
+        face = _typeface(src, child_tag)
+        if face:

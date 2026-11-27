@@ -1,0 +1,111 @@
+        ),
+    }
+
+
+def _apply_sheet_styles(
+    ws,
+    headers: list[str],
+    rows: list[list[Any]],
+    styles: dict,
+    *,
+    title: str | None = None,
+    subtitle: str | None = None,
+    freeze_first_col: bool = True,
+    merge_groups: list[tuple[int, int, int]] | None = None,
+    attend_result_columns: set[int] | None = None,
+    attend_result_rows: set[int] | None = None,
+    image_columns: list[str] | None = None,
+    image_size: tuple[int, int] = (80, 120),
+) -> None:
+    """
+    给一个已写入数据的 sheet 应用统一样式（钉钉风格）。
+
+    布局（自上而下）：
+      [可选] 第 1 行：主标题（青绿底，跨所有列，写"xxx展示  统计日期：A 至 B"）
+      [可选] 第 2 行：副标题（浅蓝底，跨所有列，写"报表生成时间：xxx"）
+      表头行：浅黄底 + 加粗黑字 + 居中 + 加高
+      数据行：白底 + 居中 + 灰色细边框
+
+    参数:
+      title:    可选主标题文本（如"月度汇总展示  统计日期：2026-01-01 至 2026-01-31"）
+      subtitle: 可选副标题文本（如"报表生成时间：2026-01-20 15:46"）
+      freeze_first_col: 是否冻结首列（姓名）
+      attend_result_columns: 考勤结果列的 0-based 列索引集合（月度汇总场景）
+      attend_result_rows:    考勤结果行的 0-based 行偏移集合（日历表场景）
+    """
+    from openpyxl.utils import get_column_letter
+
+    n_cols = len(headers)
+    n_rows = len(rows)
+    last_col_letter = get_column_letter(n_cols) if n_cols >= 1 else "A"
+
+    # ── 标题区（如果有）── 占据 1~2 行，跨所有列 ───────────────────────
+    title_row_count = 0
+    if title:
+        title_row_count += 1
+        title_row = title_row_count
+        ws.cell(row=title_row, column=1, value=title)
+        if n_cols >= 2:
+            ws.merge_cells(
+                start_row=title_row, start_column=1,
+                end_row=title_row, end_column=n_cols,
+            )
+        cell = ws.cell(row=title_row, column=1)
+        cell.font = styles["title_font"]
+        cell.fill = styles["title_fill"]
+        cell.alignment = styles["title_align"]
+        ws.row_dimensions[title_row].height = _TITLE_ROW_HEIGHT
+    if subtitle:
+        title_row_count += 1
+        sub_row = title_row_count
+        ws.cell(row=sub_row, column=1, value=subtitle)
+        if n_cols >= 2:
+            ws.merge_cells(
+                start_row=sub_row, start_column=1,
+                end_row=sub_row, end_column=n_cols,
+            )
+        cell = ws.cell(row=sub_row, column=1)
+        cell.font = styles["subtitle_font"]
+        cell.fill = styles["subtitle_fill"]
+        cell.alignment = styles["subtitle_align"]
+        ws.row_dimensions[sub_row].height = _SUBTITLE_ROW_HEIGHT
+
+    header_row = title_row_count + 1
+    first_data_row = header_row + 1
+
+    # ── 表头样式 ─────────────────────────────────────────────────────────
+    for col_idx in range(1, n_cols + 1):
+        cell = ws.cell(row=header_row, column=col_idx)
+        cell.font = styles["header_font"]
+        cell.fill = styles["header_fill"]
+        cell.alignment = styles["header_align"]
+        cell.border = styles["border"]
+    ws.row_dimensions[header_row].height = _HEADER_ROW_HEIGHT
+
+    # ── 人员交替配色映射（仅在有 merge_groups 时生效）─────────────────
+    # 为每个数据行偏移预计算应使用的背景 fill（按人员块交替）
+    band_fill_map: dict[int, Any] = {}
+    if merge_groups:
+        band_fills = styles.get("band_fills", ())
+        if band_fills:
+            for group_idx, (start_off, end_off, _n_base) in enumerate(merge_groups):
+                fill = band_fills[group_idx % len(band_fills)]
+                for off in range(start_off, end_off + 1):
+                    band_fill_map[off] = fill
+
+    # ── 考勤结果条件配色准备 ────────────────────────────────────────────
+    # attend_result_columns: 月度汇总场景，指定哪些列（0-based）是考勤结果列
+    # attend_result_rows:    日历表场景，指定哪些行偏移（0-based）是考勤结果行
+    # 两者都需要结合日期数据列（跳过基础信息列）来判断是否需要配色
+    from openpyxl.styles import PatternFill as _PF
+    _attend_fill_cache: dict[str, _PF] = {}
+
+    def _get_attend_fill(color_hex: str) -> _PF:
+        """按颜色值缓存 PatternFill，避免重复创建。"""
+        if color_hex not in _attend_fill_cache:
+            _attend_fill_cache[color_hex] = _PF(fill_type="solid", fgColor=color_hex)
+        return _attend_fill_cache[color_hex]
+
+    _ar_cols = attend_result_columns or set()
+    _ar_rows = attend_result_rows or set()
+

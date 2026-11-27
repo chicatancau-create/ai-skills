@@ -1,0 +1,96 @@
+                        f"Load set {name} selector does not match registry {registry_name}; "
+                        f"missing={missing}, extra={extra}"
+                    )
+
+            overlap = claimed_options.intersection(relative) | fixed.intersection(relative)
+            allow_repeat = isinstance(entry, dict) and entry.get("allow_repeat") is True
+            load_event = str(entry.get("load_event", ""))
+            if allow_repeat and not load_event:
+                raise AuditError(
+                    f"Load set {name} uses allow_repeat without a named load_event: {label}"
+                )
+            if overlap and not allow_repeat:
+                raise AuditError(
+                    f"Load set {name} has overlapping selector files: "
+                    + ", ".join(sorted(overlap))
+                )
+            claimed_options.update(relative)
+            counts = sorted(token_counts[path] for path in relative)
+            selectors.append(
+                {
+                    "glob": label,
+                    "load_event": load_event,
+                    "registry": str(registry_name or ""),
+                    "select": select,
+                    "candidates": len(relative),
+                    "min_tokens": sum(counts[:select]),
+                    "typical_tokens": round(statistics.mean(counts) * select),
+                    "max_tokens": sum(counts[-select:]),
+                }
+            )
+
+        fixed_tokens = sum(token_counts[path] for path in fixed)
+        minimum = fixed_tokens + sum(item["min_tokens"] for item in selectors)
+        typical = fixed_tokens + sum(item["typical_tokens"] for item in selectors)
+        maximum = fixed_tokens + sum(item["max_tokens"] for item in selectors)
+        status = "pass" if maximum <= budget else "fail"
+        if status == "fail":
+            findings.append(
+                Finding(
+                    severity="error",
+                    code="BUDGET_LOAD_SET",
+                    message=f"{name} maximum {maximum} exceeds budget {budget}",
+                    path=manifest_label,
+                )
+            )
+        results.append(
+            {
+                "name": name,
+                "description": str(load_set.get("description", "")),
+                "scope": str(load_set.get("scope", "incremental")),
+                "includes": list(load_set.get("include", [])),
+                "fixed_files": sorted(fixed),
+                "selectors": selectors,
+                "tokens": {"min": minimum, "typical": typical, "max": maximum},
+                "max_tokens": budget,
+                "status": status,
+            }
+        )
+    return results, findings, covered_paths
+
+
+def audit_load_coverage(
+    document_paths: Iterable[str],
+    covered_paths: set[str],
+    config: dict[str, Any],
+    manifest_label: str,
+) -> tuple[dict[str, Any], list[Finding]]:
+    """Force every corpus document into a load set or an explicit exemption."""
+    findings: list[Finding] = []
+    exempt_entries = config.get("exempt", [])
+    all_paths = sorted(document_paths)
+    exempt_paths: set[str] = set()
+    exempt_owner: dict[str, str] = {}
+
+    for entry in exempt_entries:
+        glob = entry["glob"]
+        matches = {
+            path for path in all_paths if PurePosixPath(path).match(glob)
+        }
+        if not matches:
+            findings.append(
+                Finding(
+                    severity="error",
+                    code="COVERAGE_EXEMPT_STALE",
+                    message=f"coverage.exempt glob matches no corpus file: {glob}",
+                    path=manifest_label,
+                )
+            )
+            continue
+        duplicate_exemptions = sorted(path for path in matches if path in exempt_owner)
+        if duplicate_exemptions:
+            details = ", ".join(
+                f"{path} (already matched by {exempt_owner[path]})"
+                for path in duplicate_exemptions
+            )
+            findings.append(

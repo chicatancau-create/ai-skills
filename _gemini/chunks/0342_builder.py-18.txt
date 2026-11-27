@@ -1,0 +1,99 @@
+        _canonical_opc_part_path(path.relative_to(extract_dir).as_posix())
+        for path in notes_files
+    )
+    for rels_path in extract_dir.rglob('*.rels'):
+        tree = ET.parse(rels_path)
+        root = tree.getroot()
+        removed = False
+        rels_name = rels_path.relative_to(extract_dir).as_posix()
+        for relationship in list(root):
+            if (
+                relationship.get('Type') in {NOTES_SLIDE_REL_TYPE, _NOTES_MASTER_REL_TYPE}
+                or (
+                    relationship.get('TargetMode', '').lower() != 'external'
+                    and _resolve_internal_opc_target(
+                        rels_name, relationship.get('Target', ''),
+                    ) in notes_parts
+                )
+            ):
+                root.remove(relationship)
+                removed = True
+        if removed:
+            _write_xml_tree(rels_path, tree)
+    presentation = extract_dir / 'ppt/presentation.xml'
+    tree = ET.parse(presentation)
+    notes_masters = tree.getroot().find(f'{{{PML_NS}}}notesMasterIdLst')
+    if notes_masters is not None:
+        tree.getroot().remove(notes_masters)
+        _write_xml_tree(presentation, tree)
+    for path in notes_files:
+        rels_path = _relationships_path_for_part(extract_dir, path.relative_to(extract_dir).as_posix())
+        rels_path.unlink(missing_ok=True)
+        path.unlink(missing_ok=True)
+    removed = False
+    for node in list(content_root):
+        if _canonical_opc_part_path(node.get('PartName', '').lstrip('/')) in notes_parts:
+            content_root.remove(node)
+            removed = True
+    if removed:
+        _write_xml_tree(content_types_path, content_tree)
+
+
+def _apply_slide_notes(
+    extract_dir: Path,
+    rels_path: Path,
+    slide_num: int,
+    notes_content: str,
+    primary_language: str | None,
+    *,
+    enable_notes: bool,
+) -> _NotesMasterReference | None:
+    """Replace one slide's notes relationship and return its notes master."""
+    existing_target = _find_relationship_target(rels_path, NOTES_SLIDE_REL_TYPE)
+    source_part = _part_name_for_relationships_path(rels_path)
+    existing_part = (
+        _resolve_package_target(source_part, existing_target) if existing_target else None
+    )
+    exclusive = existing_part is not None
+    if exclusive:
+        for other_rels in rels_path.parent.glob('*.rels'):
+            if other_rels == rels_path:
+                continue
+            other_part = _part_name_for_relationships_path(other_rels)
+            if any(
+                attrs.get('Type') == NOTES_SLIDE_REL_TYPE
+                and _resolve_package_target(other_part, attrs.get('Target', '')) == existing_part
+                for attrs in _read_relationships(other_rels).values()
+            ):
+                exclusive = False
+                break
+    _remove_relationships_by_type(rels_path, NOTES_SLIDE_REL_TYPE)
+    if not enable_notes:
+        return None
+    notes_text = markdown_to_plain_text(notes_content) if notes_content else ''
+    if not notes_text:
+        return None
+
+    notes_master = _ensure_notes_master(extract_dir, primary_language)
+    notes_slides_dir = extract_dir / 'ppt' / 'notesSlides'
+    notes_slides_dir.mkdir(exist_ok=True)
+    notes_xml_path = (
+        extract_dir / existing_part if exclusive
+        else _unused_part_path(notes_slides_dir, f'notesSlide{slide_num}.xml')
+    )
+    notes_part = notes_xml_path.relative_to(extract_dir).as_posix()
+    notes_xml_path.write_text(
+        create_notes_slide_xml(slide_num, notes_text, primary_language),
+        encoding='utf-8',
+    )
+    notes_rels_dir = notes_xml_path.parent / '_rels'
+    notes_rels_dir.mkdir(exist_ok=True)
+    notes_rels_path = notes_rels_dir / f'{notes_xml_path.name}.rels'
+    notes_rels_path.write_text(
+        create_notes_slide_rels_xml(
+            slide_num,
+            posixpath.relpath(notes_master.package_part, posixpath.dirname(notes_part)),
+        ),
+        encoding='utf-8',
+    )
+    _ensure_relationship(

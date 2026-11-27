@@ -1,0 +1,95 @@
+                        cell_y + thumbnail_height,
+                    ),
+                    fill='#CF222E',
+                    width=2,
+                )
+
+            label = file_path.name
+            if len(label) > 30:
+                label = f'{label[:13]}...{label[-14:]}'
+            label_y = cell_y + padding + thumbnail_height + 2
+            for line_index, text in enumerate((label, details)):
+                text_bbox = draw.textbbox((0, 0), text, font=font)
+                text_width = text_bbox[2] - text_bbox[0]
+                draw.text(
+                    (
+                        cell_x + (cell_width - text_width) / 2,
+                        label_y + line_index * 15,
+                    ),
+                    text,
+                    fill='#24292F',
+                    font=font,
+                )
+
+        if output_path is None:
+            resolved_output = (
+                target_path.parent
+                / 'analysis'
+                / f'{target_path.name}_orientation_contact_sheet.jpg'
+            )
+        else:
+            resolved_output = Path(output_path).expanduser().resolve()
+
+        suffix = resolved_output.suffix.lower()
+        if suffix not in {'.jpg', '.jpeg', '.png'}:
+            sheet.close()
+            raise ValueError("Contact sheet output must use .jpg, .jpeg, or .png")
+        resolved_output.parent.mkdir(parents=True, exist_ok=True)
+        if suffix == '.png':
+            sheet.save(resolved_output, format='PNG', optimize=True)
+        else:
+            sheet.save(resolved_output, format='JPEG', quality=90, optimize=True)
+        sheet.close()
+        return str(resolved_output)
+
+    def generate_html_tool(self, target_dir: str, output_filename: str = "image_orientation_tool.html") -> str:
+        """Generate the image filtering HTML tool
+
+        Automatically performs EXIF correction before generating.
+        """
+        target_path = Path(target_dir).resolve()
+        repo_root = self._repo_root()
+
+        if not target_path.exists():
+            raise FileNotFoundError(f"Directory not found: {target_path}")
+
+        # 1. Perform automatic EXIF correction first
+        self.auto_fix_exif(target_path)
+
+        # 2. Generate HTML
+        # Tool is generated in the parent directory (projects/)
+        project_root = target_path.parent
+        html_output_path = project_root / output_filename
+
+        # Collect images
+        images = []
+        valid_exts = {'.jpg', '.jpeg', '.png', '.webp', '.bmp'}
+
+        print(f"[SCAN] Scanning directory to generate webpage: {target_path}")
+
+        files = sorted(target_path.iterdir(), key=lambda p: self._natural_sort_key(p.name))
+
+        for f in files:
+            if f.is_file() and f.suffix.lower() in valid_exts:
+                try:
+                    # src is used for HTML display, keep path relative to the HTML file (e.g. "images/1.jpg")
+                    src_rel_path = f.relative_to(project_root).as_posix()
+
+                    # path is used for JSON data, using path relative to the working directory (usually repo root)
+                    # e.g. "projects/Name/images/1.jpg"
+                    # We assume the script is run from the repo root, or target_path is already absolute
+                    # The safest approach is to compute a path relative to the repo root (avoids CWD changes making fixes.json unusable)
+                    try:
+                        repo_rel_path = f.relative_to(repo_root).as_posix()
+                    except ValueError:
+                        # If the file is not under CWD, fall back to absolute path
+                        repo_rel_path = str(f.resolve())
+
+                    images.append({'src': src_rel_path, 'path': repo_rel_path})
+                except ValueError:
+                    print(f"[WARN] Warning: {f.name} cannot compute relative path, skipped")
+                    continue
+
+        if not images:
+            raise ValueError("No image files found")
+

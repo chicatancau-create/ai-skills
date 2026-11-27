@@ -1,0 +1,97 @@
+---
+name: skill-router
+description: 本机技能总路由，默认必开。Use at the START of EVERY task on this machine, before deciding which skill or capability to use. 这台笔记本上所有 Agent 默认只加载 skill-router 与 headroom 两个技能，其余技能一律不加载。本技能负责判定「这次任务到底需要哪一个/哪几个技能」，然后按需直接读取对应的 SKILL.md。任何任务——写代码、做文档、表格、PPT、PDF、网页、逆向、钉钉、看图、操控 GUI、查本机踩坑、省 token——都先走这里。Do not load other skills by name; route through this skill first.
+---
+
+# 技能总路由（skill-router）
+
+## 这台机器的规矩
+
+**默认只开两个技能：`skill-router`（本技能）+ `headroom`（省 token）。其余全部关闭。**
+
+原因：本机装了 50 个技能，全量加载会让每次会话都背上几万 token 的技能说明书，
+模型负担大、还容易选错。所以改成「一个总路由 + 按需取用」。
+
+**因此：你在技能列表里看不到别的技能，这是正常的，不是坏了。**
+不要去猜它们的名字然后当工具调用——它们没有被注册成工具。
+它们只是磁盘上的说明书，**用文件读取工具打开就能用**。
+
+## 三步协议（每次任务都走）
+
+**第 1 步 · 判定。** 看下面的索引，判断这次任务需要哪一个或哪几个技能。
+不需要就一个都不选，直接用通用能力做。**不要为了用而用。**
+
+**第 2 步 · 取用。** 对选中的每个技能，用文件读取工具打开：
+
+```
+D:\Skills\<目录名>\SKILL.md
+```
+
+原 QoderToolkit 的 9 个技能已并入本库，同样在 `D:\Skills\<目录名>\SKILL.md`（`web-kimi` 因许可排除，仍在 `D:\QoderToolkit\web-kimi`）。
+索引里给了准确路径的以索引为准（少数目录名与技能名不同）。
+
+**第 3 步 · 执行。** 按读到的说明书做。需要它的子文件（scripts/、references/）
+就继续读同一目录下的文件。**只读这次真正要用的，别顺手把整库读一遍。**
+
+## 可选：让脚本帮你判
+
+有 shell 的 Agent 可以直接问路由（纯标准库，任何 python 都行）：
+
+```
+python D:\Skills\skill-router\router.py match "把这次任务原话贴进来"
+```
+
+它按相关度打分，输出候选技能 + SKILL.md 绝对路径。低于 2 分的噪声已过滤。
+其他子命令：`list`（紧凑索引）、`cat <name>`（直接打印说明书全文）、
+`show <name>`（只给路径）、`status`（当前默认窗口）、`doctor`（体检）、
+`sync`（库里加了新技能后重建索引）。
+
+**没有 shell 也能用**——直接看下面的索引 + 读文件即可，脚本只是加速器。
+
+## 运维总入口（headroom 省 token 链路）
+
+链路是 **Agent → headroom:8787 → cc-switch:15721 → 上游**。headroom 压缩送进 LLM 的
+工具输出/日志/JSON（发送省），cc-switch 负责供应商与模型路由。日常运维只用一个脚本：
+
+```
+python D:\Skills\skill-router\ops.py status    # 代理/接线/默认窗口/12个技能根，一眼看全
+python D:\Skills\skill-router\ops.py verify    # 真实补全请求，两跳对比
+python D:\Skills\skill-router\ops.py savings   # 真实省量账本 + Kompress 是否加载（唯一可信证据）
+python D:\Skills\skill-router\ops.py guard     # 接线守护状态（--fix 立刻修）
+python D:\Skills\skill-router\ops.py shield    # 技能库自愈盾（--snapshot 额外打 zip）
+python D:\Skills\skill-router\ops.py restart   # 重启 headroom
+python D:\Skills\skill-router\ops.py wire      # 重新接线（守护会自动做，一般不用手跑）
+python D:\Skills\skill-router\ops.py unwire    # 回滚到 cc-switch 直连
+python D:\Skills\skill-router\ops.py skills    # 重建索引 + doctor
+python D:\Skills\skill-router\ops.py backup    # git 备份状态（backup now 立刻提交并推两个远端）
+```
+
+### 技能库备份：两个 git 远端，不做本地备份
+
+| 库 | 本地 | GitHub | GitCode |
+| --- | --- | --- | --- |
+| 统一技能库 | `D:\Skills`（就地 `git init`，零复制） | `chicatancau-create/ai-skills`（private） | `zhoumoyukuai/ai-skills`（private） |
+| Qoder 工具箱（已并入本库，仅留 `web-kimi`） | `D:\QoderToolkit` | `chicatancau-create/qoder-toolkit`（private） | `zhoumoyukuai/qoder-toolkit`（private） |
+
+- **自动保持最新**：`wire_guard` 每轮顺带调 `git_backup.py`，**10 分钟去抖 + 只在真有改动时**提交推送，
+  推完回读 `ls-remote` 核对 SHA。日志 `D:\AI-Tool-State\git-backup\backup.log`。
+- **`.gitattributes` 设 `* -text`**：本库文件编码是混合的（有 BOM、有 CRLF、有 LF），
+  备份必须字节一致，禁止 git 顺手规范化。**必须在第一次 `git add` 之前就位**——
+  2026-11-15 实测踩过：首次 add 早于该文件，79 个文件被 CRLF→LF 入库，
+  补属性后 `git rm -r --cached .` 并没真正清空索引，靠 `git add --renormalize .` 才修好。
+- **备份的验收标准是「从远端克隆回来逐文件 sha256 一致」，不是「push 返回 0」。**
+  复核脚本 `G:\AIrenwu\脚本库\06_建仓与双推\verify_restore.py`（4 个远端各浅克隆一次全量比对）。
+- **7 个技能按许可排除在远端之外**（`.gitignore` 按目录排除，本地仍可用）：
+  `docx`/`pdf`/`pptx`/`xlsx`（Anthropic 专有，明文禁止在 Services 外保留副本、禁止转移第三方）、
+  `reverse-trace`/`reverse-wechat-miniapp`（无 LICENSE，PROVENANCE 限定仅本机自用）、
+  `webapp-building`（泄露的 Kimi 技能，上游明示无任何使用许可）。原 QoderToolkit 的 `web-kimi` 同一泄露来源，**未并入本库**（仍在 `D:\QoderToolkit\web-kimi`）。
+  **私有仓库不能解决这一条**——上传到托管平台本身就是「转移给第三方」。依据见 `BACKUP_SCOPE.md`。
+- `git_backup.py` 提交前会**再查一遍暂存路径**，命中排除目录就拒绝提交并 reset，不靠 `.gitignore` 单点。
+- 恢复：`git clone <远端> D:\Skills` → `wire_agents.py --apply` → `router.py sync` → `ops.py wire`。
+  headroom 的常驻代理与 261MB 模型缓存不在仓库里，需另跑 `seed_kompress.py` 与 `headroom install apply`。
+
+### 两个常驻守护（登录即起，20 秒一轮，不用管）
+
+- **`wire_guard.py --watch`**：**cc-switch 每次 attach/detach 都会重写客户端 BASE_URL**，
+  把 8787 改回 15721，headroom 从此被静默绕过（不报错、只是不再省 token）。
+  守护自动接回。规则：**仅当 cc-switch 处于 proxy+attached 才动**；

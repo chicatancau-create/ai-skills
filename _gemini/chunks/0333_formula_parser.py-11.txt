@@ -1,0 +1,105 @@
+        return Prescript(base, subscript=subscript, superscript=superscript)
+
+    def _parse_limit_modifier(self, node: Nary | Function) -> Nary | Function:
+        saved = self.position
+        self._skip_whitespace()
+        command: str | None = None
+        if self._at_control_word("limits"):
+            command = "limits"
+        elif self._at_control_word("nolimits"):
+            command = "nolimits"
+        if command is None:
+            self.position = saved
+            return node
+        if node.limit_modifier is not None:
+            self._fail("Operator has more than one limit modifier")
+        self._consume_control_word(command)
+        if isinstance(node, Nary):
+            return Nary(
+                node.symbol,
+                node.category,
+                node.subscript,
+                node.superscript,
+                node.body,
+                command,
+            )
+        return Function(
+            node.name,
+            node.body,
+            node.subscript,
+            node.superscript,
+            node.limit_style,
+            command,
+        )
+
+    def _parse_owned_body(self, node: Nary | Function) -> Nary | Function:
+        if node.body is not None:
+            return node
+        saved = self.position
+        self._skip_whitespace()
+        leading_spacing: list[Node] = []
+        while self._transparent_prefix_follows():
+            append_child(leading_spacing, self._parse_nested_atom())
+            self._skip_whitespace()
+        if self.position < len(self.source) and self.source[self.position] in "+-":
+            append_child(leading_spacing, self._parse_nested_atom())
+            self._skip_whitespace()
+            while self._transparent_prefix_follows():
+                append_child(leading_spacing, self._parse_nested_atom())
+                self._skip_whitespace()
+        if not self._owned_body_follows():
+            self.position = saved
+            return node
+        if self.source[self.position] == "{":
+            body = self._parse_group()
+        else:
+            body = Sequence((self._parse_nested_atom(),))
+        if leading_spacing:
+            body = Sequence((*leading_spacing, *body.children))
+        if isinstance(node, Nary):
+            children = list(body.children)
+            while True:
+                saved_tail = self.position
+                self._skip_whitespace()
+                tail_prefix: list[Node] = []
+                while self._transparent_prefix_follows():
+                    append_child(tail_prefix, self._parse_nested_atom())
+                    self._skip_whitespace()
+                if not self._owned_body_follows():
+                    self.position = saved_tail
+                    break
+                for prefix_node in tail_prefix:
+                    append_child(children, prefix_node)
+                append_child(children, self._parse_nested_atom())
+            body = Sequence(tuple(children))
+        elif isinstance(node, Function):
+            children = list(body.children)
+            while self._call_delimiter_follows():
+                append_child(children, self._parse_nested_atom())
+            body = Sequence(tuple(children))
+        if isinstance(node, Nary):
+            return Nary(
+                node.symbol,
+                node.category,
+                node.subscript,
+                node.superscript,
+                body,
+                node.limit_modifier,
+            )
+        return Function(
+            node.name,
+            body,
+            node.subscript,
+            node.superscript,
+            node.limit_style,
+            node.limit_modifier,
+        )
+
+    def _transparent_prefix_follows(self) -> bool:
+        if self.position >= len(self.source):
+            return False
+        if self.source[self.position] == "~":
+            return True
+        if self.source[self.position] != "\\" or self.position + 1 >= len(self.source):
+            return False
+        following = self.source[self.position + 1]

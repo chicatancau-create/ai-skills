@@ -1,0 +1,98 @@
+                    raise RuntimeError(
+                        f'native animation preset {key!r} enum option '
+                        f'{option_name!r} must define values'
+                    )
+                default = str(option_spec.get('default'))
+                if default not in values:
+                    raise RuntimeError(
+                        f'native animation preset {key!r} enum option '
+                        f'{option_name!r} has an unknown default'
+                    )
+                for option_value, variant_xml in values.items():
+                    if not isinstance(option_value, str) or not isinstance(
+                        variant_xml,
+                        str,
+                    ):
+                        raise RuntimeError(
+                            f'native animation preset {key!r} enum option '
+                            f'{option_name!r} contains an invalid variant'
+                        )
+                    try:
+                        variant = ET.fromstring(variant_xml)
+                    except ET.ParseError as exc:
+                        raise RuntimeError(
+                            f'native animation preset {key!r} enum option '
+                            f'{option_name!r}/{option_value!r} contains invalid XML: '
+                            f'{exc}'
+                        ) from exc
+                    if variant.tag != f'{{{PML_NS}}}cTn':
+                        raise RuntimeError(
+                            f'native animation preset {key!r} enum option '
+                            f'{option_name!r}/{option_value!r} is not a p:cTn row'
+                        )
+                    if variant.get('presetClass') != spec['presetClass']:
+                        raise RuntimeError(
+                            f'native animation preset {key!r} enum option '
+                            f'{option_name!r}/{option_value!r} changed presetClass'
+                        )
+                    if int(variant.get('presetID', '-1')) != spec['presetID']:
+                        raise RuntimeError(
+                            f'native animation preset {key!r} enum option '
+                            f'{option_name!r}/{option_value!r} changed presetID'
+                        )
+            elif option_type not in {'number', 'string', 'boolean', 'color'}:
+                raise RuntimeError(
+                    f'native animation preset {key!r} option {option_name!r} '
+                    f'has unknown type: {option_type!r}'
+                )
+        native[key] = spec
+        category_counts[category] += 1
+
+    expected_counts = {'entrance': 53, 'emphasis': 33, 'path': 64, 'exit': 53}
+    if category_counts != expected_counts:
+        raise RuntimeError(
+            'native animation preset category counts changed: '
+            f'{category_counts!r}; expected {expected_counts!r}'
+        )
+    return native
+
+
+NATIVE_ANIMATIONS = _load_native_animations()
+NATIVE_ANIMATION_KEYS = tuple(NATIVE_ANIMATIONS)
+ANIMATIONS = {
+    **NATIVE_ANIMATIONS,
+    **{
+        alias: NATIVE_ANIMATIONS[canonical]
+        for alias, canonical in ANIMATION_ALIASES.items()
+    },
+}
+
+ANIMATION_MODES = ('auto', 'mixed', 'random')
+ANIMATION_TRIGGERS = ('on-click', 'with-previous', 'after-previous')
+
+_TRIGGER_NODE_TYPES = {
+    'on-click': 'clickEffect',
+    'with-previous': 'withEffect',
+    'after-previous': 'afterEffect',
+}
+_NODE_TYPE_TRIGGERS = {
+    value: key for key, value in _TRIGGER_NODE_TYPES.items()
+}
+
+
+@dataclass(frozen=True)
+class AnimationTarget:
+    """Resolved object-animation request for one PowerPoint shape."""
+
+    shape_id: int
+    delay_ms: int
+    effect: str
+    duration_ms: int
+    effect_options: Mapping[str, object]
+    trigger: str = 'after-previous'
+    trigger_shape_id: int | None = None
+    repeat_count: float | None = None
+    repeat_duration_ms: int | None = None
+    auto_reverse: bool | None = None
+    rewind: bool | None = None
+    accelerate: float | None = None

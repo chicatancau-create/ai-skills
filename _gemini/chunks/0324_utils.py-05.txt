@@ -1,0 +1,112 @@
+            'without a leading plus sign, exponent, or trailing decimal point'
+        )
+    if attribute in PROJECT_NON_NEGATIVE_LENGTH_ATTRIBUTES and number < 0:
+        raise ValueError('must be non-negative')
+    return number
+
+
+def is_canonical_project_geometry_length(raw: str) -> bool:
+    """Return whether a project geometry value uses the generated-SVG spelling."""
+    return bool(_CANONICAL_PROJECT_GEOMETRY_LENGTH_RE.fullmatch(raw.strip()))
+
+
+def format_project_geometry_length(value: float) -> str:
+    """Format a parsed project geometry value as a plain unitless decimal."""
+    if abs(value) < 1e-15:
+        return '0'
+    text = f'{value:.15f}'.rstrip('0').rstrip('.')
+    return '0' if text in {'', '-0'} else text
+
+
+def parse_project_opacity(
+    raw: str,
+    *,
+    allow_percentage: bool = False,
+) -> float:
+    """Parse and clamp one opacity value from the closed project grammar."""
+    try:
+        number, unit = _parse_svg_length_parts(raw)
+    except ValueError as exc:
+        raise ValueError('must be one finite numeric opacity') from exc
+
+    if unit == '%':
+        if not allow_percentage:
+            raise ValueError('must be unitless; percentages are not supported')
+        number /= 100.0
+    elif unit:
+        raise ValueError(f'uses unsupported unit {unit!r}')
+    return max(0.0, min(1.0, number))
+
+
+def is_project_opacity_default_form(raw: str) -> bool:
+    """Return whether opacity uses the generated finite unitless ``0..1`` form."""
+    try:
+        number, unit = _parse_svg_length_parts(raw)
+    except ValueError:
+        return False
+    return unit == '' and 0.0 <= number <= 1.0
+
+
+def format_project_opacity(value: float) -> str:
+    """Format one parsed opacity as a compact unitless ``0..1`` value."""
+    bounded = max(0.0, min(1.0, value))
+    return f'{bounded:.6f}'.rstrip('0').rstrip('.') or '0'
+
+
+def parse_project_image_aspect_ratio(raw: str | None) -> tuple[str, str]:
+    """Parse the closed project ``<image>`` aspect-ratio grammar."""
+    if raw is None:
+        return 'xMidYMid', 'meet'
+
+    text = raw.strip()
+    if not text:
+        raise ValueError('must not be empty; omit the attribute for the default')
+
+    parts = text.split()
+    align = parts[0]
+    if align == 'none':
+        if len(parts) != 1:
+            raise ValueError('value "none" must appear alone')
+        return align, 'meet'
+
+    if align not in PROJECT_IMAGE_ASPECT_RATIO_ANCHORS:
+        choices = ', '.join(PROJECT_IMAGE_ASPECT_RATIO_ANCHORS)
+        raise ValueError(
+            f'alignment must be "none" or one of: {choices}'
+        )
+    if len(parts) > 2:
+        raise ValueError('accepts at most one alignment and one mode token')
+
+    mode = parts[1] if len(parts) == 2 else 'meet'
+    if mode not in PROJECT_IMAGE_ASPECT_RATIO_MODES:
+        choices = ', '.join(sorted(PROJECT_IMAGE_ASPECT_RATIO_MODES))
+        raise ValueError(f'mode must be one of: {choices}')
+    return align, mode
+
+
+def format_project_image_aspect_ratio(align: str, mode: str) -> str:
+    """Format one parsed image aspect ratio for generated project SVG."""
+    if align == 'none':
+        return 'none'
+    return f'{align} {mode}'
+
+
+def _parse_project_stroke_dasharray(
+    raw: str,
+    *,
+    allow_zero_gap: bool = False,
+) -> tuple[str | None, tuple[float, ...], tuple[str, ...]] | None:
+    """Parse one project dash array without accepting general SVG lengths."""
+    text = raw.strip()
+    if text == 'none':
+        return None
+    if not _PROJECT_STROKE_DASHARRAY_RE.fullmatch(text):
+        raise ValueError(
+            'must be "none" or at least two finite unitless numbers separated '
+            'by spaces or single commas'
+        )
+    tokens = tuple(_PROJECT_STROKE_DASH_NUMBER_RE.findall(text))
+    values = tuple(float(token) for token in tokens)
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError('must contain only finite numbers')
+    if values[0] <= 0:

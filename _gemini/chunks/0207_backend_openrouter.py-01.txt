@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+"""
+OpenRouter image generation backend.
+
+Configuration keys:
+  OPENROUTER_API_KEY   (required)
+  OPENROUTER_BASE_URL  (optional)
+  OPENROUTER_MODEL     (optional)
+"""
+
+import sys
+from pathlib import Path
+
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from console_encoding import configure_utf8_stdio  # noqa: E402
+
+configure_utf8_stdio()
+
+if __name__ == "__main__":
+    print(__doc__)
+    print("Use via: python3 skills/ppt-master/scripts/image_gen.py \"prompt\" --backend openrouter")
+    raise SystemExit(0 if any(arg in {"-h", "--help", "help"} for arg in sys.argv[1:]) else 1)
+
+import os
+import time
+import threading
+import requests
+
+from image_backends.backend_common import (
+    MAX_RETRIES,
+    decode_data_uri,
+    find_data_uri,
+    http_error,
+    is_permanent_error,
+    is_rate_limit_error,
+    normalize_image_size,
+    resolve_output_path,
+    retry_delay,
+    save_image_bytes,
+)
+
+
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║  Constants                                                      ║
+# ╚══════════════════════════════════════════════════════════════════╝
+
+VALID_ASPECT_RATIOS = [
+    "1:1", "1:4", "1:8",
+    "2:3", "3:2", "3:4", "4:1", "4:3",
+    "4:5", "5:4", "8:1", "9:16", "16:9", "21:9"
+]
+
+VALID_IMAGE_SIZES = ["512px", "1K", "2K", "4K"]
+
+DEFAULT_MODEL = "google/gemini-3.1-flash-image"
+DEFAULT_ENDPOINT = "https://openrouter.ai/api/v1"
+
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║  Image Generation                                               ║
+# ╚══════════════════════════════════════════════════════════════════╝
+
+def _resolve_url(base_url: str) -> str:
+    """Resolve the OpenRouter generation endpoint."""
+    return base_url.rstrip("/") + "/chat/completions"
+
+def _message_image_uri(message: dict) -> str | None:
+    """
+    Locate the generated image in a chat completion message.
+
+    OpenRouter returns it in a dedicated `images` array; other OpenAI-compatible endpoints
+    reachable through OPENROUTER_BASE_URL inline it in the message content instead.
+    """
+    images = message.get("images")
+    if images:
+        url = images[0].get("image_url")
+        if isinstance(url, dict):
+            url = url.get("url")
+        if url:
+            return url
+
+    return find_data_uri(message.get("content"))
+
+
+def _generate_image(api_key: str, prompt: str,
+                    aspect_ratio: str = "1:1", image_size: str = "1K",
+                    output_dir: str = None, filename: str = None,
+                    model: str = DEFAULT_MODEL, base_url: str = DEFAULT_ENDPOINT) -> str:
+    """
+    Image generation via OpenRouter's API.
+    """
+
+    url = _resolve_url(base_url)
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        "modalities": ["image", "text"],
+        "image_config": {
+            "aspect_ratio": aspect_ratio,
+            "image_size": "512" if image_size == "512px" else image_size
+        }
+    }
+
+    print(f"[OpenRouter]")
+    print(f"  Model:        {model}")
+    print(f"  Prompt:       {prompt[:120]}{'...' if len(prompt) > 120 else ''}")
+    print(f"  Aspect Ratio: {aspect_ratio}")
+    print(f"  Image Size:   {image_size}")
+    print()
+
+    start_time = time.time()
+    print(f"  [..] Generating...", end="", flush=True)
+
+    # Heartbeat thread
+    heartbeat_stop = threading.Event()
+
+    def _heartbeat():
+        while not heartbeat_stop.is_set():
+            heartbeat_stop.wait(5)
+            if not heartbeat_stop.is_set():
+                elapsed = time.time() - start_time
+                print(f" {elapsed:.0f}s...", end="", flush=True)
+
+    hb_thread = threading.Thread(target=_heartbeat, daemon=True)

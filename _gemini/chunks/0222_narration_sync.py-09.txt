@@ -1,0 +1,124 @@
+            preliminaries.append((
+                order,
+                source_index,
+                effect_position,
+                group_id,
+                effect_index,
+                effect_path,
+                effect_cfg,
+                effect_trigger,
+            ))
+    preliminaries.sort(key=lambda item: (item[0], item[1], item[2]))
+
+    states: list[AnimationGroupState] = []
+    for sequence_index, (
+        order,
+        source_index,
+        _effect_position,
+        group_id,
+        effect_index,
+        effect_path,
+        effect_cfg,
+        effect_trigger,
+    ) in enumerate(preliminaries):
+        duration_ms = animation_seconds_to_milliseconds(
+            effect_cfg.get("duration", settings.duration_ms / 1000),
+            f'canonical animation duration for "{effect_path}"',
+            allow_zero=False,
+        )
+        timing_options = dict(settings.timing_options)
+        timing_options.update(
+            {
+                field: effect_cfg[field]
+                for field in ANIMATION_TIMING_OPTION_FIELDS
+                if field in effect_cfg
+            }
+        )
+        playback_duration_ms = _animation_playback_duration_ms(
+            duration_ms,
+            timing_options,
+            label=f'canonical animation for "{effect_path}"',
+        )
+        default_delay = (
+            settings.stagger_ms / 1000
+            if effect_trigger == "after-previous" and sequence_index > 0
+            else 0
+        )
+        original_delay_ms = animation_seconds_to_milliseconds(
+            effect_cfg.get("delay", default_delay),
+            f'canonical animation delay for "{effect_path}"',
+            allow_zero=True,
+        )
+        states.append(
+            AnimationGroupState(
+                group_id=group_id,
+                effect_index=effect_index,
+                order=order,
+                source_index=source_index,
+                duration_ms=playback_duration_ms,
+                original_delay_ms=original_delay_ms,
+                trigger=effect_trigger,
+            )
+        )
+    return states, use_svg
+
+
+def _find_audio(audio_dir: Path, slide_name: str) -> Path:
+    matches = [
+        path
+        for path in audio_dir.iterdir()
+        if path.is_file()
+        and path.stem == slide_name
+        and path.suffix.lower() in NARRATION_EXTENSIONS
+    ]
+    if not matches:
+        raise FileNotFoundError(f"Missing narration audio for slide: {slide_name}")
+    if len(matches) > 1:
+        rendered = ", ".join(str(path) for path in matches)
+        raise ValueError(f"Multiple narration audio files match {slide_name}: {rendered}")
+    return matches[0]
+
+
+def _seconds_from_ms(value: int) -> float:
+    return round(value / 1000, 3)
+
+
+def rebuild_animations(
+    project_path: Path,
+    *,
+    canonical_path: Path,
+    plan_path: Path,
+    subtitle_dir: Path,
+    audio_dir: Path,
+    output_path: Path,
+    narration_padding: float,
+    force: bool,
+    narration_start_floor: float = DEFAULT_NARRATION_START_FLOOR,
+) -> AnimationBuildResult:
+    """Derive narration timing without modifying the canonical animation file."""
+    narration_padding = _finite_non_negative_seconds(
+        narration_padding,
+        "Narration padding",
+    )
+    narration_start_floor = _finite_non_negative_seconds(
+        narration_start_floor,
+        "Narration start floor",
+    )
+    _reject_output_alias(
+        output_path,
+        [canonical_path, plan_path],
+        label="Narration animation config",
+    )
+    canonical = _load_canonical_animation_config(canonical_path)
+    slide_names = _animation_slide_names(project_path, canonical, subtitle_dir)
+    subtitle_paths = [subtitle_dir / f"{slide_name}.srt" for slide_name in slide_names]
+    _reject_output_alias(
+        output_path,
+        subtitle_paths,
+        label="Narration animation config",
+    )
+
+    timing_plan: dict[str, list[TimingPlanEntry]] | None = None
+    if plan_path.is_file():
+        (
+            expected_srt_sha256,

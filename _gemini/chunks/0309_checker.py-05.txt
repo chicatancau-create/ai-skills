@@ -1,0 +1,113 @@
+_PARAGRAPH_LINE_TERMINATOR_RE = re.compile(r'[.!?。！？;；]["\'”’）)]*$')
+_PARAGRAPH_LIST_MARKER_RE = re.compile(
+    r'^\s*(?:[•·・▪◦‣]\s*|[-–—*]\s+|\d+[.)、]\s+|[（(]\d+[）)]\s*)\S+'
+)
+_LEGACY_PPTX_ATTRIBUTE_RENAMES = {
+    'data-pptx-module-bounds': _BOUNDS_ATTR,
+    'data-pptx-placeholder-bounds': _BOUNDS_ATTR,
+    'data-pptx-placeholder-carrier': 'data-pptx-carrier',
+    'data-pptx-placeholder-binding': 'data-pptx-binding',
+    'data-pptx-placeholder-idx': 'data-pptx-idx',
+}
+_PPTX_ROOT_STRUCTURE_ATTRS = (
+    'data-pptx-master',
+    'data-pptx-master-name',
+    'data-pptx-layout',
+    'data-pptx-layout-name',
+)
+_PPTX_ROOT_VISIBILITY_ATTRS = (
+    'data-pptx-show-master-shapes',
+    'data-pptx-show-inherited-shapes',
+)
+_PPTX_STRUCTURE_ATTRS = frozenset({
+    *_PPTX_ROOT_STRUCTURE_ATTRS,
+    *_PPTX_ROOT_VISIBILITY_ATTRS,
+    'data-pptx-layer',
+    'data-pptx-layout-kind',
+    'data-pptx-placeholder',
+    'data-pptx-binding',
+    'data-pptx-carrier',
+    'data-pptx-idx',
+})
+_PPTX_PLACEHOLDER_DETAIL_ATTRS = frozenset({
+    'data-pptx-binding',
+    'data-pptx-idx',
+})
+_PPTX_STRUCTURE_SECTION_RE = re.compile(
+    r"(?ms)^##[ \t]+pptx_structure[ \t]*\r?\n(.*?)(?=^##[ \t]+|\Z)"
+)
+_PPTX_STRUCTURE_MODE_RE = re.compile(
+    r"(?m)^-[ \t]+mode[ \t]*:[ \t]*([^\s#]+)[ \t]*(?:#.*)?$"
+)
+def _compact_preset_ancestor_paint(
+    root: ET.Element,
+) -> list[tuple[str, tuple[str, ...]]]:
+    """Return compact presets affected by compatible ancestor paint."""
+    if (
+        _authored_preset_encoding is None
+        or _validate_authored_preset_group is None
+    ):
+        return []
+    parents = {
+        child: parent
+        for parent in root.iter()
+        for child in parent
+    }
+    affected: list[tuple[str, tuple[str, ...]]] = []
+    for group in root.iter():
+        if (
+            _authored_preset_encoding(group) != 'compact'
+            or _validate_authored_preset_group(group)
+        ):
+            continue
+        relevant = {'opacity'}
+        if group.get('fill') != 'none' and group.get('fill-opacity') is None:
+            relevant.add('fill-opacity')
+        if group.get('stroke') != 'none':
+            for name in (
+                'stroke-opacity',
+                'stroke-dasharray',
+                'stroke-linecap',
+                'stroke-linejoin',
+            ):
+                if group.get(name) is None:
+                    relevant.add(name)
+
+        inherited: set[str] = set()
+        ancestor = parents.get(group)
+        while ancestor is not None:
+            declarations = {
+                name: ancestor.get(name) or ''
+                for name in relevant
+                if ancestor.get(name) is not None
+            }
+            for declaration in (ancestor.get('style') or '').split(';'):
+                name, separator, value = declaration.partition(':')
+                name = name.strip().lower()
+                if separator and name in relevant:
+                    declarations[name] = value.strip()
+            for name, value in declarations.items():
+                normalized = value.strip().lower()
+                if name in {'opacity', 'fill-opacity', 'stroke-opacity'}:
+                    try:
+                        if float(normalized) == 1:
+                            continue
+                    except ValueError:
+                        pass
+                elif name == 'stroke-dasharray' and normalized == 'none':
+                    continue
+                elif name == 'stroke-linecap' and normalized == 'butt':
+                    continue
+                elif name == 'stroke-linejoin' and normalized == 'miter':
+                    continue
+                inherited.add(name)
+            ancestor = parents.get(ancestor)
+        if inherited:
+            affected.append((
+                group.get('id') or '(no id)',
+                tuple(sorted(inherited)),
+            ))
+    return affected
+
+
+def _declared_pptx_structure_mode(project_path: Path) -> str | None:

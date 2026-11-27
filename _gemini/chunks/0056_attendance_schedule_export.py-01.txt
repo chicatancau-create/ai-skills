@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+"""
+考勤排班查询导出脚本
+
+[AI Agent 强制门禁] 本脚本执行前必须先阅读：
+   dingtalk-workspace/references/products/attendance-schedule.md
+
+职责：
+  1. 分批查询排班记录（支持大量用户自动分批）
+  2. 将 classId 转为班次名称
+  3. 将 userId 转为员工姓名
+  4. 输出日历表格式的排班表 Excel（行=员工，列=日期，单元格=班次名称）
+
+用法:
+    python attendance_schedule_export.py \
+        --users userId1,userId2,userId3 \
+        --start 2026-05-19 --end 2026-05-23
+
+    python attendance_schedule_export.py \
+        --users userId1,userId2 \
+        --start 2026-05-01 --end 2026-05-31 \
+        --output my_schedule.xlsx
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+from datetime import datetime, timedelta
+from typing import Any
+
+from attendance_report_common import (
+    DATE_FMT,
+    DATETIME_FMT,
+    DwsCallError,
+    chunk_users,
+    error,
+    extract_records,
+    log,
+    parse_datetime_arg,
+    resolve_user_names,
+    run_dws,
+    warn,
+    write_excel,
+)
+
+# schedule get 接口每批最多用户数（保守值，避免超时）
+SCHEDULE_BATCH_SIZE = 20
+
+WEEKDAY_NAMES = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 排班数据查询（分批）
+# ─────────────────────────────────────────────────────────────────────────────
+
+def fetch_schedule_batch(
+    user_ids: list[str],
+    start_date: str,
+    end_date: str,
+) -> list[dict]:
+    """调用 dws attendance schedule get 查询一批用户的排班记录。"""
+    users_str = ",".join(user_ids)
+    try:
+        result = run_dws([
+            "attendance", "schedule", "get",
+            "--users", users_str,
+            "--start", start_date,
+            "--end", end_date,
+        ])
+    except DwsCallError as exc:
+        error(f"查询排班失败 (users={len(user_ids)}, {start_date}~{end_date}): {exc}")
+        return []
+    return extract_records(result) if result else []
+
+
+def fetch_all_schedules(
+    user_ids: list[str],
+    start_date: str,
+    end_date: str,
+) -> list[dict]:
+    """分批查询所有用户的排班记录，自动处理用户数超限。"""
+    all_records: list[dict] = []
+    batches = chunk_users(user_ids, SCHEDULE_BATCH_SIZE)
+    total = len(batches)
+
+    log(f"📋 共 {len(user_ids)} 人，分 {total} 批查询排班 ({start_date} ~ {end_date})")
+
+    for idx, batch in enumerate(batches, start=1):
+        if total > 1:
+            log(f"   批次 {idx}/{total}: {len(batch)} 人")
+        records = fetch_schedule_batch(batch, start_date, end_date)
+        all_records.extend(records)
+
+    log(f"✅ 查询完成，共 {len(all_records)} 条排班记录")
+    return all_records
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 班次名称映射
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_class_name_map(records: list[dict]) -> dict[int, str]:
+    """从排班记录中提取 classId → className 映射。
+
+    优先使用记录自带的 className；缺失时回退 class search 补全。
+    """
+    class_map: dict[int, str] = {}
+    missing_ids: set[int] = set()
+
+    for record in records:
+        raw_id = record.get("classId") or record.get("class_id")
+        raw_name = record.get("className") or record.get("class_name")
+        if raw_id is None:
+            continue
+        cid = int(raw_id)
+        if raw_name and str(raw_name).strip():
+            class_map[cid] = str(raw_name).strip()
+        elif cid != 0 and cid not in class_map:
+            missing_ids.add(cid)
+
+    if missing_ids:
+        log(f"🔍 {len(missing_ids)} 个班次缺名称，从 class search 补全 ...")
+        try:
+            result = run_dws(["attendance", "class", "search", "--page-size", "200"])
+            for cls in (extract_records(result) if result else []):
+                cid_raw = cls.get("id") or cls.get("classId")
+                cname = cls.get("name") or cls.get("className")
+                if cid_raw is not None and cname:
+                    class_map[int(cid_raw)] = str(cname).strip()
+        except DwsCallError as exc:

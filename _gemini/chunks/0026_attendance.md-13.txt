@@ -1,0 +1,98 @@
+dws attendance selfsetting get --setting-scene checkRemind --user <USER_ID> --format json
+
+# 查看指定用户的极速打卡设置
+dws attendance selfsetting get --setting-scene fastCheck --user <USER_ID> --format json
+
+# 开启指定用户的打卡结果通知
+dws attendance selfsetting save --setting-scene checkResultNotify --user <USER_ID> --check-result-msg 1 --format json
+
+# 更新指定用户的极速打卡设置
+dws attendance selfsetting save --setting-scene fastCheck --user <USER_ID> \
+  --onduty-check-type 3 --voice-remind-switch=true --format json
+
+# 获取考勤字段列表（管理员）
+dws attendance report columns --format json
+
+# 根据字段查询考勤数据（管理员）
+dws attendance report query-data --users userId1,userId2 \
+  --columns 1001,1002 --start "2026-03-01 00:00:00" --end "2026-03-31 23:59:59" --format json
+
+# 查询用户假期数据（管理员）
+dws attendance report query-leave --users userId1,userId2 \
+  --leave-names 年假,病假 --start "2026-03-01 00:00:00" --end "2026-03-31 23:59:59" --format json
+
+# 查看假期规则列表
+dws attendance vacation types --format json
+
+# 查看指定员工假期余额
+dws attendance vacation balance --users userId1,userId2 --format json
+
+# 查看指定员工某类假期余额
+dws attendance vacation balance --users userId1 --leave-code a1b2c3d4-e5f6-7890-abcd-ef1234567890 --format json
+
+# 查看指定员工假期余额变更记录
+dws attendance vacation records --user USER_ID --start 2026-04-01 --end 2026-04-22 --format json
+
+# 更新假期规则名称
+dws attendance vacation update-type --leave-code a1b2c3d4-e5f6-7890-abcd-ef1234567890 \
+  --name "事假（修改版）" --format json
+
+# 更新假期单位
+dws attendance vacation update-type --leave-code a1b2c3d4-e5f6-7890-abcd-ef1234567890 \
+  --unit hour --per-hours 8 --format json
+
+# 更新适用范围
+dws attendance vacation update-type --leave-code a1b2c3d4-e5f6-7890-abcd-ef1234567890 \
+  --visibility-rules '[{"type":"dept","visible":["1","2","3"]}]' --format json
+
+# 设置员工假期余额完整流程
+# 1. 查询当前余额
+dws attendance vacation balance --users user001 \
+  --leave-code a1b2c3d4-e5f6-7890-abcd-ef1234567890 --format json
+
+# 2. 根据查询结果计算新值（如当前5天，要设置为8天）
+
+# 3. 执行设置（SET操作，会替换当前余额）
+dws attendance vacation save-balance --target user001 \
+  --leave-code a1b2c3d4-e5f6-7890-abcd-ef1234567890 \
+  --num 8 --reason "年度发放" --start 2024-01-01 --end 2024-12-31 --format json
+
+# 增加员工假期余额完整流程（ADD场景）
+# 1. 查询当前余额（假设返回5天）
+dws attendance vacation balance --users user001 \
+  --leave-code a1b2c3d4-e5f6-7890-abcd-ef1234567890 --format json
+
+# 2. 计算增加后的新值（5 + 3 = 8天）
+
+# 3. 设置新总额度
+dws attendance vacation save-balance --target user001 \
+  --leave-code a1b2c3d4-e5f6-7890-abcd-ef1234567890 \
+  --num 8 --reason "绩效奖励发放3天" --format json
+
+# 查询签到记录
+dws attendance checkin records --operator-staff-id op001 --staff-ids user001,user002 \
+  --start "2026-04-01 00:00:00" --end "2026-04-07 00:00:00" --format json
+```
+
+## 上下文传递表
+| 操作 | 提取 | 用于 |
+|------|------|------|
+| `contact user get-self` | `userId` | summary 的 --user |
+| `rules` | `groupId` | schedule import 的 --group-id |
+| `schedule import` | `classId` | schedule import 的 schedules 中的 classId |
+| `contact user search` | `userId` | schedule import/get 的 userId |
+
+| `contact user get-self` / `contact user search` | `userId` | summary 的 --user, vacation records 的 --user；selfsetting get/save 的 --user（必填） |
+| 当前登录上下文 | `corpId`, `opUserId` | selfsetting get/save 自动补齐 MCP 入参, CLI 不需要传 `--corp-id` / `--op-user` |
+| `vacation types` | `leaveCode` | vacation balance 的 --leave-code, vacation records 的 --leave-code |
+## 注意事项
+**Agent 使用引导**：
+- 执行 vacation 子命令前，**必须先调用** `dws attendance vacation --help` 查看完整子命令列表和参数说明
+- 新增命令可能不在 Agent 缓存中，直接猜测命令会失败
+- 正确流程：查看帮助 → 选择命令 → 查看命令详细参数（如 `dws attendance vacation update-type --help`）→ 执行
+
+- `record get` 的 `--date` 格式: YYYY-MM-DD（如 `2026-03-08`），CLI 自动转换为毫秒时间戳
+- `shift list` 查询班次信息，`--start/--end` 使用 YYYY-MM-DD 格式，间隔不超过 7 天
+- `schedule import` 导入排班记录 — 必须通过 [attendance-schedule.md](./attendance-schedule.md) 排班导入工作流执行
+- `schedule get` 查询排班记录 — 必须通过 [attendance-schedule.md](./attendance-schedule.md) 排班查询导出工作流执行（脚本自动分批、姓名转换、排班表格式导出）
+- `schedule import` 是写操作，AI 调用时必须先展示导入摘要并引导用户二次确认；用户明确确认后才允许执行。用户明确要求跳过确认或命令包含全局 `--yes` 时，可跳过二次确认

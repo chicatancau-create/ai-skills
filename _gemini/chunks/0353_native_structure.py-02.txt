@@ -1,0 +1,85 @@
+            "backgroundAsset": master.get("backgroundAsset"),
+            "imageAssets": master.get("imageAssets", []),
+            "shapeImageAssets": master.get("shapeImageAssets", []),
+            "drawableShapeCount": master.get("drawableShapeCount", 0),
+            "placeholders": master.get("placeholders", []),
+            "layoutKeys": [
+                layout_key_by_path[layout["path"]]
+                for layout in layouts
+                if layout.get("parentPath") == master["path"]
+            ],
+        })
+
+    layout_contracts = []
+    for layout in layouts:
+        key = layout_key_by_path[layout["path"]]
+        layout_contracts.append({
+            "key": key,
+            "name": layout.get("displayName") or layout.get("name") or key,
+            "type": layout.get("layoutType"),
+            "packagePart": layout["path"],
+            "masterKey": master_key_by_path.get(layout.get("parentPath")),
+            "showMasterShapes": layout.get("showMasterShapes", True),
+            "backgroundAsset": layout.get("backgroundAsset"),
+            "imageAssets": layout.get("imageAssets", []),
+            "shapeImageAssets": layout.get("shapeImageAssets", []),
+            "drawableShapeCount": layout.get("drawableShapeCount", 0),
+            "placeholders": layout.get("placeholders", []),
+            "usedBySlides": layout.get("usedBySlides", []),
+            "svgFile": layout.get("svgFile"),
+        })
+
+    slide_contracts = []
+    for slide in slides:
+        slide_contracts.append({
+            "index": slide["index"],
+            "packagePart": slide.get("slidePath"),
+            "pageType": slide.get("pageType"),
+            "layoutKey": layout_key_by_path.get(slide.get("layoutPath")),
+            "masterKey": master_key_by_path.get(slide.get("masterPath")),
+            "showInheritedShapes": slide.get("showInheritedShapes", True),
+            "placeholders": slide.get("placeholders", []),
+            "layeredSvgFile": slide.get("svgFile"),
+            "flatSvgFile": slide.get("flatSvgFile"),
+        })
+
+    return {
+        "schema": SCHEMA,
+        "source": {
+            "name": source_pptx.name,
+            "templateFile": SOURCE_TEMPLATE_NAME,
+            "sha256": _sha256(source_pptx),
+        },
+        "slideSize": manifest.get("slideSize", {}),
+        "strategy": {
+            "preservationEligible": complete_graph,
+            "reusableStructureDetected": reusable_structure,
+            "recommendedMode": recommended_mode,
+            "recommendationScope": "source-structure-assessment",
+            "templateOutputMode": "template",
+            "downstreamTemplateAdherence": "strategist-confirmed-explicit-structure",
+            "hasMultipleMasters": len(masters) > 1,
+            "reasonCodes": reasons,
+        },
+        "masters": master_contracts,
+        "layouts": layout_contracts,
+        "slides": slide_contracts,
+    }
+
+
+def write_native_structure_bundle(
+    source_pptx: Path,
+    output_dir: Path,
+    manifest: dict[str, Any],
+) -> dict[str, Any]:
+    """Copy the source template and write its portable structure contract."""
+    source_copy = output_dir / SOURCE_TEMPLATE_NAME
+    _copy_source_template(source_pptx, source_copy)
+    contract = build_native_structure(source_pptx, manifest)
+    contract_path = output_dir / CONTRACT_NAME
+    contract_path.parent.mkdir(parents=True, exist_ok=True)
+    contract_path.write_text(
+        json.dumps(contract, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return contract

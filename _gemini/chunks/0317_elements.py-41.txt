@@ -1,0 +1,126 @@
+        ratio = max_dimension / max(target_w, target_h)
+        target_w = max(1, int(round(target_w * ratio)))
+        target_h = max(1, int(round(target_h * ratio)))
+    return target_w, target_h
+
+
+def _visible_source_scale_floor(
+    img_w: int,
+    img_h: int,
+    display_w: float,
+    display_h: float,
+    visible_source_fraction: tuple[float, float],
+) -> float:
+    """Keep each rendered axis at or below its visible source pixels."""
+    fraction_w, fraction_h = visible_source_fraction
+    visible_w = img_w * fraction_w
+    visible_h = img_h * fraction_h
+    if visible_w <= 0 or visible_h <= 0:
+        return 1.0
+    return min(1.0, max(display_w / visible_w, display_h / visible_h))
+
+
+def _fit_full_image_target(
+    img_w: int,
+    img_h: int,
+    display_w: float,
+    display_h: float,
+    *,
+    sizing: str,
+    max_dimension: int | None,
+    scale: float,
+    visible_source_fraction: tuple[float, float] | None = None,
+) -> tuple[int, int]:
+    """Size the full source image; never crop pixels.
+
+    ``cap`` mode limits oversized sources unless that would leave a cropped
+    or stretched picture with fewer visible source pixels than its final
+    rendered frame. ``display`` mode targets the configured rendered-frame
+    scale while retaining the same one-source-pixel-per-display-pixel floor.
+    """
+    if img_w <= 0 or img_h <= 0:
+        return (1, 1)
+
+    enforce_visible_floor = visible_source_fraction is not None
+    if enforce_visible_floor and (
+        any(
+            not math.isfinite(fraction) or fraction <= 0
+            for fraction in visible_source_fraction
+        )
+    ):
+        return (img_w, img_h)
+
+    if sizing == 'cap':
+        ratio = 1.0
+        if max_dimension and max(img_w, img_h) > max_dimension:
+            ratio = max_dimension / max(img_w, img_h)
+        if enforce_visible_floor:
+            ratio = max(
+                ratio,
+                _visible_source_scale_floor(
+                    img_w,
+                    img_h,
+                    display_w,
+                    display_h,
+                    visible_source_fraction,
+                ),
+            )
+        ratio = min(1.0, ratio)
+        target_w = max(1, int(math.ceil(img_w * ratio)))
+        target_h = max(1, int(math.ceil(img_h * ratio)))
+        return target_w, target_h
+
+    target_display_w, target_display_h = _image_target_size(
+        display_w,
+        display_h,
+        max_dimension=None,
+        scale=scale,
+    )
+
+    if enforce_visible_floor:
+        fraction_w, fraction_h = visible_source_fraction
+        preferred_scale = min(
+            1.0,
+            max(
+                target_display_w / (img_w * fraction_w),
+                target_display_h / (img_h * fraction_h),
+            ),
+        )
+        visible_floor = _visible_source_scale_floor(
+            img_w,
+            img_h,
+            display_w,
+            display_h,
+            visible_source_fraction,
+        )
+        resize_scale = preferred_scale
+        if max_dimension and max(img_w, img_h) * resize_scale > max_dimension:
+            resize_scale = max(
+                visible_floor,
+                max_dimension / max(img_w, img_h),
+            )
+        target_w = int(math.ceil(img_w * resize_scale))
+        target_h = int(math.ceil(img_h * resize_scale))
+    else:
+        ratio = min(
+            target_display_w / img_w,
+            target_display_h / img_h,
+            1.0,
+        )
+        target_w = int(round(img_w * ratio))
+        target_h = int(round(img_h * ratio))
+
+    target_w = max(1, target_w)
+    target_h = max(1, target_h)
+    if (
+        not enforce_visible_floor
+        and max_dimension
+        and max(target_w, target_h) > max_dimension
+    ):
+        ratio = max_dimension / max(target_w, target_h)
+        target_w = max(1, int(round(target_w * ratio)))
+        target_h = max(1, int(round(target_h * ratio)))
+    return target_w, target_h
+
+
+def _resize_for_target(img: Any, target_w: int, target_h: int) -> Any:

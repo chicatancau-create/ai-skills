@@ -1,0 +1,102 @@
+dws minutes list mine --limit 5 --format json
+# 共享给我的听记
+dws minutes list shared --query "ROI" --format json
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--query "<关键词>"` | 服务端关键词搜索 |
+| `--start "<ISO-8601>"` | 开始时间 |
+| `--end "<ISO-8601>"` | 结束时间 |
+| `--limit <N>` | 每页条数，默认 10（`--max` 为兼容别名） |
+| `--cursor "<token>"` | 分页 token，首页留空（`--next-token` 为兼容别名） |
+
+**获取详情**：
+
+- 批量基础信息：`minutes get batch --ids <uuid1,uuid2,...>`
+- 单篇摘要：`minutes get summary --id <taskUuid>`
+- 转写原文（自动翻页）：`minutes get transcription --id <taskUuid>`（返回 `nextToken` 时用 `--next-token <token>` 继续）
+- 关键词：`minutes get keywords --id <taskUuid>`
+- 待办事项：`minutes get todos --id <taskUuid>`
+- 基础信息：`minutes get info --id <taskUuid>`
+- 音频地址：`minutes get audio --id <taskUuid>`
+
+> `--id`/`--uuid`/`--task-uuid` 三者等价。推荐 `--id`。
+
+### minutes-edit（编辑与替换）
+
+- **替换转写文字**：`minutes replace-text --id <taskUuid> --search "旧文字" --replace "新文字"`
+  - 执行前检查特殊字符（引号/书名号/括号等），若包含先提示用户确认去除
+  - 替换成功后追问是否加热词：`minutes hot-word add --words "新文字"`
+- **替换发言人**：先通讯录查 dingUid → `minutes speaker replace --id <taskUuid> --from "发言人X" --to "姓名" --target-uid <userId>`
+  - 查询 dingUid：`contact user search --query "姓名" --format json` → 取 `userId`
+  - 多个匹配 → 列出候选让用户选；无匹配 → 不带 `--target-uid` 执行
+- **修改标题**：`minutes update title --id <taskUuid> --title "新标题"`
+- **修改摘要**：`minutes update summary --id <taskUuid> --content "新内容"`
+- **热词管理**：`minutes hot-word add --words "词1,词2"` / `minutes hot-word list`
+- **思维导图**：`minutes mind-graph create --id <taskUuid>` → `mind-graph status --id <taskUuid>` 轮询至完成
+
+### minutes-permission（权限管理）
+
+- 添加成员：`minutes permission add --ids <uuid1,uuid2> --member-uids <uid1,uid2> --policy 4`
+  - 需先通过 `contact user search` 获取目标 userId
+  - policy：0=不可见 / 1=仅查看 / 2=查看+下载 / 3=查看+下载+编辑 / 4=全部权限
+- 移除成员：`minutes permission remove --ids <uuid1,uuid2> --member-uids <uid1,uid2>`
+
+### minutes-upload（音频上传）
+
+```bash
+# 创建上传会话
+dws minutes upload create --file-name "meeting.mp3" --file-size 61565431 --format json
+# 上传完成后确认
+dws minutes upload complete --session-id <sid> --format json
+# 取消上传
+dws minutes upload cancel --session-id <sid> --format json
+```
+
+### 最佳实践案例速查（详见 [minutes.md](../products/minutes.md)）
+
+| 案例 | 场景 | 正确链路 |
+|------|------|----------|
+| 案例 1 | 听记 URL + 创建思维导图 | 提取 taskUuid → `mind-graph create` → `mind-graph status` 轮询；**禁止**走 app-development 或前端库 |
+| 案例 2 | 替换文字后未引导热词 | 检查特殊字符 → `replace-text` → 追问加热词 `hot-word add` |
+| 案例 3 | 查听记拉了不必要的转写 | 用户只要列表 → `list` 即可，**不要**自动拉 `get transcription` |
+| 案例 4 | 拉完转写只输出时间线原文 | 拉完后追问按发言人聚类 → 引导匹配 → 调用 `speaker replace` 写回 |
+| 案例 5 | 查某人说了什么不引导替换 | 推断发言人 → **用户确认** → 结构化总结 → 引导 `speaker replace` |
+| 案例 6 | 通讯录+部门+转写三路印证 | Step 3 画像 + Step 4 `contact user search` 并发 → 置信度 ≥70% → 确认 → 替换 |
+| 案例 7 | grep 花名误判未参会 | **禁止**在转写文本里 grep 人名判参会；**必须**调 `contact user search` |
+| 案例 8 | 听记类 query 不走 dws | **禁止**用 session_search/browser_use/activity:search 替代 dws；模糊请求先 `list mine` |
+
+### 间接意图识别铁律
+
+query 未提"听记"但任务产出依赖会议讨论内容时（报告/总结/日报/复盘/商业分析/市场感知），听记采集是**必跑前置步骤**：
+
+1. **铁律 A**：任务含"会议/讨论/沟通"信息需求 → `dws minutes list` 必跑
+2. **铁律 B**：用户说"文档啥也没有" → 听记优先级更高（唯一结构化数据源）
+3. **铁律 C**：多源聚合场景 → 每个被提及的数据源都必须有采集动作，听记侧 0 调用 = 严重失败
+
+## #8 通讯录
+
+### get-contact-self
+
+`contact user get-self` → 当前用户 userId、部门、主管等
+
+### search-person
+
+**搜人首选入口**。凡是“找人/搜人/找同事/谁负责/上级/下级/负责人/团队成员”均优先用 `aisearch person`：
+
+1. 从用户问题中提取 keyword（人名/业务关键词）和 dimension（维度），规则见 `aisearch`（开源版未引入，悟空内部产品）。
+2. `aisearch person --keyword "<关键词>" --dimension <维度>`
+3. 结果中提取 `userId` 和 `title`（姓名）展示给用户。
+4. 若需要 userId 做后续操作（发消息/建待办），可直接使用结果中的 `userId`。
+5. **重名消歧**：多人同名时禁止默认选第一个，须追加 `contact user get --ids` 获取部门/职位后请用户确认，详见 [08-directory.md](./08-directory.md)「多命中」。
+
+### search-user
+
+仅在以下**精确查询**场景使用，搜人请优先用 `search-person`：
+
+- 需要获取 userId 给其他产品使用（发消息/建待办/约日程）
+- 已有 userId 需查完整详情（`contact user get --ids`）
+
+1. `aisearch person --keyword "<姓名>" --dimension name` → `userId`；**多命中须列出候选请用户确认**。
+2. **重名消歧**：多人同名时禁止默认选第一个，须追加 `contact user get --ids` 获取部门/职位后请用户确认，详见 [08-directory.md](./08-directory.md)「多命中」。

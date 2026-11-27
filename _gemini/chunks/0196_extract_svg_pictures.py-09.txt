@@ -1,0 +1,81 @@
+        raise SvgPictureError("Options reference unselected id(s): " + ", ".join(sorted(unknown_options)))
+
+    tree, root = _parse_svg(source)
+    _validate_source(root)
+    ids = _index_ids(root)
+    missing = [selector for selector in selectors if selector not in ids]
+    if missing:
+        raise SvgPictureError("Selected SVG id(s) do not exist: " + ", ".join(missing))
+    targets = {selector: ids[selector] for selector in selectors}
+    for selector, target in targets.items():
+        _validate_target(selector, target)
+    for outer_id, outer in targets.items():
+        for inner_id, inner in targets.items():
+            if outer_id != inner_id and _is_descendant(outer, inner):
+                raise SvgPictureError(f"Nested selections are not allowed: {outer_id!r} contains {inner_id!r}")
+
+    parents = _parent_map(root)
+    resolved = _resolve_bounds(
+        source,
+        targets,
+        bounds_overrides,
+        args.bounds_mode,
+        args.padding,
+    )
+    plans = _prepare_plans(
+        source,
+        resource_root,
+        output,
+        images_dir,
+        root,
+        targets,
+        resolved,
+        asset_names,
+        parents,
+    )
+    occupied = {source, output, inventory}
+    if any(plan.asset_path in occupied for plan in plans):
+        raise SvgPictureError("Picture asset paths must differ from SVG and inventory paths")
+    _check_outputs(source, output, inventory, plans, args.overwrite)
+    _rebase_page_resources(root, source.parent, output.parent, resource_root)
+    _replace_targets(targets, plans, parents)
+    inventory_bytes = _inventory_payload(
+        source,
+        resource_root,
+        output,
+        images_dir,
+        plans,
+    )
+    _write_outputs(tree, output, inventory, images_dir, plans, inventory_bytes)
+    summary_path: Path | None = None
+    if args.inplace and (source.parent / AUTHORING_MANIFEST_NAME).is_file():
+        try:
+            summary_path = write_authoring_summary(source.parent)
+        except (OSError, ValueError) as exc:
+            raise SvgPictureError(
+                "Picture extraction succeeded but authoring summary refresh "
+                f"failed: {exc}"
+            ) from exc
+    print(f"Wrote rewritten SVG and {len(plans)} picture asset(s)", file=sys.stderr)
+    return {
+        "source": str(source),
+        "output": str(output),
+        "inventory": str(inventory),
+        "assets": [str(plan.asset_path) for plan in plans],
+        "authoring_summary": str(summary_path) if summary_path is not None else None,
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    try:
+        result = _run(parser.parse_args(argv))
+    except (OSError, SvgPictureError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

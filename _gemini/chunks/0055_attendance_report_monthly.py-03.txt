@@ -1,0 +1,116 @@
+        stats.add_warning(f"[query failed] {date_slice.label}: {e}")
+        return []
+
+    records = cmn.extract_records(payload)
+    # 展平 report query-data 返回的嵌套 values 结构
+    records = cmn.flatten_query_data_records(records, column_id_to_name)
+    if inspect and records and inspected_flag is not None and not inspected_flag[0]:
+        cmn.dump_first_record_for_inspection(records, "query-data (flattened)")
+        inspected_flag[0] = True
+    return records
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 日期提取（复用 daily 脚本的逻辑）
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _normalize_date(raw: Any) -> str | None:
+    """把任意形态的日期值归一化为 YYYY-MM-DD 字符串。"""
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)) and 1_000_000_000_000 <= raw <= 9_999_999_999_999:
+        try:
+            return datetime.fromtimestamp(raw / 1000).strftime(cmn.DATE_FMT)
+        except (OSError, ValueError, OverflowError):
+            return None
+    if isinstance(raw, (int, float)) and 1_000_000_000 <= raw <= 9_999_999_999:
+        try:
+            return datetime.fromtimestamp(raw).strftime(cmn.DATE_FMT)
+        except (OSError, ValueError, OverflowError):
+            return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+        head = s[:10]
+        try:
+            datetime.strptime(head, cmn.DATE_FMT)
+            return head
+        except ValueError:
+            return None
+    return None
+
+
+def _extract_work_date(record: dict, columns: list[dict]) -> str | None:
+    """从一条记录里提取工作日期（YYYY-MM-DD 格式）。"""
+    candidates: list[Any] = []
+    for key in DATE_KEY_CANDIDATES:
+        if key in record and record[key] not in (None, ""):
+            candidates.append(record[key])
+    for col in columns:
+        if "日期" in col["_column_name"] or "date" in col["_column_name"].lower():
+            v = _value_for_column(record, col)
+            if v not in (None, ""):
+                candidates.append(v)
+    for raw in candidates:
+        date_str = _normalize_date(raw)
+        if date_str:
+            return date_str
+    return None
+
+
+def _generate_date_columns(start: datetime, end: datetime) -> list[str]:
+    """根据日期范围生成按天展开的列标签列表，格式为日号（如 '1', '2', ...）。"""
+    dates: list[str] = []
+    current = start.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_date = end.replace(hour=0, minute=0, second=0, microsecond=0)
+    while current <= end_date:
+        dates.append(current.strftime(cmn.DATE_FMT))
+        current += timedelta(days=1)
+    return dates
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 月度聚合
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _value_for_column(record: dict, col: dict) -> Any:
+    """从一条原始记录里取某个字段的值（命名顺位试探）。"""
+    cname, cid = col["_column_name"], col["_column_id"]
+    for key in (cname, cid, f"col_{cid}", f"column_{cid}"):
+        if key in record:
+            return record[key]
+    return None
+
+
+def _try_number(value: Any) -> float | None:
+    """尝试把 value 解析为数字；不能则返回 None。"""
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        s = value.strip()
+        try:
+            return float(s)
+        except ValueError:
+            return None
+    return None
+
+
+def _user_id_of(record: dict) -> str | None:
+    uid = cmn._first_nonempty(record, ("userId", "userid", "user_id", "targetUserId"))
+    return str(uid) if uid is not None else None
+
+
+def aggregate_monthly(
+    all_records: list[dict],
+    columns: list[dict],
+    user_ids: list[str],
+    user_name_map: dict[str, str],
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, dict[str, str]]]]:
+    """
+    按 userId 分组聚合：
+      - 普通字段（数值/非数值）：按原聚合策略处理

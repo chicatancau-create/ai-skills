@@ -1,0 +1,121 @@
+                references.add(value[1:])
+    return references
+
+
+def _definition_reference_ids(element: ET.Element) -> set[str]:
+    """Return local definition ids referenced by attributes or style text."""
+    references = _referenced_definition_ids(element)
+    for item in element.iter():
+        if item.text:
+            references.update(
+                match.group(2) for match in _URL_ID_RE.finditer(item.text)
+            )
+    return references
+
+
+def _prune_unreferenced_definitions(root: ET.Element) -> None:
+    """Keep only the definition closure reachable by converted page content."""
+    definitions = _direct_defs(root)
+    if definitions is None:
+        return
+    owner_by_id: dict[str, ET.Element] = {}
+    for child in definitions:
+        for item in child.iter():
+            if definition_id := item.get("id"):
+                owner_by_id.setdefault(definition_id, child)
+
+    always_kept = [
+        child
+        for child in definitions
+        if _local_name(child.tag) == "style" or not child.get("id")
+    ]
+    pending = [
+        reference
+        for child in root
+        if child is not definitions
+        for reference in _definition_reference_ids(child)
+    ]
+    pending.extend(
+        reference
+        for child in always_kept
+        for reference in _definition_reference_ids(child)
+    )
+    selected_owners: set[int] = set()
+    required_ids: set[str] = set()
+    while pending:
+        definition_id = pending.pop()
+        if definition_id in required_ids:
+            continue
+        required_ids.add(definition_id)
+        owner = owner_by_id.get(definition_id)
+        if owner is None or id(owner) in selected_owners:
+            continue
+        selected_owners.add(id(owner))
+        pending.extend(_definition_reference_ids(owner) - required_ids)
+
+    for child in list(definitions):
+        if child in always_kept or id(child) in selected_owners:
+            continue
+        definitions.remove(child)
+    if not list(definitions) and not (
+        definitions.text and definitions.text.strip()
+    ):
+        root.remove(definitions)
+
+
+def _merge_defs(
+    layered_root: ET.Element,
+    authoring_root: ET.Element,
+    *,
+    include_authoring_changes: bool,
+) -> ET.Element | None:
+    layered_defs = _direct_defs(layered_root)
+    authoring_defs = _direct_defs(authoring_root)
+    if layered_defs is None and (
+        authoring_defs is None or not include_authoring_changes
+    ):
+        return None
+    merged = (
+        copy.deepcopy(layered_defs)
+        if layered_defs is not None
+        else ET.Element(f"{{{SVG_NS}}}defs")
+    )
+    if not include_authoring_changes or authoring_defs is None:
+        return merged
+    by_id = {
+        child.get("id"): (index, child)
+        for index, child in enumerate(merged)
+        if child.get("id")
+    }
+    existing_hashes = {
+        semantic_subtree_sha256(child)
+        for child in merged
+    }
+    for child in authoring_defs:
+        clone = copy.deepcopy(child)
+        definition_id = clone.get("id")
+        if definition_id and definition_id in by_id:
+            index, previous = by_id[definition_id]
+            projected_previous = copy.deepcopy(previous)
+            for item in projected_previous.iter():
+                for name in AUTHORING_OMITTED_SOURCE_ATTRIBUTES:
+                    item.attrib.pop(name, None)
+            if (
+                semantic_subtree_sha256(projected_previous)
+                == semantic_subtree_sha256(clone)
+            ):
+                continue
+            merged.remove(previous)
+            merged.insert(index, clone)
+            by_id[definition_id] = (index, clone)
+            continue
+        child_hash = semantic_subtree_sha256(clone)
+        if child_hash not in existing_hashes:
+            merged.append(clone)
+            existing_hashes.add(child_hash)
+    return merged
+
+
+def _serialize_svg(root: ET.Element) -> bytes:
+    ET.register_namespace("", SVG_NS)
+    ET.register_namespace("xlink", XLINK_NS)

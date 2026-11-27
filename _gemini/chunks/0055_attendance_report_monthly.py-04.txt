@@ -1,0 +1,107 @@
+      - DAILY_EXPAND_FIELDS 中的字段（如"考勤结果"）：按 (userId, date) 存储，不聚合
+
+    返回:
+      - rows: 每人一行的聚合结果（不含按天展开字段）
+      - daily_data: {field_name: {userId: {date_str: value}}}
+    """
+    # 识别哪些列需要按天展开
+    expand_col_names = {col["_column_name"] for col in columns
+                        if col["_column_name"] in DAILY_EXPAND_FIELDS}
+    agg_columns = [col for col in columns if col["_column_name"] not in expand_col_names]
+
+    # 聚合累加器（仅普通字段）
+    agg: dict[str, dict[str, dict]] = defaultdict(
+        lambda: {col["_column_name"]: {"sum": 0.0, "count": 0, "non_numeric": set()}
+                 for col in agg_columns}
+    )
+
+    # 按天展开数据：field_name → userId → date_str → value
+    daily_data: dict[str, dict[str, dict[str, str]]] = {
+        fname: defaultdict(dict) for fname in expand_col_names
+    }
+
+    for record in all_records:
+        uid = _user_id_of(record)
+        if uid is None:
+            continue
+        work_date = _extract_work_date(record, columns)
+
+        # 按天展开字段
+        for fname in expand_col_names:
+            matching_col = next((c for c in columns if c["_column_name"] == fname), None)
+            if matching_col and work_date:
+                raw = _value_for_column(record, matching_col)
+                if raw not in (None, ""):
+                    daily_data[fname][uid][work_date] = str(raw)
+
+        # 普通字段聚合
+        for col in agg_columns:
+            cname = col["_column_name"]
+            raw = _value_for_column(record, col)
+            num = _try_number(raw)
+            if num is not None:
+                agg[uid][cname]["sum"] += num
+                agg[uid][cname]["count"] += 1
+            elif raw not in (None, ""):
+                agg[uid][cname]["non_numeric"].add(str(raw))
+
+    rows: list[dict[str, Any]] = []
+    for uid in user_ids:
+        row: dict[str, Any] = {
+            "userId": uid,
+            "userName": user_name_map.get(uid, uid),
+        }
+        bucket = agg.get(uid, {})
+        for col in agg_columns:
+            cname = col["_column_name"]
+            cell = bucket.get(cname)
+            if not cell or (cell["count"] == 0 and not cell["non_numeric"]):
+                row[cname] = ""
+            elif cell["count"] > 0 and not cell["non_numeric"]:
+                total = cell["sum"]
+                row[cname] = int(total) if total == int(total) else round(total, 2)
+            elif cell["count"] == 0 and cell["non_numeric"]:
+                vals = sorted(cell["non_numeric"])
+                preview = "/".join(vals[:5]) + ("…" if len(vals) > 5 else "")
+                row[cname] = f"{len(vals)} 种：{preview}"
+            else:
+                total = cell["sum"]
+                num_part = int(total) if total == int(total) else round(total, 2)
+                vals = sorted(cell["non_numeric"])
+                preview = "/".join(vals[:3])
+                row[cname] = f"{num_part}（另含非数值：{preview}）"
+        rows.append(row)
+    return rows, daily_data
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 日历表（sheet2）构建
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_calendar_value_map(
+    all_records: list[dict],
+    columns: list[dict],
+    user_ids: list[str],
+) -> dict[str, dict[str, dict[str, str]]]:
+    """
+    从 all_records 中按 (uid, date, metric_name) 提取 CALENDAR_METRICS 的值。
+
+    返回: {uid: {date_str: {metric_name: value_str}}}
+
+    注：同一 (uid, date, metric) 若有多条记录，取最后一条非空值（query-data 同日同字段
+    通常只返回一条）。
+    """
+    valid_user_ids = set(user_ids)
+    metric_cols: dict[str, dict] = {}
+    for col in columns:
+        if col["_column_name"] in CALENDAR_METRICS:
+            metric_cols[col["_column_name"]] = col
+
+    result: dict[str, dict[str, dict[str, str]]] = {}
+    for record in all_records:
+        uid = _user_id_of(record)
+        if uid is None or uid not in valid_user_ids:
+            continue
+        work_date = _extract_work_date(record, columns)
+        if not work_date:
+            continue

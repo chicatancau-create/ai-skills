@@ -1,0 +1,81 @@
+---
+name: xd-authoring
+description: 生成或修改 Adobe XD 文件（.xd）的本机唯一标准做法。用户让你「做一个 XD 文件 / 课件 .xd / 交互原型 / 给这个 xd 加点击跳转 / 改画板布局 / 复刻某个 xd 的交互」时，先加载本 skill，直接用这里的生成器与校验器，不要从零试错、不要手写 ZIP。内含 .xd 容器格式规范（SCHEMA.md）、从零生成的 xdgen.py、给任意已有 .xd 加交互的 xdpatch.py、四个结构校验器（validate / validate_proto / geom_check / inter_probe），以及真机打开与自动点测流程（xd-open.ps1 / tpl_check.py / xd_watch_run.py，均受「不抢用户前台」约束）。
+---
+
+# 本机生成 / 修改 .xd 文件：唯一标准做法
+
+## 这套东西是什么（先认清 .xd 的真相）
+
+`.xd` **不是二进制格式，是一个 ZIP 包**。本项目已把它完整逆向量化，结论在
+`C:\Users\Admin\.dsh\tools\xd\SCHEMA.md`（675 行，每条都带真实样本证据，5 个样本
+8.8MB/2.9MB/88KB/1.7MB/740KB 全量比对过）。
+
+因此：**生成 .xd = 写对 ZIP 里的 JSON；绝不要试图用 GUI 一个像素一个像素画。**
+XD 软件只在最后「验收入眼」这一步才需要打开。
+
+## 工具清单（全部在 `C:\Users\Admin\.dsh\tools\xd\`）
+
+| 文件 | 干什么 | 关键用法 |
+|---|---|---|
+| `xdgen.py` | **从零生成** .xd（含分组、交互、预览图） | `python xdgen.py 设计.json -o out.xd` |
+| `xdpatch.py` | 给**任意已有** .xd 加/改交互（其余成员字节不动） | `python xdpatch.py --index a.xd` 看结构；`--spec s.json -o b.xd` 写交互 |
+| `validate.py` | 包结构校验（对照真实样本） | `python validate.py a.xd --compare "某样本.xd"` |
+| `validate_proto.py` | 交互校验（key 是否命中真实节点/画板） | `python validate_proto.py a.xd` |
+| `geom_check.py` | **几何独立审计**：按真实文件规则逐节点累加父链，检查顶层/组内坐标写法与画板范围 | `python geom_check.py a.xd [--verbose]` |
+| `inter_probe.py` | **交互可用性探针**：按「手点会怎样」验命中框几何、同板两个 tap 目标是否重叠、从 home 出发能否走到每个画板、`time` 是否有正 delay、symbol 实例内是否被挂了交互 | `python inter_probe.py a.xd [--json]`（有 FAIL 退出 1） |
+| `probe_selftest.py` | 探针自测（6 个故意坏/好的样本，防探针被改坏后悄悄全绿） | `python probe_selftest.py` → 期望 `6 cases, 0 unexpected` |
+| `tpl_check.py` | 通用原型点测器（任意文档 + 一份步骤 JSON），在预览窗里按画板局部坐标点并截图 | `python tpl_check.py <标题片段> steps.json` |
+| `wait_and_check.py` | **等用户空闲再整套跑**（文档没开就先用 `xd-open.ps1` 打开，再跑 `tpl_check.py`）；等不到就 `exit 3` 不动界面 | `python wait_and_check.py <doc.xd> <标题片段> steps.json --streak 2 --max-min 60` |
+| `xd_watch_run.py` | 同上但多一层：连续 N 次 IDLE 才动作，日志落 `%TEMP%\xd_watch.log`（更啰嗦，日常用 `wait_and_check.py` 就够） | `python xd_watch_run.py <doc.xd> <标题片段> steps.json` |
+| `specs\课件模板点测.json` | `tpl_check.py` 用的步骤样例（6 步：跳转/返回/tab/time 自动跳） | 照抄改 `ax/ay` |
+| `SCHEMA.md` | 格式规范（写生成器/排错时查这里） | 直接读 |
+| `examples\课件模板.json` | 3 画板课件设计描述样例（顶栏+卡片+底栏+6 条交互） | 复制改内容 |
+| `specs\交互式原型.json` | 11 条交互的 spec 样例（真实交付物同款） | 复制改目标 |
+| `xd-open.ps1` | 重启 XD 并打开指定 .xd（文件对话框自动化） | `-Path "E:\x.xd"` |
+| `xd-accept.py` | 在 XD 预览窗里按坐标点测交互并截图 | 见文末「真机验证」 |
+
+Python 用：`C:\Users\Admin\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\python\python.exe`
+跑前设 `$env:PYTHONIOENCODING='utf-8'`（否则中文被吞成 `??`）。
+
+## 两条路线，先选对
+
+**A. 用户给了底稿（老师发的初始文件 .xd）→ 用 xdpatch.py 加交互。**
+这是最稳的路线：底稿的美术、符号、重复网格都是真的，只把 `interactions/interactions.json`
+换掉，其余 38 个成员字节不动（已实测：39 成员顺序一致、mimetype 仍首条目 STORED、
+zip 时间戳/压缩方式/属性全保留、`testzip()=None`）。
+**前提**：热区必须是真实节点；symbol 实例（`meta.ux.symbolId`）不能给其内部子层挂交互。
+
+**B. 没有底稿，要从零造 → 用 xdgen.py。**
+写一份设计描述 JSON（见下），生成 3 画板课件只要 26KB JSON。
+限制：只支持 `rect / ellipse / text / image / group`，**不造 symbol、不支持渐变/复合路径**；
+输出不可字节复现（每次新 guid），不要求复现就不用管。
+
+## 设计描述 JSON（xdgen.py）
+
+```json
+{
+  "name": "课件名",
+  "home": "首页",
+  "artboards": [
+    {"name": "首页", "width": 375, "height": 667, "x": 0, "y": 0, "background": "#FFFFFF",
+     "elements": [
+       {"type": "group", "name": "底栏", "x": 0, "y": 618, "children": [
+          {"type": "group", "name": "tab1", "x": 31, "y": 8, "children": [
+             {"type": "rect", "name": "icon", "x": 0, "y": 0, "w": 24, "h": 24, "fill": "#1B6EF3", "radius": 6},
+             {"type": "text", "name": "label", "x": -8, "y": 30, "text": "首页", "size": 11, "color": "#333333", "w": 40, "h": 16, "align": "center"}
+          ]}
+       ]}
+     ]}
+  ],
+  "interactions": [
+    {"board": "首页", "target": "tab3", "to": "列表"},
+    {"board": "列表", "target": "顶栏", "action": "previous"},
+    {"board": "首页", "target": "@artboard", "trigger": "time", "delay": 5, "to": "列表"}
+  ]
+}
+```
+
+要点：
+- 元素类型：`rect`（`w/h/radius/fill/stroke`）、`ellipse`（或 `circle:true`）、
+  `text`（`text/size/color/font/letterSpacing/lineHeight/w/h/align`，w+h 都有 = 自动换行区）、

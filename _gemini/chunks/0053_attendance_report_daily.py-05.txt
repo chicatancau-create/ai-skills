@@ -1,0 +1,68 @@
+                data_headers.extend(f"{LEAVE_FIELD_NAME}-{lt}" for lt in LEAVE_TYPES)
+                leave_expanded = True
+            continue
+        data_headers.append(cname)
+    headers = base_headers + data_headers
+
+    rows_2d = []
+    for row in rows_dict:
+        uid = row.get("userId", "")
+        info = user_info_map.get(uid, cmn.UserInfo(name=uid))
+        group_name = group_name_map.get(uid, "")
+        work_date = row.get("workDate", "")
+        base = [info.name or uid, group_name, info.dept_name, work_date]
+        # 当天该用户的请假数据
+        day_leave = leave_data.get(uid, {}).get(work_date, {}) if leave_in_columns else {}
+        data: list[Any] = []
+        leave_filled = False
+        for cname in column_names:
+            if cname == "工作日期":
+                continue
+            if _is_leave_field(cname):
+                if not leave_filled:
+                    for lt in LEAVE_TYPES:
+                        val = day_leave.get(lt, 0.0)
+                        if val == 0.0:
+                            data.append("")
+                        elif val == int(val):
+                            data.append(int(val))
+                        else:
+                            data.append(round(val, 2))
+                    leave_filled = True
+                continue
+            data.append(row.get(cname, ""))
+        rows_2d.append(base + data)
+
+    out_name = args.out or cmn.build_output_filename(start, end, suffix="daily")
+    title = (
+        f"每日统计展示  统计日期：{start.strftime(cmn.DATE_FMT)} "
+        f"至 {end.strftime(cmn.DATE_FMT)}"
+    )
+    subtitle = f"报表生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    try:
+        cmn.write_excel(
+            out_name, headers, rows_2d,
+            sheet_name="每日统计",
+            title=title,
+            subtitle=subtitle,
+        )
+    except RuntimeError as e:
+        cmn.error(str(e))
+        return 1
+
+    cmn.print_summary(
+        granularity_label="每日统计",
+        out_path=out_name,
+        user_count=len(user_ids),
+        column_names=column_names,
+        start=start,
+        end=end,
+        rows_count=len(rows_2d),
+        stats=stats,
+        extra_tail="ℹ️ 同一 (用户, 日期) 下数值字段已求和、非数值字段取首个值。",
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,99 @@
+            )
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        if verbose:
+            print(f"  Narration audio directory: {narration_audio_dir}")
+            print(f"  Narration audio matched: {len(narration_audio)}/{len(ref_files)} slide(s)")
+        if args.recorded_narration:
+            missing = [path.stem for path in ref_files if path.stem not in narration_audio]
+            if missing:
+                print(
+                    "Error: Recorded narration requires one supported audio file per slide. "
+                    f"Matched {len(narration_audio)}/{len(ref_files)} slide(s). "
+                    f"Supported extensions: {', '.join(NARRATION_EXTENSIONS)}",
+                    file=sys.stderr,
+                )
+                for stem in missing[:20]:
+                    print(f"  Missing audio for: {stem}", file=sys.stderr)
+                if len(missing) > 20:
+                    print(f"  ... and {len(missing) - 20} more", file=sys.stderr)
+                return 1
+            unreadable = [
+                f"{stem}: {audio_path}"
+                for stem, audio_path in sorted(narration_audio.items())
+                if probe_audio_duration(audio_path) is None
+            ]
+            if unreadable:
+                print(
+                    "Error: Recorded narration requires readable audio durations. "
+                    "Install ffprobe/ffmpeg or replace the listed audio files.",
+                    file=sys.stderr,
+                )
+                for item in unreadable[:20]:
+                    print(f"  {item}", file=sys.stderr)
+                if len(unreadable) > 20:
+                    print(f"  ... and {len(unreadable) - 20} more", file=sys.stderr)
+                return 1
+        elif narration_audio_dir_arg and verbose:
+            missing = [path.stem for path in ref_files if path.stem not in narration_audio]
+            if missing:
+                print(
+                    f"  [warn] Narration audio matched {len(narration_audio)}/{len(ref_files)} slide(s); "
+                    "unmatched slides will export without audio."
+                )
+
+    if args.no_animations and any(
+        value is not None
+        for value in (
+            args.transition,
+            args.transition_duration,
+            args.animation,
+            args.animation_duration,
+            args.animation_trigger,
+            args.animation_stagger,
+        )
+    ):
+        print(
+            "Error: --no-animations cannot be combined with transition or "
+            "object-animation overrides.",
+            file=sys.stderr,
+        )
+        return 1
+
+    effective_animation_config = _resolve_animation_config_source(
+        project_path,
+        args.animation_config,
+        recorded_narration=bool(args.recorded_narration),
+        no_animations=args.no_animations,
+        roundtrip=args.roundtrip,
+    )
+
+    if effective_animation_config:
+        config_path = Path(effective_animation_config)
+        if not config_path.is_absolute():
+            config_path = project_path / config_path
+        if not config_path.exists():
+            print(
+                f"Error: Animation config does not exist: {config_path}",
+                file=sys.stderr,
+            )
+            if (
+                args.recorded_narration
+                and args.animation_config is None
+                and config_path.name == 'narration_animations.json'
+            ):
+                print(
+                    "Generate it with narration_sync.py animations, select the "
+                    "canonical config with --animation-config animations.json, "
+                    "or disable animations with --no-animations.",
+                    file=sys.stderr,
+                )
+            return 1
+
+    try:
+        animation_config = (
+            None
+            if args.no_animations
+            else load_animation_config(
+                project_path,

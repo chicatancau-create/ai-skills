@@ -1,0 +1,93 @@
+    def _parse_sequence(
+        self,
+        *,
+        terminator: str | None = None,
+        stop_commands: frozenset[str] = frozenset(),
+        stop_at_environment_boundary: bool = False,
+    ) -> Sequence:
+        children: list[Node] = []
+        while self.position < len(self.source):
+            if terminator is not None and self.source[self.position] == terminator:
+                self.position += 1
+                return Sequence(tuple(children))
+            if any(self._at_control_word(command) for command in stop_commands):
+                return Sequence(tuple(children))
+            if stop_at_environment_boundary and self._at_environment_boundary():
+                return Sequence(tuple(children))
+
+            char = self.source[self.position]
+            if char == "}":
+                self._fail("Unexpected closing group")
+            if char == "&":
+                self._fail("Alignment marker '&' is only valid inside an environment")
+            if char in "^_":
+                append_child(children, self._parse_prescript())
+                continue
+            infix = self._current_infix_command()
+            if infix is not None:
+                if not children:
+                    self._fail(f"Infix fraction \\{infix} has no numerator")
+                self._consume_control_word(infix)
+                right = self._parse_nested_sequence(
+                    terminator=terminator,
+                    stop_commands=stop_commands,
+                    stop_at_environment_boundary=stop_at_environment_boundary,
+                )
+                if is_empty(right):
+                    self._fail(f"Infix fraction \\{infix} has no denominator")
+                left = Sequence(tuple(children))
+                fraction = Fraction(
+                    numerator=left,
+                    denominator=right,
+                    kind="bar" if infix == "over" else "noBar",
+                )
+                if infix in {"choose", "brace", "brack"}:
+                    delimiters = {
+                        "choose": ("(", ")"),
+                        "brace": ("{", "}"),
+                        "brack": ("[", "]"),
+                    }[infix]
+                    return Sequence((Delimiter(*delimiters, (Sequence((fraction,)),)),))
+                return Sequence((fraction,))
+
+            atom = self._parse_complete_atom()
+            append_child(children, atom)
+
+        if terminator is not None:
+            self._fail(f"Unclosed group; expected {terminator!r}")
+        return Sequence(tuple(children))
+
+    def _parse_atom(self) -> Node:
+        char = self.source[self.position]
+        if char.isspace():
+            while self.position < len(self.source) and self.source[self.position].isspace():
+                self.position += 1
+            return self._styled_text(" ") if self.text_mode_depth else Sequence(())
+        if char == "{":
+            return self._parse_group()
+        if char == "\\":
+            return self._parse_command()
+        if char in "([|":
+            return self._parse_or_literal_character_delimiter(char)
+        if char == "$":
+            if not self.text_mode_depth:
+                self._fail("Math delimiters are only allowed around the complete marker source")
+            return self._parse_text_embedded_math("$", "$")
+        if char in "#%":
+            self._fail(f"Unsupported TeX syntax character {char!r}")
+        if ord(char) < 32:
+            self._fail("Unsupported control character")
+
+        self.position += 1
+        if self.text_mode_depth:
+            return self._styled_text(char)
+        if char == "-":
+            char = "−"
+        elif char == "~":
+            return self._styled_text("\u00a0", _SPACING_STYLE)
+        style = _ROMAN_STYLE if char in _PLAIN_OPERATOR_CHARS else None
+        return self._styled_text(char, style)
+
+    def _parse_command(self) -> Node:
+        command_start = self.position
+        self.position += 1

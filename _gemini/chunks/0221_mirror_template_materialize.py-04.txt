@@ -1,0 +1,104 @@
+    by_code: Counter[str] = Counter()
+    samples: dict[str, str] = {}
+    for item in diagnostics:
+        if not isinstance(item, dict):
+            continue
+        severity = str(item.get("severity") or "warning").lower()
+        if severity != "warning":
+            continue
+        code = str(item.get("code") or "unknown")
+        by_code[code] += 1
+        message = item.get("message")
+        if code not in samples and isinstance(message, str) and message:
+            samples[code] = message
+    return {
+        "warning_count": sum(by_code.values()),
+        "by_code": dict(sorted(by_code.items())),
+        "samples": dict(sorted(samples.items())),
+    }
+
+
+def _source_theme_bundle(
+    import_workspace: Path,
+    native: dict[str, Any],
+    masters: dict[str, dict[str, Any]],
+    retained_master_keys: set[str],
+) -> bytes:
+    """Package exact source Theme parts for every reachable mirror Master."""
+    source = native.get("source")
+    if not isinstance(source, dict):
+        raise MirrorMaterializationError("Native source facts are missing")
+    template_name = _require_string(
+        source.get("templateFile"),
+        context="native source template",
+    )
+    template_path = _resolve_inside(
+        import_workspace,
+        template_name,
+        context="native source template",
+    )
+    records: dict[str, dict[str, str]] = {}
+    try:
+        with ZipFile(template_path) as archive:
+            for master_key in sorted(retained_master_keys):
+                theme_part = _require_string(
+                    masters[master_key].get("themePart"),
+                    context=f"Master {master_key!r} themePart",
+                )
+                normalized = PurePosixPath(theme_part)
+                if (
+                    theme_part != normalized.as_posix()
+                    or normalized.is_absolute()
+                    or ".." in normalized.parts
+                ):
+                    raise MirrorMaterializationError(
+                        f"Master {master_key!r} has unsafe Theme part {theme_part!r}"
+                    )
+                try:
+                    theme_xml = archive.read(theme_part)
+                except KeyError as exc:
+                    raise MirrorMaterializationError(
+                        f"Master {master_key!r} Theme part is missing: {theme_part}"
+                    ) from exc
+                try:
+                    theme_root = ET.fromstring(theme_xml)
+                except ET.ParseError as exc:
+                    raise MirrorMaterializationError(
+                        f"Master {master_key!r} Theme part is malformed"
+                    ) from exc
+                if theme_root.tag != f"{{{DML_NS}}}theme":
+                    raise MirrorMaterializationError(
+                        f"Master {master_key!r} Theme part is not a:theme"
+                    )
+                records[master_key] = {
+                    "source_part": theme_part,
+                    "encoding": "base64",
+                    "sha256": hashlib.sha256(theme_xml).hexdigest(),
+                    "payload": base64.b64encode(theme_xml).decode("ascii"),
+                }
+    except BadZipFile as exc:
+        raise MirrorMaterializationError(
+            f"Source template is not a valid PPTX package: {template_path}"
+        ) from exc
+    return _json_bytes({
+        "schema": SOURCE_THEMES_SCHEMA,
+        "masters": records,
+    })
+
+
+def _local_name(name: object) -> str:
+    return name.rsplit("}", 1)[-1] if isinstance(name, str) else ""
+
+
+def _axis_reflection_transform(value: str | None) -> str | None:
+    """Return one exact importer axis-reflection transform when valid."""
+    if not value:
+        return None
+    match = _AXIS_REFLECTION_RE.fullmatch(value)
+    if match is None:
+        return None
+    cx, cy, scale_x, scale_y, offset_x, offset_y = (
+        float(token) for token in match.groups()
+    )
+    if not (
+        math.isclose(abs(scale_x), 1.0, abs_tol=1e-9)

@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""Regress CLI arguments, round-trip quality receipts, shape text, and notes.
+
+Usage:
+    python3 -m unittest tests.test_edit_native_batch_c
+
+Dependencies:
+    Standard library and local PPT Master conversion modules.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import copy
+import io
+import json
+import sys
+import tempfile
+import unittest
+import zipfile
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
+from xml.etree import ElementTree as ET
+
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+import notes_to_audio  # noqa: E402
+from authoring_roundtrip import SourceRefRecord  # noqa: E402
+from pptx_delivery_check import audit_pptx_delivery  # noqa: E402
+from pptx_to_svg.converter import ConvertOptions, convert_pptx_to_svg  # noqa: E402
+from svg_quality import cli as quality_cli  # noqa: E402
+from svg_quality.checker import SVGQualityChecker  # noqa: E402
+from svg_to_pptx.drawingml.converter import convert_svg_to_slide_shapes  # noqa: E402
+from svg_to_pptx.pptx_package import cli as export_cli  # noqa: E402
+from svg_to_pptx.pptx_package.builder import create_pptx_with_native_svg  # noqa: E402
+
+SVG_NS = "http://www.w3.org/2000/svg"
+SVG = (
+    f'<svg xmlns="{SVG_NS}" viewBox="0 0 1280 720" font-family="Arial">'
+    '<rect x="20" y="20" width="500" height="100" fill="#123456"/>'
+    '<text x="40" y="80" font-size="24" fill="#FFFFFF">Example</text></svg>'
+)
+
+
+def _invoke(main, *args: str) -> tuple[int, str]:
+    output = io.StringIO()
+    with patch.object(sys, "argv", ["batch-c", *map(str, args)]), \
+            contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+        try:
+            code = main()
+        except SystemExit as exc:
+            code = exc.code
+    return code or 0, output.getvalue()
+
+
+def _workspace(root: Path, *, notes: bool = False) -> Path:
+    pages = []
+    for index in (1, 2):
+        svg = root / f"slide_{index:02d}.svg"
+        svg.write_text(SVG, encoding="utf-8")
+        pages.append(svg)
+    source = root / "source.pptx"
+    with contextlib.redirect_stdout(io.StringIO()):
+        success = create_pptx_with_native_svg(
+            pages, source, resource_root=root, pptx_structure="flat",
+            use_compat_mode=False, transition=None, workers=1, verbose=False,
+            notes={"slide_01": "Private speaker note."} if notes else None,
+        )
+        if not success:
+            raise AssertionError("Could not create the minimal source deck")
+        workspace = root / "workspace"
+        convert_pptx_to_svg(
+            source, workspace, ConvertOptions(inheritance_mode="both", roundtrip=True),
+        )
+    return workspace
+
+
+class EditNativeBatchCTests(unittest.TestCase):
+    def test_c1_negative_voice_options_accept_space_and_equals(self) -> None:
+        for option, value in (("--rate", "-5%"), ("--pitch", "-2Hz"), ("--volume", "-10%")):
+            for arguments in ([option, value], [f"{option}={value}"]):
+                with self.subTest(arguments=arguments):
+                    code, output = _invoke(
+                        notes_to_audio.main, *arguments, "--list-common-voices",
+                    )
+                    self.assertEqual(code, 0, output)
+        for arguments in (["--rate"], ["--rate", "--unknown"], ["--unknown"]):
+            with self.subTest(invalid=arguments):
+                code, _ = _invoke(notes_to_audio.main, *arguments, "--list-common-voices")
+                self.assertEqual(code, 2)
+        job = notes_to_audio.AudioJob(Path("note.md"), "Example", Path("page.mp3"))
+        with patch.object(notes_to_audio.backend_edge, "generate", new_callable=AsyncMock) as generate:
+            results = asyncio.run(notes_to_audio._generate_edge_jobs(
+                [job], Path("subtitles"), voice="en-US-AriaNeural",

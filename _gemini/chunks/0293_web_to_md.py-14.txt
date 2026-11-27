@@ -1,0 +1,97 @@
+            return _save_plain_text_document(url, html, output_file)
+        soup = BeautifulSoup(html, 'html.parser')
+        base = soup.find('base', href=True)
+        base_url = urljoin(page_url, base['href']) if base else page_url
+        refresh_url = _meta_refresh_target(soup, base_url)
+        if refresh_url and refresh_url != page_url and _refresh_hops < 3:
+            print(f"   [>>] Meta refresh: {refresh_url}")
+            ok, _, error, saved = process_url(
+                refresh_url, output_file,
+                download_images=download_images, _refresh_hops=_refresh_hops + 1,
+            )
+            return ok, url, error, saved
+
+        # Extract Metadata
+        metadata = extract_metadata(soup, url)
+        print(f"   [OK] Title: {metadata['title']}")
+        if metadata['date']:
+            print(f"   [OK] Date: {metadata['date']}")
+
+        # Determine output path and image directory upfront
+        if output_file:
+            output_path = output_file
+        else:
+            base_name = derive_base_name(metadata['title'], url)
+            filename = f"{base_name}.md"
+            output_path = os.path.join(CONFIG["output_dir"], filename)
+
+        output_dirname = os.path.dirname(output_path) or "."
+        os.makedirs(output_dirname, exist_ok=True)
+        base_name = os.path.splitext(os.path.basename(output_path))[0]
+        image_dir = os.path.join(output_dirname, f"{base_name}_files")
+        rel_image_prefix = os.path.relpath(image_dir, output_dirname)
+
+        # Extract Content
+        content_div = find_main_content(soup)
+
+        # Download images and rewrite src before markdown conversion
+        image_count = 0
+        if download_images:
+            image_count = download_and_rewrite_images(
+                content_div, base_url, image_dir, rel_image_prefix)
+        else:
+            rewrite_images_to_remote_urls(content_div, base_url)
+        if image_count:
+            print(f"   [OK] Images: {image_count} saved to {image_dir}")
+
+        # Convert to MD
+        # Note: We pass the element to our traversal function
+        markdown_text = simple_html_to_markdown_traversal(content_div, base_url)
+        print(f"   [OK] Content: {len(markdown_text)} chars")
+        warnings = []
+        if not markdown_text.strip():
+            warnings.append(
+                "no readable body text extracted; the page may render its "
+                "content with scripts or link to it elsewhere")
+            print(f"   [WARN] {warnings[0]}")
+        else:
+            shortfall = _body_shortfall_warning(markdown_text, _page_visible_text(soup))
+            if shortfall:
+                warnings.append(shortfall)
+                print(f"   [WARN] {shortfall}")
+
+        # Construct content
+        final_output = []
+        final_output.append("<!--")
+        final_output.append(f"  Source: {url}")
+        final_output.append(
+            f"  Crawled: {datetime.datetime.now().isoformat()}")
+        if metadata['date']:
+            final_output.append(f"  Published: {metadata['date']}")
+        if metadata['author']:
+            final_output.append(f"  Author: {metadata['author']}")
+        final_output.append("-->\n")
+
+        if metadata['title']:
+            final_output.append(f"# {metadata['title']}\n")
+
+        if metadata['description']:
+            final_output.append(f"> {metadata['description']}\n")
+
+        final_output.append(markdown_text)
+
+        full_content = "\n".join(final_output)
+
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(full_content)
+        profile_path = write_conversion_profile_best_effort(
+            input_path=url,
+            markdown_path=output_path,
+            converter="web_to_md.py",
+            conversion_type="web",
+            asset_dir=image_dir if image_count else None,
+            warnings=warnings,
+        )
+
+        print(f"   [OK] Saved: {output_path}")
+        if profile_path:

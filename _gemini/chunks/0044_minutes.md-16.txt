@@ -1,0 +1,72 @@
+| `dingOpenErrcode=300` 且 `error_msg` 含 "taskUuid is invalid" | taskUuid 格式错误、不存在、或从上下文猜测/拼凑而来 | **立即停止当前 uuid，切换到 list 策略**：调用 `dws minutes list mine --max 10 --format json` 获取真实 uuid 列表，让用户选择或自动匹配最相关的一条。**严禁用同一个无效 uuid 重试**——真实案例中模型用同一个错 uuid 重试了 20 次全部失败 | 禁止用同一个无效 ID 重试哪怕 1 次；禁止从历史对话/文档/链接中猜测 uuid；禁止从十六进制编码字符串里截取数字拼凑新 uuid |
+| stdout 完全为空，error_msg 也为空 | 鉴权过期 / 服务端临时不可用 | 最多重试 1 次；仍为空则告知用户「服务暂时不可用，请稍后再试」 | 禁止连续重试超过 2 次 |
+| `dingOpenErrcode=403` 或含 "permission" / "forbidden" | 无权限访问该听记 | 告知用户无权限，建议联系听记创建者共享权限 | 禁止重试（权限问题不会因重试改变） |
+| `dingOpenErrcode=404` 或含 "not found" | 听记已被删除或不存在 | 告知用户该听记不存在或已被删除 | 禁止重试 |
+| 返回 JSON 但关键字段（如 `result`）为 null | 听记处理中（ASR/AI 摘要尚未完成） | 告知用户听记内容正在生成中，建议等待 1-2 分钟后再查询 | 禁止立即重试（处理需要时间） |
+| 网络超时 / 连接错误 | 网络不稳定 | 最多重试 1 次 | 禁止连续重试超过 2 次 |
+
+### 重试约束（必须遵守）
+
+- 同一个 taskUuid + 同一个命令，最多重试 **1 次**（总计最多调用 2 次）
+- 重试前必须检查：错误是否属于「可重试」类别（仅 stdout 为空 / 网络超时 属于可重试）
+- `dingOpenErrcode=300/403/404` 均为「不可重试」错误，立即停止并给出明确诊断
+- 如果第一次调用返回了结构化错误（含 errcode），禁止换一个别名 flag（如 --task-uuid 换 --id）重试——问题不在 flag 名称
+
+### Flag 别名兼容说明
+
+所有需要传入 taskUuid 的子命令（`get info/summary/keywords/transcription/todos/audio`、`mind-graph create/status` 等）均支持以下 flag 名称，自动降级到 `--id`：
+
+| Flag 名称 | 状态 | 说明 |
+|-----------|------|------|
+| `--id` | 推荐 | 唯一的正式 flag 名称，文档和示例中统一使用 |
+| `--url` | 隐藏别名 | 兼容听记 URL 传入场景 |
+| `--task-uuid` | 隐藏别名 | 兼容钉钉 OpenAPI 原生字段名 taskUuid |
+| `--uuid` | 隐藏别名 | 兼容通用 UUID 命名习惯 |
+
+传入 `--task-uuid` / `--uuid` / `--url` 时，CLI 会自动降级到 `--id` 处理，无需报错后用 `--id` 重试。
+
+## 关键词搜索与筛选最佳实践
+
+### 服务端筛选优先原则（必须遵守）
+
+`list mine` / `list shared` / `list all` 均支持 `--query`（关键词）、`--start`（开始时间）、`--end`（结束时间）三个筛选参数，筛选在服务端完成，效率远高于全量拉取后本地过滤。
+
+**禁止全量拉取后本地过滤**：当用户提供了搜索关键词或时间范围时，必须使用 `--query` / `--start` / `--end` 参数在服务端筛选，严禁先 `list all` 拉全量再在 prompt 中用 Python/grep 做本地关键词匹配。
+
+### 自然语言到参数映射表
+
+| 用户表述 | 映射参数 | 示例命令 |
+|----------|----------|----------|
+| "今天的听记" | `--start` 今日 00:00 `--end` 当前时间 | `dws minutes list all --start "2026-05-11T00:00:00+08:00" --end "2026-05-11T23:59:59+08:00"` |
+| "上周的听记" | `--start` 上周一 00:00 `--end` 上周日 23:59 | `dws minutes list all --start "2026-05-04T00:00:00+08:00" --end "2026-05-10T23:59:59+08:00"` |
+| "上月的听记" | `--start` 上月 1 日 `--end` 上月最后一天 | `dws minutes list all --start "2026-04-01T00:00:00+08:00" --end "2026-04-30T23:59:59+08:00"` |
+| "最近的听记" | 不传时间参数，使用默认排序 | `dws minutes list mine --max 10` |
+| "关于XX的听记" | `--query "XX"` | `dws minutes list all --query "双叶汽车"` |
+| "找XX相关的听记" | `--query "XX"` | `dws minutes list all --query "安利"` |
+| "本月关于XX的听记" | `--query` + `--start` + `--end` | `dws minutes list all --query "ROI" --start "2026-05-01T00:00:00+08:00" --end "2026-05-31T23:59:59+08:00"` |
+| "帮我从今天听记里找XX" | `--query` + `--start` + `--end`（今日范围） | `dws minutes list mine --query "需求评审" --start "2026-05-11T00:00:00+08:00" --end "2026-05-11T23:59:59+08:00"` |
+| "上月听记里有没有提到XX" | `--query` + `--start` + `--end`（上月范围） | `dws minutes list mine --query "OKR" --start "2026-04-01T00:00:00+08:00" --end "2026-04-30T23:59:59+08:00"` |
+| "从我的听记里搜XX" | `--query "XX"`（走 `list mine`） | `dws minutes list mine --query "技术方案"` |
+| "这周有没有关于XX的会" | `--query` + `--start` + `--end`（本周范围） | `dws minutes list mine --query "复盘" --start "2026-05-05T00:00:00+08:00" --end "2026-05-11T23:59:59+08:00"` |
+
+### 组合筛选示例
+
+```bash
+# 按关键词搜索
+dws minutes list all --query "神威数智需求变更沟通会议" --format json
+
+# 按时间范围搜索
+dws minutes list all --start "2026-04-01T00:00:00+08:00" --end "2026-04-30T23:59:59+08:00" --format json
+
+# 关键词 + 时间范围组合
+dws minutes list all --query "精益生产" --start "2026-04-01T00:00:00+08:00" --end "2026-04-30T23:59:59+08:00" --format json
+
+# 按关键词搜索共享听记
+dws minutes list shared --query "安利" --max 20 --format json
+
+# 从我的听记里按关键词 + 今日时间范围搜索（"帮我从今天听记里找需求评审"）
+dws minutes list mine --query "需求评审" --start "2026-05-11T00:00:00+08:00" --end "2026-05-11T23:59:59+08:00" --format json
+
+# 从我的听记里按关键词 + 上月时间范围搜索（"上月听记里有没有提到OKR"）
+dws minutes list mine --query "OKR" --start "2026-04-01T00:00:00+08:00" --end "2026-04-30T23:59:59+08:00" --format json
+

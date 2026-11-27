@@ -1,0 +1,114 @@
+            print(f"   [OK] Conversion profile: {profile_path}")
+        return True, url, None, output_path
+
+    except Exception as e:
+        print(f"   [ERROR] {str(e)}")
+        return False, url, str(e), None
+
+
+def _write_emit_result(result_file: str, url: str, markdown_path: str) -> None:
+    """Write the actual saved path as JSON so a caller can locate the output."""
+    md = Path(markdown_path).resolve()
+    profile = profile_path_for(md)
+    payload = {
+        "input": url,
+        "markdown": str(md),
+        "conversion_profile": str(profile) if profile.is_file() else "",
+    }
+    try:
+        Path(result_file).write_text(
+            json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except OSError as exc:
+        print(f"   [WARN] Could not write --emit-result: {exc}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the CLI entry point."""
+    parser = argparse.ArgumentParser(
+        description="Web to Markdown Converter (Python)")
+    parser.add_argument("urls", nargs="*", help="URLs to process")
+    parser.add_argument(
+        "-f", "--file", help="File containing URLs (one per line)")
+    parser.add_argument("-o", "--output", help="Output file (single URL only)")
+    parser.add_argument("-d", "--dir", help="Output directory")
+    parser.add_argument(
+        "--emit-result",
+        help="On success, write the saved output path as JSON to this file "
+             "(single-URL dispatcher use, so a title-named file can be located)")
+    parser.add_argument(
+        "--no-images",
+        action="store_true",
+        help="Keep remote image links without downloading image files",
+    )
+    parser.add_argument(
+        "--insecure",
+        action="store_true",
+        help="Disable TLS certificate verification (only for self-signed development targets)",
+    )
+    parser.add_argument(
+        "--allow-private-hosts",
+        action="store_true",
+        help="Allow pages, images, and redirect targets on loopback, link-local, "
+             "and private networks (intranet or localhost pages you trust)",
+    )
+
+    args = parser.parse_args(argv)
+    CONFIG["insecure"] = args.insecure
+    CONFIG["allow_private_hosts"] = args.allow_private_hosts
+    if args.insecure:
+        print("[WARN] TLS certificate verification disabled (--insecure)", file=sys.stderr)
+
+    if args.dir:
+        CONFIG["output_dir"] = args.dir
+
+    targets = []
+    if args.urls:
+        targets.extend(args.urls)
+
+    if args.file:
+        if os.path.exists(args.file):
+            with open(args.file, 'r', encoding='utf-8') as f:
+                lines = [l.strip() for l in f if l.strip()
+                         and not l.strip().startswith("#")]
+                targets.extend(lines)
+        else:
+            print(f"Error: File {args.file} not found", file=sys.stderr)
+            return 1
+
+    if not targets:
+        parser.print_usage(sys.stderr)
+        print(
+            "web_to_md.py: error: at least one URL or --file is required",
+            file=sys.stderr,
+        )
+        return 2
+
+    if args.output and len(targets) > 1:
+        print(
+            "web_to_md.py: error: -o/--output names one Markdown file and takes "
+            "one URL; for several URLs pass --dir <output directory> instead",
+            file=sys.stderr,
+        )
+        return 2
+
+    results = []
+    for i, url in enumerate(targets):
+        out = args.output or None
+        success, url, err, out_path = process_url(
+            url,
+            out,
+            download_images=not args.no_images,
+        )
+        results.append((success, url, err))
+        if args.emit_result and success and out_path:
+            _write_emit_result(args.emit_result, url, out_path)
+
+    # Summary
+    success_count = sum(1 for r in results if r[0])
+    fail_count = len(results) - success_count
+
+    print("\n" + "="*50)
+    print(
+        f"[Done] Success: {success_count}/{len(results)}, Failed: {fail_count}")
+
+    if fail_count > 0:

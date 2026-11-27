@@ -1,0 +1,56 @@
+        self.assertEqual(len(master.findall('./p:cSld/p:bg', NS)), 1)
+        self.assertIsNone(master.find('./p:cSld/p:bg//a:alpha', NS))
+        self.assertEqual(master.find('.//p:sp/p:spPr/a:solidFill/a:srgbClr/a:alpha', NS).get('val'), '80000')
+        opaque = path.read_text().replace('fill-opacity="0.8"', 'fill-opacity="1"')
+        path.write_text(opaque)
+        self.assertTrue(any('paint order' in issue for issue in
+                            SVGQualityChecker(template_mode=True).check_file(str(path))['errors']))
+        for inherited in ('fill-opacity="0.8"', 'style="opacity:0.8"'):
+            with self.subTest(inherited=inherited):
+                path.write_text(opaque.replace('fill-opacity="1"', '').replace(
+                    'data-pptx-layout="l"', f'data-pptx-layout="l" {inherited}'))
+                self.assertFalse(any('paint order' in issue for issue in
+                                     SVGQualityChecker(template_mode=True).check_file(str(path))['errors']))
+                parse_template_slide(path, 1)
+
+    def test_s4_cjk_alias_does_not_claim_the_named_latin_slot(self) -> None:
+        for family in ('微软雅黑', 'Microsoft YaHei', 'microsoft yahei', 'noto sans sc'):
+            for stack in (f'{family}, Arial', f'"{family}", Arial, sans-serif'):
+                with self.subTest(stack=stack):
+                    self.assertEqual(parse_font_family(stack), {'latin': 'Arial', 'ea': 'Microsoft YaHei'})
+                    self.assertEqual(unsafe_exported_font_faces(stack), {})
+        for stack in ('微软雅黑', 'Microsoft YaHei, SimHei, sans-serif'):
+            self.assertEqual(parse_font_family(stack), {'latin': 'Microsoft YaHei', 'ea': 'Microsoft YaHei'})
+        self.assertEqual(parse_font_family('Arial, sans-serif')['latin'], 'Arial')
+        self.assertEqual(parse_font_family('serif, Microsoft YaHei')['latin'], 'Times New Roman')
+        self.assertEqual(parse_font_family('Arial', 'ja-JP')['ea'], 'Yu Gothic')
+
+    def test_s5_template_marker_checks_baseline_with_existing_severity(self) -> None:
+        for baseline, bucket in ((272, 'errors'), (268.4, 'warnings'), (262.4, None), (257.6, None)):
+            with self.subTest(baseline=baseline):
+                path = self._write('chapter.svg', _page(
+                    '<g id="chapter-num-slot" data-pptx-placeholder="body" data-pptx-bounds="160 176 320 120">'
+                    f'<text id="chapter-num-carrier" data-pptx-carrier="true" x="160" y="{baseline}" '
+                    'font-size="96">{{CHAPTER_NUM}}</text></g>'))
+                result = SVGQualityChecker(template_mode=True).check_file(str(path))
+                findings = {key: [issue for issue in result[key] if 'exceeds' in issue]
+                            for key in ('errors', 'warnings')}
+                if bucket:
+                    self.assertEqual(len(findings[bucket]), 1, result)
+                    self.assertIn('vertical axis', findings[bucket][0])
+                else:
+                    self.assertEqual(findings, {'errors': [], 'warnings': []})
+                slot = slot_capacity_report([path])['slots'][0]
+                self.assertEqual(slot['baseline_allowed'], [257.6, 262.4])
+                self.assertEqual(slot['baseline'], baseline)
+
+    def test_s6_fixed_layers_do_not_consume_sparse_display_quota(self) -> None:
+        self._write('spec_lock.md', '<!-- ppt-master-schema: spec-lock/v1 -->\n'
+                    '# Lock\n\n## typography\n- body: 24\n\n## pptx_structure\n- mode: structured\n')
+        for layer in ('master', 'layout', None):
+            with self.subTest(layer=layer):
+                metadata = f'data-pptx-layer="{layer}" data-pptx-editable="false"' if layer else ''
+                path = self._write('svg_output/01.svg', _page(''.join(
+                    f'<text id="index-{i}" {metadata} x="140" y="{250 + i * 90}" font-size="40">0{i}</text>'
+                    for i in range(4))))
+                result = SVGQualityChecker().check_file(str(path))

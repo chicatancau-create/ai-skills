@@ -1,0 +1,70 @@
+        ns = {"c": "http://schemas.openxmlformats.org/drawingml/2006/chart"}
+        return [node.get("val") for node in root.findall(".//c:marker/c:symbol", ns)]
+
+    def test_non_combo_typed_series_cannot_bypass_line_style_rejection(self) -> None:
+        for type_field in (None, "type", "chart_type"):
+            for style_field in ("line_style", "lineStyle"):
+                with self.subTest(type_field=type_field, style_field=style_field):
+                    series = {"name": "S", "values": [1, 2], style_field: "lineMarker"}
+                    if type_field:
+                        series[type_field] = "line"
+                    with self.assertRaises(RuntimeError) as caught:
+                        _chart_data({"type": "line", "categories": ["A", "B"], "series": [series]})
+                    self.assertEqual(
+                        str(caught.exception),
+                        "Native PPTX chart series[].line_style is not a series option; "
+                        "set line_style on the chart root (combo: on the plot or typed series)",
+                    )
+
+    def test_typed_combo_line_markers_survive_normalization_and_xml(self) -> None:
+        for type_field in ("type", "chart_type"):
+            for style_field in ("line_style", "lineStyle"):
+                with self.subTest(type_field=type_field, style_field=style_field):
+                    payload = {
+                        "type": "combo", "categories": ["A", "B"],
+                        "series": [
+                            {type_field: "column", "name": "C", "values": [1, 2]},
+                            {type_field: "line", "name": "L", "values": [2, 3], style_field: "lineMarker"},
+                        ],
+                    }
+                    self.assertEqual(_chart_data(payload)["plots"][1]["line_style"], "lineMarker")
+                    symbols = self._marker_symbols(payload)
+                    self.assertTrue(symbols)
+                    self.assertNotIn("none", symbols)
+
+    def test_root_and_combo_plot_line_markers_remain_supported(self) -> None:
+        line = {
+            "type": "line", "line_style": "lineMarker", "categories": ["A", "B"],
+            "series": [{"name": "S", "values": [1, 2]}],
+        }
+        combo = {"type": "combo", "categories": ["A", "B"], "plots": [line]}
+        for payload in (line, combo):
+            with self.subTest(chart_type=payload["type"]):
+                symbols = self._marker_symbols(payload)
+                self.assertTrue(symbols)
+                self.assertNotIn("none", symbols)
+
+
+class StrictAlphaMarginRegressionTests(unittest.TestCase):
+    def test_a13_pure_key_soft_shadow_and_glow_preserve_partial_alpha(self) -> None:
+        for key in ((255, 0, 0), (0, 255, 0), (0, 0, 255)):
+            for foreground in ((0, 0, 0), (255, 255, 255)):
+                with self.subTest(key=key, foreground=foreground), tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    sheet = Image.new("RGB", (120, 120), key)
+                    for y in range(120):
+                        for x in range(120):
+                            distance = math.hypot(x - 60, y - 60)
+                            alpha = 255 if distance < 9 else round(128 * max(0, 32 - distance) / 23)
+                            pixel = tuple(round((base * (255 - alpha) + color * alpha) / 255)
+                                          for base, color in zip(key, foreground))
+                            sheet.putpixel((x, y), pixel)
+                    source = root / "sheet.png"
+                    sheet.save(source)
+                    expected = slice_images.slice_sheet(
+                        source, 1, 1, root / "normal", trim=True, alpha=True, bg=key,
+                    )
+                    actual = slice_images.slice_sheet(
+                        source, 1, 1, root / "strict", trim=True, alpha=True,
+                        strict_alpha=True, bg=key,
+                    )

@@ -1,0 +1,91 @@
+    text_decoration = parse_project_text_decoration(
+        _get_attr(elem, 'text-decoration', ctx) or 'none'
+    ).canonical
+    raw_letter_spacing = _get_attr(elem, 'letter-spacing', ctx)
+    resolved_letter_spacing = ctx.text_letter_spacings.get(id(elem))
+    if resolved_letter_spacing is not None:
+        letter_spacing_px = resolved_letter_spacing * ctx.scale_x
+    elif raw_letter_spacing is not None:
+        letter_spacing_px = parse_project_letter_spacing(
+            raw_letter_spacing,
+            font_size=font_size,
+            scale_x=ctx.scale_x or 1.0,
+        ).value
+    else:
+        letter_spacing_px = 0.0
+
+    fonts = parse_font_family(font_family_str, ctx.primary_language)
+
+    parent_attrs: dict[str, Any] = {
+        'fill': fill_color,
+        'fill_raw': fill_raw,
+        'font_weight': font_weight,
+        'font_size': font_size,
+        'font_family': font_family_str,
+        'font_style': font_style,
+        'text_decoration': text_decoration,
+        'letter_spacing': letter_spacing_px,
+        'baseline_shift': 0,
+        '_scale_x': ctx.scale_x or 1.0,
+        '_object_opacity': object_opacity,
+        '_fill_opacity': fill_opacity,
+        '_stroke_opacity': stroke_opacity_value,
+        'opacity': opacity,
+        'stroke_raw': stroke_raw,
+        'stroke_width': stroke_width,
+        'stroke_opacity': stroke_opacity,
+    }
+
+    # Single-frame modes annotate conservative dy-stacked text with one base
+    # line height. Semantic paragraphs become <a:p>; authored visual rows
+    # either become <a:br/> (preserve) or join for wrapping (reflow).
+    line_height_attr = (
+        elem.get('data-paragraph-line-height')
+        if ctx.text_flow != TEXT_FLOW_SPLIT
+        else None
+    )
+    line_height_px = _f(line_height_attr) if line_height_attr is not None else None
+    paragraph_runs: list[list[dict[str, Any]]] | None = None
+    paragraph_space_before: list[float] = []
+    paragraph_bullets: list[dict[str, Any] | None] = []
+    # Per-tspan widths (visual lines as the deck author drew them) regardless
+    # of how many merge into one <a:p>; used to size the textbox so PowerPoint
+    # has room to wrap text to the SVG's original line widths.
+    visual_line_widths: list[float] = []
+    visual_line_runs: list[list[dict[str, Any]]] = []
+    if line_height_px is not None and line_height_px > 0:
+        xml_space = resolve_project_xml_space(elem)
+        paragraph_runs = []
+        for child in elem:
+            if child.tag != f'{{{SVG_NS}}}tspan':
+                continue
+            line_runs = _collect_tspan_runs(
+                child,
+                parent_attrs,
+                ctx,
+                xml_space,
+            )
+            line_runs = _normalize_text_run_whitespace(line_runs)
+            if not line_runs:
+                continue
+            visual_line_runs.append(line_runs)
+            visual_line_widths.append(
+                _estimate_bullet_line_width(line_runs, fonts, ctx)
+            )
+            soft_break = child.get('data-paragraph-soft-break') == '1'
+            line_break = child.get('data-paragraph-line-break') == '1'
+            if line_break and paragraph_runs:
+                paragraph_runs[-1].append({'_line_break': True})
+                paragraph_runs[-1].extend(line_runs)
+            elif soft_break and paragraph_runs:
+                # Append to the previous paragraph. A Latin line-wrap needs a
+                # space to keep two words apart (SVG used a dy break, not
+                # punctuation); CJK wraps mid-sentence with no inter-character
+                # space, so a joining space there is a spurious artifact.
+                prev = paragraph_runs[-1]
+                prev_text = prev[-1]['text'] if prev else ''
+                next_text = line_runs[0]['text']
+                boundary_is_cjk = (
+                    (prev_text and is_cjk_char(prev_text[-1]))
+                    or (next_text and is_cjk_char(next_text[0]))
+                )

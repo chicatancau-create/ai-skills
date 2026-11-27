@@ -1,0 +1,91 @@
+                with self.subTest(relative=relative, quick_generate=quick_generate):
+                    self._assert_import_behavior(
+                        relative,
+                        initialized=True,
+                        preserved=True,
+                        quick_generate=quick_generate,
+                    )
+
+    def test_project_source_explicit_move_and_copy(self) -> None:
+        for relative in ("", "archive/2026-09"):
+            for move in (False, True):
+                with self.subTest(relative=relative, move=move):
+                    self._assert_import_behavior(
+                        relative, initialized=True, preserved=not move, move=move, copy=not move,
+                    )
+
+    def test_scratch_sources_keep_default_move_and_explicit_copy(self) -> None:
+        for relative in ("", "topic_web_sources", "archive/2026-09/topic_web_sources"):
+            for copy in (False, True):
+                with self.subTest(relative=relative, copy=copy):
+                    self._assert_import_behavior(
+                        relative, initialized=False, preserved=copy, copy=copy,
+                    )
+
+
+class _CurlHeaders(dict):
+    """Represent repeated curl headers without importing optional curl_cffi."""
+
+    def __init__(self, entries=()):
+        self.entries = list(entries.items()) if isinstance(entries, dict) else list(entries)
+        super().__init__(self.entries)
+
+    def get_list(self, name):
+        return [value for key, value in self.entries if key.lower() == name.lower()]
+
+
+@contextlib.contextmanager
+def _memory_curl(routes):
+    visited = []
+    responses = []
+
+    def get(url, **kwargs):
+        prepared = requests.Request("GET", url).prepare()
+        cookies = kwargs["cookies"]
+        visited.append({
+            "url": url,
+            "headers": dict(kwargs["headers"]),
+            "cookie_header": requests.cookies.get_cookie_header(cookies, prepared) or "",
+            "cookies": {(cookie.name, cookie.domain, cookie.domain_specified, cookie.path)
+                        for cookie in cookies},
+            "kwargs": kwargs,
+        })
+        status, headers = routes[url]
+        response = Mock(url=url, status_code=status, headers=_CurlHeaders(headers))
+        responses.append(response)
+        return response
+
+    backend = SimpleNamespace(get=Mock(side_effect=get))
+    with patch.object(web_to_md, "curl_requests", backend):
+        yield visited, responses
+
+
+class CurlSourceRedirectTests(unittest.TestCase):
+    START = "https://8.8.8.8/start"
+    MIDDLE = "https://8.8.8.8/middle"
+    PRIVATE = "http://127.0.0.1/side-effect"
+    FINAL = "https://1.1.1.1/finished"
+
+    def setUp(self) -> None:
+        for guard in (
+            patch.dict(web_to_md.CONFIG, allow_private_hosts=False),
+            patch.object(web_to_md, "CurlOpt", SimpleNamespace(RESOLVE=10203, PROXY=10004)),
+            patch.object(socket, "getaddrinfo", side_effect=AssertionError("Unexpected DNS")),
+            patch.object(socket.socket, "connect", side_effect=AssertionError("Unexpected network")),
+        ):
+            guard.start()
+            self.addCleanup(guard.stop)
+
+    def test_a01_curl_private_hops_never_enter_transport(self) -> None:
+        for intermediate_public in (False, True):
+            routes = {
+                self.START: (302, {"Location": self.MIDDLE if intermediate_public else self.PRIVATE}),
+                self.MIDDLE: (302, {"Location": self.PRIVATE}),
+                self.PRIVATE: (302, {"Location": self.FINAL}),
+                self.FINAL: (200, {}),
+            }
+            with self.subTest(intermediate_public=intermediate_public), _memory_curl(routes) as (visited, responses):
+                with self.assertRaisesRegex(ValueError, "non-public"):
+                    web_to_md._http_get(self.START)
+                expected = [self.START, self.MIDDLE] if intermediate_public else [self.START]
+                self.assertEqual([item["url"] for item in visited], expected)

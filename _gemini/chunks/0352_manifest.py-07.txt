@@ -1,0 +1,88 @@
+                    name=PurePosixPath(slide_path).name,
+                    slide_path=slide_path,
+                    layout_path=layout_path,
+                    master_path=master_path,
+                    show_inherited_shapes=parse_ooxml_boolean(
+                        slide_root.attrib.get("showMasterSp")
+                        if slide_root is not None else None,
+                        default=True,
+                        context=f"{slide_path} showMasterSp",
+                    ),
+                    background_asset=resolved_bg,
+                    background_source=bg_source,
+                    image_assets=resolved_images,
+                    text_samples=texts,
+                    text_count=len(texts),
+                    shape_count=shape_count,
+                    placeholders=placeholders,
+                    page_type=page_type,
+                    svg_file=slide_svg_filename(index),
+                    flat_svg_file=(
+                        slide_svg_filename(index) if include_flat_svg else None
+                    ),
+                )
+            )
+
+        for layout_path in layout_parts:
+            if layout_path in layout_cache:
+                continue
+            layout_root = load_xml_from_zip(zf, layout_path)
+            layout_rels = parse_relationships(zf, layout_path)
+            layout_cache[layout_path] = {
+                "root": layout_root,
+                "rels": layout_rels,
+                "master_path": layout_parent.get(layout_path),
+            }
+
+        for master_path in master_parts:
+            if master_path in master_cache:
+                continue
+            master_cache[master_path] = {
+                "root": master_roots.get(master_path),
+                "rels": master_rels_map.get(master_path, {}),
+                "theme_path": master_theme_path.get(master_path),
+            }
+
+        page_type_map: dict[str, list[int]] = defaultdict(list)
+        for slide in slide_records:
+            page_type_map[slide.page_type].append(slide.index)
+
+        layout_records = [
+            summarize_part_record(
+                part_path=layout_path,
+                root=layout_cache[layout_path]["root"],
+                rels=layout_cache[layout_path]["rels"],
+                copied_assets=copied_assets,
+                used_by_slides=layout_usage[layout_path],
+                parent_path=layout_cache[layout_path]["master_path"],
+                svg_file=part_svg_filename("layout", seq, layout_path),
+            )
+            for seq, layout_path in enumerate(layout_parts, start=1)
+            if layout_path in layout_cache
+        ]
+        master_records = [
+            summarize_part_record(
+                part_path=master_path,
+                root=master_cache[master_path]["root"],
+                rels=master_cache[master_path]["rels"],
+                copied_assets=copied_assets,
+                used_by_slides=master_usage[master_path],
+                theme_path=master_cache[master_path]["theme_path"],
+                svg_file=part_svg_filename("master", seq, master_path),
+                theme=parse_theme(load_xml_from_zip(zf, master_cache[master_path]["theme_path"]))
+                if master_cache[master_path]["theme_path"] else {"colors": {}, "fonts": {}},
+            )
+            for seq, master_path in enumerate(master_parts, start=1)
+            if master_path in master_cache
+        ]
+        layouts_top = [item for item in layout_records if item]
+        masters_top = [item for item in master_records if item]
+
+        layout_by_path = {item["path"]: item for item in layouts_top}
+        master_by_path = {item["path"]: item for item in masters_top}
+        asset_usage = Counter()
+        for slide in slide_records:
+            per_slide_assets: set[str] = set(slide.image_assets)
+            if slide.background_asset:
+                per_slide_assets.add(slide.background_asset)
+            layout_record = layout_by_path.get(slide.layout_path or "")

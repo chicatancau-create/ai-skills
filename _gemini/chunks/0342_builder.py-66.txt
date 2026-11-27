@@ -1,0 +1,89 @@
+            "SVG-image PPTX export is no longer supported; use svg_final/ "
+            "directly for preview and native DrawingML PPTX for delivery"
+        )
+    if not public_svg_files:
+        print("Error: No SVG files found")
+        return False
+
+    use_compat_mode = False
+    if pptx_structure not in {"baseline", "structured", "preserve", "flat"}:
+        raise ValueError(f"Unsupported pptx_structure: {pptx_structure}")
+    requested_canvas_format = canvas_format
+    canvas, detected_canvas_format = resolve_svg_canvas(
+        svg_files,
+        canvas_format=canvas_format,
+        expected_viewbox=expected_viewbox,
+    )
+    if canvas_format is None:
+        canvas_format = detected_canvas_format
+    if pptx_structure == "flat":
+        flat_errors = flat_structure_metadata_errors(public_svg_files)
+        if flat_errors:
+            details = "\n".join(f"  - {error}" for error in flat_errors)
+            raise TemplateStructureError(
+                "Flat PPTX structure validation failed:\n" + details
+            )
+    if use_layout_placeholder_frames and pptx_structure != "structured":
+        raise ValueError(
+            "use_layout_placeholder_frames requires pptx_structure='structured'"
+        )
+    if structured_baseline:
+        raise ValueError(
+            "structured_baseline is obsolete; use pptx_structure='structured'"
+        )
+    if baseline_layout_specs is not None:
+        raise ValueError(
+            "baseline_layout_specs is obsolete; structured export parses SVG metadata"
+        )
+    if pptx_structure == "structured" and master_text_style_spec is None:
+        raise ValueError(
+            "Structured export requires declared or inferred typography "
+            "title/body anchors in master_text_style_spec"
+        )
+    if use_native_shapes and pptx_structure == "structured":
+        template_specs = parse_template_slides(svg_files)
+        public_template_specs = template_specs[:public_slide_count]
+    elif use_native_shapes and pptx_structure == "preserve":
+        if native_structure_contract is None:
+            raise TemplateStructureError(
+                "Preserve export requires a validated native structure contract"
+            )
+        template_specs = parse_preserve_slides(svg_files)
+        for spec in template_specs:
+            native_structure_contract.layout(spec.layout_key)
+        public_template_specs = template_specs
+    else:
+        template_specs = None
+        public_template_specs = None
+    template_background_expectations: dict[str, str | None] | None = None
+    template_shape_roster_expectations: (
+        dict[str, tuple[str, ...]] | None
+    ) = None
+    template_layout_parts_by_key: dict[str, str] | None = None
+    template_master_parts_by_key: dict[str, str] | None = None
+    if template_specs is not None and not native_objects:
+        native_placeholders = sorted({
+            item.placeholder
+            for spec in template_specs
+            for item in spec.placeholders
+            if item.placeholder in {"chart", "table"}
+        })
+        if native_placeholders:
+            kinds = ", ".join(str(kind) for kind in native_placeholders)
+            context = (
+                pptx_structure.capitalize()
+            )
+            raise TemplateStructureError(
+                f"{context} {kinds} placeholder(s) require "
+                "--native-charts-and-tables so each marker becomes one native "
+                "PowerPoint Chart/Table object"
+            )
+
+    # Check compatibility mode dependencies
+    renderer_name, renderer_status, renderer_hint = get_png_renderer_info()
+    if not use_native_shapes and use_compat_mode and PNG_RENDERER is None:
+        print("Warning: No PNG rendering library installed, cannot use compatibility mode")
+        print(f"  {renderer_hint}")
+        print("  Will use pure SVG mode (may not display in Office LTSC 2021 and similar versions)")
+        use_compat_mode = False
+

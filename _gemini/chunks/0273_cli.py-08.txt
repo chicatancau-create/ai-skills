@@ -1,0 +1,105 @@
+            if not isinstance(original, str):
+                continue
+            new_item = dict(item)
+            new_item["filename"] = rename_map.get(original, original)
+            new_item["source_namespace"] = namespace
+            rebased_items.append(new_item)
+
+        self._merge_image_manifest(rebased_items, images_dir / "image_manifest.json")
+        print(
+            f"Propagated {copied_count} image asset(s) + manifest "
+            f"from {asset_dir} → images/ (filenames unchanged; source_namespace {namespace!r} recorded in image_manifest.json)"
+        )
+
+    def _propagate_companion_image_assets(self, markdown_path: Path, project_dir: Path) -> None:
+        asset_dir = markdown_path.with_name(f"{markdown_path.stem}_files")
+        if asset_dir.is_dir():
+            self._propagate_image_assets(asset_dir, project_dir)
+
+    def _import_markdown_with_assets(
+        self,
+        source_path: Path,
+        sources_dir: Path,
+        move: bool,
+    ) -> tuple[Path, Path | None, str | None]:
+        archived_markdown = self._copy_or_move_file(
+            source_path,
+            sources_dir / source_path.name,
+            move=move,
+        )
+
+        profile_src = source_path.with_name(f"{source_path.stem}.conversion_profile.json")
+        if profile_src.is_file():
+            self._copy_or_move_file(
+                profile_src,
+                sources_dir / f"{archived_markdown.stem}.conversion_profile.json",
+                move=move,
+            )
+
+        asset_dir = self._companion_asset_dir(source_path)
+        if asset_dir is None:
+            return archived_markdown, None, None
+
+        imported_asset_dir = self._copy_or_move_tree(
+            asset_dir,
+            sources_dir / f"{archived_markdown.stem}_files",
+            move=move,
+        )
+        self._rewrite_markdown_asset_refs(
+            archived_markdown,
+            original_asset_dirname=asset_dir.name,
+            imported_asset_dirname=imported_asset_dir.name,
+        )
+
+        note = None
+        if archived_markdown.stem != source_path.stem:
+            note = (
+                f"{source_path}: renamed imported markdown to {archived_markdown.name} "
+                f"and rewrote asset references to {imported_asset_dir.name}/"
+            )
+        return archived_markdown, imported_asset_dir, note
+
+    def import_sources(
+        self,
+        project_path: str,
+        source_items: list[str],
+        move: bool = False,
+        copy: bool = False,
+        propagate_images: bool = True,
+    ) -> dict[str, list[str]]:
+        if move and copy:
+            raise ValueError("--move and --copy are mutually exclusive")
+        project_dir = Path(project_path)
+        if not project_dir.exists() or not project_dir.is_dir():
+            raise FileNotFoundError(f"Project directory not found: {project_dir}")
+        if not source_items:
+            raise ValueError("At least one source path or URL is required")
+
+        sources_dir = self._source_dir(project_dir)
+        summary: dict[str, list[str]] = {
+            "archived": [],
+            "url_records": [],
+            "markdown": [],
+            "assets": [],
+            "images": [],
+            "analysis": [],
+            "notes": [],
+            "skipped": [],
+        }
+        moved_web_sources: dict[Path, Path] = {}
+
+        expanded_items: list[str] = []
+        supplied_dirs: list[Path] = []
+        for item in source_items:
+            if is_url(item):
+                expanded_items.append(item)
+                continue
+            item_path = Path(item)
+            if item_path.is_dir():
+                supplied_dirs.append(item_path)
+                directory_files = sorted(
+                    path for path in item_path.iterdir() if path.is_file()
+                )
+                if directory_files:
+                    expanded_items.extend(str(path) for path in directory_files)
+                    summary["notes"].append(

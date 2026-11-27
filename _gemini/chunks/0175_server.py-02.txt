@@ -1,0 +1,106 @@
+}
+_TEMPLATE_KIND_LINE_RE = re.compile(
+    r'''kind\s*:\s*(?:'([^']*)'|"([^"]*)"|([A-Za-z][A-Za-z0-9_-]*))'''
+    r'''\s*(?:#.*)?\Z'''
+)
+_ICON_PREVIEW_SAMPLES = {
+    'chunk-filled': ('home', 'chart-line', 'users', 'target'),
+    'tabler-filled': ('home', 'chart-dots', 'user', 'bulb'),
+    'tabler-outline': ('home', 'chart-line', 'users', 'bulb'),
+    'phosphor-duotone': ('house', 'chart-line', 'users', 'target'),
+}
+
+# Keep the long-standing Confirm UI entry port. Live preview uses a separate
+# base range so stale preview tabs cannot address a later Confirm UI process.
+# Concurrent Confirm UI sessions advance while explicit ``--port`` remains exact.
+DEFAULT_PORT = 5050
+PUBLIC_HOST = '127.0.0.1'
+STARTUP_TIMEOUT = 10
+
+# Default --wait budget, kept just under the 600s Bash-tool ceiling so the
+# parent (waiting) command returns before the calling harness kills it. The
+# detached child server keeps running on its own --timeout idle budget, so a
+# slow user can still confirm after the wait returns; the caller re-checks
+# result.json before falling back to chat.
+WAIT_TIMEOUT_DEFAULT = 590
+
+def _read_json_object(path: Path, retries: int = 2, delay: float = 0.08) -> dict:
+    """Read a JSON object, retrying briefly around non-atomic external writes."""
+    last_error: Exception = ValueError('unknown JSON read error')
+    for attempt in range(retries + 1):
+        try:
+            data = json.loads(path.read_text(encoding='utf-8-sig'))
+            if isinstance(data, dict):
+                return data
+            raise ValueError(f'{path} top-level JSON value must be an object')
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            last_error = exc
+            if attempt < retries:
+                time.sleep(delay)
+                continue
+            raise last_error
+    raise last_error
+
+
+def _read_result_object(path: Path, retries: int = 2, delay: float = 0.08) -> dict:
+    """Read result.json and apply the legacy Design Spec depth default."""
+    data = _read_json_object(path, retries=retries, delay=delay)
+    data.setdefault('design_spec_depth', 'complete')
+    return data
+
+
+def _write_json_atomic(path: Path, data: dict) -> None:
+    """Write a JSON object with replace semantics so waiters never see a partial file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
+    try:
+        tmp.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding='utf-8',
+        )
+        os.replace(tmp, path)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _json_sha256(data: object) -> str:
+    """Return a stable SHA-256 over one JSON-compatible value."""
+    canonical = json.dumps(
+        data,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(',', ':'),
+    )
+    return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+
+
+def _safe_template_id(template_id: object) -> bool:
+    """Return whether an index key is one safe directory-segment id."""
+    return (
+        isinstance(template_id, str)
+        and re.fullmatch(r'\w[\w.-]*', template_id) is not None
+    )
+
+
+_TEMPLATE_SPEC_NAME_RE = re.compile(
+    r'design_spec\.(?P<kind>brand|style|layout|deck)\.(?P<id>[^/\\]+)\.md'
+)
+
+
+def _template_design_specs(workspace_root: Path) -> list[Path]:
+    """Return every Design Spec one template workspace root exposes.
+
+    A single-kind workspace keeps the exact ``templates/design_spec.md``. A
+    multi-kind workspace keeps one ``templates/design_spec.<kind>.<id>.md`` per
+    kind — the same shape the apply stage installs into a consuming project.
+    Order is stable so candidate keys and the options digest do not depend on
+    directory listing order.
+    """
+    templates_dir = workspace_root / 'templates'
+    current = templates_dir / 'design_spec.md'
+    multi = sorted(
+        path
+        for path in templates_dir.glob('design_spec.*.md')

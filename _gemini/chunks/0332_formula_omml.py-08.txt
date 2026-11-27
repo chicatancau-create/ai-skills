@@ -1,0 +1,90 @@
+        if children or set(attributes) != {"typeface"} or not attributes["typeface"]:
+            raise FormulaCompileError(
+                f"a:{element_name} must contain one non-empty typeface attribute"
+            )
+
+
+def _validate_math_structure(element: ET.Element, element_name: str) -> None:
+    if element_name in _ARGUMENT_CONTAINERS:
+        children = list(element)
+        if element_name == "oMath" and not children:
+            raise FormulaCompileError("m:oMath must contain a math expression")
+        for child in children:
+            namespace, child_name = _qualified_name(child.tag)
+            if namespace != MATH_NS or child_name not in _ARGUMENT_ELEMENTS:
+                raise FormulaCompileError(
+                    f"m:{element_name} contains an invalid math argument child"
+                )
+        return
+    fixed_children = {
+        "acc": ("accPr", "e"),
+        "bar": ("barPr", "e"),
+        "borderBox": ("borderBoxPr", "e"),
+        "box": ("boxPr", "e"),
+        "f": ("fPr", "num", "den"),
+        "func": ("funcPr", "fName", "e"),
+        "groupChr": ("groupChrPr", "e"),
+        "limLow": ("limLowPr", "e", "lim"),
+        "limUpp": ("limUppPr", "e", "lim"),
+        "mc": ("mcPr",),
+        "nary": ("naryPr", "sub", "sup", "e"),
+        "phant": ("phantPr", "e"),
+        "rad": ("radPr", "deg", "e"),
+        "sPre": ("sPrePr", "sub", "sup", "e"),
+        "sSub": ("e", "sub"),
+        "sSubSup": ("e", "sub", "sup"),
+        "sSup": ("e", "sup"),
+    }
+    if element_name in fixed_children:
+        _require_children(element, fixed_children[element_name])
+        return
+    if element_name == "oMathPara":
+        children = tuple(_child_names(element))
+        if children not in {("oMath",), ("oMathParaPr", "oMath")}:
+            raise FormulaCompileError(
+                "m:oMathPara must contain optional m:oMathParaPr then one m:oMath"
+            )
+        return
+    if element_name == "d":
+        children = _child_names(element)
+        rows = children[1:] if children and children[0] == "dPr" else []
+        if not 1 <= len(rows) <= 64 or any(name != "e" for name in rows):
+            raise FormulaCompileError("m:d must contain m:dPr then 1..64 m:e children")
+        return
+    if element_name == "eqArr":
+        children = _child_names(element)
+        offset = 1 if children and children[0] == "eqArrPr" else 0
+        rows = children[offset:]
+        if not 1 <= len(rows) <= 64 or any(name != "e" for name in rows):
+            raise FormulaCompileError("m:eqArr must contain 1..64 m:e rows")
+        return
+    if element_name == "m":
+        children = _child_names(element)
+        rows = children[1:] if children and children[0] == "mPr" else []
+        if not 1 <= len(rows) <= 256 or any(name != "mr" for name in rows):
+            raise FormulaCompileError("m:m must contain m:mPr then 1..256 m:mr rows")
+        return
+    if element_name == "mr":
+        _require_repeated_children(element, "e", minimum=1, maximum=64)
+        return
+    if element_name == "mcs":
+        _require_repeated_children(element, "mc", minimum=1, maximum=64)
+        return
+    if element_name == "r":
+        children = [(_qualified_name(child.tag), child) for child in element]
+        index = 0
+        if index < len(children) and children[index][0] == (MATH_NS, "rPr"):
+            index += 1
+        if index < len(children) and children[index][0] == (DRAWING_NS, "rPr"):
+            index += 1
+        if index != len(children) - 1 or children[index][0] != (MATH_NS, "t"):
+            raise FormulaCompileError(
+                "m:r must contain optional m:rPr, optional a:rPr, then one m:t"
+            )
+        return
+    if element_name == "ctrlPr":
+        children = [(_qualified_name(child.tag), child) for child in element]
+        if len(children) > 1 or (
+            children and children[0][0] != (DRAWING_NS, "rPr")
+        ):
+            raise FormulaCompileError(

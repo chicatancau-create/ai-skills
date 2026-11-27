@@ -1,0 +1,120 @@
+# 7. Webhook 发告警
+dws chat message send-by-webhook --token <webhook-token> \
+  --title "告警" --text "CPU 超 90% @10" --at-all --format json
+```
+
+## 复合工作流
+
+### 机器人发消息后撤回（完整流程）
+
+`recall-by-bot` 通过机器人接口撤回机器人发出的消息（需要 `--robot-code` + `--keys`）。`chat message recall` 通过 IM 接口撤回当前用户自己发出的消息（需要 `--conversation-id` + `--msg-id`）。
+
+```bash
+# Step 1: 查我的机器人 — 提取 robot-code
+dws chat bot search --format json
+
+# Step 2: 用机器人发消息 — 提取返回中的 processQueryKey
+dws chat message send-by-bot --robot-code <robot-code> --group <openconversation_id> \
+  --title "通知" --text "内容" --format json
+
+# Step 3: 用同一个 robot-code + processQueryKey 撤回
+dws chat message recall-by-bot --robot-code <robot-code> --group <openconversation_id> \
+  --keys <processQueryKey> --format json
+```
+
+### 机器人发群消息（含机器人不在群内的处理）
+
+机器人通过 `send-by-bot --group` 发群消息时，如果返回"机器人不存在"错误，说明该机器人尚未加入目标群，需先邀请进群再发送。
+
+```bash
+# Step 1: 查我的机器人 — 提取 robot-code
+dws chat bot search --format json
+
+# Step 2: 尝试发送，若报"机器人不存在"则执行 Step 3
+dws chat message send-by-bot --robot-code <robot-code> --group <openconversation_id> \
+  --title "通知" --text "内容" --format json
+
+# Step 3: 邀请机器人进群
+dws chat group members add-bot --group <openconversation_id> --robot-code <robot-code>
+
+# Step 4: 重新发送
+dws chat message send-by-bot --robot-code <robot-code> --group <openconversation_id> \
+  --title "通知" --text "内容" --format json
+```
+
+### 给机器人发单聊消息（必须先用 find 拿 openDingTalkId）
+
+给机器人发单聊消息时，必须先用 `chat bot find` 搜索机器人拿到 `openDingTalkId`，再用 `chat message send --open-dingtalk-id` 发送。不能用 `chat bot search`，因为 search 不返回 `openDingTalkId`。
+
+```bash
+# Step 1: 搜索机器人 — 提取 openDingTalkId（必须用 find，search 没有此字段）
+dws chat bot find --query "玉澜" --format json
+
+# Step 2: 用 openDingTalkId 发单聊消息
+dws chat message send --open-dingtalk-id <openDingTalkId> --text "你好" --format json
+```
+
+### 机器人 @指定人发群消息
+
+通过 `--at-user-ids` 传入 userId 列表或 `--at-open-dingtalk-ids` 传入 openDingtalkId 列表来 @指定成员，多个用逗号分隔。`--text` 中需包含 `@userId` 或 `@openDingtalkId` 文本（不要用尖括号，不要用姓名）。通过 `--at-all` @所有人。
+
+```bash
+# Step 1: 搜人获取 userId
+dws contact user search --query "张三" --format json
+
+# Step 2: 用 userId 发送并 @（注意 text 中 @userId）
+dws chat message send-by-bot --robot-code <robot-code> --group <openconversation_id> \
+  --at-user-ids userId1,userId2 \
+  --title "提醒" --text "@userId1 @userId2 请查收本周报告" --format json
+
+# 或者用 openDingtalkId 发送并 @
+dws chat message send-by-bot --robot-code <robot-code> --group <openconversation_id> \
+  --at-open-dingtalk-ids openDingtalkId1,openDingtalkId2 \
+  --title "提醒" --text "@openDingtalkId1 @openDingtalkId2 请查收本周报告" --format json
+
+# @所有人
+dws chat message send-by-bot --robot-code <robot-code> --group <openconversation_id> \
+  --at-all --title "通知" --text "请所有人注意" --format json
+```
+
+
+### 发送图片+文字 / 文件+文字消息（跨产品: drive → chat）
+
+- **图片+文字**：图片**必须**通过 `dt_media_upload` 工具（非 dws 命令，是 agent 可调用的独立 tool）上传获取 mediaId，然后用 Markdown 嵌入方式发送。**禁止**使用钉盘上传图片。
+- **文件+文字**：文件通过钉盘上传 + Markdown 嵌入方式发送。
+
+纯发图片/文件（不带文字）的完整流程见 [intent-guide.md](../intent-guide.md) 对应章节。
+
+```bash
+# === 图片+文字 ===
+# Step 1: 调用 dt_media_upload 工具上传图片（这是一个独立的 tool，不是 dws 命令）
+#    dt_media_upload 会返回 mediaId（如 @lQLPxxx）
+#    提取 mediaId 可使用脚本: python extract_media_id.py "<返回的URL>"
+
+# Step 2: 用 Markdown 语法发送（mediaId 作为图片引用）
+dws chat message send --group <openconversation_id> \
+  --text "![截图](mediaId) 这是本周的数据汇总" --format json
+
+# === 文件+文字 ===
+# Step 1: 上传文件到钉盘
+dws drive upload --file "报告.pdf" --format json
+
+# Step 2: 获取下载链接
+dws drive download --file-id <dentryUuid> --format json
+
+# Step 3: 用 Markdown 语法发送
+dws chat message send --group <openconversation_id> \
+  --text "[报告.pdf](下载链接) 这是季度报告" --format json
+```
+
+#### 创建并推送流式卡片 — 向群聊或单聊发送流式卡片消息
+
+群聊传 --group，单聊传 --receiver，二者互斥。
+
+**注意：send-card 必须和 update-card 搭配使用。** 创建卡片时无需传入内容，后续通过 update-card 更新内容，最后一次更新必须将 --flow-status 设为 3（finish），否则卡片会一直处于"生成中"的加载状态。
+flow-status 取值：1=处理中(PROCESSING)，2=输入中(INPUTTING)，3=完成(FINISH)，4=执行中(EXECUTING)，5=错误(ERROR)。
+```
+Usage:
+  dws chat message send-card [flags]
+Example:
+  dws chat message send-card --group <openConversationId>

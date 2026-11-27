@@ -1,0 +1,111 @@
+"""OOXML loader: read .pptx zip package, resolve relationships, expose
+slide / layout / master / theme / media as a navigable structure.
+
+Mirrors what manifest.py does for analysis, but keeps the parsed XML roots
+accessible for downstream shape conversion.
+"""
+
+from __future__ import annotations
+
+import posixpath
+import re
+import zipfile
+from dataclasses import dataclass, field
+from pathlib import Path, PurePosixPath
+from typing import Iterator
+from xml.etree import ElementTree as ET
+
+from .emu_units import NS, emu_attr_to_px
+
+
+# ---------------------------------------------------------------------------
+# Relationship parsing
+# ---------------------------------------------------------------------------
+
+REL_NS = NS["rel"]
+PACKAGE_REL = "_rels/.rels"
+PRESENTATION_REL_PREFIX = "ppt/_rels/presentation.xml.rels"
+
+
+def _normalize_part_path(target: str, base: str | None = None) -> str:
+    """Resolve a relationship target against its rels source.
+
+    PPTX rels typically use paths relative to the rels file's parent directory,
+    e.g. slide1.xml.rels says target="../theme/theme1.xml". The result is
+    normalized to a posix path with no leading slash and no '..'.
+    """
+    target = target.replace("\\", "/")
+    if target.startswith("/"):
+        return target.lstrip("/")
+    if base is None:
+        return target
+    base_dir = posixpath.dirname(base.rstrip("/"))
+    joined = posixpath.normpath(posixpath.join(base_dir, target))
+    return joined.lstrip("/")
+
+
+def _rels_path_for(part_path: str) -> str:
+    """Given a part path 'ppt/slides/slide1.xml', return its rels path."""
+    parent, name = posixpath.split(part_path)
+    if not parent:
+        return f"_rels/{name}.rels"
+    return f"{parent}/_rels/{name}.rels"
+
+
+def _parse_rels(zf: zipfile.ZipFile, rels_path: str) -> dict[str, dict[str, str]]:
+    """Parse a .rels file. Returns {rId: {'type': ..., 'target': absolute_part_path}}."""
+    if rels_path not in zf.namelist():
+        return {}
+    try:
+        root = ET.fromstring(zf.read(rels_path))
+    except ET.ParseError as exc:
+        raise RuntimeError(f"Invalid relationships XML in {rels_path}: {exc}") from exc
+
+    base = rels_path.replace("/_rels/", "/")  # source part path
+    base = base[:-len(".rels")]  # strip .rels suffix
+    rels: dict[str, dict[str, str]] = {}
+    for child in root.findall(f"{{{REL_NS}}}Relationship"):
+        rid = child.attrib.get("Id", "")
+        rtype = child.attrib.get("Type", "")
+        target = child.attrib.get("Target", "")
+        target_mode = child.attrib.get("TargetMode", "")
+        # External relationships (e.g. hyperlinks) keep the raw target.
+        if target_mode == "External":
+            rels[rid] = {"type": rtype, "target": target, "external": "1"}
+            continue
+        absolute = _normalize_part_path(target, base)
+        rels[rid] = {"type": rtype, "target": absolute}
+    return rels
+
+
+def _load_xml(zf: zipfile.ZipFile, part_path: str) -> ET.Element | None:
+    if part_path not in zf.namelist():
+        return None
+    try:
+        return ET.fromstring(zf.read(part_path))
+    except ET.ParseError as exc:
+        raise RuntimeError(f"Invalid OOXML part {part_path}: {exc}") from exc
+
+
+def blip_embed_relationship_ids(blip: ET.Element) -> tuple[str, ...]:
+    """Return embedded image relationships in fidelity-preferred order.
+
+    Modern Office stores an editable SVG relationship in ``asvg:svgBlip``
+    while keeping a raster fallback on the owning ``a:blip``. Consumers must
+    try the SVG relationship first and retain the raster relationship only as
+    a compatibility fallback.
+    """
+    embed_attr = f"{{{NS['r']}}}embed"
+    candidates = [
+        node.attrib.get(embed_attr)
+        for node in blip.findall(".//asvg:svgBlip", NS)
+    ]
+    candidates.append(blip.attrib.get(embed_attr))
+
+    ordered: list[str] = []
+    for rel_id in candidates:
+        if rel_id and rel_id not in ordered:
+            ordered.append(rel_id)
+    return tuple(ordered)
+
+

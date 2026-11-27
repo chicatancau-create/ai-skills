@@ -1,0 +1,125 @@
+        parts = spec.lower().replace(" ", "").split("x")
+        w, h = int(parts[0]), int(parts[1])
+        if w > 0 and h > 0:
+            return (w, h)
+    except (ValueError, IndexError):
+        pass
+    cmn.warn(f"--image-size 格式无效: {spec!r}，使用默认 80x120")
+    return (80, 120)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# check result 查询（打卡结果，含分页）
+# ─────────────────────────────────────────────────────────────────────────────
+
+def query_check_results(
+    user_batch: list[str],
+    date_slice: cmn.DateSlice,
+    stats: cmn.CallStats,
+    *,
+    inspect: bool = False,
+    inspected_flag: list[bool] | None = None,
+) -> list[dict]:
+    """
+    对一批 users × 一个时间片调用 `dws attendance check result`。
+
+    自动分页：每次最多 1000 条，返回满 1000 条时递增 offset 继续拉取。
+    """
+    from_date = date_slice.start.strftime(cmn.DATE_FMT)
+    to_date = date_slice.end.strftime(cmn.DATE_FMT)
+    all_records: list[dict] = []
+    offset = 0
+
+    while True:
+        cmn.log(
+            f"[check-result] users={len(user_batch)} "
+            f"slice={date_slice.label} offset={offset}"
+        )
+        try:
+            payload = cmn.run_dws([
+                "attendance", "check", "result",
+                "--users", ",".join(user_batch),
+                "--from", from_date,
+                "--to", to_date,
+                "--offset", str(offset),
+                "--limit", str(CHECK_RESULT_PAGE_SIZE),
+            ])
+            stats.total_dws_calls += 1
+        except cmn.DwsCallError as exc:
+            stats.total_dws_calls += 1
+            stats.failed_calls += 1
+            if exc.is_permission_error:
+                cmn.error(
+                    "权限错误：当前账号无管理员权限，无法查询打卡结果。"
+                    "请联系考勤管理员或换号重试。"
+                )
+                raise SystemExit(2) from exc
+            stats.add_warning(f"[check-result failed] {date_slice.label} offset={offset}: {exc}")
+            break
+
+        records = cmn.extract_records(payload)
+
+        if inspect and records and inspected_flag is not None and not inspected_flag[0]:
+            cmn.dump_first_record_for_inspection(records, "check-result")
+            inspected_flag[0] = True
+
+        all_records.extend(records)
+
+        # 未满一页 → 无需翻页
+        if len(records) < CHECK_RESULT_PAGE_SIZE:
+            break
+        offset += CHECK_RESULT_PAGE_SIZE
+
+    return all_records
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# check record 查询（打卡流水）
+# ─────────────────────────────────────────────────────────────────────────────
+
+def query_check_records(
+    user_batch: list[str],
+    date_slice: cmn.DateSlice,
+    stats: cmn.CallStats,
+    *,
+    inspect: bool = False,
+    inspected_flag: list[bool] | None = None,
+) -> list[dict]:
+    """对一批 users × 一个时间片调用 `dws attendance check record`。"""
+    from_date = date_slice.start.strftime(cmn.DATE_FMT)
+    to_date = date_slice.end.strftime(cmn.DATE_FMT)
+
+    cmn.log(
+        f"[check-record] users={len(user_batch)} slice={date_slice.label}"
+    )
+    try:
+        payload = cmn.run_dws([
+            "attendance", "check", "record",
+            "--users", ",".join(user_batch),
+            "--from", from_date,
+            "--to", to_date,
+        ])
+        stats.total_dws_calls += 1
+    except cmn.DwsCallError as exc:
+        stats.total_dws_calls += 1
+        stats.failed_calls += 1
+        if exc.is_permission_error:
+            cmn.error(
+                "权限错误：当前账号无管理员权限，无法查询打卡流水。"
+                "请联系考勤管理员或换号重试。"
+            )
+            raise SystemExit(2) from exc
+        stats.add_warning(f"[check-record failed] {date_slice.label}: {exc}")
+        return []
+
+    records = cmn.extract_records(payload)
+
+    if inspect and records and inspected_flag is not None and not inspected_flag[0]:
+        cmn.dump_first_record_for_inspection(records, "check-record")
+        inspected_flag[0] = True
+
+    return records
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 值提取工具

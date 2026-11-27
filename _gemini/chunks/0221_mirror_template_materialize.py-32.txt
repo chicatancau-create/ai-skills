@@ -1,0 +1,94 @@
+            staged_source_themes = load_template_source_themes(
+                staged_root / "templates"
+            )
+            if (
+                staged_source_themes is None
+                or set(staged_source_themes) != retained_master_keys
+            ):
+                raise TemplateStructureError(
+                    "Mirror source Theme roster does not match retained Masters"
+                )
+        except TemplateStructureError as exc:
+            raise MirrorMaterializationError(
+                f"Materialized structured SVG contract is invalid: {exc}"
+            ) from exc
+        for relative in relative_files:
+            if relative.suffix.lower() == ".svg":
+                staged_svg = staged_root / relative
+                try:
+                    hydrate_native_payload_refs(_parse_svg(staged_svg), staged_svg)
+                except NativePayloadError as exc:
+                    raise MirrorMaterializationError(
+                        f"Materialized native payload reference is invalid: "
+                        f"{relative}: {exc}"
+                    ) from exc
+                _ensure_no_source_refs(staged_svg)
+        _publish_files(
+            template_workspace,
+            staged_root,
+            sorted(relative_files, key=lambda item: item.as_posix()),
+        )
+
+    return {
+        "schema": "ppt-master.mirror-materialization-report.v2",
+        "import_workspace": str(import_workspace),
+        "template_workspace": str(template_workspace),
+        "source_slide_indexes": [int(item["index"]) for item in slides],
+        "source_slide_count": len(slides),
+        "source_structure": {
+            "master_count": len(masters),
+            "layout_count": len(layouts),
+        },
+        "retained_structure": {
+            "master_keys": sorted(retained_master_keys),
+            "layout_keys": sorted(retained_layout_keys),
+        },
+        "omitted_structure": {
+            "master_keys": sorted(set(masters) - retained_master_keys),
+            "layout_keys": sorted(set(layouts) - retained_layout_keys),
+        },
+        "template_svg_count": len(materialized_roots),
+        "template_execution_manifest": execution_manifest_path.as_posix(),
+        "spec_skeleton": f"templates/{spec_name}",
+        "source_themes": source_themes_path.as_posix(),
+        "template_text_slot_manifest_count": len(materialized_roots),
+        "imported_vector_count": len(referenced_icons),
+        "packaged_asset_count": len(asset_sources),
+        "restoration": total_stats.as_dict(),
+        "native_payloads": {
+            **native_payload_stats.as_dict(),
+            "unique_count": len(native_payloads),
+            "unique_record_count": len(native_records),
+            "unique_raw_bytes": sum(len(payload) for payload in native_payloads.values()),
+            "store_bytes": len(payload_store or b""),
+            "store_path": (
+                PAYLOAD_STORE_RELATIVE_PATH.as_posix()
+                if payload_store is not None
+                else None
+            ),
+        },
+        "files": [
+            item.relative_path.as_posix()
+            for item in sorted(files, key=lambda item: item.relative_path.as_posix())
+        ],
+    }
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Materialize a deterministic mirror template from one PPTX import "
+            "workspace's layered authoring IR, including a factual Design Spec "
+            "skeleton. SVG workspaces use apply_template.py with their exact root."
+        )
+    )
+    parser.add_argument(
+        "--kind", choices=("deck", "layout"), default="deck",
+        help="Kind of the factual Design Spec skeleton (default: deck); finish its TODOs before registration",
+    )
+    parser.add_argument(
+        "import_workspace",
+        type=Path,
+        help="Type A PPTX import workspace containing authoring-svg/ and native facts",
+    )
+    parser.add_argument(

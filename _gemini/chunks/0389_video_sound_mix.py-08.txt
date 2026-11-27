@@ -1,0 +1,100 @@
+                        media_path=media_path,
+                        source_duration_ms=source_duration_ms,
+                        powerpoint_time_ms=calibrated.powerpoint_slide_start_ms,
+                        video_time_ms=calibrated.video_slide_start_ms,
+                        gain_db=transition_gain_db,
+                    )
+                )
+
+            for row_index, row in enumerate(animation.rows, 1):
+                if row.sound_relationship_id is None:
+                    continue
+                if row.trigger not in {"after-previous", "with-previous"}:
+                    raise ValueError(
+                        f"Slide {slide_num} animation row {row_index} uses "
+                        f"{row.trigger!r}; video sound timing requires a "
+                        "click-free row"
+                    )
+                package_part, media_sha256, media_path, source_duration_ms = (
+                    _extract_sound(
+                        package=package,
+                        package_parts=package_parts,
+                        relationships=relationships,
+                        rels_part=rels_part,
+                        relationship_id=row.sound_relationship_id,
+                        temp_dir=temp_dir,
+                        ffprobe_path=ffprobe_path,
+                        extracted=extracted,
+                    )
+                )
+                powerpoint_time_ms = (
+                    calibrated.powerpoint_slide_start_ms
+                    + calibrated.transition_ms
+                    + row.offset_ms
+                )
+                video_time_ms = (
+                    calibrated.video_slide_start_ms
+                    + calibrated.transition_ms
+                    + row.offset_ms
+                )
+                cues.append(
+                    SoundCue(
+                        kind="animation",
+                        slide_num=slide_num,
+                        slide_name=calibrated.slide_name,
+                        row_index=row_index,
+                        shape_id=row.shape_id,
+                        group_id=group_ids.get(row.shape_id),
+                        relationship_id=row.sound_relationship_id,
+                        sound_name=row.sound_name or Path(package_part).name,
+                        package_part=package_part,
+                        media_sha256=media_sha256,
+                        media_path=media_path,
+                        source_duration_ms=source_duration_ms,
+                        powerpoint_time_ms=powerpoint_time_ms,
+                        video_time_ms=video_time_ms,
+                        gain_db=animation_gain_db,
+                    )
+                )
+
+    cues.sort(
+        key=lambda cue: (
+            cue.video_time_ms,
+            cue.slide_num,
+            0 if cue.kind == "transition" else 1,
+            cue.row_index or 0,
+        )
+    )
+    if not cues:
+        raise ValueError(
+            "Final narrated PPTX and trace contain no transition or "
+            "object-animation sound cues; use the PowerPoint video directly"
+        )
+    for cue in cues:
+        if cue.video_time_ms < 0 or cue.video_time_ms >= video_duration_ms:
+            raise ValueError(
+                f"Sound cue falls outside the video: slide {cue.slide_num}, "
+                f"time={cue.video_time_ms}ms, video={video_duration_ms}ms"
+            )
+        cue_end_ms = cue.video_time_ms + cue.source_duration_ms
+        if cue_end_ms > video_duration_ms:
+            raise ValueError(
+                f"Sound cue would be truncated by the video end: slide "
+                f"{cue.slide_num}, cue end={cue_end_ms}ms, "
+                f"video={video_duration_ms}ms"
+            )
+    return cues
+
+
+def _render_stem(
+    *,
+    cues: list[SoundCue],
+    duration_ms: int,
+    output_path: Path,
+    ffmpeg_path: str,
+) -> None:
+    target_samples = _target_sample_count(duration_ms)
+    command = [
+        ffmpeg_path,
+        "-nostdin",
+        "-hide_banner",

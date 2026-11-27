@@ -1,0 +1,77 @@
+) -> tuple[int, int]:
+    try:
+        with Image.open(source_path) as source:
+            if int(getattr(source, "n_frames", 1)) != 1:
+                if (source.format or "").upper() == "MPO":
+                    # A camera multi-picture JPEG: the primary frame is the
+                    # photograph; the sibling frames are stereo/preview data.
+                    source.seek(0)
+                else:
+                    raise RuntimeError(
+                        f"animated images are unsupported: {source_path}"
+                    )
+            oriented = ImageOps.exif_transpose(source)
+            try:
+                oriented.load()
+                width, height = oriented.size
+                _validate_blur_radius(args.blur, width, height)
+                has_alpha = _has_alpha(oriented)
+                rgba = oriented.convert("RGBA") if has_alpha else None
+                alpha = rgba.getchannel("A") if rgba is not None else None
+                if args.duotone is not None:
+                    rgb, icc_profile = _convert_duotone_source_to_srgb(oriented)
+                else:
+                    keep_icc = oriented.mode in {"RGB", "RGBA"}
+                    icc_profile = oriented.info.get("icc_profile") if keep_icc else None
+                    rgb = rgba.convert("RGB") if rgba is not None else oriented.convert("RGB")
+
+                if args.brightness is not None and args.brightness != 1:
+                    rgb = ImageEnhance.Brightness(rgb).enhance(args.brightness)
+                if args.contrast is not None and args.contrast != 1:
+                    rgb = ImageEnhance.Contrast(rgb).enhance(args.contrast)
+                if args.desaturate is not None and args.desaturate > 0:
+                    rgb = ImageEnhance.Color(rgb).enhance(1 - args.desaturate)
+                elif args.grayscale:
+                    rgb = ImageOps.grayscale(rgb).convert("RGB")
+                elif args.duotone is not None:
+                    rgb = ImageOps.colorize(
+                        ImageOps.grayscale(rgb),
+                        black=args.duotone[0],
+                        white=args.duotone[1],
+                    )
+                if args.blur is not None and args.blur > 0:
+                    rgb = rgb.filter(ImageFilter.GaussianBlur(radius=args.blur))
+
+                result = rgb.convert("RGBA") if alpha is not None else rgb
+                if alpha is not None:
+                    result.putalpha(alpha)
+                if args.fit is not None:
+                    fit_w, fit_h = args.fit
+                    scale = min(fit_w / width, fit_h / height, 1.0)
+                    if scale < 1.0:
+                        new_size = (
+                            max(1, round(width * scale)),
+                            max(1, round(height * scale)),
+                        )
+                        resized = result.resize(new_size, Image.Resampling.LANCZOS)
+                        if result is not rgb:
+                            result.close()
+                        result = resized
+                        width, height = new_size
+                if getattr(args, "output_format", "PNG") == "JPEG":
+                    if alpha is not None:
+                        raise ValueError(
+                            "JPEG output cannot hold the source's transparency; "
+                            "use a .png output for this source"
+                        )
+                    save_options = {"format": "JPEG", "quality": 90, "optimize": True}
+                    if result.mode != "RGB":
+                        converted = result.convert("RGB")
+                        if result is not rgb:
+                            result.close()
+                        result = converted
+                else:
+                    save_options = {"format": "PNG"}
+                if isinstance(icc_profile, bytes) and icc_profile:
+                    save_options["icc_profile"] = icc_profile
+                result.save(temporary_path, **save_options)

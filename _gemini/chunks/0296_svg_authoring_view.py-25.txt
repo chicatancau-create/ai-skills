@@ -1,0 +1,65 @@
+        print(f"Error: output would overwrite source SVG: {same_file[0]}", file=sys.stderr)
+        return 1
+
+    collisions = [target for _, target in mapping if os.path.lexists(target)]
+    manifest_path = output_dir / AUTHORING_MANIFEST_NAME
+    if os.path.lexists(manifest_path):
+        collisions.append(manifest_path)
+    summary_path = output_dir / AUTHORING_SUMMARY_NAME
+    if os.path.lexists(summary_path):
+        collisions.append(summary_path)
+    if collisions and not args.force:
+        print(
+            f"Error: {len(collisions)} output file(s) already exist; "
+            "use --force to replace the authoring bundle. "
+            f"First collision: {collisions[0]}",
+            file=sys.stderr,
+        )
+        return 1
+
+    reports: list[ProjectionReport] = []
+    try:
+        source_root = input_path if input_path.is_dir() else input_path.parent
+        reports = project_svg_batch(
+            mapping,
+            source_root,
+            output_dir,
+            force=args.force,
+            projection_kind=args.projection_kind,
+        )
+    except (ET.ParseError, OSError, RuntimeError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    total_stats = ProjectionStats()
+    original_bytes = 0
+    projected_bytes = 0
+    for report in reports:
+        original_bytes += report.original_bytes
+        projected_bytes += report.projected_bytes
+        total_stats.merge(report.stats)
+
+    bytes_saved = original_bytes - projected_bytes
+    reduction = (bytes_saved / original_bytes * 100) if original_bytes else 0.0
+    result = {
+        "input": str(input_path),
+        "output_dir": str(output_dir),
+        "manifest": str(output_dir / AUTHORING_MANIFEST_NAME),
+        "summary": str(output_dir / AUTHORING_SUMMARY_NAME),
+        "projection_kind": args.projection_kind,
+        "file_count": len(reports),
+        "files": [report.as_dict() for report in reports],
+        "totals": {
+            "original_bytes": original_bytes,
+            "projected_bytes": projected_bytes,
+            "bytes_saved": bytes_saved,
+            "reduction_percent": round(reduction, 2),
+            "removed": total_stats.as_dict(),
+        },
+    }
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

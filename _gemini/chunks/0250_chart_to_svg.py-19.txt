@@ -1,0 +1,100 @@
+    chart_type = payload["type"]
+    grouping = payload.get("grouping")
+    try:
+        visual_styles = _chart_visual_styles(payload, plot, palette)
+    except _UnsupportedChart as exc:
+        if (
+            exc.status != "unsupported-chart-series-style"
+            or palette is None
+            or palette.strict
+        ):
+            raise
+        palette._diagnose(
+            "chart-series-style-normalized",
+            "Chart series styling uses DrawingML features outside the native "
+            "flat-color chart contract",
+            "preserve chart data and use representative flat series colors",
+        )
+        visual_styles = _normalized_chart_visual_styles(
+            payload,
+            plot,
+            palette,
+        )
+    for tag in (
+        "trendline", "errBars", "dropLines", "hiLowLines", "upDownBars",
+    ):
+        if plot.find(f".//c:{tag}", C_NS) is not None:
+            raise _UnsupportedChart("unsupported-chart-analysis-features")
+    if plot_area.find("c:dTable", C_NS) is not None:
+        raise _UnsupportedChart("unsupported-chart-data-table")
+    ser_line_nodes = plot.findall("c:serLines", C_NS)
+    if len(ser_line_nodes) > 1:
+        raise _UnsupportedChart("unsupported-chart-analysis-features")
+    if ser_line_nodes:
+        ser_lines = ser_line_nodes[0]
+        if (
+            chart_type != "of_pie"
+            or ser_lines.attrib
+            or len(ser_lines) > 1
+            or any(_local_name(child.tag) != "spPr" for child in ser_lines)
+        ):
+            raise _UnsupportedChart("unsupported-chart-analysis-features")
+    if validate_axes:
+        _validate_or_normalize_legacy_axes(payload, plot_area, plot)
+
+    if chart_type == "line":
+        smooth_nodes = [plot.find("c:smooth", C_NS), *plot.findall("c:ser/c:smooth", C_NS)]
+        if any(
+            node is not None and ooxml_bool(node.attrib.get("val"), True)
+            for node in smooth_nodes
+        ):
+            raise _UnsupportedChart("unsupported-chart-line-style")
+        plot_marker = plot.find("c:marker", C_NS)
+        plot_has_markers = bool(
+            plot_marker is not None
+            and ooxml_bool(plot_marker.attrib.get("val"), True)
+        )
+        marker_states: set[bool] = set()
+        for series in plot.findall("c:ser", C_NS):
+            marker_node = series.find("c:marker", C_NS)
+            symbol = _element_val(series.find("c:marker/c:symbol", C_NS))
+            if symbol not in {None, "circle", "none"}:
+                raise _UnsupportedChart("unsupported-chart-line-style")
+            marker_states.add(plot_has_markers if symbol is None else symbol != "none")
+        if len(marker_states) > 1:
+            raise _UnsupportedChart("unsupported-chart-line-style")
+
+    if chart_type in {"bar", "column"}:
+        _bounded_plot_integer(
+            plot,
+            "gapWidth",
+            minimum=0,
+            maximum=500,
+            status="unsupported-chart-bar-options",
+        )
+        _bounded_plot_integer(
+            plot,
+            "overlap",
+            minimum=-100,
+            maximum=100,
+            status="unsupported-chart-bar-options",
+        )
+
+    if chart_type == "bubble":
+        bubble_scale = _element_val(plot.find("c:bubbleScale", C_NS))
+        if bubble_scale not in {None, "100"}:
+            raise _UnsupportedChart("unsupported-chart-bubble-options")
+        show_negative = plot.find("c:showNegBubbles", C_NS)
+        if show_negative is not None and ooxml_bool(
+            show_negative.attrib.get("val"),
+            True,
+        ):
+            raise _UnsupportedChart("unsupported-chart-bubble-options")
+        size_represents = _element_val(plot.find("c:sizeRepresents", C_NS))
+        if size_represents not in {None, "area"}:
+            raise _UnsupportedChart("unsupported-chart-bubble-options")
+        bubble_3d_nodes = [
+            plot.find("c:bubble3D", C_NS),
+            *plot.findall("c:ser/c:bubble3D", C_NS),
+        ]
+        if any(

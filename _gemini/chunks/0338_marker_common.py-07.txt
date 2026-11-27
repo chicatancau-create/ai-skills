@@ -1,0 +1,109 @@
+    own_weight = _style_attr(elem, "font-weight")
+    own_anchor = _style_attr(elem, "text-anchor")
+    fill = own_fill if own_fill is not None else inherited_fill
+    weight = own_weight if own_weight is not None else inherited_weight
+    anchor = own_anchor if own_anchor is not None else inherited_anchor
+    labels = inherited_labels + _fallback_element_labels(elem)
+
+    if tag == "text":
+        text = _normalized_fallback_text("".join(elem.itertext()))
+        if not text:
+            return []
+        # A <text> whose visible characters mostly sit in styled <tspan>s
+        # reads in their paint and weight (a whole cell set in an emphasis
+        # tspan is that colour, not the <text> default).
+        runs: list[_FallbackTextRun] = []
+        fill, weight = _dominant_text_style(elem, fill, weight, runs=runs)
+        x = _project_geometry_number(elem, "x") if elem.get("x") is not None else None
+        y = _project_geometry_number(elem, "y") if elem.get("y") is not None else None
+        if x is not None and y is not None:
+            x, y = transform_point(local_matrix, x, y)
+        return [
+            _FallbackTextRecord(
+                text=text,
+                x=x,
+                y=y,
+                fill=_hex_or_none(fill),
+                bold=_fallback_text_bold(weight),
+                anchor=str(anchor or "start").strip().lower(),
+                labels=labels,
+                runs=tuple(runs),
+            )
+        ]
+
+    records: list[_FallbackTextRecord] = []
+    for child in elem:
+        records.extend(
+            _fallback_text_records(
+                child,
+                local_matrix,
+                fill,
+                weight,
+                anchor,
+                labels,
+            )
+        )
+    return records
+
+
+def _fallback_concentric_circle_radii(elem: ET.Element) -> list[float]:
+    """Return the largest countable set of concentric circular grid radii."""
+    groups: list[tuple[float, float, list[float]]] = []
+    for record in _fallback_shape_records(elem):
+        if record.tag != "circle" or record.stroke is None:
+            continue
+        x1, y1, x2, y2 = record.bounds
+        radius_x = (x2 - x1) / 2
+        radius_y = (y2 - y1) / 2
+        if radius_x <= 0 or abs(radius_x - radius_y) > 1:
+            continue
+        center_x = (x1 + x2) / 2
+        center_y = (y1 + y2) / 2
+        group = next(
+            (
+                item
+                for item in groups
+                if abs(item[0] - center_x) <= 1 and abs(item[1] - center_y) <= 1
+            ),
+            None,
+        )
+        if group is None:
+            group = (center_x, center_y, [])
+            groups.append(group)
+        group[2].append(radius_x)
+    if not groups:
+        return []
+    radii = max(groups, key=lambda item: len(item[2]))[2]
+    return sorted({round(radius, 3) for radius in radii})
+
+
+def _fallback_fill_candidates(
+    elem: ET.Element,
+    matrix: tuple[float, float, float, float, float, float] = IDENTITY_MATRIX,
+    inherited_fill: str | None = None,
+) -> list[tuple[float, str]]:
+    tag = _local_tag(elem)
+    if tag == "metadata" or tag in {"defs", "clipPath", "mask", "filter", "style"}:
+        return []
+    if elem.get("display") == "none" or elem.get("visibility") == "hidden":
+        return []
+    if not _paint_visible(elem, "fill"):
+        return []
+
+    local_matrix = matrix
+    transform = elem.get("transform")
+    if transform:
+        local_matrix = matrix_multiply(matrix, parse_transform_matrix(transform))
+
+    fill = _style_attr(elem, "fill")
+    next_fill = fill if fill is not None else inherited_fill
+    if tag in {"g", "svg", "a"}:
+        candidates: list[tuple[float, str]] = []
+        for child in elem:
+            candidates.extend(_fallback_fill_candidates(child, local_matrix, next_fill))
+        return candidates
+
+    if tag != "rect":
+        return []
+    if not next_fill or next_fill.strip().lower() in {"none", "transparent"}:
+        return []

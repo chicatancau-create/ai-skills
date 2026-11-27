@@ -1,0 +1,120 @@
+            f"dws 调用失败（exit={result.returncode}）: {stderr.strip() or stdout.strip()}",
+            is_permission_error=is_perm,
+        )
+
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError as e:
+        raise DwsCallError(f"dws 返回非 JSON：{stdout[:200]!r}") from e
+
+    return unwrap_result(data)
+
+
+def unwrap_result(data: Any) -> Any:
+    """
+    解开 dws 返回的顶层 `{success, result, error}` 包装。
+
+    success=True  → 返回 result（可能是 dict / list / None）
+    success=False → 抛 DwsCallError
+    其他形态     → 原样返回（兼容部分接口直接返回数据）
+    """
+    if not isinstance(data, dict):
+        return data
+
+    if "success" not in data:
+        # 不是标准包装，原样返回
+        return data
+
+    if data.get("success") is True:
+        return data.get("result")
+
+    # success = False
+    err = data.get("error") or {}
+    if isinstance(err, dict):
+        msg = err.get("message") or err.get("msg") or json.dumps(err, ensure_ascii=False)
+    else:
+        msg = str(err)
+    raise DwsCallError(
+        f"dws 业务失败：{msg}",
+        is_permission_error=_looks_like_permission_error(msg),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 通用记录提取（兼容多种数据嵌套形态）
+# ─────────────────────────────────────────────────────────────────────────────
+
+def extract_records(payload: Any) -> list[dict]:
+    """
+    从 dws 返回的 result 中提取"记录数组"。
+
+    兼容多种常见嵌套：
+      - 直接是 list[dict]                → 原样返回
+      - {"data": [...]}                  → 取 data
+      - {"records": [...]}               → 取 records
+      - {"list": [...]}                  → 取 list
+      - {"items": [...]}                 → 取 items
+      - {"result": [...]} (双层包装)     → 递归一次
+      - 其他 dict 但只有一个值是 list    → 取那个 list
+      - 其他形态                         → 返回 []，并 warn
+
+    业务字段不在本函数关心范围内。
+    """
+    if payload is None:
+        return []
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if isinstance(payload, dict):
+        for key in ("data", "records", "list", "items", "result"):
+            if key in payload and isinstance(payload[key], list):
+                return [item for item in payload[key] if isinstance(item, dict)]
+        # 兜底：dict 中只有一个 list 值
+        list_values = [v for v in payload.values() if isinstance(v, list)]
+        if len(list_values) == 1:
+            return [item for item in list_values[0] if isinstance(item, dict)]
+        warn(f"未能从返回中识别记录数组，顶层 keys={list(payload.keys())}")
+        return []
+    warn(f"未能识别返回类型：{type(payload).__name__}")
+    return []
+
+
+def flatten_query_data_records(
+    records: list[dict],
+    column_id_to_name: dict[str, str] | None = None,
+) -> list[dict]:
+    """
+    展平 report query-data 返回的嵌套 values 结构。
+
+    接口原始格式：
+      {"userId":"xxx", "values":[{"termId":"173410778","value":"1"}, ...], "workDate":"2026-05-01"}
+
+    展平后：
+      {"userId":"xxx", "workDate":"2026-05-01", "173410778":"1", "节假日+出勤":"1", ...}
+
+    Args:
+        records: extract_records 返回的原始记录列表
+        column_id_to_name: 可选的 columnId → columnName 映射，展平时同时写入字段名 key
+    """
+    flattened: list[dict] = []
+    for record in records:
+        values_list = record.get("values")
+        if not isinstance(values_list, list):
+            # 已经是平铺格式或无 values 字段，原样保留
+            flattened.append(record)
+            continue
+        flat: dict[str, Any] = {}
+        # 保留顶层非 values 字段（userId, workDate, corpId 等）
+        for k, v in record.items():
+            if k != "values":
+                flat[k] = v
+        # 展平 values 数组
+        for entry in values_list:
+            if not isinstance(entry, dict):
+                continue
+            term_id = str(entry.get("termId", entry.get("columnId", entry.get("id", ""))))
+            value = entry.get("value", entry.get("data", ""))
+            if term_id:
+                flat[term_id] = value
+                # 同时写入字段名 key（方便按名称取值）
+                if column_id_to_name and term_id in column_id_to_name:
+                    flat[column_id_to_name[term_id]] = value

@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""
+PPT Master - LaTeX Formula Renderer
+
+Render project-declared LaTeX formulas to transparent PNG assets.
+The script reads an explicit manifest; it never scans spec_lock.md or source
+content for dollar-delimited math.
+
+Usage:
+    python3 scripts/latex_render.py <project_path>
+    python3 scripts/latex_render.py <project_path> --manifest images/formula_manifest.json
+    python3 scripts/latex_render.py <project_path> --dry-run
+
+Examples:
+    python3 scripts/latex_render.py projects/demo_ppt169_20260523
+    python3 scripts/latex_render.py projects/demo_ppt169_20260523 --providers codecogs,quicklatex,mathpad,wikimedia
+
+Dependencies:
+    Pillow (for measuring generated PNG dimensions)
+    Network access to at least one configured rendering provider
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+from console_encoding import configure_utf8_stdio
+
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
+
+
+configure_utf8_stdio()
+
+
+DEFAULT_DPI = 300
+DEFAULT_TRANSPARENT_TOLERANCE = 12
+DEFAULT_MANIFEST = "images/formula_manifest.json"
+DEFAULT_PROVIDERS = ["codecogs", "quicklatex", "mathpad", "wikimedia"]
+CODECOGS_ENDPOINT = "https://latex.codecogs.com/png.image?"
+WIKIMEDIA_CHECK_ENDPOINT = "https://wikimedia.org/api/rest_v1/media/math/check"
+WIKIMEDIA_RENDER_ENDPOINT = "https://wikimedia.org/api/rest_v1/media/math/render/png"
+QUICKLATEX_ENDPOINT = "https://quicklatex.com/latex3.f"
+MATHPAD_ENDPOINT = "https://mathpad.ai/api/v1/latex2image"
+VALID_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*\.png$")
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+def _project_relative(path: Path, project_path: Path) -> str:
+    """Return a POSIX-style path relative to the project."""
+    return path.relative_to(project_path).as_posix()
+
+
+def _load_manifest(path: Path) -> dict[str, Any]:
+    """Load a JSON formula manifest."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise RuntimeError(f"Cannot read manifest: {path} ({exc})") from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Manifest is not valid JSON: {path} ({exc})") from exc
+
+    if not isinstance(data, dict):
+        raise RuntimeError("Manifest root must be a JSON object.")
+    items = data.get("items")
+    if not isinstance(items, list):
+        raise RuntimeError("Manifest must contain an `items` array.")
+    return data
+
+
+def _safe_filename(item: dict[str, Any], index: int) -> str:
+    """Resolve and validate the output PNG filename for one formula."""
+    filename = item.get("filename")
+    if filename is None:
+        formula_id = str(item.get("id") or f"formula_{index:03d}")
+        filename = f"{formula_id}.png"
+    filename = str(filename)
+    if "/" in filename or "\\" in filename or not VALID_FILENAME_RE.match(filename):
+        raise RuntimeError(
+            f"Invalid formula filename `{filename}`. Use a simple PNG filename "
+            "such as `formula_001.png`."
+        )
+    return filename
+
+
+def _normalize_hex_color(color: str | None, field_name: str) -> str | None:
+    """Normalize an optional 6-digit HEX color."""
+    if not color:
+        return None
+    value = color.strip()
+    if value.startswith("#"):
+        value = value[1:]
+    if not re.fullmatch(r"[0-9A-Fa-f]{6}", value):
+        raise RuntimeError(f"Formula {field_name} must be a 6-digit HEX value: {color}")
+    return value.upper()
+
+
+def _hex_to_rgb(color: str) -> tuple[int, int, int]:
+    """Convert a normalized HEX color to an RGB tuple."""
+    return (int(color[0:2], 16), int(color[2:4], 16), int(color[4:6], 16))
+
+
+def _parse_bool(value: Any, default: bool) -> bool:
+    """Parse a manifest boolean with a default."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):

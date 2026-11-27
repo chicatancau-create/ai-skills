@@ -1,0 +1,113 @@
+        for si, dslice in enumerate(date_slices, start=1):
+            log(
+                f"[leave] [batch {bi}/{len(user_batches)}] "
+                f"[slice {si}/{len(date_slices)}] users={len(batch)} "
+                f"slice={dslice.label}"
+            )
+            try:
+                payload = run_dws([
+                    "attendance", "report", "query-leave",
+                    "--users", ",".join(batch),
+                    "--leave-names", leave_arg,
+                    "--start", dslice.start_str,
+                    "--end", dslice.end_str,
+                ])
+                if stats is not None:
+                    stats.total_dws_calls += 1
+            except DwsCallError as e:
+                if stats is not None:
+                    stats.total_dws_calls += 1
+                    stats.failed_calls += 1
+                if e.is_permission_error:
+                    error("权限错误：当前账号无管理员权限，无法查询请假数据。")
+                    raise SystemExit(2) from e
+                if stats is not None:
+                    stats.add_warning(f"[leave query failed] {dslice.label}: {e}")
+                else:
+                    warn(f"[leave query failed] {dslice.label}: {e}")
+                continue
+
+            records = extract_records(payload)
+            for record in records:
+                uid = _first_nonempty(record, ("userId", "userid", "user_id"))
+                if uid is None:
+                    continue
+                uid_str = str(uid)
+                leave_vals = record.get("leaveVals")
+                if not isinstance(leave_vals, list):
+                    continue
+                user_bucket = result.setdefault(uid_str, {})
+                for entry in leave_vals:
+                    if not isinstance(entry, dict):
+                        continue
+                    date_str = _normalize_leave_date(entry.get("date"))
+                    if not date_str:
+                        continue
+                    leave_name = entry.get("leaveName") or entry.get("name")
+                    if not leave_name:
+                        continue
+                    leave_name = str(leave_name)
+                    raw_value = entry.get("value", entry.get("data", 0))
+                    try:
+                        num = float(str(raw_value).strip())
+                    except (TypeError, ValueError):
+                        continue
+                    day_bucket = user_bucket.setdefault(date_str, {})
+                    day_bucket[leave_name] = day_bucket.get(leave_name, 0.0) + num
+
+    return result
+
+
+def build_vacation_filename(
+    start: datetime | None,
+    end: datetime | None,
+    *,
+    as_of: datetime | None = None,
+) -> str:
+    """
+    生成 vacation_export_<startDate>_<endDate>.xlsx；
+    无时间区间时退化为 vacation_export_<asOfDate>.xlsx（asOfDate 默认为今天）。
+    """
+    if start is not None and end is not None:
+        return f"vacation_export_{start.strftime(DATE_FMT)}_{end.strftime(DATE_FMT)}.xlsx"
+    snapshot_date = (as_of or datetime.now()).strftime(DATE_FMT)
+    return f"vacation_export_{snapshot_date}.xlsx"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 通用报告骨架
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class CallStats:
+    """记录一次脚本运行中的 dws 调用统计，用于最终摘要。"""
+    user_batches: int = 0
+    date_slices: int = 0
+    total_dws_calls: int = 0
+    failed_calls: int = 0
+    warnings: list[str] = field(default_factory=list)
+
+    def add_warning(self, msg: str) -> None:
+        self.warnings.append(msg)
+        warn(msg)
+
+
+def print_summary(
+    *,
+    granularity_label: str,
+    out_path: str,
+    user_count: int,
+    column_names: list[str],
+    start: datetime,
+    end: datetime,
+    rows_count: int,
+    stats: CallStats,
+    extra_tail: str = "",
+) -> None:
+    """
+    把最终摘要打到 stdout，供调用方（Agent / 终端用户）查看。
+    格式与 SKILL.md 输出模板对齐。
+    """
+    abs_path = os.path.abspath(out_path)
+    print("[完成] 考勤报表已导出")
+    print()

@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+"""
+PPT Master - Native Formula Shape Builder
+
+Build editable PowerPoint formula shapes from explicit LaTeX markers.
+
+See references/native-formula.md for the owning block-formula contract.
+
+Usage:
+    Imported by the SVG-to-PPTX native-object converter.
+
+Examples:
+    from svg_to_pptx.native_objects.formula import build_native_formula
+
+Dependencies:
+    None (only uses standard library and local PPT Master modules)
+"""
+
+from __future__ import annotations
+
+import math
+import re
+from dataclasses import dataclass
+from typing import Any
+from xml.etree import ElementTree as ET
+
+from ..drawingml.context import ConvertContext, ShapeResult
+from ..drawingml.utils import _xml_escape, font_px_to_hpt
+from .formula_compiler import FormulaCompileError, compile_latex_to_omml
+from .formula_run_properties import (
+    merge_formula_control_properties,
+    merge_formula_run_properties,
+    serialize_styled_formula_omml,
+)
+from .marker_common import _bounds, _hex_or_none
+
+
+DML_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+MATH_NS = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+A14_NS = "http://schemas.microsoft.com/office/drawing/2010/main"
+MC_NS = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+_MATH_RUN = f"{{{MATH_NS}}}r"
+_DML_RUN_PROPERTIES = f"{{{DML_NS}}}rPr"
+_LANGUAGE_RE = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
+_ALIGNMENTS = {
+    "center": ("ctr", "center"),
+    "left": ("l", "left"),
+    "right": ("r", "right"),
+}
+
+for _prefix, _uri in (("a", DML_NS), ("m", MATH_NS)):
+    try:
+        ET.register_namespace(_prefix, _uri)
+    except (ValueError, AttributeError):
+        pass
+
+
+@dataclass(frozen=True)
+class FormulaSpec:
+    """Validated formula source plus the PowerPoint text style to apply."""
+
+    omml: str
+    font_size_hpt: int
+    color: str
+    paragraph_alignment: str
+    math_alignment: str
+    language: str
+
+
+def _positive_number(value: Any, field_name: str) -> float:
+    if isinstance(value, bool):
+        raise RuntimeError(f"Native PPTX formula {field_name} must be numeric")
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise RuntimeError(
+            f"Native PPTX formula {field_name} must be numeric"
+        ) from exc
+    if not math.isfinite(result) or result <= 0:
+        raise RuntimeError(
+            f"Native PPTX formula {field_name} must be a positive finite number"
+        )
+    return result
+
+
+def _formula_language(payload: dict[str, Any], ctx: ConvertContext | None) -> str:
+    raw = payload.get("language")
+    if raw is None and ctx is not None:
+        raw = ctx.primary_language
+    language = str(raw or "en-US").strip()
+    if len(language) > 35 or _LANGUAGE_RE.fullmatch(language) is None:
+        raise RuntimeError(
+            "Native PPTX formula language must be a compact BCP-47 tag"
+        )
+    return language
+
+
+def validate_formula_payload(
+    payload: dict[str, Any],
+    *,
+    ctx: ConvertContext | None = None,
+) -> FormulaSpec:
+    """Validate and compile one block-formula payload."""
+    latex = payload.get("latex")
+    if not isinstance(latex, str) or not latex.strip():
+        raise RuntimeError("Native PPTX formula metadata requires non-empty `latex`")
+
+    display = str(payload.get("display") or "block").strip().lower()
+    if display != "block":
+        raise RuntimeError(
+            "Native PPTX formula currently supports independent block formulas only"
+        )
+
+    raw_font_size = payload.get("font_size", 28)
+    font_size_px = _positive_number(raw_font_size, "font_size")
+    if font_size_px > 400:
+        raise RuntimeError("Native PPTX formula font_size must not exceed 400 px")
+    try:
+        font_size_hpt = font_px_to_hpt(font_size_px)
+    except ValueError as exc:
+        raise RuntimeError(
+            "Native PPTX formula font_size is outside the PowerPoint range"
+        ) from exc
+
+    raw_color = payload.get("color", "#000000")

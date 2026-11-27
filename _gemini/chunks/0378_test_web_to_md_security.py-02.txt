@@ -1,0 +1,63 @@
+        for url in ('file:///etc/passwd', 'ftp://8.8.8.8/', 'data:text/plain,hello',
+                    '//8.8.8.8/', 'http:///missing-host', 'http://[::1'):
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                web_to_md._validate_public_url(url)
+
+    def test_every_dns_answer_must_be_public(self) -> None:
+        public = (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('8.8.8.8', 0))
+        private = (socket.AF_INET6, socket.SOCK_STREAM, 6, '', ('fe80::1', 0, 0, 0))
+        with patch.object(web_to_md.socket, 'getaddrinfo', return_value=[public]) as resolve:
+            url, addresses = web_to_md._validate_public_url('https://page.example/')
+            self.assertEqual(url, 'https://page.example/')
+            self.assertEqual([str(ip) for ip in addresses], ['8.8.8.8'])
+            resolve.assert_called_once_with('page.example', None, type=socket.SOCK_STREAM)
+        with patch.object(web_to_md.socket, 'getaddrinfo', return_value=[public, private]):
+            with self.assertRaisesRegex(ValueError, 'non-public'):
+                web_to_md._validate_public_url('https://page.example/')
+
+    def test_dns_failure_or_empty_answers_fail_closed(self) -> None:
+        with patch.object(web_to_md.socket, 'getaddrinfo', side_effect=socket.gaierror('unresolved')):
+            with self.assertRaisesRegex(ValueError, 'Cannot validate URL hostname'):
+                web_to_md._validate_public_url('https://page.example/')
+        with patch.object(web_to_md.socket, 'getaddrinfo', return_value=[]):
+            with self.assertRaisesRegex(ValueError, 'Cannot resolve URL hostname'):
+                web_to_md._validate_public_url('https://page.example/')
+
+    def test_initial_url_is_checked_before_either_backend_fetches(self) -> None:
+        for use_curl in (False, True):
+            backend = Mock()
+            with self.subTest(curl=use_curl), \
+                    patch.object(web_to_md, 'curl_requests', backend if use_curl else None), \
+                    patch.object(web_to_md.requests.Session, 'get', backend.get):
+                with self.assertRaisesRegex(ValueError, 'non-public'):
+                    web_to_md._http_get('http://169.254.169.254/latest/meta-data/')
+                backend.get.assert_not_called()
+
+    def test_final_url_is_checked_and_response_closed_for_both_backends(self) -> None:
+        for use_curl in (False, True):
+            for final_url in ('http://10.0.0.1/private', 'file:///etc/passwd'):
+                response = Mock(url=final_url)
+                backend = Mock()
+                backend.get.return_value = response
+                with self.subTest(curl=use_curl, final_url=final_url), \
+                        patch.object(web_to_md, 'curl_requests', backend if use_curl else None), \
+                        patch.object(web_to_md.requests.Session, 'get', backend.get):
+                    with self.assertRaises(ValueError):
+                        web_to_md._http_get(PUBLIC_URL)
+                    response.close.assert_called_once_with()
+
+    def test_unsafe_page_or_image_redirect_does_not_write_output(self) -> None:
+        page = Mock(
+            url=PUBLIC_URL,
+            content=b'<html><head><title>Page</title></head><body>'
+                    b'<article><p>Content</p><img src="/image.png"></article></body></html>',
+            headers={'Content-Type': 'text/html; charset=utf-8'},
+        )
+        for unsafe_image in (False, True):
+            blocked = Mock(url='http://169.254.169.254/secret')
+            responses = [page, blocked] if unsafe_image else [blocked]
+            with self.subTest(image=unsafe_image), \
+                    patch.object(web_to_md, 'curl_requests', None), \
+                    patch.object(web_to_md.requests.Session, 'get', side_effect=responses), \
+                    patch.object(web_to_md.os, 'makedirs'), \
+                    patch('builtins.open') as write, redirect_stdout(io.StringIO()):

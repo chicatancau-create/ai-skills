@@ -1,0 +1,115 @@
+    for unit in ("B", "KB", "MB"):
+        if size < 1024:
+            return f"{size:.0f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
+
+
+def _ensure_media_dir(out_file: Path) -> tuple[Path, str]:
+    """Return (absolute media dir, relative dir name) and create the dir."""
+    rel_media_dir = f"{out_file.stem}_files"
+    media_dir = out_file.parent / rel_media_dir
+    media_dir.mkdir(parents=True, exist_ok=True)
+    return media_dir, rel_media_dir
+
+
+_HTML_IMG_PATTERNS = (
+    re.compile(
+        r'<img\s[^>]*?src="(?P<src>[^"]+)"[^>]*?(?:alt="(?P<alt>[^"]*)")?[^>]*/?\s*>'
+    ),
+    re.compile(
+        r'<img\s[^>]*?alt="(?P<alt>[^"]*)"[^>]*?src="(?P<src>[^"]+)"[^>]*/?\s*>'
+    ),
+)
+
+
+def _html_img_to_md(markdown_content: str) -> str:
+    """Convert any leftover <img> HTML tags to ![alt](src) syntax."""
+    def _repl(match: re.Match[str]) -> str:
+        src = match.group("src")
+        alt = match.group("alt") or Path(src).stem
+        return f"![{alt}]({src})"
+
+    for pattern in _HTML_IMG_PATTERNS:
+        markdown_content = pattern.sub(_repl, markdown_content)
+    return markdown_content
+
+
+def _report_result(out_file: Path, media_dir: Path | None) -> None:
+    size = out_file.stat().st_size
+    print(f"[OK] Saved Markdown to: {out_file} ({_format_size(size)})")
+    if media_dir and media_dir.exists():
+        files = [f for f in media_dir.rglob("*") if f.is_file()]
+        if files:
+            print(f"   Extracted {len(files)} media file(s) → {media_dir}")
+
+
+def _normalize_ext(ext: str | None) -> str:
+    """Return a normalized image extension, including the leading dot."""
+    if not ext:
+        return ".bin"
+    ext = ext.lower()
+    if not ext.startswith("."):
+        ext = f".{ext}"
+    if ext == ".jpe":
+        return ".jpg"
+    return ext
+
+
+def _image_size(path: Path) -> tuple[int | None, int | None]:
+    """Return bitmap dimensions when Pillow can read the file."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return None, None
+    try:
+        with Image.open(path) as img:
+            return img.width, img.height
+    except (OSError, ValueError):
+        return None, None
+
+
+def _is_office_vector(ext: str) -> bool:
+    """Return whether an extension is an Office vector preview format."""
+    return ext.lower() in OFFICE_VECTOR_EXTENSIONS
+
+
+def _write_generic_image_manifest(
+    media_dir: Path,
+    rel_media_dir: str,
+    markdown: str,
+    source_kind: str,
+) -> None:
+    """Write lightweight image metadata for non-DOCX converter paths."""
+    if not media_dir.exists():
+        return
+
+    ref_pattern = re.compile(rf"{re.escape(rel_media_dir)}/([^)\s]+)")
+    refs = [Path(match.group(1)).name for match in ref_pattern.finditer(markdown)]
+    occurrence_map: dict[str, list[dict[str, object]]] = {}
+    for index, filename in enumerate(refs, 1):
+        occurrence_map.setdefault(filename, []).append({
+            "occurrence_index": index,
+            "source_ref": f"{rel_media_dir}/{filename}",
+        })
+
+    manifest: list[dict[str, object]] = []
+    for file_path in sorted(path for path in media_dir.iterdir() if path.is_file()):
+        ext = _normalize_ext(file_path.suffix)
+        if ext not in IMAGE_ASSET_SUFFIXES:
+            continue
+        width, height = _image_size(file_path)
+        ratio = width / height if width and height else None
+        asset_kind = "office_vector" if _is_office_vector(ext) else "bitmap"
+        occurrences = occurrence_map.get(file_path.name, [])
+        entry: dict[str, object] = {
+            "index": len(manifest) + 1,
+            "filename": file_path.name,
+            "original_filename": file_path.name,
+            "asset_kind": asset_kind,
+            "svg_renderable": asset_kind != "office_vector",
+            "pptx_native_supported": True,
+            "source_kind": source_kind,
+            "source_ext": ext,
+            "pixel_width": width,
+            "pixel_height": height,

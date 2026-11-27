@@ -1,0 +1,115 @@
+    # PowerPoint stores ordinary rows in mainSeq and shape-triggered rows in
+    # separate interactiveSeq containers. Their relative cross-sequence order
+    # has no playback meaning, so read-back follows the native container order.
+    expected = tuple(
+        target
+        for target in normalized_expected
+        if target.trigger_shape_id is None
+    ) + tuple(
+        target
+        for target in normalized_expected
+        if target.trigger_shape_id is not None
+    )
+    summary = read_slide_animation_sequence(
+        slide_xml,
+        require_supported_effects=True,
+    )
+    data = slide_xml.encode('utf-8') if isinstance(slide_xml, str) else slide_xml
+    actual_root = _select_supported_timing_branch(ET.fromstring(data))
+    actual_row_elements = [
+        row
+        for row in actual_root.iter(_qn(PML_NS, 'cTn'))
+        if row.get('presetClass') in set(_PRESET_CLASS_BY_CATEGORY.values())
+    ]
+    errors: list[str] = []
+    if len(summary.rows) != len(expected):
+        errors.append(
+            f'animation read-back row count is {len(summary.rows)}; '
+            f'expected {len(expected)}'
+        )
+    expected_main_targets = tuple(
+        target for target in expected if target.trigger_shape_id is None
+    )
+    expected_main_triggers = {
+        target.trigger for target in expected_main_targets
+    }
+    expected_sequence_trigger = (
+        (
+            next(iter(expected_main_triggers))
+            if len(expected_main_triggers) == 1
+            else None
+        )
+        if expected_main_targets
+        else ('on-click' if expected else None)
+    )
+    if expected and summary.trigger != expected_sequence_trigger:
+        errors.append(
+            f'animation read-back trigger is {summary.trigger!r}; '
+            f'expected {expected_sequence_trigger!r}'
+        )
+
+    try:
+        main_offsets = iter(_main_target_offsets(expected_main_targets))
+    except ValueError as exc:
+        errors.append(str(exc))
+        main_offsets = iter(())
+    expected_offsets = [
+        (
+            target.delay_ms
+            if target.trigger_shape_id is not None
+            else next(main_offsets, 0)
+        )
+        for target in expected
+    ]
+
+    for index, (actual, target) in enumerate(zip(summary.rows, expected), 1):
+        spec = NATIVE_ANIMATIONS[target.effect]
+        expected_row = _animation_row_for_options(
+            target.effect,
+            target.effect_options,
+        )
+        if spec['durationScalable']:
+            _scale_animation_row_duration(
+                expected_row,
+                base_duration_ms=int(spec['defaultDurationMs']),
+                requested_duration_ms=target.duration_ms,
+            )
+        _apply_timing_options(expected_row, target)
+        option_errors: list[str] = []
+        expected_filter = _row_filter(
+            expected_row,
+            str(spec['presetClass']),
+            option_errors,
+        )
+        expected_options = _read_effect_options(
+            expected_row,
+            target.effect,
+            expected_filter,
+            option_errors,
+        )
+        (
+            expected_repeat_count,
+            expected_repeat_duration_ms,
+            expected_auto_reverse,
+            expected_rewind,
+            expected_accelerate,
+            expected_decelerate,
+            expected_bounce_end,
+            expected_restart,
+            expected_playback_duration_ms,
+        ) = _timing_summary(
+            expected_row,
+            (
+                target.duration_ms
+                if spec['durationScalable']
+                else spec['defaultDurationMs']
+            ),
+            option_errors,
+        )
+        if option_errors:
+            errors.append(
+                f'animation row {index} expected-option model failed: '
+                + '; '.join(option_errors)
+            )
+        if index <= len(actual_row_elements):
+            actual_row_element = actual_row_elements[index - 1]

@@ -1,0 +1,68 @@
+    def test_a7_sparse_notes_and_copied_page_are_independent(self) -> None:
+        project = self._import(self._source(count=4, notes=(3, 4)))
+        (project / 'notes/slide_01.md').write_text('New first note', encoding='utf-8')
+        output, *_ = self._export(project)
+        with zipfile.ZipFile(output) as archive:
+            self.assertIn('Original note for source 3', _note(archive, 3)[1])
+            self.assertIn('New first note', _note(archive, 1)[1])
+        authoring = project / 'authoring-svg-flat'
+        (authoring / 'copy.svg').write_bytes((authoring / 'slide_03.svg').read_bytes())
+        (project / 'page_plan.json').write_text(json.dumps({
+            'schema': 'ppt-master.roundtrip-page-plan.v1',
+            'pages': [{'source_slide': 3}, {'source_slide': 3, 'svg': 'copy.svg'}],
+        }), encoding='utf-8')
+        (project / 'notes/copy.md').write_text('Copy only', encoding='utf-8')
+        output, _, stdout, _ = self._export(project, name='copies.pptx')
+        self.assertIn('Speaker notes: 2 page(s)', stdout)
+        with zipfile.ZipFile(output) as archive:
+            self.assertIn('Original note for source 3', _note(archive, 1)[1])
+            self.assertIn('Copy only', _note(archive, 2)[1])
+            self.assertNotEqual(_note(archive, 1)[0], _note(archive, 2)[0])
+
+    def test_a7_shared_source_notes_allocate_a_private_part(self) -> None:
+        source = self._source(count=3, notes=(3,))
+        with zipfile.ZipFile(source) as archive:
+            entries = {name: archive.read(name) for name in archive.namelist()}
+        rels_path = 'ppt/slides/_rels/slide1.xml.rels'
+        rels = ET.fromstring(entries[rels_path])
+        ET.SubElement(rels, f"{{{NS['rel']}}}Relationship", {
+            'Id': 'rIdNotes', 'Type': NS['r'] + '/notesSlide', 'Target': '../notesSlides/notesSlide1.xml',
+        })
+        entries[rels_path] = ET.tostring(rels)
+        with zipfile.ZipFile(source, 'w') as archive:
+            for name, data in entries.items():
+                archive.writestr(name, data)
+        project = self._import(source)
+        (project / 'notes/slide_01.md').write_text('Private first note', encoding='utf-8')
+        output, *_ = self._export(project)
+        with zipfile.ZipFile(output) as archive:
+            self.assertIn('Original note for source 3', _note(archive, 3)[1])
+            self.assertIn('Private first note', _note(archive, 1)[1])
+            self.assertNotEqual(_note(archive, 1)[0], _note(archive, 3)[0])
+
+    def test_a8_roundtrip_notes_match_stems_only(self) -> None:
+        project = self.root / 'notes_workspace'
+        (project / 'authoring-svg-flat').mkdir(parents=True)
+        (project / 'notes').mkdir()
+        for name in ('slide_03', 'slide_13'):
+            (project / 'notes' / f'{name}.md').write_text(name, encoding='utf-8')
+        roster = [project / f'slide_{number:02d}.svg' for number in (3, 4, 16)]
+        self.assertEqual(find_notes_files(project, roster), {'slide_03': 'slide_03'})
+
+    def test_a9_delivery_counts_cloned_notes_parts_by_type(self) -> None:
+        project = self._import(self._source(count=4, notes=(3, 4)))
+        authoring = project / 'authoring-svg-flat'
+        (authoring / 'copy.svg').write_bytes((authoring / 'slide_04.svg').read_bytes())
+        (project / 'page_plan.json').write_text(json.dumps({
+            'schema': 'ppt-master.roundtrip-page-plan.v1',
+            'pages': [{'source_slide': 4}, {'source_slide': 4, 'svg': 'copy.svg'}],
+        }), encoding='utf-8')
+        output, *_ = self._export(project)
+        report = audit_pptx_delivery(output)
+        self.assertEqual(report['package']['parts']['notes'], 2)
+        self.assertEqual(report['package']['parts']['slides'], 2)
+
+    def test_a9_arbitrary_slide_master_and_layout_part_names_are_counted(self) -> None:
+        source = self._source(notes=(1,))
+        with zipfile.ZipFile(source) as archive:
+            entries = {name: archive.read(name) for name in archive.namelist()}

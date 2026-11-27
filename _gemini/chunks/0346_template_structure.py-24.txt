@@ -1,0 +1,94 @@
+            or definition_spec.master_name != expected_master_name
+        ):
+            errors.append(
+                f"spec_lock.md Layout {definition.layout_key!r} definition does "
+                f"not match prototype {definition_spec.svg_path.name} root identity"
+            )
+
+    try:
+        _validate_template_slide_contracts(definition_specs)
+    except TemplateStructureError as exc:
+        errors.append(str(exc))
+    return list(dict.fromkeys(errors))
+
+
+def template_lock_errors(
+    specs: list[TemplateSlideSpec],
+    structure_lock: PptxStructureLock,
+) -> list[str]:
+    """Return mismatches between parsed SVG layouts and the project lock."""
+    if structure_lock.mode not in {"structured", "preserve"}:
+        return []
+    errors: list[str] = []
+    references = {
+        reference.slide_num: reference
+        for reference in structure_lock.layouts
+    }
+    actual_slides = {spec.slide_num for spec in specs}
+    expected_slides = set(references)
+    missing = sorted(actual_slides - expected_slides)
+    extra = sorted(expected_slides - actual_slides)
+    assignment_section = (
+        "page_pptx_layouts"
+        if structure_lock.mode == "structured"
+        else "pptx_layouts"
+    )
+    if missing:
+        pages = ", ".join(f"P{slide_num:02d}" for slide_num in missing)
+        errors.append(
+            f"spec_lock.md {assignment_section} is missing generated page(s): "
+            f"{pages}"
+        )
+    if extra:
+        pages = ", ".join(f"P{slide_num:02d}" for slide_num in extra)
+        errors.append(
+            f"spec_lock.md {assignment_section} references absent page(s): "
+            f"{pages}"
+        )
+    for spec in specs:
+        reference = references.get(spec.slide_num)
+        if reference is None:
+            continue
+        if spec.layout_key != reference.layout_key:
+            errors.append(
+                f"{spec.svg_path.name}: data-pptx-layout={spec.layout_key!r} "
+                f"does not match spec_lock P{spec.slide_num:02d} Layout key "
+                f"{reference.layout_key!r}"
+            )
+        if structure_lock.mode == "preserve":
+            if reference.layout_name and spec.layout_name != reference.layout_name:
+                errors.append(
+                    f"{spec.svg_path.name}: data-pptx-layout-name="
+                    f"{spec.layout_name!r} does not match spec_lock "
+                    f"P{spec.slide_num:02d} Layout name "
+                    f"{reference.layout_name!r}"
+                )
+    if structure_lock.mode == "structured":
+        definitions = {
+            definition.layout_key: definition
+            for definition in structure_lock.layout_definitions
+        }
+        master_names = {
+            master.master_key: master.master_name for master in structure_lock.masters
+        }
+        for spec in specs:
+            definition = definitions.get(spec.layout_key)
+            if definition is not None:
+                if spec.layout_name != definition.layout_name:
+                    errors.append(
+                        f"{spec.svg_path.name}: data-pptx-layout-name="
+                        f"{spec.layout_name!r} does not match Layout "
+                        f"{spec.layout_key!r} name {definition.layout_name!r}"
+                    )
+                if spec.master_key != definition.master_key:
+                    errors.append(
+                        f"{spec.svg_path.name}: data-pptx-master="
+                        f"{spec.master_key!r} does not match Layout "
+                        f"{spec.layout_key!r} Master {definition.master_key!r}"
+                    )
+            expected_name = master_names.get(spec.master_key)
+            if expected_name is not None and spec.master_name != expected_name:
+                errors.append(
+                    f"{spec.svg_path.name}: data-pptx-master-name="
+                    f"{spec.master_name!r} does not match spec_lock Master "
+                    f"{spec.master_key!r} name {expected_name!r}"

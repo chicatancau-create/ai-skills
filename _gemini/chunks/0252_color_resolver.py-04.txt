@@ -1,0 +1,103 @@
+            or any((child.tail or "").strip() for child in children)
+        ):
+            raise ValueError(
+                f"{theme.path}: invalid DrawingML color scheme structure"
+            )
+
+        for name, slot in zip(_THEME_SCHEME_SLOTS, children):
+            color_children = list(slot)
+            if (
+                slot.attrib
+                or (slot.text or "").strip()
+                or len(color_children) != 1
+                or color_children[0].tag not in _THEME_COLOR_TAGS
+                or (color_children[0].tail or "").strip()
+            ):
+                raise ValueError(
+                    f"{theme.path}: invalid DrawingML theme color slot {name!r}"
+                )
+            try:
+                hex_, alpha = resolve_color(color_children[0], None)
+            except ValueError as exc:
+                raise ValueError(
+                    f"{theme.path}: invalid DrawingML theme color slot "
+                    f"{name!r}: {exc}"
+                ) from exc
+            if hex_ is None:
+                raise ValueError(
+                    f"{theme.path}: unresolved DrawingML theme color slot {name!r}"
+                )
+            if alpha != 1.0:
+                raise ValueError(
+                    f"{theme.path}: non-opaque DrawingML theme color slot {name!r}"
+                )
+            self.scheme[name] = hex_[1:]
+
+    def _load_clr_map(self, master: PartRef) -> None:
+        master_root = master.xml
+        if master_root.tag != f"{{{NS['p']}}}sldMaster":
+            raise ValueError(f"{master.path}: expected p:sldMaster root")
+        clr_maps = master_root.findall("p:clrMap", NS)
+        if len(clr_maps) != 1:
+            raise ValueError(
+                f"{master.path}: expected exactly one direct p:clrMap"
+            )
+        clr_map = clr_maps[0]
+        children = list(clr_map)
+        if (
+            set(clr_map.attrib) != set(_COLOR_MAP_SOURCES)
+            or children
+            or (clr_map.text or "").strip()
+        ):
+            raise ValueError(
+                f"{master.path}: invalid DrawingML color map structure"
+            )
+        for source in _COLOR_MAP_SOURCES:
+            target = clr_map.attrib[source]
+            if target not in _THEME_SCHEME_SLOTS:
+                raise ValueError(
+                    f"{master.path}: invalid DrawingML color map target "
+                    f"{source}={target!r}"
+                )
+            self.clr_map[source] = target
+
+    def resolve_scheme(self, name: str) -> str | None:
+        """scheme name (e.g. 'accent1', 'bg1') -> 'RRGGBB'. None on miss."""
+        # apply clrMap remap (bg1 -> lt1, tx1 -> dk1, etc.)
+        mapped = self.clr_map.get(name, name)
+        # canonical alias (bg1 -> lt1)
+        mapped = SCHEME_ALIASES.get(mapped, mapped)
+        return self.scheme.get(mapped)
+
+
+# ---------------------------------------------------------------------------
+# Color resolution
+# ---------------------------------------------------------------------------
+
+def validate_no_fill(elem: ET.Element) -> None:
+    """Require the empty DrawingML a:noFill leaf contract."""
+    if elem.attrib or list(elem) or (elem.text or "").strip():
+        raise ValueError("Invalid DrawingML noFill structure")
+
+
+def resolve_solid_fill_color(
+    elem: ET.Element,
+    palette: ColorPalette | None,
+    *,
+    placeholder_hex: str | None = None,
+) -> tuple[str, float]:
+    """Resolve one explicit color from a closed DrawingML solid fill."""
+    children = list(elem)
+    if not elem.attrib and not children and not (elem.text or "").strip():
+        raise ValueError(
+            "DrawingML solid fill requires one explicit color"
+        )
+    if (
+        elem.attrib
+        or len(children) != 1
+        or children[0].tag not in _COLOR_QNAMES
+        or (elem.text or "").strip()
+        or (children[0].tail or "").strip()
+    ):
+        raise ValueError("Invalid DrawingML solid fill structure")
+    hex_, alpha = resolve_color(

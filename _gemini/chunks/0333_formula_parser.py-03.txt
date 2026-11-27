@@ -1,0 +1,89 @@
+            parameter_count, cursor = _read_optional_integer(source, cursor)
+            body, cursor = _read_raw_group(source, cursor)
+            count = parameter_count or 0
+            if re.search(r"#(?:0|[1-9][0-9])", body):
+                raise FormulaCompileError("Macro body uses an invalid parameter number")
+            macros[name_group[1:]] = _Macro(count, body)
+        else:
+            if cursor >= len(source) or source[cursor] != "\\":
+                raise FormulaCompileError("\\def requires one control-word macro name")
+            name, cursor = _read_control_word(source, cursor)
+            parameters: list[int] = []
+            cursor = _skip_whitespace(source, cursor)
+            while cursor < len(source) and source[cursor] == "#":
+                if cursor + 1 >= len(source) or source[cursor + 1] not in "123456789":
+                    raise FormulaCompileError("\\def parameters must use #1 through #9")
+                parameters.append(int(source[cursor + 1]))
+                cursor = _skip_whitespace(source, cursor + 2)
+            expected = list(range(1, len(parameters) + 1))
+            if parameters != expected:
+                raise FormulaCompileError("\\def parameters must be consecutive from #1")
+            body, cursor = _read_raw_group(source, cursor)
+            macros[name] = _Macro(len(parameters), body)
+        position = cursor
+    return "".join(output), macros
+
+
+def _read_macro_argument(source: str, position: int) -> tuple[str, int]:
+    position = _skip_whitespace(source, position)
+    if position >= len(source):
+        raise FormulaCompileError("Macro invocation is missing an argument")
+    if source[position] == "{":
+        return _read_raw_group(source, position)
+    if source[position] == "\\":
+        if position + 1 >= len(source):
+            raise FormulaCompileError("Macro invocation ends with a backslash")
+        if _is_command_letter(source[position + 1]):
+            _, end = _read_control_word(source, position)
+            return source[position:end], end
+        return source[position:position + 2], position + 2
+    return source[position], position + 1
+
+
+def _expand_macros(source: str, macros: dict[str, _Macro]) -> str:
+    if not macros:
+        return source
+    expansion_count = 0
+    while True:
+        output: list[str] = []
+        position = 0
+        replaced = False
+        while position < len(source):
+            if source[position] != "\\" or position + 1 >= len(source):
+                output.append(source[position])
+                position += 1
+                continue
+            if not _is_command_letter(source[position + 1]):
+                output.append(source[position:position + 2])
+                position += 2
+                continue
+            command, cursor = _read_control_word(source, position)
+            macro = macros.get(command)
+            if macro is None:
+                output.append(source[position:cursor])
+                position = cursor
+                continue
+            arguments: list[str] = []
+            for _ in range(macro.parameter_count):
+                argument, cursor = _read_macro_argument(source, cursor)
+                arguments.append(argument)
+            body = macro.body
+            for index, argument in enumerate(arguments, start=1):
+                body = body.replace(f"#{index}", argument)
+            output.append(body)
+            position = cursor
+            expansion_count += 1
+            if expansion_count > _MAX_MACRO_EXPANSIONS:
+                raise FormulaCompileError(
+                    f"Formula exceeds the {_MAX_MACRO_EXPANSIONS}-macro expansion limit"
+                )
+            replaced = True
+        source = "".join(output)
+        if len(source) > _MAX_EXPANDED_LENGTH:
+            raise FormulaCompileError(
+                f"Expanded formula exceeds the {_MAX_EXPANDED_LENGTH}-character limit"
+            )
+        if not replaced:
+            return source
+
+

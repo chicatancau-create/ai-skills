@@ -1,0 +1,113 @@
+        if _is_table_region_boundary(rect, text, page, start_y):
+            return max(start_y + 20, rect.y0 - 2)
+    return page.rect.height * TABLE_SCAN_BOTTOM_RATIO
+
+
+def _normalize_table_cell(value: object) -> str:
+    """Normalize one extracted table cell for Markdown output."""
+    if value is None:
+        return ""
+    text = CONTROL_CHARS_RE.sub('', str(value))
+    text = re.sub(r'\s*\n\s*', '<br>', text.strip())
+    text = re.sub(r'[ \t]+', ' ', text)
+    return text.replace('|', r'\|')
+
+
+def _clean_table_rows(rows: list[list[object]]) -> list[list[str]]:
+    """Remove empty rows / columns from PyMuPDF table extraction output."""
+    normalized = [[_normalize_table_cell(cell) for cell in row] for row in rows]
+    normalized = [row for row in normalized if any(cell for cell in row)]
+    if not normalized:
+        return []
+
+    max_cols = max(len(row) for row in normalized)
+    padded = [row + [""] * (max_cols - len(row)) for row in normalized]
+    keep_cols = [
+        idx
+        for idx in range(max_cols)
+        if any(row[idx] for row in padded)
+    ]
+    if len(keep_cols) < 2:
+        return []
+    return _postprocess_table_rows([[row[idx] for idx in keep_cols] for row in padded])
+
+
+def _nonempty_cell_indexes(row: list[str]) -> list[int]:
+    """Return indexes of non-empty cells in a row."""
+    return [idx for idx, cell in enumerate(row) if cell]
+
+
+def _merge_label_underscore_rows(rows: list[list[str]]) -> list[list[str]]:
+    """Join rows where PDF extraction split a leading underscore from a label."""
+    merged = []
+    for row in rows:
+        nonempty = _nonempty_cell_indexes(row)
+        if nonempty == [0] and row[0] == "_" and merged and merged[-1][0]:
+            merged[-1][0] = f"_{merged[-1][0]}"
+            continue
+        merged.append(row)
+    return merged
+
+
+def _merge_single_cell_continuations(rows: list[list[str]]) -> list[list[str]]:
+    """Merge wrapped single-cell table rows into the previous row."""
+    merged: list[list[str]] = []
+    for row in rows:
+        nonempty = _nonempty_cell_indexes(row)
+        if (
+            len(nonempty) == 1
+            and nonempty[0] > 0
+            and merged
+            and not MODEL_COLUMN_RE.match(row[nonempty[0]])
+        ):
+            index = nonempty[0]
+            separator = "<br>" if merged[-1][index] else ""
+            merged[-1][index] = f"{merged[-1][index]}{separator}{row[index]}"
+            continue
+        merged.append(row)
+    return merged
+
+
+def _looks_like_model_row(row: list[str]) -> bool:
+    """Return whether a row contains model-number table headings."""
+    values = [cell for cell in row[1:] if cell]
+    return len(values) >= 2 and all(MODEL_COLUMN_RE.match(cell) for cell in values)
+
+
+def _looks_like_outcome_row(row: list[str]) -> bool:
+    """Return whether a row contains regression outcome labels."""
+    values = [cell for cell in row[1:] if cell]
+    if len(values) < 2:
+        return False
+    short_values = [cell for cell in values if len(cell) <= 12 and not NUMBER_RE.search(cell)]
+    return len(short_values) == len(values)
+
+
+def _regression_group_labels(row: list[str], data_cols: int) -> list[str]:
+    """Infer repeated group labels for common regression-table headings."""
+    compact = "".join(row)
+    if "总样本" in compact and "国有" in compact and "非国有" in compact and data_cols == 7:
+        return ["总样本"] * 3 + ["国有企业"] * 2 + ["非国有企业"] * 2
+    return [""] * data_cols
+
+
+def _flatten_regression_header(rows: list[list[str]]) -> list[list[str]]:
+    """Flatten multi-line regression headings into one Markdown header row."""
+    if len(rows) < 3:
+        return rows
+
+    if (
+        len(rows) >= 2
+        and rows[0][0]
+        and not any(rows[0][1:])
+        and _looks_like_model_row(rows[1])
+    ):
+        outcome = rows[0][0]
+        header = ["变量"]
+        header.extend(
+            f"{model} {outcome}".strip()
+            for model in rows[1][1:]
+        )
+        return [header] + rows[2:]
+
+    header_offset = 0

@@ -1,0 +1,103 @@
+            used_masters.setdefault(slide.master.path, []).append(slide.index)
+
+    manifest: dict[str, object] = {
+        "slideSize": {
+            "width_emu": pkg.slide_size_emu[0],
+            "height_emu": pkg.slide_size_emu[1],
+            "width_px": pkg.slide_size_px[0],
+            "height_px": pkg.slide_size_px[1],
+        },
+        "masters": [
+            {
+                "path": master.path,
+                "displayName": part_display_name(master.xml, master.path),
+                "drawableShapeCount": count_drawable_shapes(master.xml),
+                "usedBySlides": used_masters.get(master.path, []),
+            }
+            for master in masters
+        ],
+        "layouts": [
+            {
+                "path": layout.path,
+                "displayName": part_display_name(layout.xml, layout.path),
+                "parentPath": master.path,
+                "showMasterShapes": part_show_master_sp(layout),
+                "drawableShapeCount": count_drawable_shapes(layout.xml),
+                "placeholders": extract_placeholders(layout.xml),
+                "usedBySlides": used_layouts.get(layout.path, []),
+            }
+            for layout, master in layouts_with_parents
+        ],
+        "slides": [
+            {
+                "index": slide.index,
+                "slidePath": slide.part.path,
+                "layoutPath": slide.layout.path if slide.layout else None,
+                "masterPath": slide.master.path if slide.master else None,
+                "showInheritedShapes": part_show_master_sp(slide.part),
+                "placeholders": extract_placeholders(slide.part.xml),
+                "svgFile": f"slide_{slide.index:02d}.svg",
+            }
+            for slide in slides
+        ],
+    }
+    contract = build_native_structure(pptx_path, manifest)
+    if not contract["strategy"]["preservationEligible"]:
+        raise RuntimeError(
+            "Round-trip mode requires a complete source master/layout graph"
+        )
+    return contract
+
+
+def _annotate_roundtrip_slide_roots(
+    slides: list[SlideArtifact],
+    contract: dict[str, object],
+) -> None:
+    """Attach exact Layout identity to layered SVG roots for reverse export."""
+    raw_layouts = contract.get("layouts")
+    raw_masters = contract.get("masters")
+    raw_slides = contract.get("slides")
+    if not all(isinstance(value, list) for value in (
+        raw_layouts,
+        raw_masters,
+        raw_slides,
+    )):
+        raise RuntimeError("Generated round-trip source structure is incomplete")
+    layouts = {
+        str(item.get("key")): item
+        for item in raw_layouts
+        if isinstance(item, dict)
+    }
+    masters = {
+        str(item.get("key")): item
+        for item in raw_masters
+        if isinstance(item, dict)
+    }
+    slide_rows = {
+        int(item["index"]): item
+        for item in raw_slides
+        if isinstance(item, dict) and isinstance(item.get("index"), int)
+    }
+    for slide in slides:
+        row = slide_rows.get(slide.index)
+        if row is None:
+            raise RuntimeError(
+                f"Round-trip source structure has no slide {slide.index}"
+            )
+        layout_key = str(row.get("layoutKey") or "")
+        master_key = str(row.get("masterKey") or "")
+        layout = layouts.get(layout_key)
+        master = masters.get(master_key)
+        if layout is None or master is None:
+            raise RuntimeError(
+                f"Round-trip slide {slide.index} has an unresolved Layout/Master"
+            )
+        attrs = {
+            "data-pptx-layout": layout_key,
+            "data-pptx-layout-name": str(layout.get("name") or layout_key),
+            "data-pptx-master": master_key,
+            "data-pptx-master-name": str(master.get("name") or master_key),
+            "data-pptx-show-master-shapes": (
+                "true" if layout.get("showMasterShapes", True) else "false"
+            ),
+            "data-pptx-show-inherited-shapes": (

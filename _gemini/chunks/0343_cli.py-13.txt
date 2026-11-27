@@ -1,0 +1,107 @@
+        'summary': quality.get('summary'),
+        'categories': categories if isinstance(categories, dict) else {},
+    }
+
+
+def _quality_gate_status(
+    quality: dict[str, object],
+) -> tuple[str, int]:
+    """Return final-gate status and introduced-warning count."""
+    categories = quality.get('categories')
+    blocking_count = None
+    introduced_warning_count = 0
+    if isinstance(categories, dict):
+        blocking = categories.get('blocking')
+        if isinstance(blocking, dict):
+            blocking_count = blocking.get('count')
+        introduced = categories.get('introduced')
+        if (
+            isinstance(introduced, dict)
+            and isinstance(introduced.get('count'), int)
+        ):
+            introduced_warning_count = int(introduced['count'])
+    if quality.get('status') != 'loaded':
+        return str(quality.get('status') or 'not-provided'), introduced_warning_count
+    if quality.get('stage') != 'final':
+        return 'non-final', introduced_warning_count
+    if not isinstance(blocking_count, int):
+        return 'unverified', introduced_warning_count
+    if blocking_count > 0:
+        return 'failed', introduced_warning_count
+    if quality.get('source_match') == 'mismatch':
+        return 'stale', introduced_warning_count
+    if quality.get('source_match') != 'passed':
+        return 'unverified', introduced_warning_count
+    return 'passed', introduced_warning_count
+
+
+def _postflight_warning_summaries(
+    *,
+    quality_gate: str,
+    introduced_warning_count: int,
+    unresolved_token_count: int,
+    external_image_count: int,
+    generic_font_stack_count: int,
+    unsafe_font_face_count: int,
+    dangerous_nonconforming_export: bool,
+    dangerous_normalization_count: int,
+) -> tuple[str, ...]:
+    """Return stable warning summaries for the terminal receipt."""
+    warnings: list[str] = []
+    if quality_gate != 'passed':
+        warnings.append(f'quality_gate={quality_gate}')
+    if introduced_warning_count:
+        warnings.append(f'quality_introduced_warnings={introduced_warning_count}')
+    if unresolved_token_count:
+        warnings.append(f'unresolved_template_tokens={unresolved_token_count}')
+    if external_image_count:
+        warnings.append(f'external_images={external_image_count}')
+    if generic_font_stack_count:
+        warnings.append(f'generic_only_font_stacks={generic_font_stack_count}')
+    if unsafe_font_face_count:
+        warnings.append(f'unsafe_exported_font_faces={unsafe_font_face_count}')
+    if dangerous_nonconforming_export:
+        warnings.append('dangerous_nonconforming_svg_export=enabled')
+    if dangerous_normalization_count:
+        warnings.append(
+            f'dangerous_compatibility_normalizations={dangerous_normalization_count}'
+        )
+    return tuple(warnings)
+
+
+def _conversion_trace_dangerous_normalization_count(
+    conversion_trace_path: Path | None,
+) -> int:
+    """Count compatibility normalizations retained in a conversion trace."""
+    if conversion_trace_path is None or not conversion_trace_path.is_file():
+        return 0
+    try:
+        payload = json.loads(conversion_trace_path.read_text(encoding='utf-8'))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return 0
+    if not isinstance(payload, dict):
+        return 0
+    count = 0
+    slides = payload.get('slides')
+    if isinstance(slides, list):
+        for slide in slides:
+            if not isinstance(slide, dict):
+                continue
+            normalizations = slide.get('dangerous_normalizations')
+            if not isinstance(normalizations, list):
+                continue
+            count += sum(
+                1 for normalization in normalizations
+                if isinstance(normalization, dict)
+            )
+    return count
+
+
+def _write_postflight_report(
+    *,
+    output_path: Path,
+    project_path: Path,
+    svg_files: list[Path],
+    layout_definition_files: list[Path],
+    pptx_structure: str,
+    backup_path: Path | None,

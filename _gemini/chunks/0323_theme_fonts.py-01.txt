@@ -1,0 +1,121 @@
+"""Theme typography contracts shared by SVG conversion and PPTX assembly."""
+
+from __future__ import annotations
+
+import math
+import re
+import statistics
+from dataclasses import dataclass
+from pathlib import Path
+from xml.etree import ElementTree as ET
+
+from language_tags import language_base, language_uses_rtl
+from slide_roster import discover_slide_svgs
+
+from .utils import _explicit_language_script, font_px_to_hpt, parse_font_family
+
+
+DML_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+PML_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
+_LOCK_ROW_RE = re.compile(r"^-\s+([A-Za-z0-9_]+)\s*:\s*(.+?)\s*$")
+_SVG_FONT_SIZE_RE = re.compile(r"^([0-9]+(?:\.[0-9]+)?)(?:px)?$")
+_CJK_THEME_SCRIPTS = frozenset({"Hans", "Hant", "Jpan", "Hang"})
+_TITLE_PLACEHOLDER_TYPES = frozenset({"title", "subtitle"})
+_BODY_PLACEHOLDER_TYPES = frozenset({
+    "body",
+    "date",
+    "footer",
+    "slide-number",
+})
+_DEFAULT_MASTER_TITLE_PX = 40.0
+_DEFAULT_MASTER_BODY_PX = 24.0
+
+
+class ThemeFontError(RuntimeError):
+    """Raised when a project theme-font contract cannot be loaded or applied."""
+
+
+@dataclass(frozen=True)
+class ThemeFontFace:
+    """Concrete Latin, East Asian, and complex-script theme faces."""
+
+    latin: str
+    ea: str
+    cs: str
+
+    def matches(self, fonts: dict[str, str]) -> bool:
+        """Return whether resolved SVG fonts represent this theme face."""
+        return fonts.get("latin") == self.latin and fonts.get("ea") == self.ea
+
+
+@dataclass(frozen=True)
+class ThemeFontSpec:
+    """Major/minor theme fonts derived from one project's typography lock."""
+
+    major: ThemeFontFace
+    minor: ThemeFontFace
+    major_family: str
+    minor_family: str
+    # Supplemental theme scripts (``Arab``, ``Hebr``, ``Thai``, ``Deva``, ...)
+    # the deck's primary language writes in; they take the locked
+    # complex-script face instead of the Office factory default.
+    cs_scripts: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class MasterTextStyleSpec:
+    """Title/body defaults written to one generated slide master's txStyles."""
+
+    title_hpt: int
+    body_hpt: int
+
+    @property
+    def body_levels_hpt(self) -> tuple[int, ...]:
+        """Return a deterministic nine-level PowerPoint body-size hierarchy."""
+        factors = (16, 15, 14, 13, 12, 11, 10, 9, 8)
+        minimum = min(self.body_hpt, 800)
+        sizes = []
+        for factor in factors:
+            scaled = round((self.body_hpt * factor / 16) / 50) * 50
+            sizes.append(max(minimum, scaled))
+        return tuple(sizes)
+
+
+def _inline_style_property(style: str, name: str) -> str | None:
+    """Return one inline SVG style declaration value."""
+    for declaration in style.split(";"):
+        key, separator, value = declaration.partition(":")
+        if separator and key.strip().lower() == name:
+            return value.strip()
+    return None
+
+
+def _svg_font_size_px(element: ET.Element) -> float | None:
+    """Read one finite positive SVG font size in px."""
+    raw = element.get("font-size")
+    if raw is None:
+        raw = _inline_style_property(element.get("style", ""), "font-size")
+    if raw is None:
+        return None
+    match = _SVG_FONT_SIZE_RE.fullmatch(raw.strip())
+    if match is None:
+        return None
+    value = float(match.group(1))
+    return value if math.isfinite(value) and value > 0 else None
+
+
+def infer_master_text_style_spec(
+    svg_files: list[Path],
+) -> tuple[MasterTextStyleSpec, float, float]:
+    """Infer structured Master title/body defaults from SVG slot carriers."""
+    title_sizes: list[float] = []
+    body_sizes: list[float] = []
+    placeholder_types = _TITLE_PLACEHOLDER_TYPES | _BODY_PLACEHOLDER_TYPES
+    for svg_path in svg_files:
+        try:
+            root = ET.parse(svg_path).getroot()
+        except (OSError, ET.ParseError) as exc:
+            raise ThemeFontError(
+                f"Cannot infer Master text defaults from {svg_path}: {exc}"
+            ) from exc
+        for slot in root.iter():

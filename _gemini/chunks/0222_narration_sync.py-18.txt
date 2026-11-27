@@ -1,0 +1,133 @@
+        cue_count=len(merged_cues),
+        powerpoint_timeline_ms=timeline_ms,
+        minimum_video_adjustment_ms=(
+            min(video_adjustments) if video_adjustments else None
+        ),
+        maximum_video_adjustment_ms=(
+            max(video_adjustments) if video_adjustments else None
+        ),
+        minimum_video_correlation=(
+            min(correlations) if correlations else None
+        ),
+    )
+
+
+def merge_subtitles(
+    project_path: Path,
+    *,
+    pptx_path: Path,
+    subtitle_dir: Path,
+    output_path: Path,
+    force: bool,
+) -> tuple[int, int, int]:
+    """Merge local SRT files using timing values read from the final PPTX."""
+    result = _merge_subtitles_result(
+        project_path,
+        pptx_path=pptx_path,
+        subtitle_dir=subtitle_dir,
+        output_path=output_path,
+        force=force,
+    )
+    return (
+        result.slide_count,
+        result.cue_count,
+        result.powerpoint_timeline_ms,
+    )
+
+
+def merge_subtitles_to_video(
+    project_path: Path,
+    *,
+    pptx_path: Path,
+    subtitle_dir: Path,
+    audio_dir: Path,
+    video_path: Path,
+    output_path: Path,
+    force: bool,
+) -> SubtitleMergeResult:
+    """Merge local SRT files after calibrating page starts to an exported video."""
+    return _merge_subtitles_result(
+        project_path,
+        pptx_path=pptx_path,
+        subtitle_dir=subtitle_dir,
+        output_path=output_path,
+        force=force,
+        audio_dir=audio_dir,
+        video_path=video_path,
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Derive narrated object animation timings and merge page-local "
+            "SRT files on PowerPoint's final timeline."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    fingerprint = subparsers.add_parser(
+        "fingerprint",
+        help="print the SHA-256 used to bind a timing plan to page-local SRT files",
+    )
+    fingerprint.add_argument("project_path", help="Project directory")
+    fingerprint.add_argument(
+        "--subtitle-dir",
+        default=None,
+        help="Page-local SRT directory; default: <project>/audio",
+    )
+
+    animations = subparsers.add_parser(
+        "animations",
+        help="derive narration_animations.json from animations.json and page-local SRT",
+    )
+    animations.add_argument("project_path", help="Project directory")
+    animations.add_argument(
+        "--animation-config",
+        default=None,
+        help="Read-only canonical config; default: <project>/animations.json",
+    )
+    animations.add_argument(
+        "--plan",
+        default=None,
+        help="Timing plan; default: <project>/narration_timing.json",
+    )
+    animations.add_argument(
+        "--subtitle-dir",
+        default=None,
+        help="Page-local SRT directory; default: <project>/audio",
+    )
+    animations.add_argument(
+        "--audio-dir",
+        default=None,
+        help="Narration audio directory; default: <project>/audio",
+    )
+    animations.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help=(
+            "Narration animation output; "
+            "default: <project>/narration_animations.json"
+        ),
+    )
+    animations.add_argument(
+        "--narration-padding",
+        type=float,
+        default=0.5,
+        help="Seconds added after each narration before slide advance (default: 0.5)",
+    )
+    animations.add_argument(
+        "--narration-start-floor",
+        type=float,
+        default=DEFAULT_NARRATION_START_FLOOR,
+        help=(
+            "Minimum seconds from transition start to narration start; "
+            "0 waits only for transition completion "
+            f"(default: {DEFAULT_NARRATION_START_FLOOR:g})"
+        ),
+    )
+    animations.add_argument(
+        "--force",
+        action="store_true",

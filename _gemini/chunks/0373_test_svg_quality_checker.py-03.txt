@@ -1,0 +1,90 @@
+                )
+                bounds = self._text_bounds(root)
+                self.assertIsNotNone(bounds)
+                self.assertGreater(bounds[2], 1600)
+                result = _empty_result()
+                SVGQualityChecker()._check_text_bounds(root, result)
+                self.assertTrue(any('root viewBox' in error for error in result['errors']), result)
+
+    def test_non_scalar_and_percentage_dx_remain_unmeasurable(self) -> None:
+        for dx in ('20%', '10 20', '10,20', 'calc(20 + 30)'):
+            with self.subTest(dx=dx):
+                root = _parse_svg(
+                    f'<text x="1200" y="110" font-size="24">A<tspan dx="{dx}">B</tspan></text>',
+                    'font-family="Arial"', view_box='0 0 1280 720',
+                )
+                self.assertIsNone(self._text_bounds(root))
+                result = _empty_result()
+                SVGQualityChecker()._check_text_bounds(root, result)
+                self.assertTrue(any('Cannot verify root viewBox bounds' in warning
+                                    for warning in result['warnings']), result)
+
+    def test_positioned_lines_count_starter_and_inline_dx_once(self) -> None:
+        root = _parse_svg(
+            '<text x="100" y="110" font-size="24">'
+            '<tspan x="100" dx="10">A</tspan><tspan dx="400">B</tspan>'
+            '<tspan x="100" dx="-5" dy="30">C</tspan><tspan dx="-20">D</tspan></text>',
+            'font-family="Arial"',
+        )
+        parents = {id(child): parent for parent in root.iter() for child in parent}
+        sizes = checker_module._resolve_project_font_sizes(root)
+        spacings = checker_module._resolve_project_letter_spacings(root, sizes)
+        lines = SVGQualityChecker._resolved_text_lines(root[0], parents, sizes, spacings)
+        self.assertIsNotNone(lines)
+        self.assertEqual([(line[1], line[2]) for line in lines], [(110, 110), (95, 140)])
+        self.assertEqual([
+            [run['_inline_dx'] for run in line[3] if '_inline_dx' in run] for line in lines
+        ], [[400], [-20]])
+
+    def test_leading_direct_text_and_positioned_tspans_are_estimable(self) -> None:
+        root = _parse_svg(
+            '<g id="module" data-pptx-bounds="0 0 1000 1000">'
+            '<text id="mixed" x="10" y="30" font-size="20">'
+            'Leading <tspan font-weight="700">bold</tspan>'
+            '<tspan x="10" dy="28">Second line</tspan>'
+            '</text></g>'
+        )
+        text_element = root.find(f'.//{{{SVG_NS}}}text')
+        self.assertIsNotNone(text_element)
+        parent_by_id = {
+            id(child): parent
+            for parent in root.iter()
+            for child in list(parent)
+        }
+        font_sizes = checker_module._resolve_project_font_sizes(root)
+        letter_spacings = checker_module._resolve_project_letter_spacings(
+            root,
+            font_sizes,
+        )
+
+        lines = SVGQualityChecker._positioned_text_lines(
+            text_element,
+            parent_by_id,
+            font_sizes,
+            letter_spacings,
+        )
+
+        self.assertIsNotNone(lines)
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(
+            [''.join(run['text'] for run in line[3]) for line in lines],
+            ['Leading bold', 'Second line'],
+        )
+        result = _empty_result()
+        SVGQualityChecker()._check_text_bounds(root, result)
+        self.assertFalse(
+            any('Cannot verify' in warning for warning in result['warnings'])
+        )
+
+    def test_existing_all_tspan_and_inline_single_line_forms_still_resolve(self) -> None:
+        cases = {
+            'all_tspan': (
+                '<text x="10" y="30" font-size="20">'
+                '<tspan x="10">First</tspan>'
+                '<tspan x="10" dy="28">Second</tspan>'
+                '</text>',
+                2,
+            ),
+            'single_inline': (
+                '<text x="10" y="30" font-size="20">'
+                'First <tspan font-weight="700">line</tspan>'

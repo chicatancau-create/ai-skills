@@ -1,0 +1,98 @@
+                transformed = cls._transformed_rect_bounds(
+                    rect,
+                    (x, y, width, height),
+                    parent_by_id,
+                )
+                if transformed is not None:
+                    return label, transformed, None, True
+                rect_errors.append(f'{label} has an unresolved transform')
+            current = parent
+        return (
+            None,
+            None,
+            rect_errors[0] if rect_errors else None,
+            False,
+        )
+
+    def _check_canonical_authoring(
+        self,
+        root: ET.Element,
+        result: Dict,
+    ) -> None:
+        """Report SVG that was not compact when authored (advisory).
+
+        The exporter accepts explicit declarations, so drift from the compact
+        form never blocks. ``compact_svg_styles.py --inplace`` applies the
+        deterministic normalization on request for authored project pages; it
+        is not applied to structured template rosters, where per-slide
+        compaction would make shared Master/Layout atoms diverge and shift
+        native fallback hashes. Mirror materialization compacts its own tree
+        before publication.
+        """
+        if not self.canonical_authoring:
+            return
+        errors = canonical_authoring_errors(
+            root,
+            # Authored-preset/native frames can intentionally retain the
+            # helper's exact precision. Imported projections compact their
+            # model-facing frames before publication, where provenance is
+            # still known.
+            compact_native_frames=False,
+        )
+        if not errors:
+            return
+        if self.template_mode:
+            result['warnings'].extend(
+                f"Noncanonical compact authoring: {error} "
+                "(advisory; structured rosters keep their explicit form)"
+                for error in errors
+            )
+            return
+        def normalizer(error: str) -> str:
+            if "page-space metadata" in error:
+                return (
+                    "`python3 scripts/compact_svg_coordinates.py <svg_output> "
+                    "--inplace --keep-native-frames`"
+                )
+            return "`python3 scripts/compact_svg_styles.py <svg_output> --inplace`"
+
+        result['warnings'].extend(
+            f"Noncanonical compact authoring: {error} "
+            f"(advisory; normalize with {normalizer(error)}, "
+            "re-stamp pages that carry Chart/Table fallbacks, and rerun the "
+            "final gate, or leave the explicit form)"
+            for error in errors
+        )
+
+    def _parse_xml_root(self, content: str, result: Dict) -> ET.Element | None:
+        """Parse the SVG content as well-formed XML.
+
+        SVG is strict XML.  AI-generated decks frequently produce content that
+        looks fine in HTML5-tolerant previews but fails strict XML parsing —
+        common causes are HTML named entities (&nbsp; &mdash; &copy;…) and
+        bare XML reserved characters in text (R&D, error < 5%).  Such pages
+        cannot be exported to PPTX, so we surface them here as a hard error
+        before any downstream check looks at them.
+
+        Returns the parsed root when the document is well-formed; otherwise
+        appends an error and returns None.
+        """
+        try:
+            return ET.fromstring(content)
+        except ET.ParseError as e:
+            result['errors'].append(
+                f"Invalid XML: {e} — SVG must be well-formed XML. "
+                f"Use raw Unicode for typography (—, ©, →, NBSP); "
+                f"escape XML reserved chars as &amp; &lt; &gt; &quot; &apos; "
+                f"(see references/shared-standards-core.md §1)."
+            )
+            return None
+
+    def _check_viewbox(
+        self,
+        root: ET.Element,
+        svg_path: Path,
+        result: Dict,
+        expected_format: str = None,
+        *,
+        expected_viewbox: str | None = None,

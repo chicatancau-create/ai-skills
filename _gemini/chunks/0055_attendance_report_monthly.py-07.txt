@@ -1,0 +1,65 @@
+                    total += day_bucket.get(lt, 0.0)
+                if total == 0.0:
+                    leave_row.append("")
+                elif total == int(total):
+                    leave_row.append(int(total))
+                else:
+                    leave_row.append(round(total, 2))
+        # 按天展开字段的数据
+        expand_data = []
+        for fname, date_str in expand_date_map:
+            value = daily_data.get(fname, {}).get(uid, {}).get(date_str, "")
+            expand_data.append(value)
+        rows_2d.append(base + agg_data + leave_row + expand_data)
+
+    out_name = args.out or cmn.build_output_filename(start, end, suffix="monthly")
+    title = (
+        f"月度汇总展示  统计日期：{start.strftime(cmn.DATE_FMT)} "
+        f"至 {end.strftime(cmn.DATE_FMT)}"
+    )
+    subtitle = f"报表生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}"
+
+    # sheet1：月度汇总（每人一行）
+    summary_sheet = {
+        "name": "月度汇总",
+        "headers": headers,
+        "rows": rows_2d,
+        "title": title,
+        "subtitle": subtitle,
+        "attend_result_columns": attend_result_col_indices or None,
+    }
+
+    # sheet2：日历表（每人 3 行：班次名称 / 考勤结果 / 工作时长，按日期展开）
+    calendar_sheet = build_calendar_sheet(
+        all_records, columns, user_ids,
+        user_info_map, group_name_map,
+        start, end,
+    )
+
+    try:
+        cmn.write_excel_multi_sheets(out_name, [summary_sheet, calendar_sheet])
+    except (RuntimeError, ValueError) as e:
+        cmn.error(str(e))
+        return 1
+
+    cmn.print_summary(
+        granularity_label="月度汇总",
+        out_path=out_name,
+        user_count=len(user_ids),
+        column_names=column_names,
+        start=start,
+        end=end,
+        rows_count=len(rows_2d),
+        stats=stats,
+        extra_tail=(
+            "[提示] 数值字段已求和；"
+            "「考勤结果」按天展开为多列（每天一列显示当天考勤状态）。\n"
+            "[提示] 已附加第二个 sheet「日历表」：每人 3 行（班次名称/考勤结果/工作时长），"
+            "按日期横向展开，基础列（姓名/考勤组/部门）已纵向合并。"
+        ),
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

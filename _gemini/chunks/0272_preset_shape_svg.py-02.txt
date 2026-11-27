@@ -1,0 +1,130 @@
+            "as text_rectangle_px (page coordinates, same as render --frame)."
+        ),
+    )
+    describe_parser.add_argument(
+        "--adjust",
+        action="append",
+        default=[],
+        metavar="NAME=FORMULA",
+        help="Adjustment guide used when evaluating --frame (repeatable).",
+    )
+
+    render_parser = subparsers.add_parser(
+        "render",
+        help="Print one canonical authored-preset <g> fragment to stdout.",
+    )
+    render_parser.add_argument("preset", help="DrawingML preset name.")
+    render_parser.add_argument(
+        "--id",
+        required=True,
+        dest="element_id",
+        help="Stable unique SVG group id.",
+    )
+    render_parser.add_argument(
+        "--frame",
+        required=True,
+        nargs=4,
+        type=float,
+        metavar=("X", "Y", "WIDTH", "HEIGHT"),
+        help="SVG frame in the fragment's insertion coordinate space.",
+    )
+    render_parser.add_argument(
+        "--object-kind",
+        choices=("shape", "connector"),
+        default="shape",
+        help="Emit a normal shape or a native PowerPoint connector.",
+    )
+    render_parser.add_argument(
+        "--name",
+        help="Optional PowerPoint object name.",
+    )
+    render_parser.add_argument(
+        "--fill",
+        default="none",
+        help="Solid SVG fill, or none.",
+    )
+    render_parser.add_argument(
+        "--fill-opacity",
+        type=float,
+        help="Fill opacity from 0 to 1.",
+    )
+    render_parser.add_argument(
+        "--stroke",
+        default="none",
+        help="Solid SVG stroke, or none.",
+    )
+    render_parser.add_argument(
+        "--stroke-width",
+        type=float,
+        help="Stroke width in SVG page units; defaults to 1 when stroked.",
+    )
+    render_parser.add_argument(
+        "--stroke-opacity",
+        type=float,
+        help="Stroke opacity from 0 to 1.",
+    )
+    render_parser.add_argument(
+        "--stroke-linecap",
+        choices=("butt", "round", "square"),
+    )
+    render_parser.add_argument(
+        "--stroke-linejoin",
+        choices=("miter", "round", "bevel"),
+    )
+    render_parser.add_argument(
+        "--filter-id",
+        help=(
+            "Optional local SVG filter id for one registered native shadow or "
+            "glow; the complete page must define it in direct <defs>."
+        ),
+    )
+    render_parser.add_argument(
+        "--adjust",
+        action="append",
+        default=[],
+        metavar="NAME=FORMULA",
+        help=(
+            "DrawingML adjustment formula; repeat for multiple guides, "
+            "for example --adjust 'adj1=val 50000'."
+        ),
+    )
+
+    batch_parser = subparsers.add_parser(
+        "render-batch",
+        help="Print multiple canonical authored-preset fragments atomically.",
+    )
+    batch_parser.add_argument(
+        "--input",
+        required=True,
+        metavar="FILE_OR_DASH",
+        help=(
+            "UTF-8 JSON array of shape objects; use - to read stdin. "
+            "Use an 'adjustments' object such as "
+            "{\"adj\": \"val 42000\"}; the command prints no fragments "
+            "when any item is invalid."
+        ),
+    )
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    registry = get_preset_registry()
+
+    if args.command == "list":
+        if args.grouped:
+            payload = get_preset_shape_semantics().grouped(args.search)
+            if payload["preset_count"] == 0:
+                print(f"No preset semantics match {args.search!r}", file=sys.stderr)
+                return 1
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            return 0
+        query = args.search.casefold().strip()
+        names = [
+            name for name in registry.names
+            if not query or query in name.casefold()
+        ]
+        if not names:
+            print(f"No preset names match {args.search!r}", file=sys.stderr)
+            return 1

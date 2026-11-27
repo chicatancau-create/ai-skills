@@ -1,0 +1,105 @@
+            logger.warning('stat failed: %s: %s', path_str, exc)
+            return jsonify({'error': f'Failed to stat SVG: {exc}'}), 500
+
+        pending_edits = app.config['PENDING_EDITS'].get(name) or []
+        cached = None if pending_edits else _cache_get(
+            _SLIDE_CACHE, _SLIDE_CACHE_LOCK, path_str, mtime,
+        )
+        if cached is not None:
+            content, warnings, disk_annotations, id_to_tag = cached
+        else:
+            try:
+                tree = ET.parse(path_str)
+                root = tree.getroot()
+            except ET.ParseError as exc:
+                logger.warning('slide parse failed: %s: %s', name, exc)
+                return jsonify({'error': f'Failed to parse SVG: {exc}'}), 500
+
+            try:
+                materialize_inline_geometry_properties(root)
+            except GeometryStyleError as exc:
+                logger.warning('slide geometry materialization failed: %s: %s', name, exc)
+                return jsonify({'error': f'Invalid inline geometry: {exc}'}), 400
+
+            assign_temp_ids(root)
+            if pending_edits:
+                ok, reason = _apply_edit_records(root, pending_edits)
+                if not ok:
+                    return jsonify({'error': f'Failed to apply pending edits: {reason}'}), 500
+            disk_annotations = parse_annotations(root)
+            id_to_tag: dict[str, str] = {}
+            for elem in root.iter():
+                eid = elem.get('id')
+                if eid:
+                    tag = elem.tag
+                    if '}' in tag:
+                        tag = tag.split('}', 1)[1]
+                    id_to_tag[eid] = tag
+            _normalize_preview_hrefs(root)
+            content = ET.tostring(root, encoding='unicode', xml_declaration=False)
+            content, warnings = _inline_icons(
+                content,
+                icons_dir,
+                svg_file.parent,
+            )
+            if not pending_edits:
+                _cache_put(
+                    _SLIDE_CACHE, _SLIDE_CACHE_LOCK, path_str, mtime,
+                    (content, warnings, disk_annotations, id_to_tag),
+                )
+
+        if name in app.config['ANNOTATIONS']:
+            merged = dict(app.config['ANNOTATIONS'][name])
+        else:
+            merged = {
+                ann['element_id']: ann['annotation']
+                for ann in disk_annotations
+            }
+
+        annotations_list = [
+            {
+                'element_id': eid,
+                'tag': id_to_tag.get(eid, ''),
+                'annotation': ann_text,
+            }
+            for eid, ann_text in merged.items()
+        ]
+
+        return jsonify({
+            'name': name,
+            'content': content,
+            'annotations': annotations_list,
+            'warnings': warnings,
+            'mtime': mtime,
+            'undo_depth': len(pending_edits),
+        })
+
+    @app.route('/api/slide/<name>/annotate', methods=['POST'])
+    def post_annotate(name: str):
+        data = request.get_json()
+        if not data or 'element_id' not in data or 'annotation' not in data:
+            return jsonify({'error': 'Missing element_id or annotation'}), 400
+
+        element_id = data['element_id']
+        annotation = data['annotation']
+
+        if not isinstance(element_id, str) or not isinstance(annotation, str):
+            return jsonify({'error': 'element_id and annotation must be strings'}), 400
+
+        if len(element_id) > 200:
+            return jsonify({'error': 'element_id too long (max 200 chars)'}), 400
+
+        if len(annotation) > 10000:
+            return jsonify({'error': 'Annotation too long (max 10000 chars)'}), 400
+
+        annotations, error = _get_annotation_snapshot(name)
+        if error is not None:
+            return error
+
+        annotations[element_id] = annotation
+
+        return jsonify({
+            'status': 'ok',
+            'annotations_count': len(annotations),
+        })
+

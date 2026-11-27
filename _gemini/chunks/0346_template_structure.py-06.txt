@@ -1,0 +1,107 @@
+                f"{SOURCE_THEMES_FILENAME} Master {master_key!r} lacks payload/hash"
+            )
+        try:
+            raw = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise TemplateStructureError(
+                f"{SOURCE_THEMES_FILENAME} Master {master_key!r} has invalid base64"
+            ) from exc
+        if base64.b64encode(raw).decode("ascii") != encoded:
+            raise TemplateStructureError(
+                f"{SOURCE_THEMES_FILENAME} Master {master_key!r} base64 is not canonical"
+            )
+        if hashlib.sha256(raw).hexdigest() != expected_sha256.strip().lower():
+            raise TemplateStructureError(
+                f"{SOURCE_THEMES_FILENAME} Master {master_key!r} hash differs"
+            )
+        try:
+            root = ET.fromstring(raw)
+        except ET.ParseError as exc:
+            raise TemplateStructureError(
+                f"{SOURCE_THEMES_FILENAME} Master {master_key!r} theme is malformed"
+            ) from exc
+        if root.tag != f"{{{_DML_NS}}}theme":
+            raise TemplateStructureError(
+                f"{SOURCE_THEMES_FILENAME} Master {master_key!r} is not a:theme"
+            )
+        if any(
+            isinstance(name, str) and name.startswith(f"{{{_REL_NS}}}")
+            for node in root.iter()
+            for name in node.attrib
+        ):
+            raise TemplateStructureError(
+                f"{SOURCE_THEMES_FILENAME} Master {master_key!r} has relationships"
+            )
+        themes[master_key] = raw
+    return themes
+
+
+def _template_svg_path(
+    template_dir: Path,
+    raw_basename: str,
+    context: str,
+) -> tuple[str, Path]:
+    """Resolve one flat template SVG basename inside the project workspace."""
+    basename = (
+        raw_basename[:-4]
+        if raw_basename.lower().endswith(".svg")
+        else raw_basename
+    )
+    if (
+        not basename
+        or basename in {".", ".."}
+        or "/" in basename
+        or "\\" in basename
+        or any(ord(char) < 0x20 for char in basename)
+    ):
+        raise TemplateStructureError(
+            f"spec_lock.md {context} has invalid template SVG basename "
+            f"{raw_basename!r}"
+        )
+    svg_path = (template_dir / f"{basename}.svg").resolve()
+    if svg_path.parent != template_dir or not svg_path.is_file():
+        raise TemplateStructureError(
+            f"spec_lock.md {context} references missing template SVG "
+            f"templates/{basename}.svg"
+        )
+    return basename, svg_path
+
+
+def load_pptx_structure_lock(project_path: Path) -> PptxStructureLock | None:
+    """Load optional native-structure sections from spec_lock.md."""
+    lock_path = project_path / "spec_lock.md"
+    if not lock_path.is_file():
+        return None
+    try:
+        lines = lock_path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise TemplateStructureError(f"Cannot read {lock_path}: {exc}") from exc
+
+    sections: dict[str, list[tuple[str, str]]] = {}
+    current_section: str | None = None
+    for line_number, raw_line in enumerate(lines, start=1):
+        line = raw_line.strip()
+        if line.startswith("## "):
+            current_section = line[3:].strip()
+            sections.setdefault(current_section, [])
+            continue
+        if current_section not in {
+            "pptx_structure",
+            "pptx_masters",
+            "pptx_layouts",
+            "page_pptx_layouts",
+            "page_layouts",
+        }:
+            continue
+        match = _LOCK_ROW_RE.fullmatch(line)
+        if match:
+            sections[current_section].append((
+                match.group(1).strip(),
+                match.group(2).strip(),
+            ))
+        elif re.match(r"^-\s+", line):
+            raise TemplateStructureError(
+                f"spec_lock.md {current_section} line {line_number} must use "
+                "'- <key>: <value>' syntax"
+            )
+

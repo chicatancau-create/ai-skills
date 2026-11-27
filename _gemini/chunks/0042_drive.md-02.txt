@@ -1,0 +1,109 @@
+  dws drive delete --node <dentryUuid> --format json    # 查询 fileId: dws drive list
+Flags:
+      --node string    文件/文件夹 ID (dentryUuid)，即 drive list 返回的 fileId (必填)
+```
+
+注意：`--node` 使用的是 `drive list` 返回结果中的 `fileId` 字段（即 `dentryUuid`），**不是** `dentryId` 字段。
+
+## 意图判断
+
+用户说"我的文件/钉盘/网盘/云盘" → `list`
+用户说"钉盘空间/团队文件/有哪些空间/空间列表/团队文件列表" → `list-spaces`
+用户说"文件详情/文件信息" → `info`
+用户说"下载文件" → `download`
+用户说"新建文件夹/创建目录" → `mkdir`
+用户说"上传文件/传文件到钉盘" → `upload`（必须使用此命令，自动完成三步流程）
+用户说"复制文件/移动文件/搬到/移到" → 使用 `dws doc copy`/`dws doc move`（详见下方「复制/移动钉盘文件」工作流）
+用户说"删除文件/删除文件夹/移到回收站" → `delete`（危险操作，需确认）
+
+关键区分: drive(钉盘文件管理) vs doc(文档内容读写)
+
+**drive upload vs doc upload**: 用户提到"钉盘/网盘/我的文件"→ `drive upload`；提到"知识库/文档空间/workspace"→ `doc upload`；未明确目标时默认 `drive upload`
+
+**钉盘文件复制/移动**: drive 本身没有 copy/move 命令，需使用 `dws doc copy`/`dws doc move` 实现（详见下方工作流）
+
+## 核心工作流
+
+```bash
+# 1. 浏览「我的文件」根目录
+dws drive list --limit 20 --format json
+
+# 2. 进入子目录 — 提取 dentryUuid 作为 folder
+dws drive list --limit 20 --folder <dentryUuid> --format json
+
+# 3. 查看文件元数据
+dws drive info --node <dentryUuid> --format json
+
+# 4. 下载文件到本地
+dws drive download --node <dentryUuid> --output /tmp/ --format json
+
+# 5. 创建文件夹
+dws drive mkdir --name "项目资料" --format json
+
+# 6. 上传文件（必须使用 upload 命令，禁止手动分步操作）
+dws drive upload --file ./报告.pdf --format json
+dws drive upload --file ./报告.pdf --folder <dentryUuid> --format json
+
+# 7. 删除文件/文件夹到回收站（危险操作：必须先向用户确认，用户同意后才加 --yes 执行）
+# 正确流程：1.向用户展示"即将删除「文件名」到回收站" → 2.等用户确认 → 3.执行下面命令
+dws drive delete --node <dentryUuid> --yes --format json
+```
+
+## 复制/移动钉盘文件
+
+钉盘本身没有 copy/move 命令，需使用 `dws doc copy`/`dws doc move` 实现。
+
+> **注意：字段选择**：`drive list` 返回中有 `dentryId`（数字格式）和 `fileId`（UUID 格式）两个字段，**必须使用 `fileId`（UUID 格式，如 `ZgpG2NdyVXYOR2D5UGDok65MJMwvDqPk`）**作为 `--node` 和 `--folder` 的参数值。**禁止使用 `dentryId`（数字格式，如 `220335325118`），传入数字格式会导致命令失败。**
+
+> **注意**：钉盘场域下，仅支持将文件复制/移动到文件夹下，不支持文档下嵌套文档。
+
+### 目标位置参数规则
+
+| 目标位置 | 参数传递方式 | 前置步骤 |
+|---------|-----------|---------|
+| 未指定目标（默认） | `--folder <rootFolderId>` | 先 `dws drive list-spaces --space-type mySpace` 获取「我的文件」的 `rootFolderId` |
+| 知识库空间根目录 | `--workspace <workspaceId>` | 无需额外步骤，直接传入 workspaceId |
+| 钉盘 space 根目录 | `--folder <rootFolderId>` | 先 `dws drive list-spaces` 获取目标 space 的 `rootFolderId` |
+| 钉盘 space 下的子文件夹 | `--folder <fileId>` | 先 `dws drive list --space-id <spaceId>` 逐层浏览，获取目标文件夹的 `fileId`（dentryUuid 格式） |
+
+### 工作流示例
+
+```bash
+# ── 场景 默认: 用户未指定目标位置 → 复制/移动到「我的文件」根目录 ──
+# 1. 获取源文件 dentryUuid
+dws drive list --space-id <SPACE_ID> --format json
+# 2. 获取「我的文件」个人空间的 rootFolderId
+dws drive list-spaces --space-type mySpace --format json
+# 3. 用「我的文件」的 rootFolderId 作为 --folder
+dws doc copy --node <源文件dentryUuid> --folder <我的文件rootFolderId> --format json
+
+# ── 场景 A: 复制钉盘文件到知识库空间根目录 ──
+# 1. 获取源文件 dentryUuid
+dws drive list --space-id <SPACE_ID> --format json
+# 2. 直接传 workspaceId 即可
+dws doc copy --node <源文件dentryUuid> --workspace <TARGET_WS_ID> --format json
+
+# ── 场景 B: 移动钉盘文件到另一个钉盘 space 根目录 ──
+# 1. 获取源文件 dentryUuid
+dws drive list --space-id <SOURCE_SPACE_ID> --format json
+# 2. 获取目标 space 的 rootFolderId
+dws drive list-spaces --format json
+# 3. 用 rootFolderId 作为 --folder（不需要传 --workspace）
+dws doc move --node <源文件dentryUuid> --folder <目标space的rootFolderId> --format json
+
+# ── 场景 C: 复制钉盘文件到钉盘 space 下的子文件夹 ──
+# 1. 获取源文件 dentryUuid
+dws drive list --space-id <SOURCE_SPACE_ID> --format json
+# 2. 浏览目标 space 找到目标文件夹的 fileId（dentryUuid 格式）
+dws drive list --space-id <TARGET_SPACE_ID> --format json
+# 若目标在更深层级，继续用 --folder 逐层浏览
+dws drive list --space-id <TARGET_SPACE_ID> --folder <父文件夹dentryUuid> --format json
+# 3. 用目标文件夹的 fileId 作为 --folder
+dws doc copy --node <源文件dentryUuid> --folder <目标文件夹fileId> --format json
+```
+
+## 上下文传递表
+
+
+| 操作            | 从返回中提取                       | 用于                                                       |
+| ------------- | ---------------------------- | -------------------------------------------------------- |

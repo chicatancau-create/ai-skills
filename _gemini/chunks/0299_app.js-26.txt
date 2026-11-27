@@ -1,0 +1,84 @@
+                escapeHtml(spec.key) + '" data-target-ids="' + targetIds + '">';
+            var hasValue = spec.options.indexOf(spec.value) !== -1;
+            if (!spec.mixed && spec.value && !hasValue) {
+                html += '<option value="' + escapeHtml(spec.value) + '" selected>' +
+                    escapeHtml(spec.value) + '</option>';
+            }
+            spec.options.forEach(function (opt) {
+                var label = opt || placeholder || "";
+                var selected = !spec.mixed && spec.value === opt ? " selected" : "";
+                html += '<option value="' + escapeHtml(opt) + '"' + selected + '>' +
+                    escapeHtml(label) + '</option>';
+            });
+            html += '</select>';
+            return html;
+        }
+        return '<input type="text" class="prop-edit prop-edit-text-style" data-key="' +
+            escapeHtml(spec.key) + '" data-target-ids="' + targetIds +
+            '" placeholder="' + escapeHtml(placeholder) +
+            '" value="' + escapeHtml(spec.mixed ? "" : spec.value) + '">';
+    }
+
+    function isColorAttribute(key, value) {
+        var k = String(key).toLowerCase();
+        if (["fill", "stroke", "color", "stop-color", "flood-color", "lighting-color"].indexOf(k) !== -1) {
+            return isSafeColor(value);
+        }
+        return false;
+    }
+
+    function renderAttributeControl(spec) {
+        if (isColorAttribute(spec.key, spec.value)) {
+            return '<input type="color" class="prop-edit prop-edit-color" data-key="' +
+                escapeHtml(spec.key) + '" value="' + normalizeHexForPicker(spec.value) + '">' +
+                '<input type="text" class="prop-edit prop-edit-color-text" data-key="' +
+                escapeHtml(spec.key) + '" value="' + escapeHtml(spec.value) + '">';
+        }
+        if (spec.value.length > 60 || spec.key === "d" || spec.key === "points" || spec.key === "style") {
+            return '<textarea class="prop-edit prop-edit-attr-area" rows="2" data-key="' +
+                escapeHtml(spec.key) + '">' + escapeHtml(spec.value) + '</textarea>';
+        }
+        return '<input type="text" class="prop-edit prop-edit-attr" data-key="' +
+            escapeHtml(spec.key) + '" value="' + escapeHtml(spec.value) + '">';
+    }
+
+    // ---- Geometry (position/size) helpers ----------------------------
+    // Edits fold into the element's own transform matrix so they apply
+    // uniformly regardless of how the element is positioned (x/y, cx/cy, d…).
+
+    function computeRenderBox(el) {
+        // Local geometry bbox (excludes the element's OWN transform) ...
+        var bbox = el.getBBox();
+        // ... times the element CTM (includes own + ancestor transforms) =
+        // the on-screen box in the svg root user space (= svg_output coords).
+        var ctm = el.getCTM();
+        if (!ctm) return { x: bbox.x, y: bbox.y, w: bbox.width, h: bbox.height };
+        var corners = [
+            { x: bbox.x, y: bbox.y },
+            { x: bbox.x + bbox.width, y: bbox.y },
+            { x: bbox.x, y: bbox.y + bbox.height },
+            { x: bbox.x + bbox.width, y: bbox.y + bbox.height }
+        ];
+        var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        corners.forEach(function (p) {
+            var sx = p.x * ctm.a + p.y * ctm.c + ctm.e;
+            var sy = p.x * ctm.b + p.y * ctm.d + ctm.f;
+            minX = Math.min(minX, sx); minY = Math.min(minY, sy);
+            maxX = Math.max(maxX, sx); maxY = Math.max(maxY, sy);
+        });
+        return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+    }
+
+    function ownMatrix(el) {
+        var t = el.transform && el.transform.baseVal;
+        if (t && t.numberOfItems) {
+            var c = t.consolidate();
+            if (c) {
+                var m = c.matrix;
+                return new DOMMatrix([m.a, m.b, m.c, m.d, m.e, m.f]);
+            }
+        }
+        return new DOMMatrix();
+    }
+
+    function parentCTM(el) {

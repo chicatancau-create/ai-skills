@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""Regress Edit Native links, inheritance, text, shows, payloads, and proxies.
+
+Usage: python3 -m unittest tests.test_edit_native_batch_b
+Examples: Run the command from the scripts directory.
+Dependencies: python-pptx and the sibling importer, exporter, and checker.
+"""
+
+from __future__ import annotations
+
+import copy
+import io
+import json
+import posixpath
+import tempfile
+import unittest
+import zipfile
+from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
+from types import SimpleNamespace
+from xml.etree import ElementTree as ET
+
+from pptx import Presentation
+from pptx.chart.data import CategoryChartData
+from pptx.enum.chart import XL_CHART_TYPE
+from pptx.enum.shapes import MSO_SHAPE
+from pptx.util import Inches, Pt
+
+from authoring_roundtrip import materialize_flat_authoring_roundtrip
+from pptx_delivery_check import audit_pptx_delivery
+from pptx_ooxml.clone import clone_presentation_slides
+from pptx_to_svg.converter import ConvertOptions, convert_pptx_to_svg
+from svg_authoring_view import adopt_authoring_object
+from svg_quality.checker import SVGQualityChecker
+from svg_to_pptx.pptx_package.cli import main as export_main
+
+
+NS = {
+    'p': 'http://schemas.openxmlformats.org/presentationml/2006/main',
+    'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
+    'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
+    'rel': 'http://schemas.openxmlformats.org/package/2006/relationships',
+    's': 'http://www.w3.org/2000/svg',
+    'c': 'http://schemas.openxmlformats.org/drawingml/2006/chart',
+}
+REL_BASE = NS['r'] + '/'
+
+
+def _xml(root: ET.Element) -> bytes:
+    return ET.tostring(root, encoding='utf-8', xml_declaration=True)
+
+
+def _rewrite_package(path: Path, mutate) -> None:
+    with zipfile.ZipFile(path) as archive:
+        entries = {name: archive.read(name) for name in archive.namelist()}
+    mutate(entries)
+    with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as archive:
+        for name, data in entries.items():
+            archive.writestr(name, data)
+
+
+def _add_relationship(entries: dict, part: str, rid: str, kind: str, target: str) -> None:
+    rels = posixpath.join(posixpath.dirname(part), '_rels', posixpath.basename(part) + '.rels')
+    root = ET.fromstring(entries[rels])
+    ET.SubElement(root, '{%s}Relationship' % NS['rel'], {
+        'Id': rid, 'Type': REL_BASE + kind, 'Target': target,
+    })
+    entries[rels] = _xml(root)
+
+
+def _source(path: Path, *, chart: bool = False, placeholder: bool = False, mutate=None) -> None:
+    prs = Presentation()
+    prs.slide_width, prs.slide_height = Inches(10), Inches(5.625)
+    for _ in range(3):
+        slide = prs.slides.add_slide(prs.slide_layouts[1 if placeholder else 6])
+        shape = (slide.shapes.title if placeholder else
+                 slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(1), Inches(1), Inches(4), Inches(1)))
+        shape.text = 'Bonjour'
+        shape.text_frame.paragraphs[0].runs[0].font.size = Pt(18)
+    if chart:
+        data = CategoryChartData()
+        data.categories = ['Old A', 'Old B']
+        data.add_series('Original', [8, 2])
+        prs.slides[0].shapes.add_chart(
+            XL_CHART_TYPE.AREA, Inches(1), Inches(2.5), Inches(4), Inches(2), data,
+        )
+    prs.save(path)
+    if mutate:
+        _rewrite_package(path, mutate)
+
+
+def _link_fixture(entries: dict, *, text: bool = False, target: int = 3) -> None:
+    part = 'ppt/slides/slide1.xml'
+    root = ET.fromstring(entries[part])
+    parent = root.find('.//a:rPr' if text else './/p:sp/p:nvSpPr/p:cNvPr', NS)
+    ET.SubElement(parent, '{%s}hlinkClick' % NS['a'], {
+        '{%s}id' % NS['r']: 'rIdJump', 'action': 'ppaction://hlinksldjump',
+    })
+    entries[part] = _xml(root)
+    _add_relationship(entries, part, 'rIdJump', 'slide', f'slide{target}.xml')
+
+
+def _show_fixture(entries: dict, *, action: bool = False) -> None:
+    root = ET.fromstring(entries['ppt/presentation.xml'])

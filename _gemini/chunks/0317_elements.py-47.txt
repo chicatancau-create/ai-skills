@@ -1,0 +1,113 @@
+        raise ValueError(
+            'nested crop <svg> cannot contain non-whitespace character data'
+        )
+
+    children = list(elem)
+    if (
+        len(children) != 1
+        or children[0].tag != f'{{{SVG_NS}}}image'
+    ):
+        raise ValueError(
+            'nested <svg> is reserved for imported picture crops; expected '
+            'exactly one direct SVG-namespace <image> child'
+        )
+    image_elem = children[0]
+    if image_elem.tail and image_elem.tail.strip():
+        raise ValueError(
+            'nested crop <svg> cannot contain non-whitespace character data'
+        )
+    if list(image_elem) or (image_elem.text and image_elem.text.strip()):
+        raise ValueError('nested crop <image> must be an empty element')
+
+    unsupported = _unsupported_nested_crop_attributes(
+        image_elem,
+        _NESTED_CROP_IMAGE_ATTRIBUTES,
+    )
+    if unsupported:
+        raise ValueError(
+            'nested crop <image> has unsupported attribute(s): '
+            + ', '.join(unsupported)
+        )
+
+    outer_clip_path = elem.get('clip-path')
+    inner_clip_path = image_elem.get('clip-path')
+    if outer_clip_path is not None and inner_clip_path is not None:
+        raise ValueError(
+            'nested crop clip-path must occur on either the outer <svg> or '
+            'the inner <image>, not both'
+        )
+    clip_path = inner_clip_path or outer_clip_path
+    if crop_marker is not None and crop_marker != '1':
+        raise ValueError('nested crop data-pptx-crop must be exactly "1"')
+    if clip_path is None:
+        if crop_marker is not None:
+            raise ValueError(
+                'nested crop data-pptx-crop="1" requires clip-path'
+            )
+    elif clip_path.strip().lower() == 'none':
+        raise ValueError('nested crop clip-path cannot be "none"')
+    elif crop_marker != '1':
+        raise ValueError(
+            'nested crop clip-path requires data-pptx-crop="1"'
+        )
+    if inner_clip_path is not None and overflow != 'hidden':
+        raise ValueError(
+            'nested crop with inner <image> clip-path requires '
+            'overflow="hidden" on the outer <svg>'
+        )
+
+    try:
+        _project_image_href(image_elem)
+    except ValueError as exc:
+        raise ValueError(f'nested crop <image> {exc}') from exc
+
+    required_outer = (
+        'x',
+        'y',
+        'width',
+        'height',
+        'viewBox',
+        'preserveAspectRatio',
+    )
+    missing = [name for name in required_outer if elem.get(name) is None]
+    if missing:
+        raise ValueError(
+            'nested crop <svg> requires explicit x, y, width, height, '
+            'viewBox, and preserveAspectRatio="none"; missing '
+            + ', '.join(missing)
+        )
+    if elem.get('preserveAspectRatio') != 'none':
+        raise ValueError(
+            'nested crop <svg> preserveAspectRatio must be exactly "none"'
+        )
+
+    frame_values: dict[str, float] = {}
+    for name in ('x', 'y', 'width', 'height'):
+        raw = elem.get(name)
+        assert raw is not None
+        try:
+            frame_values[name] = parse_project_geometry_length(raw, name)
+        except ValueError as exc:
+            raise ValueError(
+                f'nested crop <svg> {name}={raw!r}: {exc}'
+            ) from exc
+    if frame_values['width'] <= 0 or frame_values['height'] <= 0:
+        raise ValueError('nested crop <svg> width and height must be positive')
+
+    view_box = elem.get('viewBox') or ''
+    view_box_tokens = view_box.strip().split()
+    if (
+        len(view_box_tokens) != 4
+        or any(
+            not is_canonical_project_geometry_length(token)
+            for token in view_box_tokens
+        )
+    ):
+        raise ValueError(
+            'nested crop viewBox must contain four finite unitless ordinary '
+            'decimals separated by whitespace'
+        )
+    vb_x, vb_y, vb_w, vb_h = (
+        parse_project_geometry_length(token, 'x')
+        for token in view_box_tokens
+    )

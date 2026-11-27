@@ -1,0 +1,95 @@
+def validate_animation_config(
+    project_path: Path,
+    config: dict[str, Any] | None = None,
+    config_path: str | None = None,
+    *,
+    svg_files: list[Path] | None = None,
+) -> list[str]:
+    """Return sidecar-reference diagnostics for the selected SVG slides.
+
+    Fatal field/type/value checks are owned by
+    :func:`validate_animation_config_errors`. Anonymous groups are warnings;
+    references to invalid sound files, missing slides/groups, and structural
+    targets are fatal at export call sites. Slides omitted from a sparse
+    sidecar inherit defaults.
+    """
+    if config is None:
+        config = load_animation_config(project_path, config_path)
+    if not config:
+        return []
+
+    warnings = _animation_sound_path_errors(project_path, config)
+    warnings.extend(_transition_sound_path_errors(project_path, config))
+    targets_by_slide, anonymous_groups = scan_project_targets(
+        project_path,
+        svg_files=svg_files,
+        include_hidden=True,
+    )
+    for item in anonymous_groups:
+        warnings.append(f'{item} has no id and cannot be customized in animations.json')
+
+    duplicates_by_slide: dict[str, tuple[str, ...]] = {}
+    for slide_name, targets in targets_by_slide.items():
+        duplicates = _duplicate_target_ids(targets)
+        if duplicates:
+            duplicates_by_slide[slide_name] = duplicates
+    for slide_name, duplicates in duplicates_by_slide.items():
+        warnings.append(_duplicate_target_error(slide_name, duplicates))
+
+    known_slides = set(targets_by_slide)
+    known_groups_by_slide: dict[str, dict[str, GroupTarget]] = {}
+    for slide_name, slide_targets in targets_by_slide.items():
+        ambiguous_ids = set(duplicates_by_slide.get(slide_name, ()))
+        known_groups_by_slide[slide_name] = {
+            target.group_id: target
+            for target in slide_targets
+            if target.group_id not in ambiguous_ids
+        }
+    default_animation: dict[str, Any] = {'effect': 'none'}
+    defaults = config.get('defaults', {})
+    if isinstance(defaults, dict):
+        animation_value = defaults.get('animation', {})
+        if isinstance(animation_value, dict):
+            default_animation = resolve_slide_animation_config(
+                default_animation,
+                animation_value,
+            )
+    slides = config.get('slides', {})
+    if not isinstance(slides, dict):
+        return list(dict.fromkeys(warnings))
+    for slide_name, slide_cfg in slides.items():
+        if slide_name not in known_slides:
+            warnings.append(f'animations.json references missing slide: {slide_name}')
+            continue
+        if not isinstance(slide_cfg, dict):
+            continue
+
+        slide_animation = default_animation
+        animation_value = slide_cfg.get('animation', {})
+        if isinstance(animation_value, dict):
+            slide_animation = resolve_slide_animation_config(
+                default_animation,
+                animation_value,
+            )
+        slide_targets = targets_by_slide.get(slide_name, [])
+        duplicate_ids = duplicates_by_slide.get(slide_name, ())
+        ambiguous_ids = set(duplicate_ids)
+        known_groups = known_groups_by_slide.get(slide_name, {})
+        groups = slide_cfg.get('groups', {})
+        if not isinstance(groups, dict):
+            continue
+        for group_id, group_cfg in groups.items():
+            path = (
+                f'slides[{json.dumps(str(slide_name), ensure_ascii=False)}]'
+                f'.groups[{json.dumps(str(group_id), ensure_ascii=False)}]'
+            )
+            if group_id in ambiguous_ids:
+                continue
+            if group_id not in known_groups:
+                warnings.append(
+                    f'animations.json {path} references a missing group'
+                )
+                continue
+            target = known_groups[group_id]
+            if target.hidden_reason:
+                warnings.append(

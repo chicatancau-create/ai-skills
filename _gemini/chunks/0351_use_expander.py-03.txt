@@ -1,0 +1,103 @@
+            else:
+                self.targets[elem_id] = elem
+
+    def expand(self) -> int:
+        """Expand every visible non-data-icon use node in the document."""
+        self._expand_children(self.root, ())
+        return self.expanded
+
+    def _expand_children(self, parent: ET.Element, stack: tuple[str, ...]) -> None:
+        for index, child in enumerate(list(parent)):
+            if _local_tag(child) == 'defs':
+                continue
+            if (
+                _local_tag(child) == 'use'
+                and child.get('data-icon') is None
+            ):
+                replacement = self._materialize_use(child, stack)
+                parent.remove(child)
+                parent.insert(index, replacement)
+                continue
+            self._expand_children(child, stack)
+
+    def _materialize_use(
+        self,
+        use_elem: ET.Element,
+        stack: tuple[str, ...],
+    ) -> ET.Element:
+        self.instances_started += 1
+        if self.instances_started > _MAX_LOCAL_USE_INSTANCES:
+            raise UseExpansionError(
+                'Local <use> expansion exceeds the 10000-instance safety limit'
+            )
+
+        href = use_elem.get('href')
+        xlink_href = use_elem.get(f'{{{XLINK_NS}}}href')
+        if href is not None and xlink_href is not None:
+            if href != xlink_href:
+                raise UseExpansionError(
+                    'Conflicting href and xlink:href values on local <use>'
+                )
+        if href is None:
+            href = xlink_href
+        match = _LOCAL_HREF_RE.fullmatch(href or '')
+        if match is None:
+            raise UseExpansionError(
+                '<use> must reference a same-document fragment with href="#id"; '
+                f'got {href!r}'
+            )
+        ref_id = match.group(1)
+        if len(stack) >= _MAX_LOCAL_USE_DEPTH:
+            chain = ' -> '.join((*stack, ref_id))
+            raise UseExpansionError(
+                f'Local <use> expansion exceeds the 64-reference depth limit: {chain}'
+            )
+        if ref_id in self.duplicate_ids:
+            raise UseExpansionError(
+                f'<use href="#{ref_id}"> is ambiguous because the id is duplicated'
+            )
+        use_id = use_elem.get('id')
+        if use_id and use_id in self.duplicate_ids:
+            raise UseExpansionError(
+                f'Local <use> instance id {use_id!r} is duplicated in this SVG'
+            )
+        target = self.targets.get(ref_id)
+        if target is None:
+            raise UseExpansionError(
+                f'<use href="#{ref_id}"> has no matching element in this SVG'
+            )
+        if ref_id in stack:
+            chain = ' -> '.join((*stack, ref_id))
+            raise UseExpansionError(f'Circular local <use> reference: {chain}')
+
+        target_tag = _local_tag(target)
+        if target_tag not in _REFERENCE_TAGS:
+            raise UseExpansionError(
+                f'<use href="#{ref_id}"> references unsupported <{target_tag}>'
+            )
+
+        self._reject_structural_metadata(use_elem, 'instance')
+        self._reject_structural_metadata(target, f'target #{ref_id}')
+        self._validate_fragment_reference_syntax(use_elem, 'instance')
+        self._validate_fragment_reference_syntax(target, f'target #{ref_id}')
+
+        target_ids = {
+            elem_id
+            for elem in target.iter()
+            if (elem_id := elem.get('id'))
+        }
+        ambiguous_ids = sorted(target_ids & self.duplicate_ids)
+        if ambiguous_ids:
+            joined = ', '.join(ambiguous_ids)
+            raise UseExpansionError(
+                f'<use href="#{ref_id}"> references a subtree with duplicate id(s): '
+                f'{joined}'
+            )
+
+        next_stack = (*stack, ref_id)
+        target_clone = copy.deepcopy(target)
+        if target_tag == 'use':
+            clone = self._materialize_use(target_clone, next_stack)
+        else:
+            clone = target_clone
+            if target_tag == 'symbol':

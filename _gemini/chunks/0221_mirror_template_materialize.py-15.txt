@@ -1,0 +1,110 @@
+            for name, value in parent_style.items()
+            if (
+                name not in _TEXT_PRESENTATION_ATTRIBUTES
+                or child_tag in _TEXT_PRESENTATION_CONTAINERS
+            )
+        }
+        merged.update(child_style)
+        if merged:
+            child.set("style", _style_text(merged))
+    parent_transform = (parent.get("transform") or "").strip()
+    child_transform = (child.get("transform") or "").strip()
+    if parent_transform:
+        child.set(
+            "transform",
+            " ".join(item for item in (parent_transform, child_transform) if item),
+        )
+
+
+def _flatten_fixed_group(group: ET.Element, *, context: str) -> list[ET.Element]:
+    visible_children = [child for child in group if _visible_leaf(child)]
+    group_style = _parse_style(group.get("style"))
+    aggregate_attrs = {
+        name for name in _AGGREGATE_GROUP_ATTRIBUTES if group.get(name) is not None
+    }
+    aggregate_attrs.update(
+        name
+        for name in _AGGREGATE_GROUP_ATTRIBUTES
+        if name in group_style
+    )
+    if len(visible_children) > 1 and aggregate_attrs:
+        raise MirrorMaterializationError(
+            f"{context} cannot expand a multi-child group with aggregate effect(s): "
+            + ", ".join(sorted(aggregate_attrs))
+        )
+
+    atoms: list[ET.Element] = []
+    for child in visible_children:
+        child_style = _parse_style(child.get("style"))
+        conflicting_aggregate_attrs = {
+            name
+            for name in aggregate_attrs
+            if child.get(name) is not None or name in child_style
+        }
+        if conflicting_aggregate_attrs:
+            raise MirrorMaterializationError(
+                f"{context} cannot collapse nested aggregate effect(s): "
+                + ", ".join(sorted(conflicting_aggregate_attrs))
+            )
+        item = copy.deepcopy(child)
+        _merge_group_inheritance(group, item)
+        for name in aggregate_attrs:
+            if group.get(name) is not None:
+                item.set(name, group.get(name, ""))
+        if _local_name(item.tag) == "g":
+            atoms.extend(_flatten_fixed_group(item, context=context))
+        else:
+            atoms.append(item)
+    if len(atoms) == 1:
+        atom = atoms[0]
+        for name in ("data-pptx-frame", "data-pptx-object", "data-pptx-prst"):
+            if group.get(name) is not None and atom.get(name) is None:
+                atom.set(name, group.get(name, ""))
+    return atoms
+
+
+def _flatten_fixed_text_atoms(atoms: Iterable[ET.Element]) -> list[ET.Element]:
+    flattened: list[ET.Element] = []
+    for atom in atoms:
+        if _local_name(atom.tag) != "text":
+            flattened.append(atom)
+            continue
+        scratch = ET.Element(f"{{{SVG_NS}}}svg")
+        scratch.append(atom)
+        tree = ET.ElementTree(scratch)
+        flatten_text_with_tspans(tree, merge_paragraphs=False)
+        flattened.extend(list(scratch))
+    return flattened
+
+
+def _fixed_atoms(
+    root: ET.Element,
+    *,
+    scope: str,
+    key: str,
+    placeholder_source_refs: set[str] | None = None,
+) -> list[ET.Element]:
+    atoms: list[ET.Element] = []
+    serial = 0
+    placeholder_source_refs = placeholder_source_refs or set()
+    for child in root:
+        tag = _local_name(child.tag)
+        if (
+            tag in _NON_VISUAL_TAGS
+            or child.get("data-ph-type") is not None
+            or child.get(SOURCE_REF_ATTRIBUTE) in placeholder_source_refs
+        ):
+            continue
+        if not _visible_leaf(child):
+            continue
+        item = copy.deepcopy(child)
+        _merge_group_inheritance(root, item)
+        if tag == "g":
+            expanded = _flatten_fixed_group(
+                item,
+                context=f"{scope} {key} element {child.get('id') or '<g>'}",
+            )
+        else:
+            expanded = [item]
+        expanded = _flatten_fixed_text_atoms(expanded)
+        source_ref = child.get(SOURCE_REF_ATTRIBUTE)

@@ -1,0 +1,76 @@
+            size_str = get_file_size_str(size) if size > 0 else ""
+            if status == "EMBEDDED":
+                if opt_info:
+                    print(f"   [OK] {img_path} ({opt_info})")
+                else:
+                    print(f"   [OK] {img_path} ({size_str})")
+            elif status == "WILL EMBED":
+                print(f"   [PREVIEW] {img_path} ({size_str}) [dry-run]")
+            else:
+                print(f"   [FAIL] {img_path} ({status})")
+        
+        print(f"   [SIZE] {get_file_size_str(original_size)} -> {get_file_size_str(new_size)}")
+    
+    if not dry_run and images_embedded > 0:
+        with open(svg_path, 'w', encoding='utf-8') as f:
+            f.write(new_content)
+    
+    processed_count = len(images_found) if dry_run else images_embedded
+    return (processed_count, new_size)
+
+def main() -> None:
+    """Run the CLI entry point."""
+    parser = argparse.ArgumentParser(
+        description='Convert externally referenced images in SVG files to Base64 inline format',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  %(prog)s 01_cover.svg                # Process a single file
+  %(prog)s *.svg                       # Process all SVGs in current directory
+  %(prog)s --dry-run *.svg             # Preview files to be processed
+        '''
+    )
+    parser.add_argument('files', nargs='+', help='SVG files to process')
+    parser.add_argument('--dry-run', '-n', action='store_true',
+                        help='Only show which images would be processed, without modifying files')
+    parser.add_argument('--compress', action='store_true',
+                        help='Compress images before embedding (JPEG quality=85, PNG optimize)')
+    parser.add_argument('--max-dimension', type=int, default=None,
+                        help='Downscale images exceeding this dimension on either axis (e.g., 2560)')
+
+    args = parser.parse_args()
+
+    if args.dry_run:
+        print("[INFO] Dry-run mode: only preview, no modification\n")
+    if args.compress:
+        print("[INFO] Compression enabled: JPEG quality=85, PNG optimize")
+    if args.max_dimension:
+        print(f"[INFO] Max dimension: {args.max_dimension}px")
+    
+    total_images = 0
+    total_files = 0
+    
+    for svg_file in args.files:
+        if not os.path.exists(svg_file):
+            print(f"[ERROR] File not found: {svg_file}")
+            continue
+        
+        if not svg_file.endswith('.svg'):
+            print(f"[SKIP] Skipping non-SVG file: {svg_file}")
+            continue
+        
+        images, _ = embed_images_in_svg(svg_file, dry_run=args.dry_run,
+                                        compress=args.compress,
+                                        max_dimension=args.max_dimension)
+        if images > 0:
+            total_images += images
+            total_files += 1
+    
+    print(f"\n{'=' * 50}")
+    if args.dry_run:
+        print(f"[PREVIEW] Will process {total_images} images in {total_files} files")
+    else:
+        print(f"[DONE] Embedded {total_images} images in {total_files} files")
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,128 @@
+    for decoration in decorations:
+        existing = (decoration.get("transform") or "").strip()
+        decoration.set(
+            "transform",
+            " ".join(value for value in (frame_transform, existing) if value),
+        )
+
+
+def _resolved_placeholder_decorations(
+    source: ET.Element | None,
+    layout_guide: ET.Element | None,
+    master_guide: ET.Element | None,
+) -> list[ET.Element]:
+    """Resolve text-placeholder decoration through Slide/Layout/Master."""
+    local = _placeholder_decorations(source)
+    local_geometry = (
+        source is not None
+        and source.get("data-pptx-placeholder-local-geometry") == "true"
+    )
+    if local and local_geometry:
+        return local
+
+    inherited: list[ET.Element] = []
+    inherited_guide: ET.Element | None = None
+    for candidate in (layout_guide, master_guide):
+        inherited = _placeholder_decorations(candidate)
+        if inherited:
+            inherited_guide = candidate
+            break
+    if not inherited:
+        return local
+
+    geometry_tags = {
+        "circle",
+        "ellipse",
+        "line",
+        "path",
+        "polygon",
+        "polyline",
+        "rect",
+    }
+    if local and not local_geometry:
+        if (
+            len(local) != 1
+            or len(inherited) != 1
+            or _local_name(local[0].tag) not in geometry_tags
+            or _local_name(inherited[0].tag) not in geometry_tags
+        ):
+            return local
+        _apply_placeholder_paint(local[0], inherited[0])
+
+    if (
+        source is None
+        or not local_geometry
+        or len(inherited) != 1
+    ):
+        _remap_placeholder_decorations(
+            inherited,
+            _frame(inherited_guide),
+            _frame(source),
+        )
+        return inherited
+
+    source_geometry = _placeholder_geometry(source)
+    inherited_tag = _local_name(inherited[0].tag)
+    if not source_geometry or inherited_tag not in geometry_tags:
+        return inherited
+    for geometry in source_geometry:
+        _apply_placeholder_paint(inherited[0], geometry)
+    return source_geometry
+
+
+def _normalize_mergeable_tspans(text: ET.Element) -> None:
+    """Mark the first line of a positional text block for paragraph merging."""
+    tspans = [child for child in text if _local_name(child.tag) == "tspan"]
+    if len(tspans) < 2 or not any(
+        any(tspan.get(name) is not None for name in ("x", "y", "dy"))
+        for tspan in tspans
+    ):
+        return
+    first = tspans[0]
+    if first.get("x") is None and text.get("x") is not None:
+        first.set("x", text.get("x", ""))
+    if first.get("y") is None and first.get("dy") is None:
+        first.set("dy", "0")
+
+
+def _blank_text_carrier(
+    plan: SlotPlan,
+    layout_guide: ET.Element | None,
+    master_guide: ET.Element | None,
+) -> ET.Element:
+    carrier = _copy_text_carrier(layout_guide)
+    if carrier is None:
+        carrier = _copy_text_carrier(master_guide)
+    if carrier is None:
+        x, y, _width, height = plan.bounds
+        carrier = ET.Element(
+            f"{{{SVG_NS}}}text",
+            {
+                "x": format_coordinate(x),
+                "y": format_coordinate(y + min(height, 24)),
+                "font-size": "18",
+                "fill": "#000000",
+                "data-pptx-carrier": "true",
+            },
+        )
+    carrier.text = None
+    for child in list(carrier):
+        carrier.remove(child)
+    if carrier.get("data-pptx-frame") is None:
+        carrier.set(
+            "data-pptx-frame",
+            " ".join(format_coordinate(value) for value in plan.bounds),
+        )
+    carrier.set("data-pptx-carrier", "true")
+    return carrier
+
+
+def _blank_image_carrier(plan: SlotPlan) -> ET.Element:
+    x, y, width, height = plan.bounds
+    return ET.Element(
+        f"{{{SVG_NS}}}image",
+        {
+            "x": format_coordinate(x),
+            "y": format_coordinate(y),
+            "width": format_coordinate(width),
+            "height": format_coordinate(height),

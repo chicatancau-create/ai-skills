@@ -1,0 +1,123 @@
+```
+Usage:
+  dws contact dept get-info [flags]
+Example:
+  dws contact dept get-info --dept 12345
+Flags:
+      --dept string   部门 ID (必填)
+Notes:
+  - **钉钉根部门 `deptId=1`**；查根部门用 `--dept 1`
+```
+
+#### 查看子部门
+```
+Usage:
+  dws contact dept list-children [flags]
+Example:
+  dws contact dept list-children --dept 1           # 枚举根部门下的一级部门
+  dws contact dept list-children --dept 12345       # 枚举指定部门的直属子部门
+Flags:
+      --dept string   父部门 ID (必填)
+Returns:
+  success          bool     调用是否成功
+  result           list     直属子部门列表，每项包含以下字段：
+    deptId         int      子部门 ID
+    deptName       string   子部门名称
+Notes:
+  - **钉钉根部门 `deptId=1`**；查询一级部门请用 `--dept 1`
+  - 仅返回**直属**（直接下一级）子部门，不递归；需要逐层下钻请对子 deptId 继续调用本命令
+  - 受组织架构可见性控制：仅返回调用者**有权限查看**的子部门
+  - 父部门不可见或无子部门时返回 result=[] 空列表（非错误）
+```
+
+#### 查看部门成员
+```
+Usage:
+  dws contact dept list-members [flags]
+Example:
+  dws contact dept list-members --depts 12345,67890
+  dws contact dept list-members --depts 1              # 根部门
+Flags:
+      --depts string   部门 ID 列表，逗号分隔 (必填)
+Notes:
+  - **钉钉根部门 `deptId=1`**；查根部门直属成员用 `--depts 1`
+  - 仅返回**本部门**直接成员，**不含下级部门**成员；需含下级请先 `dept list-children` 枚举子部门，再对子 deptId 分别/合并调用 `list-members`
+  - 受组织架构可见性控制；`--depts` 支持逗号分隔批量查询多个部门
+  - 跨层级成员展开见 [08-directory.md](../best_practices/08-directory.md) 的 `cross-level-dept-members` recipe
+```
+
+### label (角色查询)
+
+> **角色ID = labelId**：用户提到"角色ID"时，均指通讯录 label 系统中的角色ID，**不是部门ID也不是userId**。查角色成员用 `label list-members --id <角色ID>`，不要传给 `dept get-info` 或 `user get`。
+
+#### 获取企业所有角色列表
+```
+Usage:
+  dws contact label list
+Example:
+  dws contact label list
+Flags:
+  无
+Notes:
+  - 无需参数，返回当前企业全部角色列表（labelId、labelName等）
+  - 用于不知道准确角色名称时先浏览全部角色
+  - 典型场景：用户说“企业所有主管/查所有管理员/财务人员有哪些”→ 先 label list 浏览全部角色，匹配目标角色后 label list-members 获取成员
+```
+
+#### 根据角色名称查询角色
+```
+Usage:
+  dws contact label get [flags]
+Example:
+  dws contact label get --names "管理员"
+  dws contact label get --names "管理员,财务"
+Flags:
+      --names string   角色名称，逗号分隔 (必填)
+Notes:
+  - 精确匹配角色名称，不支持模糊搜索
+  - 支持同时查询多个角色名称，逗号分隔
+  - 无需分页
+```
+
+#### 查询角色下的成员
+```
+Usage:
+  dws contact label list-members [flags]
+Example:
+  dws contact label list-members --id 12345
+Flags:
+      --id string   角色 ID (必填)
+Notes:
+  - 根据角色ID直接查询成员列表；已有角色ID时直接用 `--id <labelId>`
+  - 不知道角色ID时：先 `dws contact label get --names "角色名"` 或 `dws contact label list` 获取 labelId
+```
+
+## 意图判断
+
+> **搜人首选 `aisearch person`**：凡是“找人/搜人/找同事/谁负责/上级/下级”均优先用 [aisearch person](./aisearch.md)，以下场景才用 contact。
+
+用户说"我是谁/我的信息/我的 userId/当前用户/本人/self/me/whoami" → `user get-self`（无需参数；禁止用 `user get --ids me/self` 代替）
+用户需要 userId 给其他产品使用（发消息/建待办/约日程）→ `user search`（按名字）或 `user search-mobile`（按手机号）
+用户说"查用户详情/部门/主管/管理员" → `user get`（需 userId，返回组织管理信息）
+用户说"花名册字段/有哪些字段/字段列表" → `user profile fields`
+用户说"花名册/员工档案/学历/家庭/银行卡/紧急联系人/合同" → `user profile get`（需 staffId，返回个人档案信息）
+用户说"离职员工/离职名单/离职人员/已离职" → `user dismission search`
+用户说"找部门/哪个部门" → `dept search`
+用户说"部门详情/部门信息/部门多少人" → `dept get-info`（返回部门ID、部门名称、部门人数；需 deptId，若只有部门名称需先 `dept search`）
+用户说"子部门/下设部门/部门有哪些下级部门/枚举二级部门" → `dept list-children`（需父 deptId；只有部门名先 `dept search`）
+用户说"部门有谁/部门成员/人员名单" → `dept list-members`（需 deptId；**仅本部门不含下级**，含下级先 `dept list-children` 再合并查）
+用户查询涵盖"角色"（主管/管理员/财务/HR/总经理等任意角色名）→ 统一走 `contact label` 链路，按下方决策树选命令：
+- 不知道角色名 / 枚举所有角色 → `label list`
+- 已知角色名，查ID或成员 → 先 `label get --names <名>` 拿ID，查成员再调 `label list-members --id <ID>`；**精确匹配无结果时降级 `label list` 模糊匹配**
+- 已知角色ID 查成员 → `label list-members --id <ID>`
+
+> [!IMPORTANT]
+> **角色查询 3 步决策树**（不依赖字串匹配，按语义判定）：
+> 1. 不知道角色名 / 要枚举所有角色（列出企业有哪些角色、每个角色的名称和ID、不确定叫什么角色、负责XX的人有哪些等） → `label list`
+> 2. 已知角色名 要查角色ID → `label get --names`
+> 3. 已知角色ID 要查成员 → `label list-members --id`
+>
+> 任何含"角色"一词的查询默认走 `contact label` 链路。**唯一例外**：终点是"某个人是否具备某权限"（如"张三是不是管理员"）→ `user get`。禁止路由到 `user profile fields`（那是花名册字段）、`dept list-members` 筛选、或 OA/chat 模块。
+
+> [!IMPORTANT]
+> **角色查人 vs 查某人的角色信息 — 判断口径**：先判断用户的终点是"人"还是"属性"：

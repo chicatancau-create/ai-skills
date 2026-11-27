@@ -1,0 +1,103 @@
+        if command.startswith("\\") and command[1:].isalpha():
+            return command + " "
+        return command
+    if len(value) == 1:
+        return value
+    raise FormulaImportError(f"unsupported reversible delimiter: {value!r}")
+
+
+def _preview_root(root: ET.Element) -> str:
+    math = root.find(f"{_M}oMath") if root.tag == f"{_M}oMathPara" else root
+    if math is None:
+        return ""
+    return _preview_children(math)
+
+
+def _preview_children(parent: ET.Element) -> str:
+    return "".join(
+        _preview_node(child)
+        for child in parent
+        if not _local_name(child).endswith(_PROPERTY_SUFFIX)
+        and _local_name(child) != "ctrlPr"
+    )
+
+
+def _preview_argument(owner: ET.Element, name: str) -> str:
+    child = owner.find(f"{_M}{name}")
+    return _preview_children(child) if child is not None else ""
+
+
+def _preview_node(element: ET.Element) -> str:
+    name = _local_name(element)
+    if name == "r":
+        text = element.find(f"{_M}t")
+        return text.text or "" if text is not None else ""
+    if name == "f":
+        return f"({_preview_argument(element, 'num')})/({_preview_argument(element, 'den')})"
+    if name == "rad":
+        degree = _preview_argument(element, "deg")
+        prefix = f"√[{degree}]" if degree else "√"
+        return f"{prefix}({_preview_argument(element, 'e')})"
+    if name in {"sSub", "sSup", "sSubSup"}:
+        base = _preview_argument(element, "e")
+        subscript = _preview_argument(element, "sub")
+        superscript = _preview_argument(element, "sup")
+        return _preview_script(base, subscript, superscript)
+    if name == "sPre":
+        prefix = _preview_script(
+            "",
+            _preview_argument(element, "sub"),
+            _preview_argument(element, "sup"),
+        )
+        return prefix + _preview_argument(element, "e")
+    if name == "nary":
+        symbol = _property_value(element, "naryPr", "chr", "")
+        return _preview_script(
+            symbol,
+            _preview_argument(element, "sub"),
+            _preview_argument(element, "sup"),
+        ) + _preview_argument(element, "e")
+    if name == "d":
+        left = _property_value(element, "dPr", "begChr", "(")
+        right = _property_value(element, "dPr", "endChr", ")")
+        separator = _property_value(element, "dPr", "sepChr", "")
+        segments = [_preview_children(child) for child in element.findall(f"{_M}e")]
+        return left + separator.join(segments) + right
+    if name == "m":
+        rows = [
+            ", ".join(_preview_children(cell) for cell in row.findall(f"{_M}e"))
+            for row in element.findall(f"{_M}mr")
+        ]
+        return "[" + "; ".join(rows) + "]"
+    if name == "eqArr":
+        return "  ".join(
+            _preview_children(row)
+            for row in element.findall(f"{_M}e")
+        )
+    if name == "acc":
+        return _preview_argument(element, "e") + _property_value(element, "accPr", "chr", "")
+    if name == "bar":
+        marker = "¯" if _property_value(element, "barPr", "pos", "top") == "top" else "_"
+        return marker + f"({_preview_argument(element, 'e')})"
+    if name == "groupChr":
+        marker = _property_value(element, "groupChrPr", "chr", "")
+        return marker + f"({_preview_argument(element, 'e')})"
+    if name == "limLow":
+        return _preview_script(
+            _preview_argument(element, "e"),
+            _preview_argument(element, "lim"),
+            "",
+        )
+    if name == "limUpp":
+        return _preview_script(
+            _preview_argument(element, "e"),
+            "",
+            _preview_argument(element, "lim"),
+        )
+    if name == "func":
+        return _preview_argument(element, "fName") + _preview_argument(element, "e")
+    if name in {"box", "phant"}:
+        return _preview_argument(element, "e")
+    if name == "borderBox":
+        return "□(" + _preview_argument(element, "e") + ")"
+    if name in {"e", "deg", "den", "fName", "lim", "num", "sub", "sup"}:

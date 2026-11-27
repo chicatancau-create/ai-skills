@@ -1,0 +1,114 @@
+        default_gridlines=True,
+        title_xml=y_title_xml,
+    )
+
+
+def _stock_series_xml(
+    categories: list[int | float],
+    series: list[dict[str, Any]],
+    *,
+    colors: list[str],
+    category_number_format: str | None = None,
+) -> str:
+    parts: list[str] = []
+    for index, item in enumerate(series):
+        column_index = index + 2
+        parts.append(
+            "<c:ser>"
+            f'<c:idx val="{index}"/><c:order val="{index}"/>'
+            "<c:tx><c:strRef>"
+            f"<c:f>Sheet1!${_excel_col(column_index)}$1</c:f>"
+            f"{_string_cache([str(item['name'])])}"
+            "</c:strRef></c:tx>"
+            '<c:spPr><a:ln><a:noFill/></a:ln></c:spPr>'
+            '<c:marker><c:symbol val="none"/></c:marker>'
+            "<c:cat><c:numRef>"
+            f"<c:f>Sheet1!$A$2:$A${len(categories) + 1}</c:f>"
+            f"{_number_cache(categories, category_number_format or 'General')}"
+            "</c:numRef></c:cat>"
+            "<c:val><c:numRef>"
+            f"<c:f>Sheet1!${_excel_col(column_index)}$2:${_excel_col(column_index)}${len(categories) + 1}</c:f>"
+            f"{_number_cache(item['values'])}"
+            "</c:numRef></c:val>"
+            '<c:smooth val="0"/>'
+            "</c:ser>"
+        )
+    return "".join(parts)
+
+
+def _stock_axis_xml(
+    cat_ax_id: str,
+    val_ax_id: str,
+    *,
+    axis_font_size: int,
+    axis_title_font_size: int,
+    axis_titles: dict[str, Any],
+    chart_style: dict[str, str | None],
+    axes: dict[str, dict[str, Any]] | None = None,
+) -> str:
+    normalized_axes = dict(axes or {})
+    normalized_axes.setdefault("category", {"kind": "date", "position": "bottom"})
+    return _axis_pair_xml(
+        cat_ax_id,
+        val_ax_id,
+        axis_font_size=axis_font_size,
+        axis_title_font_size=axis_title_font_size,
+        axis_titles=axis_titles,
+        chart_style=chart_style,
+        chart_type="stock",
+        grouping=None,
+        show_value_axis_labels=True,
+        axes=normalized_axes,
+        secondary=False,
+    )
+
+
+def _chart_data_with_fallback_geometry(
+    elem: ET.Element,
+    chart_data: dict[str, Any],
+) -> dict[str, Any]:
+    """SVG-first only: fill bar spacing and tick crossing from the fallback drawing."""
+    if chart_data.get("gap_width") is None:
+        inferred_gap_width = _inferred_bar_gap_width(elem, chart_data)
+        if inferred_gap_width is not None:
+            chart_data = {**chart_data, "gap_width": inferred_gap_width}
+    if chart_data.get("overlap") is None:
+        inferred_overlap = _inferred_bar_overlap(elem, chart_data)
+        if inferred_overlap is not None:
+            chart_data = {**chart_data, "overlap": inferred_overlap}
+    axes = chart_data.get("axes") or {}
+    value_axis = axes.get("value") or {}
+    if value_axis.get("cross_between") is None:
+        inferred_cross_between = _inferred_cross_between(elem, chart_data)
+        if inferred_cross_between is not None:
+            chart_data = {
+                **chart_data,
+                "axes": {
+                    **axes,
+                    "value": {**value_axis, "cross_between": inferred_cross_between},
+                },
+            }
+    return chart_data
+
+
+def _chart_xml(
+    elem: ET.Element,
+    payload: dict[str, Any],
+    *,
+    chart_rels_id: str,
+    chart_data: dict[str, Any],
+    chart_bounds: tuple[int, int, int, int],
+    inherited_styles: dict[str, str] | None = None,
+    primary_language: str | None = None,
+) -> bytes:
+    style = payload.get("style") if isinstance(payload.get("style"), dict) else {}
+    colors = (
+        [_clean_hex(color, "#4472C4") for color in style.get("colors", [])]
+        if isinstance(style.get("colors"), list)
+        else []
+    )
+    text_sizes = _chart_text_sizes(payload, elem, inherited_styles)
+    axis_titles = _axis_titles(payload)
+    chart_style = _classic_chart_style(payload, elem, inherited_styles)
+    chart_style["primary_language"] = primary_language
+    if not native_json_is_authoritative(elem):

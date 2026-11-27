@@ -1,0 +1,101 @@
+            raw = self._parse_raw_required_group("chemical expression")
+            return _ChemParser(raw, display=self.display).parse()
+        if command == "bra":
+            return Delimiter("⟨", "|", (self._parse_required_argument("bra body"),))
+        if command == "ket":
+            return Delimiter("|", "⟩", (self._parse_required_argument("ket body"),))
+        if command in SPACING_COMMANDS:
+            return self._styled_text(SPACING_COMMANDS[command], _SPACING_STYLE)
+        if command in {"mkern", "mskip"}:
+            return self._styled_text(self._parse_spacing_length(command), _SPACING_STYLE)
+        if command == "hspace":
+            return self._styled_text(
+                _space_from_length(self._parse_raw_required_group("horizontal space")),
+                _SPACING_STYLE,
+            )
+        if command in NO_OUTPUT_COMMANDS:
+            return Sequence(())
+        if command in DISCARDED_ARGUMENT_COMMANDS:
+            self._parse_required_argument(f"\\{command} body", allow_empty=True)
+            return Sequence(())
+        if command == "mathrel":
+            return OperatorEmulator(
+                self._parse_required_argument("math relation body")
+            )
+        if command == "mathop":
+            return Function(
+                name=self._parse_required_argument("math operator body"),
+                limit_style=True,
+            )
+
+        self._fail(f"Unsupported LaTeX command \\{command}", position=command_start)
+
+    def _parse_group(self) -> Sequence:
+        self.position += 1
+        saved_style = self.current_style
+        try:
+            return self._parse_nested_sequence(terminator="}")
+        finally:
+            self.current_style = saved_style
+
+    def _parse_required_argument(
+        self,
+        description: str,
+        *,
+        allow_empty: bool = False,
+        text_mode: bool = False,
+    ) -> Sequence:
+        self._skip_whitespace()
+        saved_text_depth = self.text_mode_depth
+        if text_mode:
+            self.text_mode_depth += 1
+        try:
+            if self.position >= len(self.source):
+                self._fail(f"{description.capitalize()} is missing")
+            if self.source[self.position] == "{":
+                result = self._parse_group()
+            else:
+                result = Sequence((self._parse_nested_bare_atom(),))
+        finally:
+            self.text_mode_depth = saved_text_depth
+        if not allow_empty and is_empty(result):
+            self._fail(f"{description.capitalize()} cannot be empty")
+        return result
+
+    def _parse_optional_argument(
+        self,
+        description: str,
+        *,
+        allow_empty: bool = False,
+    ) -> Sequence | None:
+        self._skip_whitespace()
+        if self.position >= len(self.source) or self.source[self.position] != "[":
+            return None
+        self.position += 1
+        result = self._parse_nested_sequence(terminator="]")
+        if not allow_empty and is_empty(result):
+            self._fail(f"{description.capitalize()} cannot be empty")
+        return result
+
+    def _parse_raw_required_group(self, description: str) -> str:
+        try:
+            raw, self.position = _read_raw_group(self.source, self.position)
+        except FormulaCompileError as exc:
+            self._fail(f"{description.capitalize()} must use a braced group")
+            raise AssertionError from exc
+        return raw
+
+    def _parse_raw_optional_group(self, description: str) -> str | None:
+        self._skip_whitespace()
+        if self.position >= len(self.source) or self.source[self.position] != "[":
+            return None
+        closing = self.source.find("]", self.position + 1)
+        if closing < 0:
+            self._fail(f"Unclosed {description}")
+        raw = self.source[self.position + 1:closing]
+        self.position = closing + 1
+        self._skip_whitespace()
+        return raw
+
+    def _parse_nested_sequence(self, **kwargs: object) -> Sequence:
+        self.depth += 1

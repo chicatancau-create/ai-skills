@@ -1,0 +1,90 @@
+        pixels > 1024
+        or not (512 <= width <= 2048 and 512 <= height <= 2048)
+        or width * height > 1024 * 1024
+    ):
+        raise ValueError(
+            f"Unsupported image size '{image_size}' / aspect ratio '{aspect_ratio}' for Hy-Image-3.0. "
+            "Width and height must each be 512-2048 pixels in multiples of 16, "
+            "with area <= 1024x1024. Use 1K with a ratio from 1:4 to 4:1, or 512px at 1:1."
+        )
+    return f"{width}x{height}"
+
+
+def _read_bool(name: str, default: bool) -> bool:
+    """Read a boolean provider option without silently accepting typos."""
+    value = os.environ.get(name, str(default)).strip().lower()
+    if value in {"true", "1", "yes", "on"}:
+        return True
+    if value in {"false", "0", "no", "off"}:
+        return False
+    raise ValueError(f"Invalid argument: set {name} to true or false.")
+
+
+def _generate_image(api_key: str, prompt: str,
+                    aspect_ratio: str = "1:1", image_size: str = "1K",
+                    output_dir: str = None, filename: str = None,
+                    model: str = DEFAULT_MODEL, base_url: str = DEFAULT_BASE_URL) -> str:
+    """Generate one image with the Tencent backend."""
+    model = _validate_model(model)
+    size = _resolve_size(aspect_ratio, image_size, model)
+    url = _resolve_url(base_url, model)
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "size": size,
+    }
+    output_format = "png"
+    if model == DEFAULT_MODEL:
+        payload["revise"] = _read_bool("TENCENT_REVISE", True)
+    else:
+        output_format = (os.environ.get("TENCENT_OUTPUT_FORMAT") or "png").strip().lower()
+        if output_format not in {"png", "jpeg"}:
+            raise ValueError("Invalid argument: set TENCENT_OUTPUT_FORMAT to png or jpeg.")
+        payload.update({
+            "watermark": _read_bool("TENCENT_WATERMARK", False),
+            "response_format": "url",
+            "output_format": output_format,
+        })
+
+    print("[Tencent Cloud TokenHub]")
+    print(f"  Model:        {model}")
+    print(f"  Prompt:       {prompt[:120]}{'...' if len(prompt) > 120 else ''}")
+    print(f"  Aspect Ratio: {aspect_ratio}")
+    if model == "seedream-image-v5.0-lite" and normalize_image_size(image_size) in {"512px", "1K"}:
+        print(f"  [INFO] Seedream lite requires at least 2K; upgrading {image_size} to 2K.")
+    print(f"  Resolution:   {size}")
+    print()
+    print("  [..] Generating...", end="", flush=True)
+    start = time.time()
+    response = requests.post(url, headers=headers, json=payload, timeout=300)
+    elapsed = time.time() - start
+    print(f"\n  [DONE] Response received ({elapsed:.1f}s)")
+
+    if response.status_code != 200:
+        raise http_error(response, "Tencent image generation")
+
+    data = response.json()
+    items = data.get("data") or []
+    item = items[0] if items and isinstance(items[0], dict) else {}
+    image_url = item.get("url")
+    image_b64 = item.get("b64_json") if model != DEFAULT_MODEL else None
+    if not image_url and not image_b64:
+        raise RuntimeError(f"Tencent response missing image URL or base64 data: {data}")
+
+    path = resolve_output_path(prompt, output_dir, filename, f".{output_format}")
+    if image_url:
+        return download_image(image_url, path)
+    return save_image_bytes(base64.b64decode(image_b64), path, content_type=f"image/{output_format}")
+
+
+def generate(prompt: str,
+             aspect_ratio: str = "1:1", image_size: str = "1K",
+             output_dir: str = None, filename: str = None,
+             model: str = None, max_retries: int = MAX_RETRIES) -> str:
+    """Generate an image with retries using the Tencent backend."""
+    resolved_model = _validate_model(model or os.environ.get("TENCENT_MODEL") or DEFAULT_MODEL)
+    normalized_size = normalize_image_size(image_size)

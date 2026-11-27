@@ -1,0 +1,47 @@
+| `dws_minutes_hotquery_0047` | 这个听记链接你能打开看内容吗 `https://shanji.dingtalk.com/meeting/minutes?taskUuid=sample006` |
+
+**典型错误动作**：`browser_use` 打开页面遇到登录墙就回复"需要登录"；或 `read_file` 当本地文件读 → 失败 → 把锅甩给用户。完全没有意识到 dws 技能本身已携带账号态，能直接通过 taskUuid/dentryUuid 拿到内容。
+
+**模式 E：多源数据生成日报/汇报/总结/报告，听记侧 0 调用**
+
+涉及 query：
+
+| case_id | 用户原始 query |
+|---------|----------------|
+| `dws_minutes_hotquery_0040` | 根据今天的聊天记录和听记总结工作日报 |
+| `dws_minutes_hotquery_0005` | 把会议纪要写入钉钉文档 |
+| `minutes-001` (P0) | 从悟空的商业模式分析，重新写一下市场感知报告 |
+| `minutes-002` (P0) | 最新文档啥也没有啊，我要你根据我的工作情况总结，分成问题应收、异常事故处理、ai相关工作和其他几部分总结 |
+| `minutes-004` (P0) | 你这个好像只是基于日程，我要的是我的对话，发出去的文字，私聊，群聊，日程，会议，文档修改等相关的所有动作，参考这个生成日报，并且把这个封装成日报skill |
+
+**典型错误动作**：识别出"日报/报告/总结/写文档"场景后，只想着调用周报技能 / 文档写入技能，**完全跳过听记数据获取**这一步。更隐蔽的变体是：用户 query 中**没有出现"听记"二字**（如"根据工作情况总结"、"重新写市场感知报告"），但任务的完成**实际依赖会议讨论内容**，AI 却完全没有意识到需要从听记中采集素材，结果输出空洞的报告或反问"请告诉我会议纪要内容"。
+
+**P0 case 暴露的三种变体（必须全部识别）：**
+- **变体 1（minutes-001）**：用户要写报告，报告素材来源于历史会议讨论 → AI 没识别出需要查听记
+- **变体 2（minutes-002）**：用户要分类总结工作，且明确说"文档啥也没有" → AI 没切到听记作为替代数据源
+- **变体 3（minutes-004）**：用户明确抱怨"只是基于日程"并点名要求"会议"等多数据源 → AI 仍然只用日程数据
+
+#### 二、五类共性反模式（必须全部识别为禁止动作）
+
+| 反模式 | 错误根因 | 正确做法 |
+|--------|----------|----------|
+| **R1：模糊请求 → 反问要细节** | AI 把"信息不足"当成必须澄清的前置条件 | 听记类模糊请求 → **默认先调用 `dws minutes list mine --max 10 --format json`** 把最近的听记列出来，让用户从列表里挑，而不是反问关键词 |
+| **R2：用 `session_search`/`memory_search` 替代 dws** | AI 把"历史会话里聊过的纪要描述"误认为是真实数据源 | 历史会话只能回忆"以前我们聊过什么"，**不是真实听记数据**。听记数据**必须**从 `dws minutes` 实时拉取 |
+| **R3：用 `activity:search` 通用 web 搜索听记** | 把"听记"理解成公网信息 | 听记是用户私人钉钉数据，**只能**通过 `dws minutes list/get` 获取，公网搜不到也不该搜 |
+| **R4：钉钉 URL 走 browser_use/read_file** | 把钉钉 URL 当成普通网页 | 钉钉听记 URL（`shanji.dingtalk.com/meeting/minutes?taskUuid=xxx` 或 `shanji.dingtalk.com/app/transcribes/xxx`）→ **提取 taskUuid → 走 `dws minutes get summary/get transcription`**；钉钉文档 URL（`alidocs.dingtalk.com/i/nodes/xxx`）→ **提取 dentryUuid → 走 `dws doc read`** |
+| **R5：日报/汇报/总结/报告场景跳过听记数据采集** | 只看到"日报/报告/总结"就直奔输出端，忘了用户指定的（或隐含的）数据源包含会议/听记。**不仅限于用户说了"听记"二字的场景**——"根据我的工作情况总结"（minutes-002）、"重新写一下市场感知报告"（minutes-001）、"我要的是我的对话...会议...生成日报"（minutes-004）都属于此类 | query 中出现"总结/报告/汇报/日报/周报/工作情况/商业分析/市场感知/复盘"等产出类关键词时，必须自检：**用户的产出是否依赖会议讨论内容？** 如果是 → **第一步必须** `dws minutes list mine` 拿听记 → `get summary` 逐篇拉摘要 → 再汇总。详见「间接意图识别」章节 |
+
+#### 三、五类 badcase 的统一正确链路（速查表）
+
+| 用户 query 形态 | 第一步必跑命令 | 关键说明 |
+|------------------|------------------|----------|
+| 模糊请求："总结下我的会议" / "周会回顾整理" / "查列表+看摘要" / "评测工作复盘" / "按关键词搜索我的听记" | `dws minutes list mine --max 10 --format json` | 拿到最近听记列表后，对前 1~3 篇 `get summary`，引导用户挑选目标 |
+| 含时间词："最近一次/昨天/本周/上周的会议" | `dws minutes list mine --start <ISO> --end <ISO> --max 20 --format json` | 时间范围按用户描述折算，不要让用户自己提供日期 |
+| 含主题/项目关键词："某某项目讨论" / "搜索+摘要+关键词" | `dws minutes list all --query "<关键词>" --max 20 --format json` | 用 `--query` 而不是 `activity:search` |
+| 钉钉听记 URL（`shanji.dingtalk.com/...?taskUuid=xxx`） | `dws minutes get summary --id <taskUuid> --format json` | 从 URL 提取 taskUuid，禁用 browser_use |
+| 钉钉文档 URL（`alidocs.dingtalk.com/i/nodes/xxx`） | `dws doc read --node <url 或 dentryUuid> --format json` | 走 doc 技能而非 read_file/browser_use |
+| 多篇听记对比："对比一下这几个听记 [URL1] [URL2]" | 对每个 URL 分别 `dws minutes get summary --id <uuid> --format json` | 失败的 URL 给出明确说明，不要把锅全甩给用户 |
+| 日报/汇报含"听记"/"会议纪要"关键词 | 先 `dws minutes list mine --start <今日 0 点> --max 20`，再对每篇 `get summary`，最后才汇总 | 听记数据采集是必跑前置，不能直接跳到周报技能 |
+| 报告/分析类（query 未显式提"听记"但依赖会议讨论素材）："重新写一下市场感知报告" / "帮我生成商业分析" | `dws minutes list all --query "<主题关键词>" --max 20 --format json` → 逐篇 `get summary` 提取素材 | 详见「间接意图识别」，用户的报告素材来源于历史会议讨论 |
+| 分类工作总结（query 未显式提"听记"但需要工作记录）："根据我的工作情况总结，分成…几部分" / "文档啥也没有，根据工作情况总结" | `dws minutes list mine --start <起始日期> --end <截止日期> --format json` → 逐篇 `get summary` → 按分类维度归类 | 文档不足时听记是唯一剩余数据源；详见「间接意图识别」 |
+| 多源聚合（用户抱怨数据源不全或点名要求会议数据）："只是基于日程，我要的是对话+会议+文档等所有动作" / "聊天记录和听记总结日报" | 听记侧必跑 `dws minutes list mine --start <起始日期> --end <截止日期>` → `get summary`，再并行采集其他源 | 用户点名要了"会议"就不能省略听记采集 |

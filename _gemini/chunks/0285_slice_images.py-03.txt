@@ -1,0 +1,106 @@
+    border_ratio: float = _SHEET_DIAGNOSTIC_BORDER_RATIO,
+    key: Optional[tuple[int, int, int]] = None,
+) -> tuple[tuple[int, int, int], int, int]:
+    """Return the dominant RGB cluster, its spread, and the ring's farthest pixel.
+
+    The spread describes the key field itself; the outlier distance is what a
+    ``--tolerance`` must reach so that isolated ringing or compression pixels
+    in the gutter still key out.
+    """
+    rgb = sheet.convert("RGB")
+    width, height = rgb.size
+    border_x = max(1, round(width * border_ratio))
+    border_y = max(1, round(height * border_ratio))
+    px = rgb.load()
+    pixels: list[tuple[int, int, int]] = []
+
+    for y in range(border_y):
+        pixels.extend(px[x, y] for x in range(width))
+    for y in range(max(border_y, height - border_y), height):
+        pixels.extend(px[x, y] for x in range(width))
+    for y in range(border_y, max(border_y, height - border_y)):
+        pixels.extend(px[x, y] for x in range(border_x))
+        pixels.extend(
+            px[x, y]
+            for x in range(max(border_x, width - border_x), width)
+        )
+
+    buckets = Counter(
+        tuple(channel // _SHEET_DIAGNOSTIC_BUCKET_SIZE for channel in pixel)
+        for pixel in pixels
+    )
+    dominant_bucket = buckets.most_common(1)[0][0]
+    dominant_pixels = [
+        pixel
+        for pixel in pixels
+        if tuple(
+            channel // _SHEET_DIAGNOSTIC_BUCKET_SIZE
+            for channel in pixel
+        ) == dominant_bucket
+    ]
+    dominant = tuple(
+        round(median(channel))
+        for channel in zip(*dominant_pixels)
+    )
+    channel_spreads = [
+        max(pixel[index] for pixel in dominant_pixels)
+        - min(pixel[index] for pixel in dominant_pixels)
+        for index in range(3)
+    ]
+    measured_key = dominant if key is None else key
+    outlier = max(
+        max(abs(pixel[index] - measured_key[index]) for index in range(3))
+        for pixel in pixels
+    )
+    return dominant, max(channel_spreads), outlier  # type: ignore[return-value]
+
+
+def _max_channel_difference(cell: Image.Image, bg: tuple[int, int, int]) -> Image.Image:
+    """Return the maximum absolute RGB channel difference from the background."""
+    diff = ImageChops.difference(cell.convert("RGB"), Image.new("RGB", cell.size, bg))
+    red, green, blue = diff.split()
+    return ImageChops.lighter(ImageChops.lighter(red, green), blue)
+
+
+def _pure_chroma_channel(bg: tuple[int, int, int]) -> Optional[int]:
+    """Return the active channel for an exact pure RGB key, if any."""
+    if bg.count(255) != 1 or bg.count(0) != 2:
+        return None
+    return bg.index(255)
+
+
+def _nearest_pure_key(
+    color: tuple[int, int, int],
+) -> Optional[tuple[tuple[int, int, int], int]]:
+    """Return the pure RGB key a drifted gutter color came from, with its distance."""
+    best: Optional[tuple[tuple[int, int, int], int]] = None
+    for index in range(3):
+        pure = tuple(255 if i == index else 0 for i in range(3))
+        distance = max(abs(color[i] - pure[i]) for i in range(3))
+        if distance <= _KEY_DRIFT_MAX_TOLERANCE and (best is None or distance < best[1]):
+            best = (pure, distance)  # type: ignore[assignment]
+    return best
+
+
+def _channel_alpha(channel: Image.Image, bg_value: int) -> Image.Image:
+    """Return the minimum alpha that can explain one channel over a key."""
+    lut = []
+    for value in range(256):
+        if value > bg_value:
+            denominator = 255 - bg_value
+            alpha = 255 if denominator == 0 else round(
+                (value - bg_value) * 255 / denominator
+            )
+        elif value < bg_value:
+            alpha = 255 if bg_value == 0 else round(
+                (bg_value - value) * 255 / bg_value
+            )
+        else:
+            alpha = 0
+        lut.append(alpha)
+    return channel.point(lut)
+
+
+def _chroma_alpha(rgb: Image.Image, bg: tuple[int, int, int]) -> Image.Image:
+    """Recover foreground opacity for a pure single-channel chroma key.
+

@@ -1,0 +1,82 @@
+    referenced_data_ids: list[int]
+    if chart_type in _HIERARCHY_LAYOUTS:
+        data_id = _series_data_id(series_nodes[0])
+        data = _require_data(data_by_id, data_id)
+        raw_levels = _string_dimension(data, expected_levels=None)
+        values = _numeric_dimension(data, "size")
+        if not raw_levels or any(len(level) != len(values) for level in raw_levels):
+            raise UnsupportedChartEx("unsupported-chartex-cache")
+        # ChartEx serializes the innermost level first; the authoring schema
+        # and workbook writer use the natural outermost-to-innermost order.
+        payload["levels"] = list(reversed(raw_levels))
+        payload["values"] = values
+        if chart_type == "treemap":
+            parent_labels = _treemap_parent_labels(series_nodes[0])
+            if parent_labels is not None:
+                payload["parent_label_layout"] = parent_labels
+        referenced_data_ids = [data_id]
+    elif chart_type == "histogram":
+        data_id = _series_data_id(series_nodes[0])
+        data = _require_data(data_by_id, data_id)
+        _reject_dimensions(data, allowed={"numDim"})
+        payload["values"] = _numeric_dimension(data, "val")
+        referenced_data_ids = [data_id]
+    elif chart_type in {"funnel", "pareto", "waterfall"}:
+        data_id = _series_data_id(series_nodes[0])
+        data = _require_data(data_by_id, data_id)
+        categories = _string_dimension(data, expected_levels=1)[0]
+        values = _numeric_dimension(data, "val")
+        if len(categories) != len(values):
+            raise UnsupportedChartEx("unsupported-chartex-cache")
+        payload["categories"] = categories
+        payload["values"] = values
+        if chart_type == "waterfall":
+            payload["subtotals"] = _waterfall_subtotals(series_nodes[0])
+        referenced_data_ids = [data_id]
+    elif chart_type == "box_whisker":
+        items: list[dict[str, Any]] = []
+        referenced_data_ids = []
+        for index, series in enumerate(series_nodes, start=1):
+            data_id = _series_data_id(series)
+            if data_id in referenced_data_ids:
+                raise UnsupportedChartEx("unsupported-chartex-data-id")
+            data = _require_data(data_by_id, data_id)
+            categories = _string_dimension(data, expected_levels=1)[0]
+            values = _numeric_dimension(data, "val")
+            if len(categories) != len(values):
+                raise UnsupportedChartEx("unsupported-chartex-cache")
+            items.append({
+                "categories": categories,
+                "name": _series_name(series, index),
+                "values": values,
+            })
+            referenced_data_ids.append(data_id)
+        payload["series"] = items
+    else:  # pragma: no cover - _chart_type is closed, keep the invariant explicit.
+        raise UnsupportedChartEx("unsupported-chartex-type")
+
+    if set(referenced_data_ids) != set(data_by_id):
+        raise UnsupportedChartEx("unsupported-chartex-data-id")
+
+    legend = chart.find("cx:legend", CX_NS)
+    if legend is not None:
+        payload["show_legend"] = True
+        position = legend.attrib.get("pos")
+        if position in _LEGEND_POSITIONS:
+            payload["legend_position"] = position
+    return payload
+
+
+def _chart_type(series_nodes: list[ET.Element]) -> str:
+    layouts = [series.attrib.get("layoutId", "") for series in series_nodes]
+    if len(series_nodes) == 1 and layouts[0] in _HIERARCHY_LAYOUTS | _FLAT_LAYOUTS:
+        return layouts[0]
+    if layouts and all(layout == "boxWhisker" for layout in layouts):
+        return "box_whisker"
+    if len(series_nodes) == 1 and layouts == ["clusteredColumn"]:
+        if series_nodes[0].find("cx:layoutPr/cx:binning", CX_NS) is None:
+            raise UnsupportedChartEx("unsupported-chartex-series")
+        return "histogram"
+    if len(series_nodes) == 2 and layouts == ["clusteredColumn", "paretoLine"]:
+        primary, line = series_nodes
+        if (

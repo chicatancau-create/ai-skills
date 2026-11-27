@@ -1,0 +1,57 @@
+**重要：该接口会真实发送消息到目标会话，不可用于测试或试探性调用。调用前必须确认消息内容和接收对象无误。**
+
+--group 指定群聊 openConversationId 发群消息；--user 指定用户 userId 发单聊；--open-dingtalk-id 指定用户 openDingTalkId 发单聊。三者只能选其一，不能同时指定。纯文本/Markdown 单聊传 --user 时直接走 userId 发送能力，不需要先手动查询 openDingTalkId。推荐使用 --text flag 传递消息内容（也支持位置参数）。可选 --title 作为消息标题。
+若用户只提供了数字群号而非 openConversationId，需先调用 `chat group get-by-group-id` 将群号转为 openConversationId，再传入 --group。
+--群聊时可选 --at-all @所有人，或 --at-open-dingtalk-ids 指定成员（仅群聊时生效）。
+--富媒体消息：通过 --msg-type 指定类型（image/file），必须根据文件扩展名判断 msgType 后再发送。
+```
+Usage:
+  dws chat message send [flags] [<text>]
+
+富媒体消息 msgType 决策（必须按此规则判断，不可跳过）:
+  文件扩展名                               → msgType → 发送参数
+  .jpg/.jpeg/.png/.gif/.bmp/.webp          → image   → dt_media_upload 上传 → `python scripts/extract_media_id.py <URL>` 提取 mediaId → --msg-type image --media-id
+  其他所有（.mp3/.wav/.mp4/.avi/.pdf/.doc/.xls/.zip 等） → file → conversation-info 获取 spaceId → drive upload --space-id 上传 → drive info 获取 dentryId → --msg-type file --dentry-id --space-id --file-name --file-type --file-path --file-size
+
+Example:
+  dws chat message send --group <openconversation_id> --text "hello"
+  dws chat message send --user <userId> --text "请查收"
+  dws chat message send --open-dingtalk-id <openDingTalkId> --text "请查收"
+  dws chat message send --group <openconversation_id> "hello"
+  dws chat message send --group <openconversation_id> --title "周报提醒" --text "请大家本周五前提交周报"
+  # 幂等发送（24h 内相同 uuid 不重复投递）
+  dws chat message send --group <openconversation_id> --text "hello" --uuid "unique-id-123"
+  dws chat message send --group <openconversation_id> --at-all "@all 请大家注意"
+  dws chat message send --group <openconversation_id> --at-open-dingtalk-ids openDingTalkId1,openDingTalkId2 "<@openDingTalkId1> <@openDingTalkId2> 请查收"
+  # 发送图片
+  dws chat message send --group <openconversation_id> --msg-type image --media-id <mediaId>
+  # 发送文件（音频/视频/文档等非图片文件统一走钉盘上传）
+  # 先 dws chat conversation-info --group <id> 获取 spaceId（取 newCSpaceIdIM）
+  # 再 dws drive upload --file <文件> --space-id <spaceId> 上传
+  # 再 dws drive info --file-id <fileId> --space-id <spaceId> 获取 dentryId
+  dws chat message send --group <openconversation_id> --msg-type file --dentry-id <dentryId> --space-id 24557356340 --file-name "report.pdf" --file-type "pdf" --file-path "/report.pdf" --file-size 234724
+Flags:
+      --text string              消息内容（推荐使用，也可用位置参数）
+      --group string             群聊 openconversation_id（群聊时必填）
+      --user string              单聊接收人 userId（单聊时与 --open-dingtalk-id 二选一）
+      --open-dingtalk-id string  单聊接收人 openDingTalkId（单聊时与 --user 二选一）
+      --title string             消息标题（可选，默认「消息」）
+      --at-all                   @所有人（仅群聊时生效，可选，默认 false）
+      --at-open-dingtalk-ids string  @指定成员的 openDingTalkId 列表，逗号分隔（仅群聊时生效，可选）
+      --media-id string          图片 mediaId（dt_media_upload 上传后用 `python scripts/extract_media_id.py <URL>` 提取，仅 msgType=image）
+      --msg-type string          消息类型: image/file（image 用 mediaId，file 用钉盘上传）
+      --dentry-id int64          钉盘文件 dentryId（msgType=file 时必填，通过 drive info 获取）
+      --space-id int64           钉盘空间 ID（msgType=file 时必填）
+      --file-name string         文件名（msgType=file 时必填）
+      --file-type string         文件类型/扩展名（msgType=file 时必填）
+      --file-path string         文件路径（msgType=file 时必填）
+      --file-size int64          文件大小，单位字节（msgType=file 时必填）
+      --uuid string             幂等 UUID，相同 uuid 在 24h 内不会重复发送（可选）
+
+注意:
+  - --text 和位置参数二选一，--text 优先
+  - --group、--user、--open-dingtalk-id 三者互斥，只需指定其一：群聊用 --group，单聊用 --user 或 --open-dingtalk-id
+  - 纯文本/Markdown 单聊发送时 `--user` 和 `--open-dingtalk-id` 都可用；传 `--user` 时直接走 userId 发送能力
+  - --group 的别名: --id, --chat, --conversation-id (均可替代 --group)
+  - --at-all 和 --at-open-dingtalk-ids 仅在 --group 群聊时生效，单聊时无效；当设置--at-all时，消息内容中一定要包含对应的占位符@all;当设置--at-open-dingtalk-ids openDingTalkId1,openDingTalkId2时，消息内容中一定要包含对应格式的占位符<@openDingTalkId1> <@openDingTalkId2>
+  - **换行符**：消息内容按 Markdown 渲染，换行有两层要求，缺一不可：

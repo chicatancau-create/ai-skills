@@ -1,0 +1,96 @@
+        joined = "\n".join(native_object_projection_warnings(marker))
+
+        self.assertIn(
+            "style.text_color #111111 differs from fallback dominant text_color #AAAAAA",
+            joined,
+        )
+        self.assertIn(
+            "style.axis_color #222222 differs from fallback dominant axis_color #BBBBBB",
+            joined,
+        )
+        self.assertIn(
+            "style.grid_color #333333 differs from fallback dominant grid_color #CCCCCC",
+            joined,
+        )
+
+    def test_checker_surfaces_projection_findings_as_warnings(self) -> None:
+        checker = SVGQualityChecker()
+        for filename, expected in self.EXPECTED_FINDINGS.items():
+            with self.subTest(filename=filename):
+                result = {"errors": [], "warnings": []}
+                checker._check_native_object_markers(
+                    _fixture_root(filename),
+                    result,
+                )
+                joined = "\n".join(result["warnings"])
+                for text in expected:
+                    self.assertIn(text, joined)
+                self.assertFalse(result["errors"])
+
+    def test_native_export_preflight_collects_the_same_findings(self) -> None:
+        fixture_paths = [
+            FIXTURES_DIR / filename
+            for filename in self.EXPECTED_FINDINGS
+        ]
+
+        findings = _native_object_projection_findings(fixture_paths)
+        findings_by_page: dict[str, str] = {}
+        for filename, _marker_id, warning in findings:
+            findings_by_page.setdefault(filename, "")
+            findings_by_page[filename] += warning + "\n"
+
+        self.assertEqual(set(findings_by_page), set(self.EXPECTED_FINDINGS))
+        for filename, expected in self.EXPECTED_FINDINGS.items():
+            with self.subTest(filename=filename):
+                for text in expected:
+                    self.assertIn(text, findings_by_page[filename])
+
+    def test_table_parity_accepts_uniform_run_level_bold_and_color(self) -> None:
+        marker = ET.fromstring("""
+            <g data-pptx-replace-with="table" data-pptx-bounds="0 0 200 80">
+              <metadata type="application/json">
+                {
+                  "schema": "ppt-master.semantic-table.v2",
+                  "x": 0, "y": 0, "width": 200, "height": 80,
+                  "header_rows": 1,
+                  "column_widths": [100, 100],
+                  "row_heights": [40, 40],
+                  "columns": [
+                    {
+                      "align": "l",
+                      "paragraphs": [{"runs": [{
+                        "text": "Level", "bold": true, "color": "#1E1A16"
+                      }]}]
+                    },
+                    {
+                      "align": "l",
+                      "paragraphs": [{"runs": [{
+                        "text": "Meaning", "bold": true, "color": "#1E1A16"
+                      }]}]
+                    }
+                  ],
+                  "rows": [[
+                    {"paragraphs": [{"runs": [{
+                      "text": "Altar", "bold": true, "color": "#1E1A16"
+                    }]}]},
+                    {"text": "Cosmos", "color": "#2F2A25"}
+                  ]]
+                }
+              </metadata>
+              <line x1="0" y1="0" x2="200" y2="0" stroke="#999999"/>
+              <line x1="0" y1="40" x2="200" y2="40" stroke="#999999"/>
+              <line x1="0" y1="80" x2="200" y2="80" stroke="#999999"/>
+              <g font-weight="bold" fill="#1E1A16">
+                <text x="10" y="25">Level</text>
+                <text x="110" y="25">Meaning</text>
+                <text x="10" y="65">Altar</text>
+              </g>
+              <text x="110" y="65" fill="#2F2A25">Cosmos</text>
+            </g>
+        """)
+
+        joined = "\n".join(native_object_projection_warnings(marker))
+
+        self.assertNotIn("header style not projected", joined)
+        self.assertNotIn("first-column text style not projected", joined)
+

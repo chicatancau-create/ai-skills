@@ -1,0 +1,131 @@
+        for name, cid_str, col in col_index:
+            if kw_lower in name.lower() and cid_str not in matched_ids:
+                enriched = dict(col)
+                enriched["_column_id"] = cid_str
+                enriched["_column_name"] = name
+                matched.append(enriched)
+                matched_ids.add(cid_str)
+                hit_keywords.add(kw_stripped)
+                break
+
+    missing = set(k.strip() for k in keywords if k.strip()) - hit_keywords
+    if missing:
+        warn(f"以下关键词未匹配到任何字段，已跳过：{sorted(missing)}")
+    return matched
+
+
+def _first_nonempty(d: dict, keys: Iterable[str]) -> Any:
+    for k in keys:
+        if k in d and d[k] not in (None, ""):
+            return d[k]
+    return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# userId → name 映射
+# ─────────────────────────────────────────────────────────────────────────────
+
+def resolve_users_from_input(raw_ids: list[str]) -> list[str]:
+    """
+    智能解析 --users 输入：自动区分部门ID和员工userId。
+
+    Wukong Agent 经常把部门ID当 userId 传入。本函数尝试对每个ID调用
+    `dws contact dept list-members` 获取成员列表：
+      - 如果成功且返回了员工，说明该ID是部门ID，展开为员工userId列表
+      - 如果失败或无结果，说明该ID本身就是userId，原样保留
+
+    最终返回去重后的 userId 列表。
+    """
+    if not raw_ids:
+        return []
+
+    resolved: list[str] = []
+    seen: set[str] = set()
+
+    # 先尝试批量查部门成员（可能全是部门ID）
+    try:
+        result = run_dws([
+            "contact", "dept", "list-members",
+            "--ids", ",".join(raw_ids),
+        ])
+        members = extract_records(result)
+        if members:
+            # 成功获取到成员 → 输入是部门ID
+            for member in members:
+                uid = _first_nonempty(member, ("userId", "userid", "id"))
+                if uid and str(uid) not in seen:
+                    resolved.append(str(uid))
+                    seen.add(str(uid))
+            if resolved:
+                log(f"[users] 检测到输入为部门ID，已展开为 {len(resolved)} 个员工userId")
+                return resolved
+    except DwsCallError:
+        pass
+
+    # 逐个ID尝试：可能混合了部门ID和userId
+    for raw_id in raw_ids:
+        if raw_id in seen:
+            continue
+        try:
+            result = run_dws([
+                "contact", "dept", "list-members",
+                "--ids", raw_id,
+            ])
+            members = extract_records(result)
+            if members:
+                for member in members:
+                    uid = _first_nonempty(member, ("userId", "userid", "id"))
+                    if uid and str(uid) not in seen:
+                        resolved.append(str(uid))
+                        seen.add(str(uid))
+                log(f"[users] 部门ID {raw_id} 展开为 {len(members)} 个员工")
+                continue
+        except DwsCallError:
+            pass
+        # 不是部门ID，当作userId保留
+        if raw_id not in seen:
+            resolved.append(raw_id)
+            seen.add(raw_id)
+
+    return resolved
+
+
+@dataclass
+class UserInfo:
+    """用户基础信息，用于报表的姓名/部门/工号/职位列。"""
+    name: str = ""
+    dept_name: str = ""
+    job_number: str = ""
+    title: str = ""
+
+
+def _extract_title_from_labels(labels: list) -> str:
+    """从 orgEmployeeModel.labels 数组中提取职务名称。"""
+    if not isinstance(labels, list):
+        return ""
+    for item in labels:
+        if isinstance(item, dict) and item.get("groupName") == "职务":
+            name = item.get("name", "")
+            if name:
+                return str(name)
+    return ""
+
+
+def _parse_user_record(record: dict) -> tuple[str, UserInfo] | None:
+    """
+    从 dws contact user get 返回的单条记录中解析用户信息。
+
+    接口返回结构为嵌套格式：
+      {"orgEmployeeModel": {"userId": "xxx", "orgUserName": "吾贤",
+       "depts": [{"deptName": "技术部"}],
+       "labels": [{"groupName": "职务", "name": "财务"}],
+       ...}, "isAdmin": true}
+
+    也兼容扁平格式（其他接口可能返回）：
+      {"userId": "xxx", "name": "吾贤", "deptName": "技术部", ...}
+    """
+    # 优先从嵌套的 orgEmployeeModel 中提取
+    model = record.get("orgEmployeeModel")
+    if isinstance(model, dict):
+        uid = model.get("userId") or model.get("orgUserId")
+        if not uid:

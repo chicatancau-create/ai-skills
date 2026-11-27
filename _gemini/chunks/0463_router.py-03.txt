@@ -1,0 +1,118 @@
+    if end < 0:
+        return None, None
+    fm = txt[3:end]
+    name = desc = None
+    key = None
+    buf = []
+    for line in fm.splitlines():
+        m = re.match(r"^(name|description)\s*:\s*(.*)$", line)
+        if m:
+            if key == "description":
+                desc = " ".join(buf).strip()
+            key = m.group(1)
+            val = m.group(2).strip()
+            if key == "name":
+                name = val.strip("'\"")
+                key = None
+            else:
+                buf = [] if val in ("|", ">", "|-", ">-", "") else [val]
+        elif key == "description" and line.startswith((" ", "\t")):
+            buf.append(line.strip())
+    if key == "description":
+        desc = " ".join(buf).strip()
+    if desc:
+        desc = desc.strip("'\"")
+    return name, desc
+
+
+def scan():
+    """All skills across the library + extra libs. Returns list of dicts."""
+    out = []
+    seen = {}
+    roots = [(LIB, "library")] + EXTRA_LIBS
+    for root, tag in roots:
+        if not os.path.isdir(root):
+            continue
+        for n in sorted(os.listdir(root)):
+            p = os.path.join(root, n)
+            if not os.path.isdir(p):
+                continue
+            sm = os.path.join(p, "SKILL.md")
+            if not os.path.isfile(sm):
+                continue
+            name, desc = parse_fm(sm)
+            name = name or n
+            rec = {
+                "name": name, "dir": n, "root": root, "source": tag,
+                "skill_md": sm, "description": desc or "",
+                "link": is_link(p),
+            }
+            if name in seen:
+                # library wins over extra libs; keep first, record duplicates
+                seen[name].setdefault("duplicates", []).append(sm)
+                continue
+            seen[name] = rec
+            out.append(rec)
+    for rec in out:
+        t = TRIGGERS.get(rec["name"])
+        rec["brief"] = t[0] if t else (rec["description"][:60] or rec["name"])
+        rec["triggers"] = t[1] if t else []
+    return out
+
+
+def cmd_sync():
+    recs = scan()
+    with open(CATALOG_JSON, "w", encoding="utf-8") as f:
+        json.dump({"generated_by": "skill-router", "library": LIB,
+                   "active_window": ACTIVE, "always_on": ALWAYS_ON,
+                   "skills": recs}, f, ensure_ascii=False, indent=1)
+    lines = ["# 技能总索引（由 router.py sync 生成，勿手改）", "",
+             f"共 {len(recs)} 个技能。默认只加载 `skill-router` + `headroom`。",
+             "需要哪个就 **直接 read 它的 SKILL.md**，不要试图把它当工具调用。", "",
+             "| name | 用途 | SKILL.md |", "|---|---|---|"]
+    for r in sorted(recs, key=lambda x: x["name"]):
+        lines.append(f"| `{r['name']}` | {r['brief']} | `{r['skill_md']}` |")
+    with open(CATALOG_MD, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    print(f"synced {len(recs)} skills -> {CATALOG_JSON}")
+    print(f"                        -> {CATALOG_MD}")
+    missing = [r["name"] for r in recs if r["name"] not in TRIGGERS]
+    if missing:
+        print(f"NOTE: {len(missing)} skill(s) have no curated triggers: {', '.join(missing)}")
+
+
+def load_catalog():
+    if not os.path.isfile(CATALOG_JSON):
+        cmd_sync()
+    with open(CATALOG_JSON, "r", encoding="utf-8") as f:
+        return json.load(f)["skills"]
+
+
+def cmd_list():
+    for r in sorted(load_catalog(), key=lambda x: x["name"]):
+        mark = "*" if r["name"] in ALWAYS_ON else " "
+        print(f"{mark} {r['name']:34s} {r['brief']}")
+
+
+def norm(s):
+    s = unicodedata.normalize("NFKC", s).lower()
+    return s
+
+
+def tokens(s):
+    """ASCII words + CJK bigrams/unigrams."""
+    s = norm(s)
+    ascii_words = re.findall(r"[a-z0-9][a-z0-9_.+#/-]*", s)
+    cjk = re.findall(r"[\u4e00-\u9fff]+", s)
+    grams = []
+    for run in cjk:
+        if len(run) == 1:
+            grams.append(run)
+        else:
+            grams.extend(run[i:i + 2] for i in range(len(run) - 1))
+            grams.append(run)
+    return set(ascii_words) | set(grams)
+
+
+def cmd_match(task):
+    recs = load_catalog()

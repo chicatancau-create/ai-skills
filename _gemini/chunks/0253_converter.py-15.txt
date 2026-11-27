@@ -1,0 +1,118 @@
+        sound_dir.mkdir(parents=True, exist_ok=True)
+    for filename, blob in sounds_written.items():
+        target = sound_dir / filename
+        if _path_lexists(target):
+            if (
+                target.is_symlink()
+                or not target.is_file()
+                or target.read_bytes() != blob
+            ):
+                raise RuntimeError(
+                    f"Sound filename collision with different bytes: {filename}"
+                )
+            continue
+        target.write_bytes(blob)
+    if result.native_structure is not None:
+        flat_dir = output_dir / ROUNDTRIP_FLAT_SVG_DIR
+        authoring_dir = output_dir / AUTHORING_SVG_FLAT_DIR
+        source_proxy_dir = media_dir / "source-object-previews"
+        mapping = [
+            (source, authoring_dir / source.name)
+            for source in sorted(flat_dir.glob("slide_*.svg"))
+        ]
+        if len(mapping) != len(result.slides):
+            raise RuntimeError(
+                "Round-trip flat backing roster does not match the slide roster"
+            )
+        project_svg_batch(
+            mapping,
+            flat_dir,
+            authoring_dir,
+            force=False,
+            projection_kind="flat",
+            source_proxy_dir=source_proxy_dir,
+        )
+        extract_directory(
+            authoring_dir,
+            output_dir / "icons",
+            "imported",
+            min_drawables=_ROUNDTRIP_VECTOR_MIN_DRAWABLES,
+            min_bytes=_ROUNDTRIP_VECTOR_MIN_BYTES,
+            min_decoration_bytes=_ROUNDTRIP_VECTOR_MIN_DECORATION_BYTES,
+            inplace=True,
+            id_prefix="flat",
+            inventory_path=(
+                output_dir
+                / f"{authoring_dir.name}_vector_asset_inventory.json"
+            ),
+        )
+        _write_roundtrip_manifest(output_dir, result, options)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _write_speaker_notes(
+    output_dir: Path,
+    result: ConvertResult,
+    *,
+    write_total: bool = True,
+) -> None:
+    """Write imported notes into the standard per-slide Markdown contract."""
+    if not result.speaker_notes:
+        return
+    notes_dir = output_dir / "notes"
+    notes_dir.mkdir(parents=True, exist_ok=True)
+    combined = ["# Speaker Notes"]
+    for note in result.speaker_notes:
+        content = note.markdown.strip() + "\n"
+        (notes_dir / note.filename).write_text(content, encoding="utf-8")
+        combined.extend([
+            "",
+            f"## Slide {note.slide_index:02d}",
+            "",
+            note.markdown.strip(),
+        ])
+    if not write_total:
+        # Round-trip notes are keyed by output stem; the Generate-only
+        # total.md would only pose as a second source of truth.
+        return
+    (notes_dir / "total.md").write_text(
+        "\n".join(combined).rstrip() + "\n",
+        encoding="utf-8",
+    )
+
+
+def _write_roundtrip_manifest(
+    output_dir: Path,
+    result: ConvertResult,
+    options: ConvertOptions,
+) -> None:
+    """Record immutable source, editable sidecars, and semantic resources."""
+    source_path = output_dir / SOURCE_PPTX_PATH
+    animation_path = output_dir / "animations.json"
+    resource_manifest = result.resource_inventory.manifest(
+        include_images=not options.embed_images,
+    )
+    materialized_resource_paths = {
+        Path(str(item["workspacePath"]))
+        for item in resource_manifest["items"]
+        if isinstance(item, dict)
+        and item.get("materialized") is True
+        and isinstance(item.get("workspacePath"), str)
+    }
+    notes_by_index = {
+        note.slide_index: note
+        for note in result.speaker_notes
+    }
+    flat_by_index = {
+        slide.index: slide
+        for slide in result.flat_slides
+    }
+    native_slides = []
+    if isinstance(result.native_structure, dict):

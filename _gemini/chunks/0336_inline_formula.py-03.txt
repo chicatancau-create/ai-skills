@@ -1,0 +1,92 @@
+        if non_output_ancestor is not None:
+            errors.append(
+                f"{label} cannot be placed inside non-output "
+                f"<{non_output_ancestor}> content"
+            )
+        if nested_marker:
+            errors.append(f"{label} cannot be nested inside another inline formula marker")
+        if inside_baseline_shift:
+            errors.append(
+                f"{label} cannot combine baseline-shift with an inline formula"
+            )
+        if inside_block_formula:
+            errors.append(
+                f"{label} cannot be placed inside a block formula preview"
+            )
+        elif inside_native_replacement:
+            errors.append(
+                f"{label} cannot be placed inside a native replacement subtree"
+            )
+        if inside_skipped_transport:
+            errors.append(
+                f"{label} cannot be placed inside non-output geometry transport"
+            )
+        if inside_preserved_text:
+            errors.append(
+                f"{label} cannot be placed inside an imported preserved txBody group"
+            )
+        if inside_placeholder:
+            errors.append(
+                f"{label} cannot be used inside a structured Layout placeholder"
+            )
+        if fixed_structure_layer is not None:
+            errors.append(
+                f"{label} cannot be used on the {fixed_structure_layer} layer; "
+                "inline formulas are slide-local text"
+            )
+
+    return errors
+
+
+def _apply_run_properties(omml: str, run_properties_xml: str) -> str:
+    """Merge DrawingML defaults onto every Office Math leaf run."""
+    try:
+        root = ET.fromstring(omml)
+        wrapper = ET.fromstring(
+            f'<root xmlns:a="{DML_NS}" xmlns:r="{OFFICE_REL_NS}">'
+            f"{run_properties_xml}</root>"
+        )
+    except (ET.ParseError, RecursionError) as exc:
+        raise RuntimeError(f"Invalid inline formula XML: {exc}") from exc
+    if len(wrapper) != 1:
+        raise RuntimeError("Inline formula styling must contain one a:rPr root")
+    run_properties = wrapper[0]
+    if root.tag != f"{{{MATH_NS}}}oMath":
+        raise RuntimeError("Inline formula compiler must return one m:oMath root")
+    if run_properties.tag != _DML_RUN_PROPERTIES:
+        raise RuntimeError("Inline formula styling must use one a:rPr root")
+
+    for run in root.iter(_MATH_RUN):
+        merge_formula_run_properties(run, run_properties)
+    merge_formula_control_properties(root, run_properties)
+
+    return serialize_styled_formula_omml(root)
+
+
+def build_inline_formula_xml(latex: str, run_properties_xml: str) -> str:
+    """Build one ``a14:m`` inline math zone for insertion inside ``a:p``."""
+    try:
+        omml = compile_latex_to_inline_omml(latex)
+    except FormulaCompileError as exc:
+        raise RuntimeError(f"Unsupported inline formula LaTeX: {exc}") from exc
+    styled = _apply_run_properties(omml, run_properties_xml)
+    return f"<a14:m>{styled}</a14:m>"
+
+
+def wrap_inline_formula_shape(shape_xml: str) -> str:
+    """Wrap a text shape containing ``a14:m`` in its required MCE Choice."""
+    return (
+        f'<mc:AlternateContent xmlns:mc="{MC_NS}">'
+        f'<mc:Choice xmlns:a14="{A14_NS}" Requires="a14">'
+        f"{shape_xml}"
+        "</mc:Choice>"
+        "</mc:AlternateContent>"
+    )
+
+
+__all__ = [
+    "INLINE_FORMULA_ATTR",
+    "build_inline_formula_xml",
+    "inline_formula_marker_errors",
+    "wrap_inline_formula_shape",
+]

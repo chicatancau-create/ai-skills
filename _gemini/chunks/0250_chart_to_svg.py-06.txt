@@ -1,0 +1,119 @@
+            raise _UnsupportedChart("unsupported-stock-chart")
+        smooth = series_node.find("c:smooth", C_NS)
+        if smooth is not None:
+            if set(smooth.attrib) != {"val"} or list(smooth):
+                raise _UnsupportedChart("unsupported-stock-chart")
+            if _strict_axis_bool(smooth, False):
+                raise _UnsupportedChart("unsupported-stock-chart")
+        for child_name in ("idx", "order"):
+            child = series_node.find(f"c:{child_name}", C_NS)
+            if child is None or set(child.attrib) != {"val"} or list(child):
+                raise _UnsupportedChart("unsupported-stock-chart")
+
+
+def _stock_payload(
+    chart_root: ET.Element,
+    plot_area: ET.Element,
+    chart: ET.Element,
+    xfrm: Xfrm,
+    *,
+    palette: ColorPalette | None,
+) -> tuple[dict[str, Any], list[SeriesVisualStyle]]:
+    series_nodes = chart.findall("c:ser", C_NS)
+    if len(series_nodes) != 4:
+        raise _UnsupportedChart("unsupported-stock-chart")
+    categories = _numeric_values(series_nodes[0].find("c:cat", C_NS))
+    if not categories:
+        raise _UnsupportedChart("unsupported-chart-cache")
+    series: list[dict[str, Any]] = []
+    for index, series_node in enumerate(series_nodes, start=1):
+        expected_index = str(index - 1)
+        if (
+            _element_val(series_node.find("c:idx", C_NS)) != expected_index
+            or _element_val(series_node.find("c:order", C_NS)) != expected_index
+        ):
+            raise _UnsupportedChart("unsupported-stock-chart")
+        if _numeric_values(series_node.find("c:cat", C_NS)) != categories:
+            raise _UnsupportedChart("unsupported-chart-cache")
+        values = _numeric_values(series_node.find("c:val", C_NS))
+        if len(values) != len(categories):
+            raise _UnsupportedChart("unsupported-chart-cache")
+        series.append({
+            "name": _series_name(series_node, index),
+            "values": values,
+        })
+    axes = _single_axis_contract(
+        plot_area,
+        chart,
+        category_kind="date",
+        cross_between="between",
+    )
+    expected_category_format = axes["category"].get(
+        "number_format",
+        "m/d/yyyy",
+    )
+    category_cache_format = _numeric_category_cache_format(chart)
+    if category_cache_format not in {"General", expected_category_format}:
+        raise _UnsupportedChart("unsupported-chart-category-format")
+    _validate_stock_semantics(plot_area, chart)
+    payload: dict[str, Any] = {
+        **_bounds_payload(xfrm),
+        "axes": axes,
+        "categories": categories,
+        "series": series,
+        "type": "stock",
+    }
+    visual_styles = _chart_visual_styles(payload, chart, palette)
+    _apply_chart_metadata(
+        payload,
+        chart_root,
+        plot_area,
+        chart,
+        palette=palette,
+    )
+    return payload, visual_styles
+
+
+def _canonical_srgb_color(fill: ET.Element | None) -> str:
+    """Return an exporter-canonical solid RGB fill, or reject the style."""
+    if fill is None or fill.attrib:
+        raise _UnsupportedChart("unsupported-chart-series-style")
+    children = list(fill)
+    if (
+        len(children) != 1
+        or _local_name(children[0].tag) != "srgbClr"
+        or set(children[0].attrib) != {"val"}
+        or list(children[0])
+    ):
+        raise _UnsupportedChart("unsupported-chart-series-style")
+    color = children[0].attrib["val"].strip()
+    if len(color) != 6 or any(char not in "0123456789abcdefABCDEF" for char in color):
+        raise _UnsupportedChart("unsupported-chart-series-style")
+    return color.upper()
+
+
+@dataclass(frozen=True)
+class _LinePaint:
+    color: str | None
+    opacity: float
+    width: float
+    cap: str
+    visible: bool
+    automatic: bool
+
+
+@dataclass(frozen=True)
+class _ShapePaint:
+    fill: str | None
+    fill_opacity: float
+    fill_explicit: bool
+    line: _LinePaint | None
+
+
+@dataclass(frozen=True)
+class _MarkerPaint:
+    symbol: str | None
+    size: float
+    shape: _ShapePaint
+
+

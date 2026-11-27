@@ -1,0 +1,93 @@
+        stage = _stage_key(raw_stage)
+        if raw_stage is not None and stage is None:
+            return jsonify({'error': 'invalid confirmation stage'}), 400
+        try:
+            rec_file, current_recommendations = _read_active_recommendations(
+                confirm_dir,
+            )
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            return jsonify({
+                'error': (
+                    'cannot confirm without valid current recommendations: '
+                    f'{exc}'
+                ),
+            }), 409
+        rec_stage_number = _recommendation_stage(current_recommendations)
+        stage1_sha256 = (
+            _json_sha256(current_recommendations) if rec_stage_number == 1
+            else _stage1_sha256(confirm_dir)
+        )
+        selection_receipt = None
+        selection_file = confirm_dir / TEMPLATE_SELECTION_NAME
+        write_selection = False
+        if rec_stage_number == 1:
+            stage1_error = _stage1_ready_error(confirm_dir)
+            if stage1_error:
+                return jsonify({
+                    'error': f'Stage 1 is not ready: {stage1_error}',
+                }), 409
+            if not isinstance(template_selection_payload, dict):
+                return jsonify({
+                    'error': (
+                        'Stage 1 payload must include template_selection with '
+                        'mode and selection_keys'
+                    ),
+                }), 400
+            try:
+                template_options, template_candidates = _build_template_options(
+                    confirm_dir,
+                    recommendation=current_recommendations,
+                )
+                if result.pop('options_sha256', None) != template_options['options_sha256']:
+                    return jsonify({'error': 'Stage 1 options changed; reload the page'}), 409
+                selection_receipt = _resolve_template_confirmation(
+                    template_selection_payload,
+                    template_candidates,
+                    template_options['options_sha256'],
+                    project_path,
+                )
+            except (OSError, json.JSONDecodeError, ValueError) as exc:
+                return jsonify({
+                    'error': f'invalid Stage 1 template selection: {exc}',
+                }), 400
+            template_required = selection_receipt['mode'] == 'templates'
+            write_selection = True
+
+        else:
+            if template_selection_payload is not None:
+                return jsonify({
+                    'error': 'template_selection is accepted only in Stage 1',
+                }), 400
+            stage2_error = _stage2_ready_error(
+                project_path,
+                confirm_dir,
+                rec_file,
+            )
+            if stage2_error:
+                return jsonify({
+                    'error': f'Stage 2 is waiting for the confirmed installation: {stage2_error}',
+                }), 409
+            try:
+                template_required = _template_confirmation_required(project_path)
+            except (OSError, json.JSONDecodeError, ValueError) as exc:
+                return jsonify({
+                    'error': f'cannot determine active template mode: {exc}',
+                }), 409
+        stage_error = _submission_stage_error(
+            confirm_dir,
+            stage,
+            recommendations_file=rec_file,
+            recommendations=current_recommendations,
+            template_required=template_required,
+        )
+        if stage_error:
+            return jsonify({'error': stage_error}), 409
+        custom_error = _custom_selection_error(result)
+        if custom_error:
+            return jsonify({'error': custom_error}), 400
+        previous_result = {}
+        if rec_stage_number >= 2:
+            try:
+                previous_result = _read_result_object(result_file)
+            except (OSError, json.JSONDecodeError, ValueError):
+                pass

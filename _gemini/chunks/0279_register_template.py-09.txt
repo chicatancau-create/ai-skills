@@ -1,0 +1,101 @@
+                or _HEX_COLOR_RE.fullmatch(row[1].strip("` ")) is None
+                or not _style_value_is_substantive(row[2])
+            ):
+                errors.append(
+                    "Fallback Color Scheme rows must be Role | #RRGGBB | Purpose"
+                )
+                break
+
+    fallback_typography = _markdown_subsection(body, "Fallback Typography")
+    if fallback_typography is not None:
+        if "### Fallback Typography" not in visual_section:
+            errors.append("Fallback Typography must appear under section V")
+        typography_rows = [
+            row
+            for row in _markdown_table_rows(fallback_typography)
+            if row and row[0].casefold() != "role"
+        ]
+        if not any(
+            len(row) >= 4
+            and all(_style_value_is_substantive(cell) for cell in row[:4])
+            for row in typography_rows
+        ):
+            errors.append(
+                "Fallback Typography must contain at least one complete "
+                "four-column row"
+            )
+
+    review_section = _numbered_section(body, "Review Focus") or ""
+    if review_section.count(_STYLE_REVIEW_TRIGGER_MARKER) != 1:
+        errors.append(
+            "VII. Review Focus must contain exactly one "
+            f"{_STYLE_REVIEW_TRIGGER_MARKER} marker"
+        )
+    review_items = re.findall(r"^[-*]\s+(.+?)\s*$", review_section, re.MULTILINE)
+    if not any(_style_value_is_substantive(item) for item in review_items):
+        errors.append("VII. Review Focus must contain at least one check")
+
+    for label in _STYLE_FORBIDDEN_FIELDS:
+        if _style_field_is_declared(body, label):
+            errors.append(f"style scope must not declare field: {label}")
+
+    if errors:
+        details = "\n".join(f"  - {error}" for error in errors)
+        raise SpecParseError(f"invalid style specification:\n{details}")
+
+
+def _validate_svg_template_spec(
+    kind: str,
+    template_id: str,
+    template_dir: Path,
+    frontmatter: dict,
+    pages: list[str],
+    *,
+    validate_payload: bool = True,
+) -> None:
+    """Validate Layout/Deck metadata and, when active, its SVG payload."""
+    errors: list[str] = []
+    id_key = KIND_CONFIG[kind]["id_key"]
+    declared_id = str(frontmatter.get(id_key) or "").strip()
+    if declared_id != template_id:
+        errors.append(
+            f"frontmatter {id_key} must match directory {template_id!r}, "
+            f"got {declared_id!r}"
+        )
+    declared_kind = str(frontmatter.get("kind") or "").strip()
+    if declared_kind != kind:
+        errors.append(
+            f"frontmatter kind must be {kind!r}, got {declared_kind!r}"
+        )
+    if not str(frontmatter.get("summary") or "").strip():
+        errors.append("frontmatter summary must be non-empty")
+    if not pages:
+        errors.append(f"{kind} workspace must contain at least one template SVG")
+
+    raw_page_count = frontmatter.get("page_count")
+    if isinstance(raw_page_count, bool) or not isinstance(raw_page_count, int):
+        errors.append("frontmatter page_count must be an integer")
+    elif raw_page_count != len(pages):
+        errors.append(
+            f"frontmatter page_count is {raw_page_count}, but templates/ "
+            f"contains {len(pages)} SVG files"
+        )
+
+    canvas_format = str(frontmatter.get("canvas_format") or "").strip()
+    canvas = CANVAS_FORMATS.get(canvas_format)
+    if canvas is None:
+        errors.append(
+            "frontmatter canvas_format must be one of: "
+            + ", ".join(sorted(CANVAS_FORMATS))
+        )
+    else:
+        expected_canvas_fields = {
+            "canvas_width": canvas["width"],
+            "canvas_height": canvas["height"],
+            "canvas_viewbox": canvas["viewbox"],
+        }
+        for field, expected in expected_canvas_fields.items():
+            actual = frontmatter.get(field)
+            if str(actual) != str(expected):
+                errors.append(
+                    f"frontmatter {field} must be {expected!r} for "

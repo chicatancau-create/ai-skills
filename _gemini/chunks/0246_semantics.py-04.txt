@@ -1,0 +1,103 @@
+            repeated_choices = {
+                "roles": SEMANTIC_ROLES,
+                "relationships": SEMANTIC_RELATIONSHIPS,
+                "directionality": SEMANTIC_DIRECTIONALITY,
+                "aspects": SEMANTIC_ASPECTS,
+            }
+            for field, choices in repeated_choices.items():
+                if field in details:
+                    normalized_details[field] = _require_choices(
+                        details[field],
+                        f"{preset_label}.{field}",
+                        choices,
+                    )
+            single_choices = {
+                "scope": SEMANTIC_SCOPES,
+                "text_capacity": SEMANTIC_TEXT_CAPACITIES,
+                "visual_weight": SEMANTIC_VISUAL_WEIGHTS,
+            }
+            for field, choices in single_choices.items():
+                if field in details:
+                    normalized_details[field] = _require_choice(
+                        details[field],
+                        f"{preset_label}.{field}",
+                        choices,
+                    )
+            if "literal_only" in details:
+                normalized_details["literal_only"] = _require_bool(
+                    details["literal_only"],
+                    f"{preset_label}.literal_only",
+                )
+            for field in ("recommended_for", "avoid_for"):
+                if field in details:
+                    normalized_details[field] = _require_string_list(
+                        details[field],
+                        f"{preset_label}.{field}",
+                    )
+            if "adjustment_notes" in details:
+                normalized_details["adjustment_notes"] = _require_string(
+                    details["adjustment_notes"],
+                    f"{preset_label}.adjustment_notes",
+                )
+            normalized_presets[preset_name] = normalized_details
+        recommended_for = _require_string_list(
+            group.get("recommended_for"),
+            f"{label}.recommended_for",
+        )
+        avoid_for = _require_string_list(
+            group.get("avoid_for"),
+            f"{label}.avoid_for",
+        )
+        if not recommended_for or not avoid_for:
+            raise PresetShapeDataError(
+                f"{label}.recommended_for and avoid_for must not be empty"
+            )
+        return {
+            "id": _require_string(group.get("id"), f"{label}.id"),
+            "label": _require_string(group.get("label"), f"{label}.label"),
+            "office_category": category_id,
+            "office_category_label": self._category_by_id[category_id]["label"],
+            "scope": scope,
+            "roles": roles,
+            "relationships": relationships,
+            "directionality": directionality,
+            "aspects": aspects,
+            "text_capacity": _require_choice(
+                group.get("text_capacity"),
+                f"{label}.text_capacity",
+                SEMANTIC_TEXT_CAPACITIES,
+            ),
+            "visual_weight": _require_choice(
+                group.get("visual_weight"),
+                f"{label}.visual_weight",
+                SEMANTIC_VISUAL_WEIGHTS,
+            ),
+            "literal_only": _require_bool(
+                group.get("literal_only"),
+                f"{label}.literal_only",
+            ),
+            "recommended_for": recommended_for,
+            "avoid_for": avoid_for,
+            "presets": normalized_presets,
+        }
+
+@lru_cache(maxsize=1)
+def get_preset_shape_semantics() -> PresetShapeSemantics:
+    """Return the process-wide, lazily loaded bundled semantic catalog."""
+
+    return PresetShapeSemantics.bundled()
+
+
+def _require_dict(value: object, label: str) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise PresetShapeDataError(f"{label} must be a JSON object")
+    return value
+
+
+def _reject_unknown_fields(
+    value: dict[str, object],
+    label: str,
+    allowed: set[str],
+) -> None:
+    unknown = sorted(set(value) - allowed)
+    if unknown:

@@ -1,0 +1,106 @@
+    _prst, _guides, frame = _parse_preset_geometry_metadata(elem)
+    if frame is None:
+        if _uses_full_transform(ctx, transform):
+            tag = elem.tag.rsplit('}', 1)[-1]
+            raise ValueError(
+                f'Transformed preset-bearing <{tag}> requires data-pptx-frame '
+                'to preserve its logical size'
+            )
+        off_x = px_to_emu(min_x)
+        off_y = px_to_emu(min_y)
+        ext_cx = max(px_to_emu(width), 1)
+        ext_cy = max(px_to_emu(height), 1)
+        return (
+            '',
+            off_x,
+            off_y,
+            ext_cx,
+            ext_cy,
+            (off_x, off_y, off_x + ext_cx, off_y + ext_cy),
+        )
+    return _shape_xfrm_from_preset_frame(
+        elem,
+        ctx,
+        (0.0, 0.0, 1.0, 1.0),
+        (min_x, min_y, width, height),
+        transform,
+    )
+
+
+def _build_round_rect_custgeom(w: float, h: float, rx: float, ry: float) -> str:
+    """Build a DrawingML ``custGeom`` for a rectangle with elliptical corners.
+
+    Used when ``<rect>`` has rx ≠ ry, which DrawingML's preset ``roundRect``
+    cannot express (the preset takes a single ``adj`` shared by all four
+    corners and is implicitly symmetric). Each 90° elliptical arc is
+    approximated by one cubic Bézier — within 0.03% of the true ellipse, far
+    below any visible threshold at slide resolution.
+
+    Trade-off vs. the symmetric ``prstGeom roundRect`` path: this geometry
+    is custom, so PowerPoint's yellow corner-radius handle is gone and the
+    shape can no longer be retuned in-place. That matches the underlying
+    reality — rx ≠ ry has no single "radius" to drag — and remains far
+    better than the previous behaviour (silently dropping all corners and
+    rendering a hard rectangle).
+
+    Args:
+        w, h:   Pixel dimensions of the rectangle (post ctx-scale).
+        rx, ry: Pixel corner radii along x and y. Will be clamped to half
+                of w / h respectively per the SVG spec.
+
+    Returns:
+        A complete ``<a:custGeom>...</a:custGeom>`` XML string. Coordinates
+        are emitted in EMU within a path-local coordinate system whose
+        ``w`` / ``h`` equal the rectangle's pixel-converted dimensions.
+    """
+    # Clamp radii (SVG spec): rx > w/2 collapses to a half-circle end.
+    rx = min(max(rx, 0.0), w / 2)
+    ry = min(max(ry, 0.0), h / 2)
+
+    width_emu = px_to_emu(w)
+    height_emu = px_to_emu(h)
+    rx_emu = px_to_emu(rx)
+    ry_emu = px_to_emu(ry)
+
+    cx_off = int(round(rx_emu * _BEZIER_QUARTER_K))
+    cy_off = int(round(ry_emu * _BEZIER_QUARTER_K))
+
+    def pt(x: int, y: int) -> str:
+        return f'<a:pt x="{x}" y="{y}"/>'
+
+    def cubic(c1: tuple[int, int], c2: tuple[int, int], end: tuple[int, int]) -> str:
+        return (
+            f'<a:cubicBezTo>{pt(*c1)}{pt(*c2)}{pt(*end)}</a:cubicBezTo>'
+        )
+
+    # Path traversed clockwise, starting just past the top-left corner.
+    parts = [
+        f'<a:moveTo>{pt(rx_emu, 0)}</a:moveTo>',
+        f'<a:lnTo>{pt(width_emu - rx_emu, 0)}</a:lnTo>',
+        # Top-right corner: (W-Rx, 0) → (W, Ry)
+        cubic(
+            (width_emu - rx_emu + cx_off, 0),
+            (width_emu, ry_emu - cy_off),
+            (width_emu, ry_emu),
+        ),
+        f'<a:lnTo>{pt(width_emu, height_emu - ry_emu)}</a:lnTo>',
+        # Bottom-right corner: (W, H-Ry) → (W-Rx, H)
+        cubic(
+            (width_emu, height_emu - ry_emu + cy_off),
+            (width_emu - rx_emu + cx_off, height_emu),
+            (width_emu - rx_emu, height_emu),
+        ),
+        f'<a:lnTo>{pt(rx_emu, height_emu)}</a:lnTo>',
+        # Bottom-left corner: (Rx, H) → (0, H-Ry)
+        cubic(
+            (rx_emu - cx_off, height_emu),
+            (0, height_emu - ry_emu + cy_off),
+            (0, height_emu - ry_emu),
+        ),
+        f'<a:lnTo>{pt(0, ry_emu)}</a:lnTo>',
+        # Top-left corner: (0, Ry) → (Rx, 0)
+        cubic(
+            (0, ry_emu - cy_off),
+            (rx_emu - cx_off, 0),
+            (rx_emu, 0),
+        ),

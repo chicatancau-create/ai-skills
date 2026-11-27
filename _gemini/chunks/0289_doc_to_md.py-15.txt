@@ -1,0 +1,106 @@
+    markdown = out_file.read_text(encoding="utf-8")
+
+    # Flatten nested media/ subdir that pandoc creates
+    nested_media = media_dir / "media"
+    if nested_media.exists():
+        for f in nested_media.iterdir():
+            if f.is_file():
+                shutil.move(str(f), str(media_dir / f.name))
+        try:
+            nested_media.rmdir()
+        except OSError:
+            pass
+        markdown = markdown.replace(f"{rel_media_dir}/media/", f"{rel_media_dir}/")
+
+    # Normalize absolute paths to relative
+    for abs_str in (str(media_dir.resolve()).replace("\\", "/"),
+                    str(media_dir.resolve())):
+        if abs_str in markdown:
+            markdown = markdown.replace(abs_str, rel_media_dir)
+
+    markdown = _html_img_to_md(markdown)
+    out_file.write_text(markdown, encoding="utf-8")
+    _write_generic_image_manifest(media_dir, rel_media_dir, markdown, "pandoc_image")
+
+    _report_result(out_file, media_dir if media_dir.exists() else None)
+    return markdown
+
+
+# ─────────────────────────────────────────────────────────────
+# Dispatcher
+# ─────────────────────────────────────────────────────────────
+
+_FORMAT_DESC = {
+    ".docx":  "Microsoft Word (mammoth)",
+    ".html":  "HTML (markdownify)",
+    ".htm":   "HTML (markdownify)",
+    ".epub":  "EPUB (ebooklib)",
+    ".ipynb": "Jupyter Notebook (nbconvert)",
+}
+
+
+def convert_to_markdown(input_path: str, output_path: str | None = None) -> str:
+    input_file = Path(input_path)
+    if not input_file.exists():
+        print(f"[ERROR] File not found: {input_path}")
+        return ""
+
+    suffix = input_file.suffix.lower()
+    if suffix not in NATIVE_FORMATS and suffix not in PANDOC_FORMATS:
+        supported = ", ".join(sorted(NATIVE_FORMATS | PANDOC_FORMATS.keys()))
+        print(f"[ERROR] Unsupported format: {suffix}")
+        print(f"   Supported: {supported}")
+        return ""
+
+    out_file = Path(output_path) if output_path else input_file.with_suffix(".md")
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+
+    if suffix in NATIVE_FORMATS:
+        desc = _FORMAT_DESC[suffix]
+        print(f"[INFO] Converting {desc}: {input_file.name}")
+        warnings: list[str] = []
+        if suffix == ".docx":
+            markdown = _convert_docx(input_file, out_file, warnings)
+        elif suffix in (".html", ".htm"):
+            markdown = _convert_html(input_file, out_file)
+        elif suffix == ".epub":
+            markdown = _convert_epub(input_file, out_file)
+        elif suffix == ".ipynb":
+            markdown = _convert_ipynb(input_file, out_file)
+        else:
+            markdown = ""
+        if markdown:
+            profile_path = write_conversion_profile_best_effort(
+                input_path=str(input_file),
+                markdown_path=out_file,
+                converter="doc_to_md.py",
+                conversion_type=suffix.lstrip("."),
+                warnings=warnings,
+            )
+            if profile_path:
+                print(f"   Wrote conversion profile -> {profile_path}")
+        return markdown
+
+    _, format_desc = PANDOC_FORMATS[suffix]
+    print(f"[INFO] Converting {format_desc} via pandoc: {input_file.name}")
+    markdown = _convert_with_pandoc(input_file, out_file, suffix)
+    if markdown:
+        profile_path = write_conversion_profile_best_effort(
+            input_path=str(input_file),
+            markdown_path=out_file,
+            converter="doc_to_md.py",
+            conversion_type=suffix.lstrip("."),
+        )
+        if profile_path:
+            print(f"   Wrote conversion profile -> {profile_path}")
+    return markdown
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Convert documents to Markdown "
+                    "(pure-Python for common formats, pandoc fallback for the rest)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python doc_to_md.py lecture.docx                # Word → Markdown (mammoth)

@@ -1,0 +1,111 @@
+                f"{label}: unsupported {AUTHORING_ATTR} value {authoring!r}"
+            )
+            continue
+        if tag == "g":
+            errors.extend(
+                f"{label}: {error}"
+                for error in validate_authored_preset_group(element)
+            )
+            element_id = element.get("id")
+            if element_id and id_counts.get(element_id, 0) > 1:
+                errors.append(
+                    f"{label}: authored preset logical group id must be "
+                    "globally unique"
+                )
+            continue
+        if element.get("data-pptx-part") != "geometry":
+            errors.append(
+                f"{label}: authored preset metadata is allowed only on the "
+                "logical group and its direct geometry carrier"
+            )
+            continue
+        parent = parents.get(element)
+        if (
+            parent is None
+            or not _is_svg_element(parent, "g")
+            or parent.get(AUTHORING_ATTR) != AUTHORING_VALUE
+        ):
+            errors.append(
+                f"{label}: authored preset geometry carrier must be a direct "
+                "child of its authored logical group"
+            )
+    return errors
+
+
+def materialize_compact_authored_preset_tree(root: ET.Element) -> int:
+    """Expand validated compact authored presets in memory for conversion.
+
+    Source SVG stays compact.  The converter reuses the established lossless
+    carrier/preview path internally, so compact and expanded inputs share one
+    DrawingML implementation.
+    """
+    materialized = 0
+    for group in list(root.iter()):
+        if authored_preset_encoding(group) != "compact":
+            continue
+        errors = _validate_compact_authored_preset_group(group)
+        if errors:
+            raise ValueError("; ".join(errors))
+
+        preset = group.get("data-pptx-prst") or ""
+        object_kind = group.get("data-pptx-object") or ""
+        frame = _parse_frame(group.get("data-pptx-frame"), object_kind)
+        adjustments = {
+            name[len(_ADJUSTMENT_PREFIX):]: value
+            for name, value in group.attrib.items()
+            if name.startswith(_ADJUSTMENT_PREFIX)
+        }
+        rendered = render_preset_geometry(
+            preset,
+            Xfrm(x=frame[0], y=frame[1], w=frame[2], h=frame[3]),
+            adjustments,
+        )
+        style_attrs = _validate_style({
+            name: group.attrib[name]
+            for name in _STYLE_ATTRS
+            if name in group.attrib
+        })
+        filter_ref = _validate_filter_reference(
+            group.get("filter"),
+            object_kind,
+        )
+        if filter_ref is not None:
+            style_attrs["filter"] = filter_ref
+        semantic_attrs = {
+            name: value
+            for name, value in group.attrib.items()
+            if name in _SEMANTIC_ATTRS
+            or name.startswith(_ADJUSTMENT_PREFIX)
+            or name == "data-pptx-shape-name"
+        }
+        markup = serialize_preset_layers(
+            rendered.paths,
+            semantic_attrs,
+            style_attrs,
+        )
+
+        for name in _PRESENTATION_ATTRS:
+            group.attrib.pop(name, None)
+        group.set("data-pptx-preview-sha256", markup.preview_hash)
+        for child in list(group):
+            group.remove(child)
+        wrapper = ET.fromstring(
+            '<svg xmlns="http://www.w3.org/2000/svg">'
+            f"{markup.markup}"
+            "</svg>"
+        )
+        for child in list(wrapper):
+            wrapper.remove(child)
+            group.append(child)
+        materialized += 1
+    return materialized
+
+
+def _validate_frame(
+    frame: tuple[float, float, float, float],
+    object_kind: str,
+) -> tuple[float, float, float, float]:
+    if len(frame) != 4:
+        raise ValueError("frame must contain x, y, width, and height")
+    values = tuple(float(value) for value in frame)
+    if not all(math.isfinite(value) for value in values):

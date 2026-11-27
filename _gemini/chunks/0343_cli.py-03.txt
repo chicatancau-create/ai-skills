@@ -1,0 +1,99 @@
+                previous_source_stem = (
+                    Path(previous_page.source_svg_name).stem
+                    if previous_page is not None
+                    else None
+                )
+                if (
+                    isinstance(original_from, str)
+                    and original_from.strip()
+                    and previous_page is not None
+                    and original_from == previous_page.svg_stem
+                ):
+                    pass
+                elif (
+                    isinstance(original_from, str)
+                    and original_from.strip()
+                    and previous_page is not None
+                    and original_from == previous_source_stem
+                ):
+                    morph["from"] = previous_page.svg_stem
+                elif isinstance(original_from, str) and original_from.strip():
+                    previous_label = (
+                        f'"{previous_page.svg_stem}" from '
+                        f'"{previous_source_stem}"'
+                        if previous_page is not None
+                        else "no previous output page"
+                    )
+                    raise RuntimeError(
+                        f'Round-trip output page "{output_stem}" {row_origin} '
+                        f'Morph from "{original_from}", but it follows '
+                        f'{previous_label}; add an explicit animations.json '
+                        f'row for "{output_stem}" that overrides morph.from '
+                        'for this output adjacency, or remove that Morph row'
+                    )
+        output_slides[output_stem] = selected
+    expanded["slides"] = output_slides
+    return expanded
+
+
+def _roundtrip_note_changed(
+    project_path: Path,
+    row: dict[str, object],
+    page: RoundtripPage,
+) -> bool:
+    """Return whether one output page changes its inherited source notes."""
+    relative = Path("notes") / f"{page.svg_stem}.md"
+    output_note = project_path / relative
+    if page.svg_name != page.source_svg_name:
+        return output_note.is_file()
+
+    note = row.get("notes")
+    if note is None:
+        return output_note.is_file()
+    if not isinstance(note, dict):
+        raise RuntimeError(
+            f"Round-trip manifest slide {page.source_slide} notes metadata "
+            "must be an object"
+        )
+    note_file = note.get("file")
+    if not isinstance(note_file, str) or not note_file:
+        raise RuntimeError(
+            f"Round-trip manifest slide {page.source_slide} notes metadata "
+            "must declare notes.file"
+        )
+    expected_file = relative.as_posix()
+    if note_file != expected_file:
+        raise RuntimeError(
+            f"Round-trip manifest slide {page.source_slide} notes.file must be "
+            f"{expected_file!r} for {page.svg_name}; got {note_file!r}"
+        )
+    expected_sha = note.get("sha256")
+    if not isinstance(expected_sha, str):
+        raise RuntimeError(
+            f"Round-trip manifest slide {page.source_slide} notes metadata "
+            "must declare notes.sha256"
+        )
+    return not output_note.is_file() or _path_sha256(output_note) != expected_sha
+
+
+def _roundtrip_passthrough_candidates(
+    project_path: Path,
+    native_files: list[Path],
+    pages: tuple[RoundtripPage, ...],
+    *,
+    source_dir: str,
+    authoring_report: dict[str, object] | None,
+    changed_resource_pages: frozenset[int],
+) -> set[int]:
+    """Return source slides whose visual and editable sidecars are unchanged."""
+    manifest = load_roundtrip_manifest(project_path)
+    if manifest is None or manifest.get('schema') != 'ppt-master.roundtrip-workspace.v1':
+        raise RuntimeError(
+            "Round-trip export requires analysis/roundtrip_manifest.json "
+            "with schema ppt-master.roundtrip-workspace.v1"
+        )
+    raw_slides = manifest.get('slides')
+    if not isinstance(raw_slides, list):
+        return set()
+    slide_rows = {
+        int(row['index']): row

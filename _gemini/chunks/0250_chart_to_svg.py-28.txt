@@ -1,0 +1,82 @@
+    cache = _first_cache(parent, ("numCache", "numLit"))
+    if cache is None:
+        return []
+    return _numeric_cache_values(cache)
+
+
+def _numeric_cache_values(cache: ET.Element) -> list[int | float | None]:
+    values: list[int | float | None] = []
+    for value in _cache_point_values(cache):
+        if value is None:
+            values.append(None)
+            continue
+        number = float(value)
+        if not math.isfinite(number):
+            raise _UnsupportedChart("unsupported-chart-cache")
+        values.append(int(number) if number.is_integer() else number)
+    return values
+
+
+def _first_cache(parent: ET.Element | None, names: tuple[str, ...]) -> ET.Element | None:
+    if parent is None:
+        return None
+    for name in names:
+        found = parent.find(f".//c:{name}", C_NS)
+        if found is not None:
+            return found
+    return None
+
+
+def _cache_point_values(cache: ET.Element | None) -> list[str | None]:
+    if cache is None:
+        return []
+    points: dict[int, str] = {}
+    for idx, point in enumerate(cache.findall("c:pt", C_NS)):
+        raw_idx = point.attrib.get("idx")
+        try:
+            point_idx = int(raw_idx) if raw_idx is not None else idx
+        except ValueError:
+            raise _UnsupportedChart("unsupported-chart-cache")
+        if point_idx < 0 or point_idx in points:
+            raise _UnsupportedChart("unsupported-chart-cache")
+        value = point.findtext("c:v", default="", namespaces=C_NS)
+        points[point_idx] = value
+
+    count_elem = cache.find("c:ptCount", C_NS)
+    if count_elem is not None:
+        try:
+            point_count = int(count_elem.attrib.get("val", ""))
+        except ValueError:
+            raise _UnsupportedChart("unsupported-chart-cache")
+    else:
+        point_count = len(points)
+    if (
+        point_count < 0
+        or any(idx >= point_count for idx in points)
+    ):
+        raise _UnsupportedChart("unsupported-chart-cache")
+    return [points.get(idx) for idx in range(point_count)]
+
+
+def _element_val(elem: ET.Element | None) -> str | None:
+    if elem is None:
+        return None
+    return elem.attrib.get("val")
+
+
+def _bounds_payload(xfrm: Xfrm) -> dict[str, int | float]:
+    return {
+        "height": _round_payload_number(xfrm.h),
+        "width": _round_payload_number(xfrm.w),
+        "x": _round_payload_number(xfrm.x),
+        "y": _round_payload_number(xfrm.y),
+    }
+
+
+def _round_payload_number(value: float) -> int | float:
+    rounded = round(float(value), 3)
+    return int(rounded) if rounded.is_integer() else rounded
+
+
+def _local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1] if "}" in tag else tag

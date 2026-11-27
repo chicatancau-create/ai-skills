@@ -1,0 +1,112 @@
+        banner.textContent = t("reload_banner");
+        banner.onclick = function () {
+            hideReloadBanner();
+            // Re-fetch via selectSlide so all post-load logic (annotation merge,
+            // warnings, mtime update) runs the same way as a manual click.
+            var item = slideListEl.querySelector('.slide-item[data-name="' + cssAttr(name) + '"]');
+            selectSlide(name, item || undefined);
+        };
+        document.body.appendChild(banner);
+        reloadBannerEl = banner;
+    }
+
+    function hideReloadBanner() {
+        if (reloadBannerEl) {
+            reloadBannerEl.remove();
+            reloadBannerEl = null;
+        }
+    }
+
+    function escapeHtml(str) {
+        var d = document.createElement("div");
+        d.appendChild(document.createTextNode(str));
+        return d.innerHTML;
+    }
+
+    function jsonOrThrow(res) {
+        return res.json().then(function (data) {
+            if (!res.ok || data.error) {
+                throw new Error(data.error || ("Request failed with status " + res.status));
+            }
+            return data;
+        });
+    }
+
+    function loadConfig() {
+        return fetch("/api/config")
+            .then(function (res) { return res.json(); })
+            .then(function (data) {
+                liveMode = !!data.live;
+            })
+            .catch(function () {
+                liveMode = false;
+            });
+    }
+
+    function startSlidePolling() {
+        if (!liveMode || slidePollTimer) return;
+        slidePollTimer = window.setInterval(function () {
+            loadSlides();
+        }, 2000);
+    }
+
+    // ---- Direct-edit undo + save hint --------------------------------
+    function updateUndoButton() {
+        if (!btnUndo) return;
+        var n = (currentSlide && editStackCount[currentSlide]) || 0;
+        btnUndo.disabled = n === 0;
+        btnUndo.textContent = n > 0 ? (t("btn_undo") + " (" + n + ")") : t("btn_undo");
+    }
+
+    function runUndo() {
+        if (!currentSlide || !editStackCount[currentSlide]) return;
+        fetch("/api/slide/" + encodeURIComponent(currentSlide) + "/undo", { method: "POST" })
+            .then(jsonOrThrow)
+            .then(function (data) {
+                if (data.status === "empty") {
+                    editStackCount[currentSlide] = 0;
+                    matrixEditSlides[currentSlide] = false;
+                    updateUndoButton();
+                    updatePendingStatus();
+                    showWarning(t("undo_empty"));
+                    return;
+                }
+                if (data.mtime !== undefined && data.mtime !== null) {
+                    slideMtimes[currentSlide] = data.mtime;
+                }
+                // Reload the page so the canvas reflects the reverted SVG;
+                // selectSlide refreshes editStackCount + the undo button.
+                var item = slideListEl.querySelector('.slide-item[data-name="' + cssAttr(currentSlide) + '"]');
+                selectSlide(currentSlide, item || undefined);
+                updatePendingStatus();
+                showWarning(t("undo_done"));
+            })
+            .catch(function (err) {
+                showError(t("err_edit") + err.message);
+            });
+    }
+
+    function maybeShowSavedHint() {
+        if (savedHintShown) return;
+        savedHintShown = true;
+        showWarning(t("edit_saved_hint"));
+    }
+
+    function payloadHasMatrixTransform(payload) {
+        var transform = payload && payload.attrs && payload.attrs.transform;
+        return typeof transform === "string" && /^\s*matrix\s*\(/i.test(transform);
+    }
+
+    function hasPendingMatrixEdits() {
+        return Object.keys(matrixEditSlides).some(function (name) {
+            return !!matrixEditSlides[name];
+        });
+    }
+
+    function markMatrixTransformEdit(slide) {
+        matrixEditSlides[slide] = true;
+        if (matrixHintShown) return;
+        matrixHintShown = true;
+        showWarning(t("warn_matrix_transform"));
+    }
+

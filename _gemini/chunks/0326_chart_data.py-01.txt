@@ -1,0 +1,119 @@
+"""Native chart metadata normalization."""
+
+from __future__ import annotations
+
+import math
+from typing import Any
+
+from .marker_common import (
+    _chart_bool,
+    _clean_hex,
+    _compact_key,
+    _first_present,
+    _hex_or_none,
+    _number,
+    _powerpoint_emu,
+    _powerpoint_line_width_emu,
+)
+
+
+def _chart_number(value: Any) -> int | float:
+    if isinstance(value, bool):
+        raise RuntimeError("Native PPTX chart values must be numeric")
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise RuntimeError("Native PPTX chart value is not numeric") from exc
+    if not math.isfinite(number):
+        raise RuntimeError(f"Native PPTX chart value must be finite: {value}")
+    return int(number) if number.is_integer() else number
+
+
+def _chart_point_value(value: Any) -> int | float | None:
+    """A series point: a finite number, or ``null`` for a gap in the series."""
+    if value is None:
+        return None
+    return _chart_number(value)
+
+
+def _chart_list(value: Any, field_name: str) -> list[Any]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise RuntimeError(f"Native PPTX chart {field_name} must be a list")
+    return value
+
+
+def _data_labels_config(payload: dict[str, Any]) -> dict[str, Any] | None:
+    raw = _first_present(payload.get("data_labels"), payload.get("dataLabels"))
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return {} if raw else None
+    if not isinstance(raw, dict):
+        raise RuntimeError("Native PPTX chart data_labels must be a boolean or object")
+    return raw
+
+
+def _data_label_position(value: Any, chart_type: str, grouping: str | None) -> str | None:
+    """Normalize and validate a label position for its chart plot."""
+    if chart_type == "area":
+        if value is not None:
+            raise RuntimeError("Native PPTX area data labels do not support label position")
+        return None
+    is_stacked = chart_type in {"bar", "column"} and grouping in {
+        "percentStacked", "stacked",
+    }
+    default = "ctr" if is_stacked else (
+        "outEnd" if chart_type in {"bar", "column"} else "t"
+    )
+    if value is None:
+        return default
+    aliases = {
+        "above": "t",
+        "bestfit": "bestFit",
+        "center": "ctr",
+        "inbase": "inBase",
+        "insidebase": "inBase",
+        "insideend": "inEnd",
+        "inend": "inEnd",
+        "outend": "outEnd",
+        "outsideend": "outEnd",
+    }
+    position = aliases.get(_compact_key(value))
+    if not position:
+        raise RuntimeError(
+            "Native PPTX chart data label position must be one of: "
+            "above, best_fit, center, inside_base, inside_end, outside_end"
+        )
+    if chart_type in {"bar", "column"}:
+        if position not in {"ctr", "inBase", "inEnd", "outEnd"}:
+            raise RuntimeError(
+                "Native PPTX bar/column data label position must be one of: "
+                "center, inside_base, inside_end, outside_end"
+            )
+        if is_stacked and position == "outEnd":
+            raise RuntimeError(
+                "Native PPTX stacked bar/column data labels do not support outside_end"
+            )
+    elif chart_type == "line" and position not in {"bestFit", "ctr", "t"}:
+        raise RuntimeError(
+            "Native PPTX line data label position must be one of: above, best_fit, center"
+        )
+    return position
+
+
+def _chart_data_labels(
+    payload: dict[str, Any],
+    chart_type: str,
+    grouping: str | None,
+    point_count: int,
+) -> dict[str, Any] | None:
+    config = _data_labels_config(payload)
+    if config is None:
+        return None
+    if chart_type not in {"area", "bar", "column", "line"}:
+        raise RuntimeError(
+            f"Native PPTX {chart_type} chart data labels are outside current support"
+        )
+    _data_label_position(config.get("position"), chart_type, grouping)

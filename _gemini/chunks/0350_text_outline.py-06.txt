@@ -1,0 +1,122 @@
+                weight_range=_axis_range(axes.get("wght")),
+                italic_range=_axis_range(axes.get("ital")),
+                coverage=coverage,
+                order=len(records),
+            ))
+    if not records:
+        raise RuntimeError(
+            "Text operands in Shape Boolean found no readable OpenType fonts; "
+            "install fonts or pass --font-dir"
+        )
+    return tuple(records)
+
+
+def _font_files(explicit_roots: tuple[str, ...]) -> tuple[Path, ...]:
+    roots = [Path(value) for value in explicit_roots]
+    roots.extend(_system_font_roots())
+    files: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        if not root.is_dir():
+            continue
+        try:
+            candidates = sorted(
+                (
+                    path
+                    for path in root.rglob("*")
+                    if path.is_file()
+                    and path.suffix.lower() in _FONT_EXTENSIONS
+                ),
+                key=lambda path: str(path).casefold(),
+            )
+        except OSError:
+            continue
+        for path in candidates:
+            try:
+                key = str(path.resolve())
+            except OSError:
+                key = str(path)
+            if key not in seen:
+                files.append(path)
+                seen.add(key)
+    return tuple(files)
+
+
+def _system_font_roots() -> tuple[Path, ...]:
+    roots: list[Path] = []
+    home = Path.home()
+    if sys.platform.startswith("win"):
+        windows = Path(os.environ.get("WINDIR", "C:/Windows"))
+        roots.append(windows / "Fonts")
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            roots.append(Path(local_app_data) / "Microsoft/Windows/Fonts")
+    elif sys.platform == "darwin":
+        roots.extend((
+            Path("/System/Library/Fonts"),
+            Path("/Library/Fonts"),
+            home / "Library/Fonts",
+        ))
+    else:
+        xdg_data_home = os.environ.get("XDG_DATA_HOME")
+        if xdg_data_home:
+            roots.append(Path(xdg_data_home) / "fonts")
+        roots.extend((home / ".local/share/fonts", home / ".fonts"))
+        xdg_data_dirs = os.environ.get(
+            "XDG_DATA_DIRS",
+            "/usr/local/share:/usr/share",
+        )
+        roots.extend(
+            Path(value) / "fonts"
+            for value in xdg_data_dirs.split(os.pathsep)
+            if value
+        )
+    return tuple(roots)
+
+
+def _face_names(face: Any, name_ids: Sequence[int]) -> tuple[str, ...]:
+    values: list[str] = []
+    seen: set[str] = set()
+    for name_id in name_ids:
+        value = face.get_name(name_id)
+        if not value:
+            continue
+        normalized = " ".join(str(value).split())
+        key = _family_key(normalized)
+        if normalized and key not in seen:
+            values.append(normalized)
+            seen.add(key)
+    return tuple(values)
+
+
+def _font_candidates(
+    catalog: Sequence[_FontFace],
+    families: Sequence[str],
+    target_weight: int,
+    italic: bool,
+) -> list[_FontFace]:
+    by_family: dict[str, list[_FontFace]] = {}
+    for face in catalog:
+        for family in face.families:
+            by_family.setdefault(_family_key(family), []).append(face)
+
+    candidates: list[_FontFace] = []
+    seen: set[tuple[Path, int]] = set()
+    for requested in families:
+        requested_key = _family_key(requested)
+        generic = requested_key in _GENERIC_FAMILIES
+        expanded = _GENERIC_FAMILIES.get(requested_key, (requested,))
+        for family in expanded:
+            available = by_family.get(_family_key(family), ())
+            if generic:
+                available = tuple(
+                    face
+                    for face in available
+                    if _face_supports_style(
+                        face,
+                        target_weight,
+                        italic,
+                    )
+                )
+            matches = sorted(
+                available,

@@ -1,0 +1,111 @@
+    # Sequence counters (single-element lists so handlers can mutate)
+    grad_seq: list[int] = field(default_factory=lambda: [0])
+    marker_seq: list[int] = field(default_factory=lambda: [0])
+    filter_seq: list[int] = field(default_factory=lambda: [0])
+    shape_seq: list[int] = field(default_factory=lambda: [0])
+    clip_seq: list[int] = field(default_factory=lambda: [0])
+
+    # Accumulated outputs
+    defs: list[str] = field(default_factory=list)
+    media: dict[str, bytes] = field(default_factory=dict)
+    group_fills: list[FillResult | None] = field(default_factory=list)
+
+    def bind_palette(self) -> None:
+        """Route tolerant color diagnostics through the current object context."""
+        if self.palette is None:
+            return
+        self.palette.strict = self.strict
+        self.palette.diagnostic_sink = self._diagnose_color
+
+    def diagnose(
+        self,
+        code: str,
+        message: str,
+        fallback: str,
+        *,
+        node: ShapeNode | None = None,
+    ) -> None:
+        """Record one recoverable source-contract violation."""
+        source_node = node or self.current_node
+        append_diagnostic(
+            self.diagnostics,
+            ImportDiagnostic(
+                code=code,
+                message=message,
+                fallback=fallback,
+                part_path=self.slide_part.path,
+                slide_index=self.source_slide_index,
+                shape_id=source_node.spid if source_node is not None else "",
+                shape_name=source_node.name if source_node is not None else "",
+                shape_kind=source_node.kind if source_node is not None else "",
+            ),
+        )
+
+    def _diagnose_color(self, code: str, message: str, fallback: str) -> None:
+        self.diagnose(code, message, fallback)
+
+
+def _diagnose_picture_result(
+    ctx: AssemblyContext,
+    result: PictureResult,
+) -> None:
+    """Project recoverable picture losses into the import report."""
+    for diagnostic in result.diagnostics:
+        ctx.diagnose(
+            diagnostic.code,
+            diagnostic.message,
+            diagnostic.fallback,
+        )
+
+
+def _resolve_svg_hyperlink(
+    ctx: AssemblyContext,
+    relationship_id: str,
+    action: str,
+) -> str | None:
+    """Resolve one source-part click link or record its explicit loss."""
+    resolution = resolve_click_hyperlink(
+        ctx.slide_part.rels,
+        relationship_id,
+        action,
+        slide_index_by_part=ctx.pkg.slide_index_by_part,
+    )
+    if resolution.error is None:
+        return resolution.href
+    if ctx.strict:
+        raise ValueError(resolution.error)
+    ctx.diagnose(
+        "hyperlink-omitted",
+        resolution.error,
+        "retain the object and omit only its unsupported click link",
+    )
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Public entry
+# ---------------------------------------------------------------------------
+
+def assemble_slide(
+    pkg: OoxmlPackage,
+    slide: SlideRef,
+    palette: ColorPalette | None,
+    *,
+    theme_fonts: dict[str, str] | None = None,
+    media_subdir: str = "images",
+    embed_images: bool = False,
+    keep_hidden: bool = False,
+    inheritance_mode: str = "flat",
+    asset_name_map: dict[str, str] | None = None,
+    strict: bool = False,
+    diagnostics: list[ImportDiagnostic] | None = None,
+    preserve_placeholder_inheritance: bool = False,
+) -> tuple[str, dict[str, bytes]]:
+    """Convert one slide to a complete SVG string + media files map.
+
+    inheritance_mode controls how master/layout shapes are rendered:
+        - "flat" (default): emit the effective visible Master/Layout
+          non-placeholder shapes inline inside the slide SVG, honoring both
+          source ``showMasterSp`` flags. This view is used for round-trip
+          fidelity with svg_to_pptx.
+        - "layered": skip inherited shapes entirely. The slide SVG contains

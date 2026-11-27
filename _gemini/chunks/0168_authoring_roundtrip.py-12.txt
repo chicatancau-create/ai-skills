@@ -1,0 +1,101 @@
+    if document is None:
+        raise AuthoringRoundtripError(f"Cannot resolve adopted source page {source_name}")
+    _, inventory = _load_current_assets(project_path, authoring_dir, documents)
+    temporary, baseline_dir, _ = _generate_baseline_bundle(
+        project_path, source_dir, proxy_dir, documents, inventory,
+    )
+    try:
+        inherited = _source_jump_links(source_root, _parse_svg(baseline_dir / document.source_name))
+    finally:
+        temporary.cleanup()
+    for original, clone in zip(source_element.iter(), adopted.iter()):
+        if original in inherited:
+            clone.set(SOURCE_HREF_ATTR, inherited[original][1])
+        if clone.get(SOURCE_HREF_ATTR):
+            clone.set(ADOPTED_SOURCE_LINK_ATTR, "true")
+    for ancestor in _element_chain(source_root, source_element)[:-1]:
+        if _local_name(ancestor.tag) != "a":
+            continue
+        href = ancestor.get("href") or ancestor.get(f"{{{XLINK_NS}}}href")
+        if href:
+            adopted.set(SHAPE_HYPERLINK_ATTR, href)
+            if ancestor in inherited or ancestor.get(SOURCE_HREF_ATTR) == href:
+                adopted.set(SOURCE_HREF_ATTR, href)
+                adopted.set(ADOPTED_SOURCE_LINK_ATTR, "true")
+
+
+def authoring_source_ref_is_unchanged(
+    current_element: ET.Element,
+    baseline_element: ET.Element,
+    current_assets: dict[str, VectorAssetRecord],
+    baseline_assets: dict[str, VectorAssetRecord],
+    *,
+    changed_definition_ids: set[str],
+    current_asset: VectorAssetRecord | None = None,
+    baseline_asset: VectorAssetRecord | None = None,
+    current_root: ET.Element | None = None,
+    baseline_root: ET.Element | None = None,
+) -> bool:
+    """Compare one source-ref occurrence exactly as round-trip export does."""
+    current_element = _contextual_authoring_element(current_element, current_root)
+    baseline_element = _contextual_authoring_element(baseline_element, baseline_root)
+    return (
+        normalized_authoring_subtree_sha256(
+            current_element,
+            current_assets,
+            asset=current_asset,
+        )
+        == normalized_authoring_subtree_sha256(
+            baseline_element,
+            baseline_assets,
+            asset=baseline_asset,
+        )
+        and not (
+            changed_definition_ids
+            & _referenced_definition_ids(current_element)
+        )
+    )
+
+
+def _referenced_assets(
+    root: ET.Element,
+    assets: dict[str, VectorAssetRecord],
+    *,
+    document_name: str,
+    origin_document: str | None = None,
+) -> dict[str, tuple[VectorAssetRecord, ET.Element]]:
+    referenced: dict[str, tuple[VectorAssetRecord, ET.Element]] = {}
+    for element in root.iter():
+        icon = (element.get("data-icon") or "").strip()
+        if not icon or icon in referenced:
+            continue
+        if (
+            icon.startswith(f"{IMPORTED_ICON_NAMESPACE}/")
+            and element.get(ASSET_ROLE_ATTRIBUTE) != DECORATION_ASSET_ROLE
+        ):
+            raise AuthoringRoundtripError(
+                f"{document_name} imported vector {icon!r} is not marked "
+                "as decoration"
+            )
+        record = assets.get(icon)
+        if record is None:
+            if icon.startswith(f"{IMPORTED_ICON_NAMESPACE}/"):
+                raise AuthoringRoundtripError(
+                    f"{document_name} references imported vector {icon!r} "
+                    "without an inventory record"
+                )
+            continue
+        expected_origin = origin_document or document_name
+        if record.origin_document != expected_origin:
+            raise AuthoringRoundtripError(
+                f"{document_name} references {icon!r} owned by "
+                f"{record.origin_document}"
+            )
+        referenced[icon] = (record, _parse_svg(record.asset_path))
+    return referenced
+
+
+def _ref_occurrences(
+    root: ET.Element,
+    referenced_assets: dict[str, tuple[VectorAssetRecord, ET.Element]],
+) -> dict[str, list[RefOccurrence]]:

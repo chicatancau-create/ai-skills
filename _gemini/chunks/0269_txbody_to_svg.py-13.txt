@@ -1,0 +1,116 @@
+                space_width = _estimate_run_width(" ", bullet_run)
+                extra_spaces = round(
+                    (hanging_width - measured_width) / space_width
+                )
+                bullet_run.text += " " * max(extra_spaces, 0)
+            lines[-1].append(bullet_run)
+            cur_w = _estimate_run_width(bullet_run.text, bullet_run)
+
+    for run in para.runs:
+        if run.is_break:
+            # Keep the break on the line it terminates so consecutive breaks
+            # form a break-only empty line. Visible text owns a non-empty
+            # line's height; the break rPr owns only that empty line.
+            lines[-1].append(run)
+            lines.append([])
+            cur_w = 0.0
+            continue
+        if not run.text:
+            continue
+        if run.formula_latex is not None:
+            width = _estimate_run_width(run.text, run)
+            if lines[-1] and cur_w + width > max_width:
+                lines.append([])
+                cur_w = 0.0
+            lines[-1].append(_copy_run(run, text=run.text))
+            cur_w += width
+            continue
+        text = run.text
+        i = 0
+        while i < len(text):
+            avail = max_width - cur_w
+            if avail <= 0 and lines[-1]:
+                # Line is full; start a new one
+                lines.append([])
+                cur_w = 0.0
+                avail = max_width
+
+            end, used = _find_break_point(text, i, avail, run)
+            if end == i:
+                # Nothing fits even from a fresh line — force one char to avoid
+                # an infinite loop.
+                if lines[-1]:
+                    lines.append([])
+                    cur_w = 0.0
+                    continue
+                end = i + 1
+                used = _advance_width(text[i], 0, run)
+
+            chunk = text[i:end]
+            lines[-1].append(_copy_run(run, text=chunk))
+            cur_w += used
+            i = end
+
+            if i < len(text):
+                # More to render — wrap to next line
+                lines.append([])
+                cur_w = 0.0
+
+    return lines
+
+
+def _should_keep_single_line(para: TextParagraph, max_width: float) -> bool:
+    if max_width == float("inf") or para.bullet_prefix:
+        return False
+    if any(run.is_break for run in para.runs):
+        return False
+
+    text_runs = [run for run in para.runs if run.text]
+    if not text_runs:
+        return False
+    text = "".join(run.text for run in text_runs)
+    non_space_count = sum(1 for ch in text if not ch.isspace())
+
+    # Short labels/titles are usually intentionally single-line in PPT. Let
+    # them overflow slightly rather than inventing a line break from imperfect
+    # font metrics or alignment spaces.
+    if non_space_count <= 18:
+        return True
+
+    estimated = sum(_estimate_run_width(run.text, run) for run in text_runs)
+    return estimated <= max_width * 1.12
+
+
+def _copy_run(run: TextRun, *, text: str) -> TextRun:
+    return TextRun(
+        text=text,
+        font_size_px=run.font_size_px,
+        font_family=run.font_family,
+        fill=run.fill,
+        fill_opacity=run.fill_opacity,
+        defs=list(run.defs),
+        bold=run.bold,
+        italic=run.italic,
+        underline=run.underline,
+        strikethrough=run.strikethrough,
+        letter_spacing_px=run.letter_spacing_px,
+        hyperlink_href=run.hyperlink_href,
+        formula_latex=run.formula_latex,
+    )
+
+
+def _paragraph_height_from_lines(p: TextParagraph,
+                                 lines: list[list[TextRun]]) -> float:
+    """Total px height after wrapping. Each line uses its own max font size."""
+    if not lines:
+        return p.empty_line_font_size_px * p.line_height_ratio
+    height = 0.0
+    for line in lines:
+        height += _line_height(p, line)
+    return height
+
+
+def _line_height(p: TextParagraph, line: list[TextRun]) -> float:
+    return _line_font_size(p, line) * p.line_height_ratio
+
+

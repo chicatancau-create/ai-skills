@@ -1,0 +1,109 @@
+    elif pptx_structure == 'structured' and declared_structure_mode != 'structured':
+        _print_structure_contract_error(
+            declared_structure_mode,
+            requested_mode='structured',
+        )
+        return 1
+
+    if args.roundtrip:
+        structure_lock = PptxStructureLock(
+            mode='preserve',
+            source_template=source_pptx_path(project_path),
+            native_structure=native_structure_path(project_path),
+        )
+        try:
+            native_structure_contract = load_native_structure_contract(
+                structure_lock,
+            )
+        except TemplateStructureError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        try:
+            roundtrip_manifest = load_roundtrip_manifest(project_path)
+            if roundtrip_manifest is None:
+                raise RuntimeError(
+                    "Round-trip export requires analysis/roundtrip_manifest.json"
+                )
+            roundtrip_resources = workspace_resource_specs(
+                project_path,
+                roundtrip_manifest,
+            )
+        except RuntimeError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+
+    if (
+        pptx_structure in _RELEASE_PPTX_STRUCTURE_MODES
+        and declared_structure_mode == pptx_structure
+    ):
+        try:
+            structure_lock = load_pptx_structure_lock(project_path)
+        except TemplateStructureError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        if structure_lock is None or structure_lock.mode != pptx_structure:
+            print(
+                "Error: spec_lock.md must contain one complete "
+                f"pptx_structure.mode: {pptx_structure} contract",
+                file=sys.stderr,
+            )
+            return 1
+
+    theme_font_spec = None
+    master_text_style_spec = None
+    theme_color_spec = None
+    source_theme_xml = None
+    source_theme_xml_by_master = None
+    source_embedded_fonts = None
+    if (
+        pptx_structure in {'flat', 'structured'}
+        and not lockless_export
+    ):
+        try:
+            theme_font_spec = load_theme_font_spec(project_path, primary_language)
+            master_text_style_spec = load_master_text_style_spec(project_path)
+            theme_color_spec = load_theme_color_spec(project_path)
+        except (ThemeFontError, ThemeColorError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        missing_theme_fields = []
+        if theme_font_spec is None:
+            missing_theme_fields.append(
+                'typography font_family/title_family/body_family'
+            )
+        if theme_color_spec is None:
+            missing_theme_fields.append('colors')
+        if missing_theme_fields:
+            print(
+                f"Error: {pptx_structure} export requires a current-project "
+                "theme contract in spec_lock.md; missing: "
+                + ", ".join(missing_theme_fields),
+                file=sys.stderr,
+            )
+            return 1
+    elif (
+        pptx_structure in {'flat', 'preserve'}
+        and (diagnostic_source or compatibility_export)
+    ):
+        try:
+            (
+                theme_color_spec,
+                theme_font_spec,
+                source_theme_xml,
+                source_embedded_fonts,
+            ) = _load_diagnostic_import_source(project_path)
+        except (EmbeddedFontError, ThemeFontError, ThemeColorError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+    source_themes_path = project_path / "templates" / SOURCE_THEMES_FILENAME
+    mirror_source_themes = (
+        structure_lock is not None
+        and structure_lock.mode == "structured"
+        and structure_lock.template_reuse_scope == "mirror"
+    )
+    if (
+        source_themes_path.exists()
+        and not mirror_source_themes
+        and not args.quick_generate
+    ):
+        print(

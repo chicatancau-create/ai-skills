@@ -1,0 +1,119 @@
+    """Text-bearing groups must stay readable/editable in the working SVG."""
+    return any(_local(e.tag) in SEMANTIC_CONTENT for e in elem.iter())
+
+
+def _has_semantic_object(elem: ET.Element) -> bool:
+    """Semantic authoring objects must never move into imported decoration."""
+    return any(_is_semantic_owner(item) for item in elem.iter())
+
+
+def _is_semantic_owner(elem: ET.Element) -> bool:
+    if any(elem.get(name) is not None for name in SEMANTIC_MARKER_ATTRIBUTES):
+        return True
+    return (
+        _local(elem.tag) == "metadata"
+        and elem.get("type") == "application/json"
+    )
+
+
+def _is_existing_placeholder(elem: ET.Element) -> bool:
+    return _local(elem.tag) == "use" and elem.get("data-icon") is not None
+
+
+def _has_icon_placeholder(elem: ET.Element) -> bool:
+    return any(_is_existing_placeholder(item) for item in elem.iter())
+
+
+def _is_extractable_subtree(elem: ET.Element) -> bool:
+    """Pure vector subtrees can be moved; semantic content must stay inline."""
+    if (
+        _local(elem.tag) in DEFINITION_CONTAINERS
+        or _has_semantic_object(elem)
+        or _has_icon_placeholder(elem)
+        or _is_chart_group(elem)
+        or _has_semantic_content(elem)
+    ):
+        return False
+    return _drawable_count(elem) > 0
+
+
+def _is_chart_group(elem: ET.Element) -> bool:
+    """Charts are handled separately (data + calibration) — never extract them."""
+    gid = (elem.get("id") or "").lower()
+    if "chart" in gid:
+        return True
+    return any("chart" in (e.get("id") or "").lower() for e in elem.iter())
+
+
+def _tag_histogram(elem: ET.Element) -> dict[str, int]:
+    hist: dict[str, int] = {}
+    for e in elem.iter():
+        name = _local(e.tag)
+        if name in DRAWABLE:
+            hist[name] = hist.get(name, 0) + 1
+    return hist
+
+
+def _source_references(elem: ET.Element) -> list[str]:
+    return sorted({
+        source_ref
+        for item in elem.iter()
+        if (source_ref := item.get(SOURCE_REF_ATTRIBUTE))
+    })
+
+
+def _is_descendant(container: ET.Element, candidate: ET.Element) -> bool:
+    return any(elem is candidate for elem in container.iter())
+
+
+def _id_index(root: ET.Element) -> dict[str, ET.Element]:
+    return {elem_id: elem for elem in root.iter() if (elem_id := elem.get("id"))}
+
+
+def _referenced_ids(elem: ET.Element) -> set[str]:
+    refs: set[str] = set()
+    for item in elem.iter():
+        for attr_name, value in item.attrib.items():
+            refs.update(match.group(2) for match in URL_REF_RE.finditer(value))
+            if _local(attr_name) == "href" and value.startswith("#") and len(value) > 1:
+                refs.add(value[1:])
+    return refs
+
+
+def _dependency_elements(root: ET.Element, asset_group: ET.Element) -> list[ET.Element]:
+    """
+    Return external definition elements referenced by the extracted subtree.
+
+    Gradients, patterns, filters, clip paths, and markers often live in the
+    source SVG root <defs>. The extracted asset must carry these dependencies
+    itself; otherwise the standalone icon and later re-inline can lose styling.
+    """
+    by_id = _id_index(root)
+    dependencies: list[ET.Element] = []
+    seen: set[str] = set()
+    queue = sorted(_referenced_ids(asset_group))
+
+    while queue:
+        ref_id = queue.pop(0)
+        if ref_id in seen:
+            continue
+        seen.add(ref_id)
+
+        target = by_id.get(ref_id)
+        if target is None or _is_descendant(asset_group, target):
+            continue
+
+        dependencies.append(target)
+        for nested_ref in sorted(_referenced_ids(target)):
+            if nested_ref not in seen:
+                queue.append(nested_ref)
+
+    return dependencies
+
+
+def _collect_id_mapping(asset_id: str, group: ET.Element, dependencies: list[ET.Element]) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for root in [group, *dependencies]:
+        for elem in root.iter():
+            elem_id = elem.get("id")
+            if elem_id and elem_id not in mapping:

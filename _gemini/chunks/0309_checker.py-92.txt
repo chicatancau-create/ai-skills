@@ -1,0 +1,77 @@
+        - **Roster mismatch (orphan / missing)** is reported as an *error*: a
+          stale roster will produce a wrong ``layouts_index.json`` entry.
+        - **Explicit structure gaps** are errors when positive structure checks
+          are enabled: every current reusable SVG declares its Master and Layout
+          identity. Zero-placeholder Layouts are valid. Legacy template-mode
+          packages fail and must be replaced by a new create-template workspace.
+        - **Placeholder gaps** are reported as *warnings*. Templates may
+          legitimately omit conventional placeholders or swap them out (e.g.
+          ``{{CLOSING_MESSAGE}}`` instead of ``{{THANK_YOU}}``), and a content
+          variant may use a bespoke slot vocabulary. Designers can declare
+          their own per-stem expectations via ``placeholders:`` frontmatter
+          in ``design_spec.md`` to suppress these warnings explicitly.
+
+        Issues are aggregated and printed in :py:meth:`print_summary` so the
+        per-file report stays focused on intrinsic SVG validity.
+        """
+        spec_path = _roster_spec_path(dir_path)
+        spec_text = (
+            spec_path.read_text(encoding='utf-8')
+            if spec_path is not None and spec_path.exists()
+            else ""
+        )
+        declared_structure_mode = _declared_template_structure_mode(dir_path)
+        mode_error_recorded = False
+        if declared_structure_mode != 'structured':
+            mode_error_recorded = True
+            self._template_issues.append((
+                'error',
+                'explicit_structure_mode',
+                "design_spec.md frontmatter must declare "
+                "native_structure_mode: structured; legacy template-mode "
+                "workspaces must be re-created through create-template",
+            ))
+        if check_structure:
+            native_contract_path = dir_path / NATIVE_STRUCTURE_PATH
+            source_template_path = dir_path / SOURCE_PPTX_PATH
+            legacy_structure_detected = False
+            for svg_file in svg_files:
+                try:
+                    root = ET.parse(svg_file).getroot()
+                except (OSError, ET.ParseError):
+                    continue
+                if not root.get('data-pptx-master'):
+                    legacy_structure_detected = True
+                    self._template_issues.append((
+                        'error',
+                        'explicit_master_missing',
+                        f"{svg_file.name}: reusable templates require root "
+                        "data-pptx-master metadata",
+                    ))
+                if not root.get('data-pptx-master-name'):
+                    legacy_structure_detected = True
+                    self._template_issues.append((
+                        'error',
+                        'explicit_master_name_missing',
+                        f"{svg_file.name}: reusable templates require root "
+                        "data-pptx-master-name metadata",
+                    ))
+                if not root.get('data-pptx-layout'):
+                    self._template_issues.append((
+                        'error',
+                        'explicit_structure_missing',
+                        f"{svg_file.name}: reusable templates require root "
+                        "data-pptx-layout metadata",
+                    ))
+                if not root.get('data-pptx-layout-name'):
+                    self._template_issues.append((
+                        'error',
+                        'explicit_structure_name_missing',
+                        f"{svg_file.name}: reusable templates require root "
+                        "data-pptx-layout-name metadata",
+                    ))
+                if root.get('data-pptx-layout-kind') is not None:
+                    legacy_structure_detected = True
+                    self._template_issues.append((
+                        'error',
+                        'deck_instance_layout_kind',

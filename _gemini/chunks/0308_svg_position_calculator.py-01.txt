@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""
+PPT Master - SVG Position Calculation and Validation Tool
+
+Provides pre-calculation and post-validation of chart coordinates,
+outputting clear coordinate tables.
+
+======================================================================
+Common Commands (can be copied and used directly)
+======================================================================
+
+1. Analyze all coordinates in an SVG file:
+   python scripts/svg_position_calculator.py analyze <svg_file>
+
+2. Interactive calculation mode:
+   python scripts/svg_position_calculator.py interactive
+
+3. Calculate from JSON config file:
+   python scripts/svg_position_calculator.py from-json <config.json>
+
+4. Quick calculation:
+   python scripts/svg_position_calculator.py calc bar --data "East:185,South:142"
+   python scripts/svg_position_calculator.py calc pie --data "A:35,B:25,C:20"
+   python scripts/svg_position_calculator.py calc line --data "0:50,10:80,20:120"
+   python scripts/svg_position_calculator.py calc grid --rows 2 --cols 3
+
+======================================================================
+"""
+
+import sys
+import re
+import math
+import argparse
+from pathlib import Path
+from typing import Dict, List, Tuple, Optional, Any
+from dataclasses import dataclass
+
+from console_encoding import configure_utf8_stdio
+
+configure_utf8_stdio()
+
+# Import canvas format configuration
+try:
+    from project_utils import CANVAS_FORMATS
+except ImportError:
+    # Use built-in definitions if import fails
+    CANVAS_FORMATS = {
+        'ppt169': {'name': 'PPT 16:9', 'dimensions': '1280×720', 'viewbox': '0 0 1280 720'},
+        'ppt43': {'name': 'PPT 4:3', 'dimensions': '1024×768', 'viewbox': '0 0 1024 768'},
+        'xiaohongshu': {'name': 'Xiaohongshu (RED)', 'dimensions': '1242×1660', 'viewbox': '0 0 1242 1660'},
+        'moments': {'name': 'WeChat Moments', 'dimensions': '1080×1080', 'viewbox': '0 0 1080 1080'},
+    }
+
+
+# =============================================================================
+# Coordinate System Base Classes
+# =============================================================================
+
+@dataclass
+class ChartArea:
+    """Chart area definition"""
+    x_min: float
+    y_min: float
+    x_max: float
+    y_max: float
+
+    @property
+    def width(self) -> float:
+        return self.x_max - self.x_min
+
+    @property
+    def height(self) -> float:
+        return self.y_max - self.y_min
+
+    @property
+    def center(self) -> Tuple[float, float]:
+        return ((self.x_min + self.x_max) / 2, (self.y_min + self.y_max) / 2)
+
+
+class CoordinateSystem:
+    """Coordinate system - maps data domain to SVG canvas coordinates"""
+
+    def __init__(self, canvas_format: str = 'ppt169', chart_area: Optional[ChartArea] = None):
+        """
+        Initialize the coordinate system
+
+        Args:
+            canvas_format: Canvas format (ppt169, ppt43, xiaohongshu, moments, etc.)
+            chart_area: Chart area; uses default values if not specified
+        """
+        self.canvas_format = canvas_format
+
+        # Parse canvas dimensions
+        if canvas_format in CANVAS_FORMATS:
+            viewbox = CANVAS_FORMATS[canvas_format]['viewbox']
+            parts = viewbox.split()
+            self.canvas_width = int(parts[2])
+            self.canvas_height = int(parts[3])
+        else:
+            self.canvas_width = 1280
+            self.canvas_height = 720
+
+        # Set chart area (default with margins)
+        if chart_area:
+            self.chart_area = chart_area
+        else:
+            # Default chart area: left/right margin 140px, top/bottom margin 150px
+            self.chart_area = ChartArea(
+                x_min=140,
+                y_min=150,
+                x_max=self.canvas_width - 120,
+                y_max=self.canvas_height - 120
+            )
+
+    def data_to_svg_x(self, data_x: float, x_range: Tuple[float, float]) -> float:
+        """
+        Map data X value to SVG X coordinate
+
+        Args:
+            data_x: Data X value

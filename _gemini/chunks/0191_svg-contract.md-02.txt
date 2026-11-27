@@ -1,0 +1,55 @@
+| Path grammar | One explicit `M`/`L` command per vertex. Triangle, stealth, and diamond paths end in `Z`; arrow paths remain open after the third vertex. No `H`, `V`, curves, or implicit multi-point `L` inside a marker path |
+| Color parity | Triangle, stealth, diamond, and oval use a fill matching the parent line stroke. The open arrow uses `fill="none"` and a stroke matching the parent line stroke. DrawingML line ends inherit the line color |
+
+The converter maps these five shapes to their corresponding DrawingML line-end
+types. Prefer `<polygon>` for the closed triangle, stealth, and diamond forms;
+the open arrow form requires `<path>`. Four-vertex shapes must be simple and
+non-degenerate: convex geometry maps to diamond and concave geometry maps to
+stealth. Other marker shapes have no native mapping and block export instead
+of being silently dropped. Marker type is `Native-normalized`; size is
+`Approximate` (`sm` / `med` / `lg`).
+
+PPTX import compatibility, tolerant recovery, strict-mode rejection, and
+diagnostic behavior are indexed in
+[`conversion.md`](conversion.md#import-compatibility-and-recovery-boundary).
+
+---
+
+## §1.2 Image clipping
+
+`clip-path` maps natively only on SVG `<image>` (including an exact crop
+wrapper's inner image). Legacy imported crops may retain an outer-wrapper clip
+as compatible input.
+
+| Concern | Required form |
+|---|---|
+| SVG-namespace `<clipPath>` defined inside `<defs>` | Converter looks up one exact local id; missing, duplicate, foreign-namespace, or malformed references fail |
+| Contains exactly one direct SVG-namespace supported shape child | Multiple shapes are not composited |
+| Shape is one of: `<circle>`, `<ellipse>`, `<rect>` (optional rx/ry), `<path>`, `<polygon>` | These map to DrawingML geometry (preset or custom) |
+| No `clip-rule` or `fill-rule`, whether direct or in inline `style` | DrawingML picture geometry has no equivalent winding-rule control |
+| Used only on `<image>` or a compatible legacy imported crop wrapper | Shapes, groups, text, and generalized nested SVG targets are forbidden |
+
+| SVG clip shape | DrawingML output |
+|---|---|
+| `<circle>` / `<ellipse>` | Full-frame `<a:prstGeom prst="ellipse"/>`; the child must exactly cover the image frame. A `userSpaceOnUse` circle requires a square physical frame; a normalized `objectBoundingBox` circle may fill any frame |
+| `<rect>` / `<rect rx="..."/>` | A plain full-frame rect is a compatible no-op; rounded form maps to full-frame `<a:prstGeom prst="roundRect"/>` with one physical radius adjustment. The rect must exactly cover the image frame and cannot express non-uniform physical corner radii |
+| `<path>` / `<polygon>` | `<a:custGeom>` with coordinates mapped into the image frame |
+
+A contour that depends on even-odd or another explicit winding rule is outside
+this mapping and must be rebuilt as one unambiguous visible contour or
+pre-rendered.
+
+---
+
+## §1.3 Static same-document `<use>`
+
+Static local reuse is compile-time authoring shorthand. `finalize_svg.py` and
+native export replace each qualifying instance with cloned primitive content;
+PPTX-to-SVG import emits the resulting primitives and does **not** reconstruct
+the original `<use>` / `<symbol>` structure.
+
+| Concern | Required form |
+|---|---|
+| Reference syntax | SVG 2 form `href="#id"`. Legacy `xlink:href="#id"` remains read-compatible and Live Preview normalizes it to `href`; if both attributes exist, their values MUST match |
+| Referenced target | One of `<symbol>`, `<g>`, `<use>`, `<rect>`, `<circle>`, `<ellipse>`, `<line>`, `<path>`, `<polygon>`, `<polyline>`, `<text>`, or `<image>`. Nested local `<use>` is recursively expanded |
+| Instance position | Generated `<use x>` / `<use y>` use finite unitless values; an explicit `px` suffix is read-compatible. Omitted values default to `0` |

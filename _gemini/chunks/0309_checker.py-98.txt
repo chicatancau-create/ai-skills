@@ -1,0 +1,89 @@
+            'geometry_elements': dict(sorted(geometry_counts.items())),
+            'preset_names': dict(sorted(preset_names.items())),
+            'native_objects': dict(sorted(native_objects.items())),
+            'image_page_max_frame_share_range': frame_share_range,
+        }
+
+    def _relationship_page_count(self) -> int | None:
+        """Count design_spec §IX pages whose Relationships line names a carried relation.
+
+        The executor's receipt review compares pages carrying a preset or
+        connector against pages whose ``Relationships`` line names ``order``,
+        ``link``, ``parent``, or ``membership``; this reads that count from the
+        project's ``design_spec.md`` so the comparison is on the receipt. None
+        when no exact ``design_spec.md`` is present (Quick, templates).
+        """
+        paths = [
+            Path(result['path'])
+            for result in self.results
+            if result.get('path') and result.get('info', {}).get('carrier_receipt')
+        ]
+        if not paths:
+            return None
+        spec_path = self._resolve_project_path(paths[0]) / 'design_spec.md'
+        if not spec_path.is_file():
+            return None
+        try:
+            text = spec_path.read_text(encoding='utf-8')
+        except OSError:
+            return None
+        return count_carried_relationship_pages(text)
+
+    def _print_carrier_receipt_summary(self) -> None:
+        """Print a compact actual-use receipt without a score or threshold."""
+        if self.template_mode:
+            return
+        receipt = self._carrier_receipt_summary()
+        if not receipt['pages']:
+            return
+        totals = receipt['totals']
+        native = receipt['native_objects']
+        print("\n[CARRIERS] Actual-use receipt (informational; not a quota)")
+        print(
+            f"  Pages: {receipt['pages']} | text: {totals['text_elements']} | "
+            f"images: {totals['image_placements']} | icons: {totals['icons']}"
+        )
+        print(
+            f"  Geometry: SVG elements {totals['svg_geometry_elements']} | "
+            f"native presets {totals['preset_shapes']} | "
+            f"page-frame elements {totals['page_frame_elements']} | "
+            f"marker uses {totals['marker_uses']}"
+        )
+        pages_with = receipt['pages_with']
+        print(
+            f"  Effects: inline emphasis {totals['inline_emphasis_runs']} "
+            f"(pages {pages_with['inline_emphasis_runs']}) | "
+            f"gradients {totals['gradient_uses']} "
+            f"(pages {pages_with['gradient_uses']}) | "
+            f"filters {totals['filter_uses']} "
+            f"(pages {pages_with['filter_uses']}) | "
+            f"text effects {totals['text_effects']} "
+            f"(pages {pages_with['text_effects']})"
+        )
+        print(
+            f"  Native objects: charts {native.get('chart', 0)} | "
+            f"tables {native.get('table', 0)} | formulas "
+            f"{native.get('formula_block', 0) + native.get('formula_inline', 0)}"
+        )
+        presets = receipt['preset_names']
+        preset_text = (
+            ', '.join(f'{name} x{count}' for name, count in presets.items())
+            if presets
+            else '(none)'
+        )
+        print(f"  Presets: {preset_text}")
+        relationship_pages = receipt.get('relationship_pages')
+        preset_pages = pages_with['presets']
+        if relationship_pages is None:
+            print(f"  Pages carrying a preset or connector: {preset_pages}")
+        else:
+            print(
+                f"  Relationship pages: {relationship_pages} "
+                "(§IX names order / link / parent / membership) | "
+                f"pages carrying a preset or connector: {preset_pages}"
+            )
+        image_range = receipt['image_page_max_frame_share_range']
+        if image_range:
+            print(
+                "  Largest image-frame share on image pages: "
+                f"{image_range[0] * 100:.1f}%–{image_range[1] * 100:.1f}%"

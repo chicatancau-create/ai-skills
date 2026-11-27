@@ -1,0 +1,109 @@
+    return PurePosixPath(*parts[ppt_index:]).as_posix()
+
+
+def _copy_shape_relationships_to_part(
+    elem: ET.Element,
+    slide_rels: dict[str, dict[str, str]],
+    target_rels_path: Path,
+) -> ET.Element:
+    """Clone a shape and retarget supported relationship ids to another part."""
+    clone = ET.fromstring(ET.tostring(elem, encoding="utf-8"))
+    target_part = _part_name_for_relationships_path(target_rels_path)
+    for node in clone.iter():
+        for attr_name, value in list(node.attrib.items()):
+            if attr_name not in _REL_ATTRS:
+                continue
+            rel = slide_rels.get(value)
+            if not rel:
+                raise RuntimeError(f"Missing slide relationship for {value}")
+            target_mode = rel.get("TargetMode")
+            relationship_target = rel["Target"]
+            if target_mode != "External":
+                resolved_target = _resolve_package_target(
+                    "ppt/slides/source.xml",
+                    relationship_target,
+                )
+                relationship_target = posixpath.relpath(
+                    resolved_target,
+                    posixpath.dirname(target_part),
+                )
+            new_rid = _ensure_relationship(
+                target_rels_path,
+                rel["Type"],
+                relationship_target,
+                target_mode,
+            )
+            node.set(attr_name, new_rid)
+    return clone
+
+
+def _copy_shape_relationships_to_master(
+    elem: ET.Element,
+    slide_rels: dict[str, dict[str, str]],
+    master_rels_path: Path,
+) -> ET.Element:
+    """Clone a shape and retarget supported relationship ids to the master."""
+    return _copy_shape_relationships_to_part(elem, slide_rels, master_rels_path)
+
+
+def _next_master_shape_id(master_xml: str) -> int:
+    ids = [
+        int(match)
+        for match in re.findall(r"<p:cNvPr\b[^>]*\bid=\"(\d+)\"", master_xml)
+    ]
+    return max(ids, default=1) + 1
+
+
+def _renumber_shape_ids(elem: ET.Element, start_id: int) -> None:
+    next_id = start_id
+    for cnv in elem.iter(f"{{{PML_NS}}}cNvPr"):
+        cnv.set("id", str(next_id))
+        next_id += 1
+
+
+def _append_shape_to_master(master_path: Path, elem: ET.Element) -> None:
+    master_xml = master_path.read_text(encoding="utf-8")
+    _renumber_shape_ids(elem, _next_master_shape_id(master_xml))
+    shape_xml = ET.tostring(elem, encoding="unicode")
+    if "</p:spTree>" not in master_xml:
+        raise RuntimeError(f"Slide master has no p:spTree: {master_path}")
+    master_path.write_text(
+        master_xml.replace("</p:spTree>", f"{shape_xml}\n</p:spTree>", 1),
+        encoding="utf-8",
+    )
+
+
+def _append_shape_to_part(part_path: Path, elem: ET.Element) -> None:
+    """Append a top-level shape to a master/layout spTree with fresh ids."""
+    tree = ET.parse(part_path)
+    root = tree.getroot()
+    sp_tree = root.find(f".//{{{PML_NS}}}cSld/{{{PML_NS}}}spTree")
+    if sp_tree is None:
+        raise RuntimeError(f"PPTX part has no p:spTree: {part_path}")
+    existing_ids = [
+        int(cnv.attrib["id"])
+        for cnv in root.iter(f"{{{PML_NS}}}cNvPr")
+        if cnv.attrib.get("id", "").isdigit()
+    ]
+    clone = ET.fromstring(ET.tostring(elem, encoding="utf-8"))
+    _renumber_shape_ids(clone, max(existing_ids, default=1) + 1)
+    sp_tree.append(clone)
+    _write_xml_tree(part_path, tree)
+
+
+def _write_xml_tree(path: Path, tree: ET.ElementTree) -> None:
+    root = tree.getroot()
+    if root.tag == f"{{{PACKAGE_REL_NS}}}Relationships":
+        ET.register_namespace("", PACKAGE_REL_NS)
+    tree.write(path, encoding="utf-8", xml_declaration=True)
+
+
+def _slide_ref_shape_ids(values: frozenset[str]) -> set[str]:
+    """Return Slide-local ids from authoring source references."""
+    result: set[str] = set()
+    for value in values:
+        if value.startswith("slide:") and len(value) > len("slide:"):
+            result.add(value.split(":", 1)[1])
+    return result
+
+

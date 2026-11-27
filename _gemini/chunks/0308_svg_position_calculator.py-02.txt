@@ -1,0 +1,118 @@
+            x_range: X axis data range (min, max)
+        """
+        x_min, x_max = x_range
+        if x_max == x_min:
+            return self.chart_area.x_min
+
+        ratio = (data_x - x_min) / (x_max - x_min)
+        return self.chart_area.x_min + ratio * self.chart_area.width
+
+    def data_to_svg_y(self, data_y: float, y_range: Tuple[float, float]) -> float:
+        """
+        Map data Y value to SVG Y coordinate (note: SVG Y axis points downward)
+
+        Args:
+            data_y: Data Y value
+            y_range: Y axis data range (min, max)
+        """
+        y_min, y_max = y_range
+        if y_max == y_min:
+            return self.chart_area.y_max
+
+        ratio = (data_y - y_min) / (y_max - y_min)
+        # SVG Y axis points downward, so invert
+        return self.chart_area.y_max - ratio * self.chart_area.height
+
+    def data_to_svg(self, data_x: float, data_y: float,
+                    x_range: Tuple[float, float], y_range: Tuple[float, float]) -> Tuple[float, float]:
+        """Map data point to SVG coordinates"""
+        return (self.data_to_svg_x(data_x, x_range), self.data_to_svg_y(data_y, y_range))
+
+
+# =============================================================================
+# Bar Chart Calculator
+# =============================================================================
+
+@dataclass
+class BarPosition:
+    """Bar position information"""
+    index: int
+    label: str
+    value: float
+    x: float
+    y: float
+    width: float
+    height: float
+    label_x: float  # Label X position
+    label_y: float  # Label Y position (below bar)
+    value_x: float  # Value X position
+    value_y: float  # Value Y position (above bar)
+
+
+class BarChartCalculator:
+    """Bar chart coordinate calculator"""
+
+    def __init__(self, coord_system: CoordinateSystem):
+        self.coord = coord_system
+
+    def calculate(self, data: Dict[str, float],
+                  bar_width: float = 50,
+                  gap_ratio: float = 0.3,
+                  y_min: float = 0,
+                  y_max: Optional[float] = None,
+                  horizontal: bool = False) -> List[BarPosition]:
+        """
+        Calculate bar chart positions
+
+        Args:
+            data: Data dictionary {label: value}
+            bar_width: Bar width (auto-calculated if None)
+            gap_ratio: Gap ratio between bars (relative to bar width)
+            y_min: Y axis minimum value
+            y_max: Y axis maximum value (uses data maximum if None)
+            horizontal: Whether to use horizontal bar chart
+        """
+        labels = list(data.keys())
+        values = list(data.values())
+        n = len(labels)
+
+        if n == 0:
+            return []
+
+        # Calculate Y axis range
+        if y_max is None:
+            y_max = max(values) * 1.1  # Leave 10% headroom
+
+        area = self.coord.chart_area
+
+        if horizontal:
+            # Horizontal bar chart
+            return self._calculate_horizontal(labels, values, bar_width, gap_ratio, y_min, y_max)
+
+        # Calculate bar layout
+        total_width = area.width
+        if bar_width is None:
+            # Auto-calculate bar width: total width / (bar count * (1 + gap ratio))
+            bar_width = total_width / (n * (1 + gap_ratio))
+
+        gap = bar_width * gap_ratio
+        total_bars_width = n * bar_width + (n - 1) * gap
+        start_x = area.x_min + (area.width - total_bars_width) / 2
+
+        results = []
+        for i, (label, value) in enumerate(zip(labels, values)):
+            # Bar X position
+            x = start_x + i * (bar_width + gap)
+
+            # Bar height and Y position
+            ratio = (value - y_min) / (y_max - y_min) if y_max > y_min else 0
+            height = ratio * area.height
+            y = area.y_max - height  # SVG Y axis points downward
+
+            # Label and value positions
+            center_x = x + bar_width / 2
+
+            results.append(BarPosition(
+                index=i + 1,
+                label=label,
+                value=value,

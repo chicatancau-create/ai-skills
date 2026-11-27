@@ -1,0 +1,127 @@
+    Parse total.md file and extract speaker notes content for each level-1 heading
+
+    Args:
+        md_path: Path to total.md file
+
+    Returns:
+        Dictionary where key is the level-1 heading (without #) and value is the notes content
+    """
+    if not md_path.exists():
+        print(f"Error: {md_path} file does not exist")
+        return {}
+
+    try:
+        with open(md_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+    except Exception as e:
+        print(f"Error: Unable to read file {md_path}: {e}")
+        return {}
+
+    svg_stems = svg_stems or []
+    exact, norm_map, num_map = build_match_maps(svg_stems)
+
+    # Parse by headings (supports # / ## / ###)
+    notes: dict[str, str] = {}
+    current_key: str | None = None
+    current_lines: list[str] = []
+    unmatched_headings: list[str] = []
+
+    lines = content.splitlines()
+    for line in lines:
+        m = HEADING_RE.match(line)
+        if m:
+            raw_title = m.group(2).strip()
+            matched = match_title(raw_title, exact, norm_map, num_map, svg_stems)
+            if matched:
+                if current_key is not None:
+                    text = '\n'.join(current_lines).strip()
+                    if current_key in notes and text:
+                        notes[current_key] = (notes[current_key].rstrip() + "\n\n" + text).strip()
+                    elif current_key not in notes:
+                        notes[current_key] = text
+                current_key = matched
+                current_lines = []
+                continue
+            unmatched_headings.append(raw_title)
+
+        if HR_RE.match(line):
+            continue
+        if current_key is not None:
+            current_lines.append(line)
+
+    if current_key is not None:
+        text = '\n'.join(current_lines).strip()
+        if current_key in notes and text:
+            notes[current_key] = (notes[current_key].rstrip() + "\n\n" + text).strip()
+        elif current_key not in notes:
+            notes[current_key] = text
+
+    if verbose and unmatched_headings:
+        print("\n[Notice] Found unmatched headings (ignored):")
+        for t in unmatched_headings[:10]:
+            print(f"  - {t}")
+        if len(unmatched_headings) > 10:
+            print(f"  ... and {len(unmatched_headings) - 10} more")
+
+    return notes
+
+
+def check_svg_note_mapping(svg_files: list[Path], notes: dict[str, str]) -> tuple[bool, list[str]]:
+    """
+    Check the mapping between SVG files and speaker notes
+
+    Args:
+        svg_files: List of SVG files
+        notes: Notes dictionary (key is heading)
+
+    Returns:
+        (whether all matched, list of missing notes headings)
+    """
+    missing_notes = []
+
+    for svg_path in svg_files:
+        # Extract SVG filename (without extension)
+        svg_stem = svg_path.stem
+
+        # Check if a corresponding heading exists in the notes
+        if svg_stem not in notes:
+            missing_notes.append(svg_stem)
+
+    return len(missing_notes) == 0, missing_notes
+
+
+def split_notes(notes: dict[str, str], output_dir: Path, verbose: bool = True) -> bool:
+    """
+    Split and save notes dictionary into multiple files
+
+    Args:
+        notes: Notes dictionary (key is heading, value is content)
+        output_dir: Output directory
+        verbose: Whether to output detailed information
+
+    Returns:
+        Whether successful
+    """
+    if not notes:
+        print("Error: No notes content found")
+        return False
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    success_count = 0
+
+    for title, content in notes.items():
+        # Generate output filename (same name as SVG file, with .md extension)
+        output_path = output_dir / f"{title}.md"
+
+        try:
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+
+            if verbose:
+                print(f"  Generated: {output_path.name}")
+
+            success_count += 1
+
+        except Exception as e:
+            if verbose:

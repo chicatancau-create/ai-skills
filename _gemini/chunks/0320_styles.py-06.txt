@@ -1,0 +1,107 @@
+            "stroke",
+        )
+        return f'<a:ln w="{width_emu}"{cap_attr}>{grad_fill}{dash_xml}{join_xml}{line_ends}</a:ln>'
+
+    # Solid color stroke
+    color, color_alpha = parse_svg_color(stroke)
+    if not color:
+        return '<a:ln><a:noFill/></a:ln>'
+
+    opacity = combine_opacity(opacity, color_alpha)
+    alpha_xml = ''
+    if opacity is not None and opacity < 1.0:
+        alpha_xml = f'<a:alpha val="{quantize_ooxml_alpha(opacity)}"/>'
+
+    color_xml = color_node_xml(color, ctx.theme_color_spec, "stroke", alpha_xml)
+    return f'''<a:ln w="{width_emu}"{cap_attr}>
+<a:solidFill>{color_xml}</a:solidFill>{dash_xml}{join_xml}{line_ends}
+</a:ln>'''
+
+
+def _infer_shadow_alignment(dx: float, dy: float, threshold: float = 0.5) -> str:
+    """Infer outer shadow alignment from the SVG offset vector.
+
+    DrawingML applies alignment before blur/offset transforms, so we anchor the
+    shadow opposite to the dominant offset direction:
+    - diagonal offsets map to the opposite corner
+    - pure vertical offsets stay centered, matching common PPT shadow presets
+    - pure horizontal offsets anchor to the opposite side
+    """
+    if abs(dx) < threshold and abs(dy) < threshold:
+        return 'ctr'
+    if abs(dx) < threshold:
+        return 'ctr'
+    if abs(dy) < threshold:
+        return 'l' if dx > 0 else 'r'
+    if dx > 0 and dy > 0:
+        return 'tl'
+    if dx < 0 and dy > 0:
+        return 'tr'
+    if dx > 0 and dy < 0:
+        return 'bl'
+    return 'br'
+
+
+def _shadow_dir_angle(dx: float, dy: float) -> int:
+    """Convert an SVG offset vector to DrawingML clockwise angle units.
+
+    OOXML angles are expressed in 60,000ths of a degree, with positive angles
+    rotating clockwise toward the positive Y axis. SVG uses the same screen
+    coordinate orientation (positive Y points downward), so the raw screen-space
+    vector angle can be mapped directly with atan2(dy, dx).
+    """
+    if abs(dx) < 0.001 and abs(dy) < 0.001:
+        return 0
+    angle_deg = math.degrees(math.atan2(dy, dx)) % 360
+    return int(angle_deg * ANGLE_UNIT)
+
+
+def build_shadow_xml(
+    filter_elem: ET.Element,
+    opacity: float | None = None,
+) -> str:
+    """Build <a:effectLst> with <a:outerShdw> from SVG filter element.
+
+    SVG-to-DrawingML shadow mapping notes:
+    - SVG feGaussianBlur stdDeviation (σ) maps to DrawingML blurRad using a
+      2.0× scale. Rationale: σ is a standard deviation whose visual radius
+      is ~3σ, while DrawingML blurRad is an outer-spread pixel distance.
+      A 1.0× scale makes PowerPoint render sharp, concentrated shadows
+      ("heavy" visual). 2.0× matches the CSS drop-shadow↔box-shadow
+      convention and produces softer diffusion closer to the SVG preview.
+    - The algn attribute is inferred from the offset direction so that
+      the shadow aligns naturally with the shape edge.
+    """
+    if filter_elem is None:
+        return ''
+
+    p = parse_project_filter_params(filter_elem)
+    dx = p['dx']
+    dy = p['dy']
+    # For shadow, default dy to 4 if no offset was found
+    if not p['has_offset']:
+        dy = 4.0
+        p = {**p, 'dy': dy}
+
+    coordinates = project_filter_drawingml_coordinates(p, 'shadow')
+    blur_rad = coordinates['blurRad']
+    dist = coordinates['dist']
+    dir_angle = _shadow_dir_angle(dx, dy)
+    # PowerPoint renders outerShdw alpha slightly heavier than SVG's filter
+    # composite (different blending path). Scale by 0.75 to match the SVG
+    # preview after blur has been corrected to 2.0× σ.
+    opacity_multiplier = 1.0 if opacity is None else opacity
+    alpha_val = quantize_ooxml_alpha(
+        p['opacity'] * opacity_multiplier * 0.75
+    )
+    algn = _infer_shadow_alignment(dx, dy)
+
+    return f'''<a:effectLst>
+<a:outerShdw blurRad="{blur_rad}" dist="{dist}" dir="{dir_angle}" algn="{algn}" rotWithShape="0">
+<a:srgbClr val="{p['color']}"><a:alpha val="{alpha_val}"/></a:srgbClr>
+</a:outerShdw>
+</a:effectLst>'''
+
+
+def build_glow_xml(
+    filter_elem: ET.Element,

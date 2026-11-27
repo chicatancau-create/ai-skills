@@ -1,0 +1,97 @@
+                    f'{label} {_MORPH_STAGING_ATTR} is valid only on <g>; '
+                    'move it to the enclosing ordinary direct-root group'
+                )
+                continue
+            if parent_by_id.get(id(element)) is not root:
+                result['errors'].append(
+                    f'{label} {_MORPH_STAGING_ATTR} requires a direct-root '
+                    '<g>; move the marked group directly under <svg> or remove '
+                    'the marker'
+                )
+                continue
+            if not (element.get('id') or '').strip():
+                result['errors'].append(
+                    f'{label} {_MORPH_STAGING_ATTR} requires a stable non-empty '
+                    'id; add an id to the marked direct-root group'
+                )
+                continue
+            incompatible = [
+                attribute
+                for attribute in (
+                    'data-pptx-layer',
+                    'data-pptx-placeholder',
+                )
+                if element.get(attribute) is not None
+            ]
+            if incompatible:
+                result['errors'].append(
+                    f'{label} {_MORPH_STAGING_ATTR} cannot be combined with '
+                    f'{", ".join(incompatible)}; use an ordinary Slide-local '
+                    'group or remove the marker'
+                )
+                continue
+            resolved = self._resolved_root_module_bounds(element)
+            if resolved is None:
+                result['errors'].append(
+                    f'{label} {_MORPH_STAGING_ATTR} requires valid '
+                    f'{_BOUNDS_ATTR}; add or fix positive root-coordinate '
+                    'x y width height bounds'
+                )
+                continue
+            if canvas is None:
+                result['errors'].append(
+                    f'{label} {_MORPH_STAGING_ATTR} cannot verify an off-canvas '
+                    'endpoint without a valid root viewBox; fix the root viewBox'
+                )
+                continue
+            if not self._bounds_are_disjoint(resolved[1], canvas):
+                result['errors'].append(
+                    f'{label} {_MORPH_STAGING_ATTR} requires wholly off-canvas '
+                    f'{_BOUNDS_ATTR}; move the full bounds outside the root '
+                    'viewBox or remove the marker from partially visible content'
+                )
+
+        missing: List[str] = []
+        bounded_root_groups: List[
+            Tuple[ET.Element, Tuple[float, float, float, float]]
+        ] = []
+        root_groups = [
+            child
+            for child in list(root)
+            if _local_name(child) == 'g'
+        ]
+        require_bounds = (
+            self.template_mode
+            or root.get('data-pptx-page-role') is not None
+            or any(
+                root.get(attribute) is not None
+                for attribute in _PPTX_ROOT_STRUCTURE_ATTRS
+            )
+        )
+        for group in root_groups:
+            if self._is_hidden_element(group, parent_by_id):
+                continue
+            if (
+                _authored_preset_encoding is not None
+                and _authored_preset_encoding(group) == 'compact'
+            ):
+                continue
+            raw_bounds = group.get(_BOUNDS_ATTR)
+            if raw_bounds is None:
+                missing.append(_element_label(group))
+                continue
+            try:
+                _parse_positive_bounds(raw_bounds)
+            except ValueError as exc:
+                result['errors'].append(
+                    f'{_element_label(group)} {_BOUNDS_ATTR} {exc}'
+                )
+                continue
+
+            resolved = self._resolved_root_module_bounds(group)
+            if resolved is None:
+                continue
+            bounded_root_groups.append((group, resolved[1]))
+            if canvas is None:
+                continue
+            if self._is_off_canvas_morph_group(group, canvas):

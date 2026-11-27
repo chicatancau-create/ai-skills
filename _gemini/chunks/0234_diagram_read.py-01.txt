@@ -1,0 +1,131 @@
+"""Read SmartArt content and structure from DrawingML diagram parts.
+
+The reader exposes source facts only.  It does not edit DiagramML or promise
+native SmartArt regeneration; generated decks continue to redraw the extracted
+content through the SVG-to-DrawingML shape pipeline.
+"""
+
+from __future__ import annotations
+
+import zipfile
+from typing import Any
+from xml.etree import ElementTree as ET
+
+from .ooxml import (
+    MC_NS,
+    NS,
+    _container_geometry,
+    _normalize_part,
+    _paragraph_texts,
+    _qn,
+    _read_xml,
+    _rels_name_for_part,
+    _shape_identity,
+    _slide_relationships,
+)
+
+
+DIAGRAM_NS = "http://schemas.openxmlformats.org/drawingml/2006/diagram"
+DIAGRAM_DRAWING_NS = "http://schemas.microsoft.com/office/drawing/2008/diagram"
+DIAGRAM_URI = "http://schemas.openxmlformats.org/drawingml/2006/diagram"
+
+_DIAGRAM_REL_SUFFIXES = {
+    "colors": "diagramColors",
+    "data": "diagramData",
+    "layout": "diagramLayout",
+    "quick_style": "diagramQuickStyle",
+}
+_REL_ATTRS = {
+    "colors": "cs",
+    "data": "dm",
+    "layout": "lo",
+    "quick_style": "qs",
+}
+_CONTENT_POINT_TYPES = {"asst", "node"}
+
+DIAGRAM_NS_MAP = {
+    **NS,
+    "dgm": DIAGRAM_NS,
+    "dsp": DIAGRAM_DRAWING_NS,
+    "mc": MC_NS,
+}
+
+
+def _relationship_matches(rel_type: str, suffix: str) -> bool:
+    return rel_type.rsplit("/", 1)[-1] == suffix
+
+
+def _read_optional_xml(
+    zf: zipfile.ZipFile,
+    part_name: str | None,
+) -> tuple[ET.Element | None, str | None]:
+    if not part_name:
+        return None, "missing-part-reference"
+    try:
+        return _read_xml(zf, part_name), None
+    except RuntimeError:
+        return None, "missing-part"
+    except ET.ParseError:
+        return None, "invalid-xml"
+
+
+def _diagram_containers(slide_root: ET.Element) -> list[ET.Element]:
+    containers: list[ET.Element] = []
+    for frame in slide_root.findall(".//p:graphicFrame", DIAGRAM_NS_MAP):
+        graphic_data = frame.find("a:graphic/a:graphicData", DIAGRAM_NS_MAP)
+        if graphic_data is not None and graphic_data.attrib.get("uri") == DIAGRAM_URI:
+            containers.append(frame)
+    return containers
+
+
+def _fallback_preview_shape_ids(slide_root: ET.Element) -> set[str]:
+    shape_ids: set[str] = set()
+    for alternate in slide_root.findall(".//mc:AlternateContent", DIAGRAM_NS_MAP):
+        frame = alternate.find("mc:Choice//p:graphicFrame", DIAGRAM_NS_MAP)
+        if frame is None:
+            continue
+        graphic_data = frame.find("a:graphic/a:graphicData", DIAGRAM_NS_MAP)
+        if graphic_data is None or graphic_data.attrib.get("uri") != DIAGRAM_URI:
+            continue
+        if alternate.find("mc:Fallback//p:pic", DIAGRAM_NS_MAP) is None:
+            continue
+        shape_id, _shape_name = _shape_identity(frame, len(shape_ids) + 1)
+        shape_ids.add(shape_id)
+    return shape_ids
+
+
+def _diagram_parts(
+    rel_ids: ET.Element | None,
+    relationships: dict[str, dict[str, str]],
+    slide_part: str,
+) -> tuple[dict[str, str], str | None]:
+    if rel_ids is None:
+        return {}, "missing-rel-ids"
+
+    parts: dict[str, str] = {}
+    data_error: str | None = None
+    for key, attr_name in _REL_ATTRS.items():
+        rel_id = rel_ids.attrib.get(_qn(NS["r"], attr_name), "")
+        if not rel_id:
+            if key == "data":
+                data_error = "missing-data-relationship"
+            continue
+        relationship = relationships.get(rel_id)
+        if relationship is None:
+            if key == "data":
+                data_error = "missing-data-relationship"
+            continue
+        if not _relationship_matches(
+            relationship.get("type", ""),
+            _DIAGRAM_REL_SUFFIXES[key],
+        ):
+            if key == "data":
+                data_error = "invalid-data-relationship"
+            continue
+        parts[key] = _normalize_part(relationship["target"], slide_part)
+    return parts, data_error
+
+
+def _persisted_drawing_part(
+    zf: zipfile.ZipFile,
+    data_part: str | None,

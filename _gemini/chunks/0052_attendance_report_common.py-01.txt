@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+"""
+考勤报表导出脚本 — 公共模块
+
+[AI Agent 强制门禁] 本模块不可单独执行，且任何调用方脚本
+   （attendance_report_detail/monthly/daily.py）执行前都必须先阅读：
+   dingtalk-workspace/references/products/attendance-report.md
+
+   工作流细节、报表类型判断、人员获取、列选择、错误处理等约束
+   全部在 attendance-report.md，禁止凭本脚本源码或 --help 自行组装命令。
+
+被 attendance_report_detail.py / attendance_report_monthly.py /
+attendance_report_daily.py 三个粒度脚本共享。
+
+职责：
+  1. dws CLI 调用（run_dws / run_dws_raw）
+  2. 接口分批 / 切片（chunk_users / slice_date_range）
+  3. dws 返回值通用解析（unwrap_result / extract_records）
+  4. 字段（columns）模糊匹配（match_columns_by_keywords）
+  5. userId → name 映射（resolve_user_names）
+  6. Excel 写入（write_excel）
+  7. 错误处理 / stderr 进度日志
+
+约束：
+  - 不依赖 dws 命令的具体业务字段（除接口顶层 success/result/error）
+  - 业务字段解析全部由各粒度脚本负责
+  - 时间字段单位由各粒度脚本自行处理（attendance 接口多为毫秒时间戳）
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import subprocess
+import sys
+
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+import tempfile
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from typing import Any, Iterable
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 常量：dws 接口限制（来自 attendance.md）
+# ─────────────────────────────────────────────────────────────────────────────
+
+MAX_USERS_PER_BATCH = 5             # report query-data: --users 最多 5 人（降低单批人数避免超时）
+MAX_DAYS_PER_SLICE = 32             # report query-data: --start 到 --end ≤ 32 天
+DWS_TIMEOUT_SECONDS = 120           # 单次 dws 调用超时
+DATETIME_FMT = "%Y-%m-%d %H:%M:%S"
+DATE_FMT = "%Y-%m-%d"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# stderr 日志（脚本所有进度信息打 stderr，stdout 留给最终摘要）
+# ─────────────────────────────────────────────────────────────────────────────
+
+def log(msg: str) -> None:
+    """打印进度信息到 stderr，stdout 保留给最终摘要。"""
+    print(msg, file=sys.stderr, flush=True)
+
+
+def warn(msg: str) -> None:
+    log(f"[WARN] {msg}")
+
+
+def error(msg: str) -> None:
+    log(f"[ERROR] {msg}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# dws 调用
+# ─────────────────────────────────────────────────────────────────────────────
+
+class DwsCallError(Exception):
+    """dws 调用失败（含进程退出非零、超时、JSON 解析失败、业务 success=false）。"""
+
+    def __init__(self, message: str, *, is_permission_error: bool = False) -> None:
+        super().__init__(message)
+        self.is_permission_error = is_permission_error
+
+
+def _looks_like_permission_error(text: str) -> bool:
+    """启发式：判断错误文本是否属于权限/管理员问题。"""
+    if not text:
+        return False
+    lower = text.lower()
+    keywords = ("403", "permission", "denied", "unauthorized",
+                "forbidden", "无权限", "权限不足", "管理员")
+    return any(k in lower for k in keywords)
+
+
+def run_dws(args: list[str]) -> Any:
+    """
+    调用 `dws <args> --format json`，返回解析后的 JSON。
+
+    自动追加 `--format json`（如果调用方没传），并解开顶层 `success/result/error`：
+      - success=True  → 返回 result 内容
+      - success=False → 抛 DwsCallError（含 is_permission_error 标记）
+      - 进程退出非零或解析失败 → 抛 DwsCallError
+
+    注意：本函数仅做"顶层解包"，业务字段解析由调用方负责。
+    """
+    if "--format" not in args:
+        args = args + ["--format", "json"]
+
+    cmd = ["dws"] + args
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=DWS_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise DwsCallError(f"dws 调用超时（{DWS_TIMEOUT_SECONDS}s）：{' '.join(cmd)}") from e
+    except FileNotFoundError as e:
+        raise DwsCallError("未找到 dws 命令，请确认 dws CLI 已安装并在 PATH 中") from e
+
+    stdout = result.stdout or ""
+    stderr = result.stderr or ""
+
+    if result.returncode != 0:
+        is_perm = _looks_like_permission_error(stderr) or _looks_like_permission_error(stdout)
+        raise DwsCallError(

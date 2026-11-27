@@ -1,0 +1,108 @@
+            raise TemplateStructureError(
+                f"{svg_path.name}: {element_id} placeholder '{placeholder}' must be "
+                f"carried by one direct <g data-pptx-replace-with=\"{placeholder}\"> "
+                "marker"
+            )
+
+
+def _structure_attrs(elem: ET.Element) -> list[str]:
+    return sorted(attr for attr in _STRUCTURE_ATTRS if elem.get(attr) is not None)
+
+
+def _parse_root_boolean(
+    root: ET.Element,
+    attribute: str,
+    *,
+    svg_path: Path,
+) -> bool:
+    """Parse one optional root boolean with a backward-compatible true default."""
+    raw = root.get(attribute)
+    if raw is None:
+        return True
+    if raw not in {"true", "false"}:
+        raise TemplateStructureError(
+            f"{svg_path.name}: root {attribute} must be exactly 'true' or 'false'"
+        )
+    return raw == "true"
+
+
+def parse_template_slide(
+    svg_path: Path,
+    slide_num: int,
+    *,
+    structured: bool = True,
+) -> TemplateSlideSpec:
+    """Parse one SVG's explicit template layout and structure elements."""
+    try:
+        root = _parse_svg_root(svg_path)
+    except (OSError, ET.ParseError, NativePayloadError) as exc:
+        raise TemplateStructureError(
+            f"{svg_path.name}: unable to parse SVG structure metadata: {exc}"
+        ) from exc
+
+    try:
+        materialize_inline_geometry_properties(root)
+    except GeometryStyleError as exc:
+        raise TemplateStructureError(
+            f"{svg_path.name}: invalid inline geometry: {exc}"
+        ) from exc
+
+    if _local_tag(root) != "svg":
+        raise TemplateStructureError(f"{svg_path.name}: root element must be <svg>")
+    try:
+        parse_project_viewbox(
+            root.get("viewBox"),
+            context=f"{svg_path.name} root viewBox",
+        )
+    except CanvasContractError as exc:
+        raise TemplateStructureError(str(exc)) from exc
+
+    geometry_errors = project_geometry_length_errors(root)
+    if geometry_errors:
+        preview = "; ".join(geometry_errors[:8])
+        suffix = (
+            "" if len(geometry_errors) <= 8
+            else f"; +{len(geometry_errors) - 8} more"
+        )
+        raise TemplateStructureError(
+            f"{svg_path.name}: invalid project geometry length(s): "
+            f"{preview}{suffix}"
+        )
+
+    master_key = (root.get("data-pptx-master") or "").strip()
+    master_name = (root.get("data-pptx-master-name") or "").strip()
+    if structured and not master_key:
+        raise TemplateStructureError(
+            f"{svg_path.name}: structured export requires root data-pptx-master"
+        )
+    if structured and not master_name:
+        raise TemplateStructureError(
+            f"{svg_path.name}: structured export requires root data-pptx-master-name"
+        )
+    if not master_key:
+        master_key = "preserved-source"
+    if not master_name:
+        master_name = "Preserved Source Master"
+    if not _MASTER_KEY_RE.fullmatch(master_key):
+        raise TemplateStructureError(
+            f"{svg_path.name}: invalid data-pptx-master {master_key!r}; use 1-64 "
+            "ASCII letters, digits, dots, underscores, or hyphens"
+        )
+
+    layout_key = (root.get("data-pptx-layout") or "").strip()
+    if not layout_key:
+        raise TemplateStructureError(
+            f"{svg_path.name}: explicit Layout export requires root data-pptx-layout"
+        )
+    if not _LAYOUT_KEY_RE.fullmatch(layout_key):
+        raise TemplateStructureError(
+            f"{svg_path.name}: invalid data-pptx-layout {layout_key!r}; use 1-64 "
+            "ASCII letters, digits, dots, underscores, or hyphens"
+        )
+    layout_name = (root.get("data-pptx-layout-name") or "").strip()
+    if structured and not layout_name:
+        raise TemplateStructureError(
+            f"{svg_path.name}: structured export requires root data-pptx-layout-name"
+        )
+    if not layout_name:
+        layout_name = re.sub(r"[-_.]+", " ", layout_key).strip().title() or layout_key

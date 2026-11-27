@@ -1,0 +1,112 @@
+    # 18px -> 13.5pt, 24px -> 18.0pt, 42px -> 31.5pt.
+    sz = font_px_to_hpt(fs_px)
+    b_attr = ' b="1"' if parse_project_font_weight(fw).value else ''
+    i_attr = ' i="1"' if fstyle == 'italic' else ''
+    underline, strike = parse_project_text_decoration(
+        text_dec or 'none'
+    ).value
+    u_attr = ' u="sng"' if underline else ''
+    strike_attr = ' strike="sngStrike"' if strike else ''
+    spc_attr = _letter_spacing_to_drawingml_spc(letter_spacing_px)
+    baseline_attr = f' baseline="{baseline_shift}"' if baseline_shift else ''
+
+    fonts = (
+        parse_font_family(ff, ctx.primary_language if ctx is not None else None)
+        if ff else default_fonts
+    )
+    run_fonts = (
+        {
+            'latin': fixed_font_family,
+            'ea': fixed_font_family,
+            'cs': fixed_font_family,
+        }
+        if fixed_font_family is not None
+        else theme_font_tokens(
+            fonts,
+            ctx.theme_font_spec if ctx is not None else None,
+        ) or resolve_text_run_fonts(text, fonts)
+    )
+    lang = str(run.get('_language_override') or detect_text_lang(
+        text,
+        ctx.primary_language if ctx is not None else None,
+    ))
+    rtl_xml = (
+        '\n<a:rtl val="1"/>'
+        if text_has_rtl_characters(text)
+        else ''
+    )
+
+    fill_xml = _build_text_fill_xml(fill, fill_raw, opacity, ctx)
+    outline_xml = _build_text_outline_xml(run, ctx)
+    relationship_id = run.get(HYPERLINK_RID_KEY)
+    hyperlink_xml = (
+        hyperlink_click_xml(
+            str(relationship_id),
+            str(run.get(HYPERLINK_ACTION_KEY))
+            if run.get(HYPERLINK_ACTION_KEY) is not None
+            else None,
+        )
+        if relationship_id is not None
+        else ''
+    )
+
+    return f'''<a:rPr lang="{lang}" sz="{sz}"{b_attr}{i_attr}{u_attr}{strike_attr}{spc_attr}{baseline_attr} dirty="0">
+{outline_xml}
+{fill_xml}
+{effect_xml}
+<a:latin typeface="{_xml_escape(run_fonts['latin'])}"/>
+<a:ea typeface="{_xml_escape(run_fonts['ea'])}"/>
+<a:cs typeface="{_xml_escape(run_fonts['cs'])}"/>
+{hyperlink_xml}{rtl_xml}
+</a:rPr>'''
+
+
+def _coalesce_text_runs(
+    runs: list[dict[str, Any]],
+    default_fonts: dict[str, str],
+    ctx: ConvertContext | None,
+) -> list[dict[str, Any]]:
+    """Join adjacent runs that PowerPoint sees as one formatting run."""
+    merged: list[dict[str, Any]] = []
+    previous_properties: str | None = None
+    for run in runs:
+        if run.get('_line_break'):
+            merged.append({'_line_break': True})
+            previous_properties = None
+            continue
+        text = str(run.get('text', ''))
+        if not text:
+            continue
+        if run.get(_INLINE_FORMULA_KEY) is not None or '_inline_dx' in run:
+            merged.append({**run, 'text': text})
+            previous_properties = None
+            continue
+        properties = _build_run_properties_xml(run, default_fonts, ctx)
+        if (
+            merged
+            and merged[-1].get(_INLINE_FORMULA_KEY) is None
+            and merged[-1].get(HYPERLINK_RID_KEY) == run.get(HYPERLINK_RID_KEY)
+            and merged[-1].get(HYPERLINK_ACTION_KEY) == run.get(HYPERLINK_ACTION_KEY)
+            and properties == previous_properties
+        ):
+            candidate = {
+                **merged[-1],
+                'text': str(merged[-1].get('text', '')) + text,
+            }
+            candidate_properties = _build_run_properties_xml(
+                candidate,
+                default_fonts,
+                ctx,
+            )
+            if candidate_properties == previous_properties:
+                merged[-1] = candidate
+                previous_properties = candidate_properties
+                continue
+        merged.append({**run, 'text': text})
+        previous_properties = properties
+    return merged
+
+
+def _text_axis_transform(ctx: ConvertContext) -> tuple[bool, bool, bool]:
+    """Return whether text can consume the context matrix and its axis flips."""
+    if not ctx.use_transform_matrix:

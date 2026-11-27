@@ -1,0 +1,102 @@
+    column_id_to_name = {c["_column_id"]: c["_column_name"] for c in columns}
+
+    cmn.log(f"[users] 获取 {len(user_ids)} 个用户基础信息")
+    user_info_map = cmn.resolve_user_info(user_ids)
+    user_name_map = {uid: info.name or uid for uid, info in user_info_map.items()}
+
+    user_batches = cmn.chunk_users(user_ids)
+    date_slices = cmn.slice_date_range(start, end)
+    stats = cmn.CallStats(
+        user_batches=len(user_batches),
+        date_slices=len(date_slices),
+    )
+    cmn.log(
+        f"[plan] 共 {len(user_batches)} 批 × {len(date_slices)} 个时间片 "
+        f"= {len(user_batches) * len(date_slices)} 次接口调用"
+    )
+
+    inspected_flag = [False]
+    all_records: list[dict] = []
+    for bi, batch in enumerate(user_batches, start=1):
+        for si, dslice in enumerate(date_slices, start=1):
+            cmn.log(f"[batch {bi}/{len(user_batches)}] [slice {si}/{len(date_slices)}]")
+            records = query_one_batch(
+                batch, column_ids, dslice, stats,
+                column_id_to_name=column_id_to_name,
+                inspect=args.inspect,
+                inspected_flag=inspected_flag,
+            )
+            all_records.extend(records)
+
+    if not all_records:
+        stats.add_warning("查询完成，但未得到任何记录")
+
+    # 从原始记录中提取每个用户的考勤组名称
+    group_name_map = cmn.extract_group_names_from_records(all_records, user_ids)
+
+    # 月度聚合（普通字段聚合 + 每日维度字段按天存储）
+    rows_dict, daily_data = aggregate_monthly(all_records, columns, user_ids, user_name_map)
+
+    # 请假数据特殊处理：通过 query-leave 单独查询，按 4 类假期月度求和
+    # 凡是 "请假" 开头的字段（请假 / 请假分类 / 请假时长 等）都视为请假列
+    leave_in_columns = any(_is_leave_field(name) for name in column_names)
+    leave_data: dict[str, dict[str, dict[str, float]]] = {}
+    if leave_in_columns:
+        try:
+            leave_data = cmn.query_leave_data(
+                user_ids, start, end,
+                leave_names=LEAVE_TYPES,
+                stats=stats,
+            )
+        except cmn.DwsCallError as e:
+            stats.add_warning(f"[leave] 查询请假数据失败：{e}")
+
+    # 生成日期范围内所有日期列表
+    all_dates = _generate_date_columns(start, end)
+
+    # 构建表头：基础列 + 普通聚合字段（剔除"请假*"系列和按天展开字段）+ 请假展开列 + 按天展开字段
+    base_headers = ["姓名", "考勤组", "部门"]
+    agg_column_names = [
+        name for name in column_names
+        if name not in DAILY_EXPAND_FIELDS and not _is_leave_field(name)
+    ]
+
+    # 请假按假期类型展开（如 "请假-事假", "请假-调休", ...）
+    leave_headers: list[str] = []
+    if leave_in_columns:
+        leave_headers = [f"{LEAVE_FIELD_NAME}-{lt}" for lt in LEAVE_TYPES]
+
+    # 按天展开的表头：字段名-日号（如 "考勤结果-1日", "考勤结果-2日", ...）
+    expand_headers: list[str] = []
+    expand_date_map: list[tuple[str, str]] = []  # [(field_name, date_str), ...]
+    for fname in column_names:
+        if fname in DAILY_EXPAND_FIELDS:
+            for date_str in all_dates:
+                day_num = datetime.strptime(date_str, cmn.DATE_FMT).day
+                header_label = f"{fname}-{day_num}日"
+                expand_headers.append(header_label)
+                expand_date_map.append((fname, date_str))
+
+    headers = base_headers + agg_column_names + leave_headers + expand_headers
+
+    # 计算考勤结果列的 0-based 列索引集合（供 Excel 条件配色使用）
+    _expand_col_start = len(base_headers) + len(agg_column_names) + len(leave_headers)
+    attend_result_col_indices: set[int] = set()
+    for i, (fname, _date) in enumerate(expand_date_map):
+        if fname == "考勤结果":
+            attend_result_col_indices.add(_expand_col_start + i)
+
+    rows_2d = []
+    for row in rows_dict:
+        uid = row.get("userId", "")
+        info = user_info_map.get(uid, cmn.UserInfo(name=uid))
+        group_name = group_name_map.get(uid, "")
+        base = [info.name or uid, group_name, info.dept_name]
+        agg_data = [row.get(h, "") for h in agg_column_names]
+        # 请假按假期类型聚合（月度求和）
+        leave_row: list[Any] = []
+        if leave_in_columns:
+            user_leave = leave_data.get(uid, {})
+            for lt in LEAVE_TYPES:
+                total = 0.0
+                for day_bucket in user_leave.values():

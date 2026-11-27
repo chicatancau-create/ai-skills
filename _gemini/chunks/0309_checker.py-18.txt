@@ -1,0 +1,100 @@
+        """Report the exporter's semantic-shape text contract before conversion."""
+        parents = {id(child): parent for parent in root.iter() for child in parent}
+        for shape in root.iter(f'{{{SVG_NS}}}g'):
+            if shape.get(SEMANTIC_OBJECT_ATTRIBUTE) != SEMANTIC_SHAPE_KIND:
+                continue
+            if _svg_hidden_reason is not None and _svg_hidden_reason(
+                shape, parents, preserve_native_carriers=True,
+            ) is not None:
+                continue
+            try:
+                component = semantic_shape_text_component(
+                    shape, included_text_ids=included_text_ids,
+                )
+            except ValueError as exc:
+                result['errors'].append(f"{_element_label(shape)}: {exc}")
+                continue
+            if (
+                component is None
+                or _classify_paragraph_block is None
+                or not any(
+                    _local_name(child) == 'tspan'
+                    and any(child.get(name) for name in ('x', 'y', 'dy'))
+                    for child in component
+                )
+                or _classify_paragraph_block(
+                    component, preserve_line_breaks=True,
+                ) is not None
+            ):
+                continue
+            result['errors'].append(
+                f"{_element_label(shape)}: multi-line semantic shape text must "
+                "stay one paragraph block, which export otherwise splits into "
+                "several text components; write the first line on <text x y> "
+                "and each later line as <tspan x dy>, never an absolute tspan y"
+            )
+
+    @staticmethod
+    def _roundtrip_text_diff_ids(
+        root: ET.Element,
+        source_document,
+        baseline_root: ET.Element,
+        current_assets,
+        baseline_assets,
+    ) -> tuple[set[int], set[int]]:
+        """Return edited and hash-unchanged source text carrier identities."""
+        from authoring_roundtrip import (
+            _definition_changes,
+            authoring_source_ref_is_unchanged,
+        )
+        from svg_authoring_view import (
+            SOURCE_PROXY_ATTRIBUTE,
+            SOURCE_PROXY_KIND,
+            SOURCE_REF_ATTRIBUTE,
+        )
+
+        baseline_by_ref: Dict[str, ET.Element] = {}
+        for element in baseline_root.iter():
+            source_ref = element.get(SOURCE_REF_ATTRIBUTE)
+            if source_ref is None:
+                continue
+            if source_ref in baseline_by_ref:
+                raise ValueError(
+                    f"Regenerated baseline repeats source ref {source_ref!r}"
+                )
+            baseline_by_ref[source_ref] = element
+        _, changed_definition_ids = _definition_changes(
+            root,
+            baseline_root,
+            current_assets,
+            baseline_assets,
+        )
+        parent_by_id = {
+            id(child): parent
+            for parent in root.iter()
+            for child in list(parent)
+        }
+        unchanged_by_owner: Dict[int, bool] = {}
+        baseline_signatures: Dict[int, Counter] = {}
+        baseline_parent_by_id = {
+            id(child): parent
+            for parent in baseline_root.iter()
+            for child in list(parent)
+        }
+        included: set[int] = set()
+        unchanged_text: set[int] = set()
+        for text_element in root.iter(f'{{{SVG_NS}}}text'):
+            current: ET.Element | None = text_element
+            source_owner: ET.Element | None = None
+            source_ref: str | None = None
+            source_proxy = False
+            while current is not None:
+                if (
+                    current.get(SOURCE_PROXY_ATTRIBUTE)
+                    == SOURCE_PROXY_KIND
+                ):
+                    source_proxy = True
+                if source_owner is None:
+                    candidate = current.get(SOURCE_REF_ATTRIBUTE)
+                    if candidate:
+                        source_owner = current

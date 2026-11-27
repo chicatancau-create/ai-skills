@@ -1,0 +1,68 @@
+                '<cx:visibility meanMarker="1" outliers="1"/>'
+                '<cx:statistics quartileMethod="exclusive"/>'
+                '</cx:layoutPr></cx:series>'
+            )
+        return "".join(parts)
+    raise RuntimeError(f"Native PPTX {chart_type} chart is outside current basic chart support")
+
+
+def _chart_ex_axes_xml(chart_data: dict[str, Any]) -> str:
+    chart_type = chart_data["type"]
+    if chart_type in {"sunburst", "treemap"}:
+        return ""
+    if chart_type == "pareto":
+        return (
+            '<cx:axis id="0"><cx:catScaling gapWidth="0"/><cx:tickLabels/></cx:axis>'
+            '<cx:axis id="1"><cx:valScaling/><cx:majorGridlines/><cx:tickLabels/></cx:axis>'
+            '<cx:axis id="2"><cx:valScaling max="1" min="0"/><cx:units unit="percentage"/><cx:tickLabels/></cx:axis>'
+        )
+    if chart_type == "funnel":
+        return '<cx:axis id="1"><cx:catScaling gapWidth="0.06"/><cx:tickLabels/></cx:axis>'
+    gap_width = "0.5" if chart_type == "waterfall" else "0"
+    if chart_type == "box_whisker":
+        gap_width = "1"
+    return (
+        f'<cx:axis id="0"><cx:catScaling gapWidth="{gap_width}"/><cx:tickLabels/></cx:axis>'
+        '<cx:axis id="1"><cx:valScaling/><cx:majorGridlines/><cx:tickLabels/></cx:axis>'
+    )
+
+
+def _chart_ex_xml(
+    payload: dict[str, Any],
+    chart_data: dict[str, Any],
+    *,
+    chart_rels_id: str,
+) -> bytes:
+    data_xml = _chart_ex_data_xml(chart_data)
+    series_xml = _chart_ex_series_xml(payload, chart_data)
+    axes_xml = _chart_ex_axes_xml(chart_data)
+    title = _chart_ex_title_text(payload)
+    title_xml = (
+        '<cx:title pos="t" align="ctr" overlay="0">'
+        f'<cx:tx><cx:txData><cx:v>{_xml_escape(title)}</cx:v>'
+        '</cx:txData></cx:tx></cx:title>'
+        if title is not None else ""
+    )
+    xml = f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<cx:chartSpace xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+               xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+               xmlns:cx="{CHARTEX_URI}">
+<cx:chartData><cx:externalData r:id="{chart_rels_id}" cx:autoUpdate="0"/>{data_xml}</cx:chartData>
+<cx:chart>{title_xml}
+<cx:plotArea><cx:plotAreaRegion>{series_xml}</cx:plotAreaRegion>{axes_xml}</cx:plotArea>
+{_chart_ex_legend_xml(payload)}</cx:chart>
+</cx:chartSpace>'''
+    return xml.encode("utf-8")
+
+
+def _chart_ex_rels_xml(workbook_target: str, style_target: str, colors_target: str) -> bytes:
+    xml = f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="{PACKAGE_REL_TYPE}" Target="{_xml_escape(workbook_target)}"/>
+<Relationship Id="rId2" Type="{CHART_STYLE_REL_TYPE}" Target="{_xml_escape(style_target)}"/>
+<Relationship Id="rId3" Type="{CHART_COLOR_STYLE_REL_TYPE}" Target="{_xml_escape(colors_target)}"/>
+</Relationships>'''
+    return xml.encode("utf-8")
+
+
+def _chart_ex_style_xml() -> bytes:

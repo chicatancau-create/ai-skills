@@ -1,0 +1,124 @@
+    return sorted(set(ports))
+
+
+def load_cache():
+    try:
+        with io.open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_cache(cache):
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with io.open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        eprint("[vision] 缓存写入失败: %s" % exc)
+
+
+def pick_model(models):
+    """优先多模态模型"""
+    for m in models:
+        if "multimodal" in m["capabilities"]:
+            return m
+    return models[0]
+
+
+def discover(use_cache=True):
+    """按顺序尝试: 缓存 -> 牧羊人网关 -> llama-server 动态端口 -> 常见端口"""
+    candidates = []
+
+    if use_cache:
+        cache = load_cache()
+        ep = cache.get("endpoint")
+        if ep:
+            candidates.append(("cache", ep))
+
+    candidates.append(("gateway", GATEWAY_ENDPOINT))
+
+    for port in find_llama_server_ports():
+        candidates.append(("llama-server", "http://127.0.0.1:%d" % port))
+
+    for port in GATEWAY_FALLBACK_PORTS:
+        candidates.append(("fallback", "http://127.0.0.1:%d" % port))
+
+    for label, endpoint in candidates:
+        models = probe_endpoint(endpoint)
+        if models:
+            return endpoint, pick_model(models)
+    return None, None
+
+
+def downscale_if_needed(path):
+    """图片过大时用 PIL 缩小, 未安装 PIL 则原样返回"""
+    try:
+        from PIL import Image
+    except ImportError:
+        return path
+    try:
+        im = Image.open(path)
+        w, h = im.size
+        limit = 1568
+        if max(w, h) <= limit:
+            return path
+        scale = limit / float(max(w, h))
+        im = im.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
+        tmp = os.path.join(os.environ.get("TEMP", TOOL_DIR), "vision_resized_%d.png" % os.getpid())
+        im.save(tmp, "PNG")
+        eprint("[vision] 图片已缩放 %dx%d -> %dx%d" % (w, h, im.size[0], im.size[1]))
+        return tmp
+    except Exception:
+        return path
+
+
+def image_to_data_url(path):
+    path = downscale_if_needed(path)
+    ext = os.path.splitext(path)[1].lower()
+    mime = "image/png" if ext == ".png" else "image/jpeg"
+    with open(path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode("ascii")
+    return "data:%s;base64,%s" % (mime, b64)
+
+
+def build_messages(image_paths, question, lang):
+    content = []
+    if lang == "zh":
+        content.append({"type": "text", "text": question or "请详细描述这张图片的内容。"})
+    else:
+        content.append({"type": "text", "text": question or "Please describe this image in detail."})
+    for p in image_paths:
+        content.append({"type": "image_url", "image_url": {"url": image_to_data_url(p)}})
+    messages = [
+        {"role": "system", "content": DEFAULT_SYSTEM_PROMPT if lang == "zh" else
+         "You are a professional image analysis assistant."},
+        {"role": "user", "content": content},
+    ]
+    return messages
+
+
+def call_model(endpoint, model_id, messages):
+    url = endpoint.rstrip("/") + "/v1/chat/completions"
+    payload = {
+        "model": model_id,
+        "messages": messages,
+        "stream": False,
+        "temperature": 0.2,
+        "max_tokens": 4096,
+    }
+    data = http_post_json(url, payload, timeout=600)
+    try:
+        return data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError):
+        raise RuntimeError("模型返回格式异常: %s" % json.dumps(data, ensure_ascii=False)[:500])
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="VisionTool - 本地多模态视觉分析工具(连接牧羊人 Herdsman AI 本地模型)")
+    parser.add_argument("images", nargs="*", help="图片文件路径(可多个)")
+    parser.add_argument("question", nargs="?", default=None, help="关于图片的问题(可选)")
+    parser.add_argument("-p", "--prompt", dest="question_opt", default=None, help="关于图片的问题(可选)")
+    parser.add_argument("--endpoint", default=None, help="手动指定 API 端点, 如 http://127.0.0.1:8080")
+    parser.add_argument("--model", default=None, help="手动指定模型名")

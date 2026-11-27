@@ -1,0 +1,110 @@
+                    f"Authoring round-trip slide {index} has invalid {field}"
+                )
+            return frozenset(value)
+
+        authoring_visual_changed = (
+            force_visual_changed
+            or int(raw.get("edited_refs") or 0) > 0
+            or int(raw.get("deleted_refs") or 0) > 0
+            or int(raw.get("authored_unreferenced") or 0) > 0
+            or raw.get("defs_changed") is True
+        )
+        patches[index] = RoundtripSlidePatch(
+            source_ref_ids=_ref_set("source_ref_ids"),
+            edited_ref_ids=_ref_set("edited_ref_ids"),
+            deleted_ref_ids=_ref_set("deleted_ref_ids"),
+            visual_changed=(
+                authoring_visual_changed
+                or index in changed_resource_pages
+            ),
+            authoring_visual_changed=authoring_visual_changed,
+            motion_changed=motion_changed,
+            transition_changed=transition_changed,
+            transition_replaced=transition_replaced,
+            animation_changed=animation_changed,
+            advance_changed=advance_changed,
+            notes_changed=(
+                force_notes_changed
+                or _roundtrip_note_changed(project_path, row, page)
+            ),
+        )
+    return patches
+
+
+def _report_roundtrip_omitted_opaque_payloads(
+    project_path: Path,
+    pages: tuple[RoundtripPage, ...],
+) -> None:
+    """Report omitted source slides whose private payloads drop with the page."""
+    manifest = load_roundtrip_manifest(project_path)
+    if manifest is None:
+        return
+    resources = manifest.get("resources")
+    items = resources.get("items") if isinstance(resources, dict) else None
+    raw_slides = manifest.get("slides")
+    if not isinstance(items, list) or not isinstance(raw_slides, list):
+        return
+    slide_rows = {
+        int(row["index"]): row
+        for row in raw_slides
+        if isinstance(row, dict) and isinstance(row.get("index"), int)
+    }
+    kept_source_slides = {page.source_slide for page in pages}
+    omitted_payloads: dict[int, set[str]] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("kind")
+        source_parts = item.get("sourceParts")
+        chart_native_payload = (
+            kind == "native-payload"
+            and isinstance(source_parts, list)
+            and bool(source_parts)
+            and all(
+                isinstance(source_part, str)
+                and source_part.startswith("ppt/charts/")
+                for source_part in source_parts
+            )
+        )
+        if chart_native_payload:
+            continue
+        payload_kind = {
+            "audio": "audio",
+            "sound": "audio",
+            "video": "video",
+            "native-payload": "opaque native payload",
+        }.get(kind)
+        if payload_kind is None:
+            continue
+        for index in _resource_slide_indices(
+            item,
+            slide_rows,
+            include_structure=False,
+        ):
+            if index not in kept_source_slides:
+                omitted_payloads.setdefault(index, set()).add(payload_kind)
+    if not omitted_payloads:
+        return
+    details = "; ".join(
+        f"source slide {index}: {', '.join(sorted(kinds))}"
+        for index, kinds in sorted(omitted_payloads.items())
+    )
+    print(
+        "Note: page_plan.json omits source slide(s) whose private payloads "
+        "are dropped with the page: " + details,
+        file=sys.stderr,
+    )
+
+
+def _opaque_roundtrip_slide_dependencies(
+    project_path: Path,
+) -> dict[int, list[str]]:
+    """Map source slides that own video/audio/opaque relationships."""
+    manifest = load_roundtrip_manifest(project_path)
+    if manifest is None:
+        return {}
+    resources = manifest.get('resources')
+    items = resources.get('items') if isinstance(resources, dict) else None
+    if not isinstance(items, list):
+        return {}
+    raw_slides = manifest.get("slides")

@@ -1,0 +1,106 @@
+    port and advance predictably when it is occupied. Invalid ports fail before
+    probing, and an exhausted valid range raises ``RuntimeError`` instead of
+    returning a port already known to be unavailable.
+    """
+    preferred = validate_port(preferred)
+    if isinstance(span, bool) or not isinstance(span, int) or span <= 0:
+        raise ValueError(f'span must be a positive integer: {span}')
+
+    last_port = min(preferred + span - 1, MAX_PORT)
+    for port in range(preferred, last_port + 1):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                probe.bind((host, port))
+                return port
+            except OSError:
+                continue
+    raise RuntimeError(
+        f'no free TCP port on {host} in range {preferred}..{last_port}'
+    )
+
+
+def popen_detached(
+    args: list[str],
+    *,
+    logger: Optional[logging.Logger] = None,
+    **kwargs: object,
+) -> subprocess.Popen:
+    """Start a long-running child process detached from the caller.
+
+    Windows hosts such as terminal sandboxes may place child processes in the
+    caller's Job Object. ``CREATE_BREAKAWAY_FROM_JOB`` lets the local UI server
+    survive after the launcher command returns; when that flag is forbidden, the
+    function falls back to the previous detached-process flags.
+
+    Detached service output remains in its component log, so the child receives
+    the shared workflow-transcript opt-out environment flag.
+    """
+    supplied_env = kwargs.get('env')
+    child_env = dict(os.environ if supplied_env is None else supplied_env)
+    child_env[DISABLE_TRANSCRIPT_ENV] = '1'
+    kwargs['env'] = child_env
+
+    if os.name != 'nt':
+        return subprocess.Popen(args, start_new_session=True, **kwargs)
+
+    base_flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+    breakaway_flag = getattr(subprocess, 'CREATE_BREAKAWAY_FROM_JOB', 0x01000000)
+    try:
+        return subprocess.Popen(
+            args,
+            creationflags=base_flags | breakaway_flag,
+            **kwargs,
+        )
+    except OSError as exc:
+        if logger is not None:
+            logger.warning(
+                'Windows process breakaway failed; falling back to detached '
+                'process-group launch (%s)',
+                exc,
+            )
+        return subprocess.Popen(args, creationflags=base_flags, **kwargs)
+
+
+def process_alive(pid: object) -> bool:
+    """Return True if a process with this pid is reachable.
+
+    On POSIX, ``os.kill(pid, 0)`` succeeds when the process exists even without
+    permission to signal it; ``PermissionError`` therefore still counts as
+    alive. On Windows there is no ``os.kill(pid, 0)`` equivalent, so probe via
+    ``OpenProcess`` + ``WaitForSingleObject``.
+    """
+    try:
+        pid_int = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid_int <= 0:
+        return False
+    if os.name == 'nt':
+        import ctypes
+        import ctypes.wintypes
+
+        kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel32.OpenProcess.argtypes = [
+            ctypes.wintypes.DWORD,
+            ctypes.wintypes.BOOL,
+            ctypes.wintypes.DWORD,
+        ]
+        kernel32.OpenProcess.restype = ctypes.wintypes.HANDLE
+        kernel32.WaitForSingleObject.argtypes = [
+            ctypes.wintypes.HANDLE,
+            ctypes.wintypes.DWORD,
+        ]
+        kernel32.WaitForSingleObject.restype = ctypes.wintypes.DWORD
+        kernel32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
+        kernel32.CloseHandle.restype = ctypes.wintypes.BOOL
+
+        process_query_limited_information = 0x1000
+        synchronize = 0x00100000
+        wait_timeout = 0x00000102
+        wait_object_0 = 0x00000000
+        wait_failed = 0xFFFFFFFF
+
+        handle = kernel32.OpenProcess(
+            process_query_limited_information | synchronize,
+            False,

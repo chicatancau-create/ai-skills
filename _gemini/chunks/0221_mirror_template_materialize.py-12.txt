@@ -1,0 +1,124 @@
+            if not value or value.startswith("#"):
+                continue
+            parsed = urlsplit(value)
+            if parsed.scheme or parsed.netloc or not parsed.path:
+                continue
+            absolute = (base_dir / unquote(parsed.path)).resolve().as_posix()
+            element.set(
+                attribute,
+                urlunsplit(("", "", absolute, parsed.query, parsed.fragment)),
+            )
+
+
+def _validate_authoring_tree(
+    root: ET.Element,
+    document: AuthoringDocument,
+    *,
+    excluded_refs: set[str],
+) -> RestorationStats:
+    """Inspect source-ref hashes while preserving the compact authoring tree."""
+    stats = RestorationStats()
+
+    def validate(element: ET.Element) -> None:
+        source_ref = element.get(SOURCE_REF_ATTRIBUTE)
+        record = document.source_refs.get(source_ref or "")
+        contains_semantic_object = any(
+            item.get(SEMANTIC_OBJECT_ATTRIBUTE) is not None
+            for item in element.iter()
+        )
+        if source_ref and record is None:
+            raise MirrorMaterializationError(
+                f"{document.name} contains unknown source ref {source_ref!r}"
+            )
+        if source_ref and record is not None:
+            actual_hash = semantic_subtree_sha256(
+                element,
+                ignored_attributes=frozenset({SOURCE_REF_ATTRIBUTE}),
+            )
+            hash_changed = actual_hash != record.initial_authoring_subtree_sha256
+
+            if source_ref in excluded_refs:
+                stats.structural_refs += 1
+            elif contains_semantic_object:
+                stats.semantic_refs += 1
+            elif hash_changed:
+                stats.fallback_refs += 1
+
+        for child in element:
+            validate(child)
+
+    validate(root)
+    return stats
+
+
+def _line_groups(text: ET.Element) -> list[list[ET.Element]]:
+    """Return direct tspan runs grouped by their imported visual line."""
+    groups: list[list[ET.Element]] = []
+    for tspan in text:
+        if _local_name(tspan.tag) != "tspan":
+            return []
+        raw_dy = _optional_float(tspan.get("dy"))
+        starts_line = (
+            not groups
+            or tspan.get("x") is not None
+            or tspan.get("y") is not None
+            or (raw_dy is not None and abs(raw_dy) > 1e-9)
+        )
+        if starts_line:
+            groups.append([tspan])
+        else:
+            groups[-1].append(tspan)
+    return groups
+
+
+def _normalized_text(value: str) -> str:
+    return " ".join(value.split())
+
+
+def _text_body_segments(metadata: ET.Element) -> list[list[str]] | None:
+    if metadata.get("data-pptx-encoding") != "base64":
+        return None
+    try:
+        payload = base64.b64decode((metadata.text or "").strip(), validate=True)
+        text_body = ET.fromstring(payload)
+    except (ValueError, ET.ParseError):
+        return None
+
+    paragraphs: list[list[str]] = []
+    for paragraph in text_body:
+        if _local_name(paragraph.tag) != "p":
+            continue
+        segments = [""]
+        for child in paragraph:
+            tag = _local_name(child.tag)
+            if tag == "br":
+                segments.append("")
+            elif tag in {"r", "fld"}:
+                segments[-1] += "".join(
+                    node.text or ""
+                    for node in child.iter()
+                    if _local_name(node.tag) == "t"
+                )
+        paragraphs.append(segments)
+    return paragraphs
+
+
+def _mark_explicit_breaks(
+    authored_element: ET.Element,
+    source_element: ET.Element,
+) -> None:
+    metadata = next(
+        (
+            child
+            for child in source_element
+            if _local_name(child.tag) == "metadata"
+            and child.get("data-pptx-part") == "txbody"
+        ),
+        None,
+    )
+    if metadata is None:
+        return
+    paragraphs = _text_body_segments(metadata)
+    if paragraphs is None:
+        return
+    authored_texts = [

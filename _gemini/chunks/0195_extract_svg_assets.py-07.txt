@@ -1,0 +1,110 @@
+            f"unsupported reuse inventory schema: {payload.get('schema')!r}"
+        )
+    if payload.get("asset_role") != DECORATION_ASSET_ROLE:
+        raise ValueError(
+            "reuse inventory must declare asset_role='decoration'"
+        )
+    entries = payload.get("assets")
+    if not isinstance(entries, list):
+        raise ValueError(f"reuse inventory has no assets list: {inventory_path}")
+
+    reusable: dict[str, dict] = {}
+    fingerprinted = 0
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        source_sha256 = entry.get("source_sha256")
+        asset_sha256 = entry.get("asset_sha256")
+        asset = entry.get("asset")
+        icon = entry.get("icon")
+        role = entry.get("role")
+        if not all(
+            isinstance(value, str) and value
+            for value in (source_sha256, asset_sha256, asset, icon)
+        ):
+            continue
+        if role != DECORATION_ASSET_ROLE:
+            raise ValueError(
+                f"reusable asset {icon!r} is not a decoration asset"
+            )
+        fingerprinted += 1
+        asset_path = icons_dir / asset
+        if not asset_path.is_file():
+            raise ValueError(
+                f"reusable asset is missing from the target icons directory: {asset_path}"
+            )
+        actual_asset_sha256 = hashlib.sha256(asset_path.read_bytes()).hexdigest()
+        if actual_asset_sha256 != asset_sha256:
+            raise ValueError(
+                f"reusable asset hash does not match its inventory: {asset_path}"
+            )
+        try:
+            asset_root = ET.parse(asset_path).getroot()
+        except ET.ParseError as exc:
+            raise ValueError(
+                f"reusable asset is not valid SVG XML: {asset_path}: {exc}"
+            ) from exc
+        if asset_root.get(ASSET_ROLE_ATTRIBUTE) != DECORATION_ASSET_ROLE:
+            raise ValueError(
+                f"reusable asset lacks its decoration role: {asset_path}"
+            )
+        current = reusable.get(source_sha256)
+        if current is None or asset < str(current["asset"]):
+            reusable[source_sha256] = entry
+
+    extracted_count = payload.get("extracted_count", 0)
+    if isinstance(extracted_count, int) and extracted_count > fingerprinted:
+        raise ValueError(
+            "reuse inventory predates source fingerprints; rerun the source extraction "
+            f"with the current tool: {inventory_path}"
+        )
+    return reusable
+
+
+def _rewritten_path(svg_path: Path, rewritten_dir: Path | None, inplace: bool) -> Path:
+    if inplace:
+        return svg_path
+    if rewritten_dir is None:
+        return svg_path.parent.parent / f"{svg_path.parent.name}-rewritten" / svg_path.name
+    return rewritten_dir / svg_path.name
+
+
+def _fresh_native_fallback_markers(root: ET.Element) -> set[ET.Element]:
+    """Snapshot native markers whose visible fallback is fresh before extraction."""
+    fresh: set[ET.Element] = set()
+    for element in root.iter():
+        expected = element.get(NATIVE_FALLBACK_SHA256_ATTR)
+        if (
+            expected is None
+            or expected != expected.strip()
+            or not _SHA256_RE.fullmatch(expected)
+        ):
+            continue
+        if svg_native_fallback_fingerprint(
+            element,
+            document_root=root,
+        ) == expected.lower():
+            fresh.add(element)
+    return fresh
+
+
+def _normalize_authoring_tree(
+    root: ET.Element,
+    fresh_native_markers: set[ET.Element],
+) -> None:
+    """Normalize first, then hash the final visible native fallbacks."""
+    normalize_compact_authoring_tree(root)
+    live_elements = set(root.iter())
+    for marker in fresh_native_markers & live_elements:
+        marker.set(
+            NATIVE_FALLBACK_SHA256_ATTR,
+            svg_native_fallback_fingerprint(marker, document_root=root),
+        )
+
+
+def extract_file(
+    svg_path: Path,
+    icons_dir: Path,
+    icon_namespace: str,
+    min_drawables: int,
+    min_bytes: int,

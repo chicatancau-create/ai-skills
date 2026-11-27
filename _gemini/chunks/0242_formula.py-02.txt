@@ -1,0 +1,99 @@
+            build_builtin_guides(width, height, left=left, top=top)
+        )
+        self._values: dict[str, float] = {}
+        if values:
+            for name, value in values.items():
+                self.bind(name, value)
+
+    @property
+    def values(self) -> Mapping[str, float]:
+        """Return a detached, read-only view of explicitly bound guides."""
+
+        return MappingProxyType(dict(self._values))
+
+    @property
+    def builtins(self) -> Mapping[str, float]:
+        """Return the resolved built-in guide values."""
+
+        return MappingProxyType(dict(self._builtins))
+
+    def bind(self, name: str, value: float) -> float:
+        """Bind one evaluated adjustment or guide and return its numeric value."""
+
+        if not name or name.isspace():
+            raise FormulaEvaluationError("Guide name must not be empty")
+        number = _finite_number(value, f"guide {name!r}")
+        self._values[name] = number
+        return number
+
+    def resolve(self, token: str) -> float:
+        """Resolve a literal, bound guide, or DrawingML built-in guide token."""
+
+        token = token.strip()
+        if not token:
+            raise UnknownGuideError("Guide token must not be empty")
+        try:
+            return _finite_number(float(token), f"literal {token!r}")
+        except ValueError:
+            pass
+
+        if token in self._values:
+            return self._values[token]
+        if token in self._builtins:
+            return self._builtins[token]
+
+        dynamic = self._resolve_dynamic_builtin(token)
+        if dynamic is not None:
+            self._builtins[token] = dynamic
+            return dynamic
+        raise UnknownGuideError(f"Unknown DrawingML guide token: {token!r}")
+
+    def evaluate(self, formula: str) -> float:
+        """Evaluate one complete DrawingML geometry formula."""
+
+        parts = formula.split()
+        if not parts:
+            raise FormulaSyntaxError("DrawingML formula must not be empty")
+        operator = parts[0]
+        expected = _OPERATOR_ARITY.get(operator)
+        if expected is None:
+            raise FormulaSyntaxError(
+                f"Unsupported DrawingML formula operator: {operator!r}"
+            )
+        if len(parts) < expected + 1:
+            raise FormulaSyntaxError(
+                f"Operator {operator!r} expects {expected} operands, "
+                f"received {len(parts) - 1}: {formula!r}"
+            )
+        trailing = parts[expected + 1 :]
+        if trailing and not (
+            operator == "+-" and all(token == "0" for token in trailing)
+        ):
+            raise FormulaSyntaxError(
+                f"Operator {operator!r} expects {expected} operands, "
+                f"received {len(parts) - 1}: {formula!r}"
+            )
+        # POI 5.4.1 carries three circular-arrow formulas with one inert
+        # trailing zero ("+- xH 0 dxB 0"). Apache POI ignores surplus tokens;
+        # accept only this harmless form while keeping all other arity errors.
+        operands = tuple(self.resolve(token) for token in parts[1 : expected + 1])
+        try:
+            result = _apply_operator(operator, operands)
+        except (OverflowError, ValueError) as exc:
+            raise FormulaEvaluationError(
+                f"Cannot evaluate DrawingML formula {formula!r}: {exc}"
+            ) from exc
+        return _finite_number(result, f"result of {formula!r}")
+
+    def evaluate_value(self, value: str | int | float) -> float:
+        """Evaluate a formula string, guide token, or numeric adjustment value."""
+
+        if isinstance(value, str):
+            parts = value.split()
+            if not parts:
+                raise FormulaSyntaxError("DrawingML value must not be empty")
+            if parts[0] in SUPPORTED_OPERATORS:
+                return self.evaluate(value)
+            if len(parts) == 1:
+                return self.resolve(parts[0])
+            raise FormulaSyntaxError(f"Invalid DrawingML value: {value!r}")

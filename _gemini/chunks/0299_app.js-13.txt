@@ -1,0 +1,93 @@
+            // attrsForMove(el, 0, 0) returns the element's current geometry in the
+            // exact attribute shape a move writes (x/y, cx/cy, … or transform);
+            // restoring it before each frame keeps the preview drift-free.
+            try { dragStartAttrs[el.id] = attrsForMove(el, 0, 0); }
+            catch (err) { dragStartAttrs[el.id] = null; }
+        });
+        document.body.classList.add("svg-dragging");
+    }
+
+    function applyAttrSnapshot(el, sa) {
+        if (!sa) return;
+        applyElementAttrs(el, sa);
+    }
+
+    var INLINE_GEOMETRY_STYLE_PROPERTIES = {
+        rect: new Set(["x", "y", "width", "height", "rx", "ry"]),
+        circle: new Set(["cx", "cy", "r"]),
+        ellipse: new Set(["cx", "cy", "rx", "ry"]),
+        image: new Set(["x", "y", "width", "height"]),
+        svg: new Set(["x", "y", "width", "height"]),
+        use: new Set(["x", "y", "width", "height"])
+    };
+
+    function stripEditedInlineGeometry(el, attrs) {
+        var style = el.getAttribute("style");
+        var supported = INLINE_GEOMETRY_STYLE_PROPERTIES[localName(el)];
+        if (!style || !supported) return;
+        var edited = new Set(Object.keys(attrs || {}).map(function (key) {
+            return String(key).toLowerCase();
+        }).filter(function (key) { return supported.has(key); }));
+        if (edited.size === 0) return;
+
+        var retained = [];
+        var changed = false;
+        style.split(";").forEach(function (rawDeclaration) {
+            var declaration = rawDeclaration.trim();
+            if (!declaration) return;
+            var colon = declaration.indexOf(":");
+            if (colon < 0) {
+                retained.push(declaration);
+                return;
+            }
+            var name = declaration.slice(0, colon).trim().toLowerCase();
+            if (edited.has(name)) {
+                changed = true;
+                return;
+            }
+            retained.push(declaration);
+        });
+        if (!changed) return;
+        if (retained.length > 0) el.setAttribute("style", retained.join("; "));
+        else el.removeAttribute("style");
+    }
+
+    function applyElementAttrs(el, attrs) {
+        stripEditedInlineGeometry(el, attrs);
+        if (localName(el) === "g" && el.hasAttribute("data-icon") &&
+                attrs.x !== undefined && attrs.y !== undefined) {
+            // The preview expands <use data-icon> into a <g>, but disk still owns
+            // the source <use>. Keep the browser geometry in sync while the staged
+            // edit writes x/y back to the real placeholder instead of persisting a
+            // transform.
+            var m = ownMatrix(el);
+            el.setAttribute("transform", "matrix(" + [
+                formatCoord(m.a), formatCoord(m.b), formatCoord(m.c),
+                formatCoord(m.d), formatCoord(parseFloat(attrs.x)),
+                formatCoord(parseFloat(attrs.y))
+            ].join(",") + ")");
+            el.setAttribute("data-use-x", attrs.x);
+            el.setAttribute("data-use-y", attrs.y);
+        }
+        Object.keys(attrs).forEach(function (k) {
+            if (localName(el) === "g" && el.hasAttribute("data-icon") &&
+                    (k === "x" || k === "y" || k === "transform")) return;
+            if (attrs[k] === null || attrs[k] === undefined) el.removeAttribute(k);
+            else el.setAttribute(k, attrs[k]);
+        });
+    }
+
+    function localName(el) {
+        return el && el.tagName ? el.tagName.toLowerCase() : "";
+    }
+
+    function markCommittedAttrs(el, attrs) {
+        if (attrs && attrs.transform === null &&
+                localName(el) === "g" && el.hasAttribute("data-icon")) {
+            el.removeAttribute("data-use-has-transform");
+        }
+    }
+
+    function payloadForCurrentElementState(el, payload) {
+        if (!payload || !payload.attrs || payload.attrs.transform !== null ||
+                localName(el) !== "g" || !el.hasAttribute("data-icon") ||

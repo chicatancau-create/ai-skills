@@ -1,0 +1,122 @@
+    """Convert a PyMuPDF table object to cleaned Markdown."""
+    try:
+        rows = tab.extract() or []
+    except Exception:
+        return ""
+    return _rows_to_markdown(_clean_table_rows(rows))
+
+
+def _is_valid_table_markdown(markdown: str) -> bool:
+    """Return whether generated Markdown contains a minimally useful table."""
+    return markdown.count("\n") >= 2 and markdown.startswith("|")
+
+
+def _markdown_col_count(markdown: str) -> int:
+    """Return the column count implied by the first Markdown table row."""
+    first_line = markdown.splitlines()[0] if markdown else ""
+    return max(0, first_line.count("|") - 1)
+
+
+def _append_table_markdown_candidate(
+    candidates: list[dict[str, object]],
+    bbox: fitz.Rect,
+    markdown: str,
+    method: str,
+    replace_narrow: bool = False,
+) -> None:
+    """Append or replace a table candidate after overlap deduplication."""
+    if not _is_valid_table_markdown(markdown):
+        return
+
+    for index, candidate in enumerate(candidates):
+        existing = candidate["bbox"]
+        if not isinstance(existing, fitz.Rect):
+            continue
+        overlap = (bbox & existing).get_area()
+        if overlap <= 0.8 * min(bbox.get_area(), existing.get_area()):
+            continue
+
+        existing_markdown = str(candidate.get("content", ""))
+        can_replace = (
+            replace_narrow
+            and bbox.width > existing.width * 1.4
+            and _markdown_col_count(markdown) >= _markdown_col_count(existing_markdown)
+        )
+        if can_replace:
+            candidates[index] = {
+                "bbox": bbox,
+                "content": markdown,
+                "method": method,
+            }
+        return
+
+    candidates.append({
+        "bbox": bbox,
+        "content": markdown,
+        "method": method,
+    })
+
+
+def _add_table_candidate(
+    candidates: list[dict[str, object]],
+    tab: object,
+    method: str,
+) -> None:
+    """Append a table candidate if it has useful Markdown and is not duplicate."""
+    markdown = _table_to_markdown(tab)
+    if not _is_valid_table_markdown(markdown):
+        return
+
+    bbox = fitz.Rect(tab.bbox)
+    _append_table_markdown_candidate(candidates, bbox, markdown, method)
+
+
+ORPHAN_CELL_MAX_CHARS = 24
+ORPHAN_COLUMN_GAP = 12.0
+ORPHAN_ROW_COVERAGE = 0.6
+
+
+def _cluster_orphan_columns(cells: list[tuple[fitz.Rect, str, int]]) -> list[list[int]]:
+    """Group orphan text lines into columns by overlapping x-extents."""
+    ordered = sorted(range(len(cells)), key=lambda idx: cells[idx][0].x0)
+    columns: list[list[int]] = []
+    column_x1 = 0.0
+    for idx in ordered:
+        rect = cells[idx][0]
+        if columns and rect.x0 <= column_x1 + ORPHAN_COLUMN_GAP:
+            columns[-1].append(idx)
+            column_x1 = max(column_x1, rect.x1)
+        else:
+            columns.append([idx])
+            column_x1 = rect.x1
+    return columns
+
+
+def _orphan_side_columns(
+    cells: list[tuple[fitz.Rect, str, int]],
+    row_count: int,
+) -> list[list[str]] | None:
+    """Return per-row cell text for one side of a ruled table, or None."""
+    if not cells:
+        return None
+    covered_rows = {row_index for _rect, _text, row_index in cells}
+    if len(covered_rows) < max(2, math.ceil(row_count * ORPHAN_ROW_COVERAGE)):
+        return None
+    if any(len(text) > ORPHAN_CELL_MAX_CHARS for _rect, text, _row in cells):
+        return None
+
+    columns = _cluster_orphan_columns(cells)
+    table: list[list[str]] = [["" for _ in columns] for _ in range(row_count)]
+    for col_index, members in enumerate(columns):
+        for idx in sorted(members, key=lambda item: cells[item][0].x0):
+            rect, text, row_index = cells[idx]
+            current = table[row_index][col_index]
+            table[row_index][col_index] = f"{current} {text}".strip() if current else text
+    return table
+
+
+def _extend_ruled_table(
+    page: fitz.Page,
+    tab: object,
+    lines: list[tuple[fitz.Rect, str]],
+) -> tuple[fitz.Rect, str] | None:

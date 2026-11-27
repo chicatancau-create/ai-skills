@@ -1,0 +1,98 @@
+        "notes": [
+            (Path("notes") / note.filename).as_posix()
+            for note in result.speaker_notes
+        ] + (
+            ["notes/total.md"]
+            if result.speaker_notes and not options.roundtrip
+            else []
+        ),
+    }
+    if embedded_font_paths:
+        artifacts["embeddedFontManifest"] = embedded_font_paths[-1]
+        artifacts["embeddedFontParts"] = list(embedded_font_paths[:-1])
+    if result.native_structure is not None:
+        artifacts["sourceTemplate"] = SOURCE_TEMPLATE_NAME
+        artifacts["nativeStructure"] = NATIVE_STRUCTURE_NAME
+        artifacts["roundtripManifest"] = ROUNDTRIP_MANIFEST_PATH.as_posix()
+    report = {
+        "schemaVersion": 1,
+        "source": result.source_file,
+        "mode": "strict" if result.strict else "tolerant",
+        "summary": {
+            "slides": len(result.slides),
+            "warnings": len(result.diagnostics),
+        },
+        "artifacts": artifacts,
+        "sourceDocument": source_document,
+        "diagnostics": [item.to_dict() for item in result.diagnostics],
+    }
+    report_path = output_dir / CONVERSION_REPORT_PATH
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _write_animation_config(output_dir: Path, result: ConvertResult) -> None:
+    """Write the canonical transition/object-motion sidecar."""
+    errors = list(
+        dict.fromkeys(
+            validate_transition_config(result.animation_config)
+            + validate_animation_config_errors(result.animation_config)
+        )
+    )
+    if errors:
+        raise RuntimeError(
+            "Generated animations.json is invalid: " + "; ".join(errors)
+        )
+    (output_dir / "animations.json").write_text(
+        json.dumps(
+            result.animation_config,
+            ensure_ascii=False,
+            indent=2,
+        ) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _write_inheritance_json(svg_dir: Path, result: ConvertResult) -> None:
+    """Record layered parentage plus source-owned shape-visibility booleans."""
+    layout_by_path = {art.part_path: art.filename for art in result.layouts}
+    master_by_path = {art.part_path: art.filename for art in result.masters}
+
+    inheritance = {
+        "masters": [
+            {
+                "file": art.filename,
+                "partPath": art.part_path,
+                "themePath": art.theme_part_path,
+            }
+            for art in result.masters
+        ],
+        "layouts": [
+            {
+                "file": art.filename,
+                "partPath": art.part_path,
+                "master": master_by_path.get(art.parent_master_part_path or ""),
+                "parentPartPath": art.parent_master_part_path,
+                "themePath": art.theme_part_path,
+                "showMasterShapes": art.show_master_shapes,
+            }
+            for art in result.layouts
+        ],
+        "slides": [
+            {
+                "file": f"slide_{slide.index:02d}.svg",
+                "index": slide.index,
+                "layout": layout_by_path.get(slide.layout_part_path or ""),
+                "master": master_by_path.get(slide.master_part_path or ""),
+                "showInheritedShapes": slide.show_inherited_shapes,
+            }
+            for slide in result.slides
+        ],
+    }
+    (svg_dir / "inheritance.json").write_text(
+        json.dumps(inheritance, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )

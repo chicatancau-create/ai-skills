@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""
+PPT Master - Automatic Workflow Transcript
+
+Internal runtime helper that records a project-scoped Python tool's command
+envelope and material text outcomes in an existing project workflow log.
+
+Dependencies:
+    None (standard library only)
+"""
+
+from __future__ import annotations
+
+import atexit
+import json
+import os
+import sys
+import threading
+import time
+import uuid
+from collections import deque
+from collections.abc import Iterable
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import TextIO
+
+WORKFLOW_LOG_RELATIVE_PATH = Path("validation/workflow.log")
+PROJECT_PATH_ENV = "PPT_MASTER_PROJECT_PATH"
+DISABLE_TRANSCRIPT_ENV = "PPT_MASTER_DISABLE_WORKFLOW_TRANSCRIPT"
+_EXCLUDED_ENTRYPOINTS = {"workflow_log.py"}
+_CRITICAL_MARKERS = ("[ERROR]", "[FAIL]")
+_ALWAYS_RETAIN_MARKERS = (
+    "[POSTFLIGHT]",
+    "[PPTX]",
+    "[REPORT]",
+    "[Done]",
+    "[OK] Done",
+)
+_SUMMARY_MARKER = "[SUMMARY]"
+_SUMMARY_STOP_MARKERS = ("[TIP]",)
+_WARNING_MARKERS = ("[WARN]", "[WARNING]")
+_OK_MARKER = "[OK]"
+_WARNING_SAMPLE_LIMIT = 4
+_OK_SAMPLE_LIMIT = 1
+_STDERR_SAMPLE_LIMIT = 8
+_STDERR_TAIL_LIMIT = 4
+_CRITICAL_CONTEXT_LIMIT = 4
+_SUMMARY_CONTEXT_LIMIT = 12
+_ACTIVE_TRANSCRIPT: _AutomaticTranscript | None = None
+
+
+def _utc_timestamp() -> str:
+    """Return a compact UTC timestamp."""
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def _candidate_directory(value: str) -> Path | None:
+    """Resolve one CLI value to an existing directory candidate."""
+    if not value or value.startswith("-") or "://" in value:
+        return None
+    try:
+        raw_path = Path(value)
+        # A long positional string (a paragraph handed to text_measure.py)
+        # is not a path; stat-ing it raises ENAMETOOLONG on most filesystems.
+        if any(len(part.encode("utf-8", "surrogateescape")) > 255 for part in raw_path.parts):
+            return None
+        if not raw_path.exists() and raw_path.parent == Path("."):
+            return None
+        path = raw_path
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        while not path.exists() and path != path.parent:
+            path = path.parent
+        if path.is_file():
+            path = path.parent
+        return path.resolve()
+    except (OSError, ValueError):
+        return None
+
+
+def _find_project_root(argv: list[str]) -> Path | None:
+    """Find the first ancestor that already owns a workflow log."""
+    explicit_project = os.environ.get(PROJECT_PATH_ENV, "").strip()
+    values = [explicit_project, *argv[1:], str(Path.cwd())]
+    for value in values:
+        directory = _candidate_directory(value)
+        if directory is None:
+            continue
+        for candidate in (directory, *directory.parents):
+            if (candidate / WORKFLOW_LOG_RELATIVE_PATH).is_file():
+                return candidate
+    return None
+
+
+class _AutomaticTranscript:
+    """Append a bounded command/outcome audit without changing the owning tool."""
+
+    def __init__(
+        self,
+        handle: TextIO,
+        original_stderr: TextIO,
+        argv: list[str],
+    ) -> None:
+        self.handle = handle
+        self.original_stderr = original_stderr
+        self.argv = argv
+        self.run_id = uuid.uuid4().hex[:12]
+        self.started_clock = time.monotonic()
+        self.pending = {"stdout": "", "stderr": ""}
+        self.observed_lines = 0
+        self.retained_lines = 0
+        self.omitted_lines = 0
+        self.warning_samples = 0
+        self.ok_samples = 0
+        self.stderr_samples = 0
+        self.stderr_tail: deque[str] = deque(maxlen=_STDERR_TAIL_LIMIT)
+        self.critical_context_remaining = 0
+        self.summary_context_remaining = 0
+        self.current_record_stream: str | None = None
+        self.lock = threading.RLock()
+        self.enabled = True
+
+    def _disable(self, exc: OSError | UnicodeError | ValueError) -> None:

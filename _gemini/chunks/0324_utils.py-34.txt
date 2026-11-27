@@ -1,0 +1,109 @@
+    return ch.translate(_UNDECOMPOSED_BASE_LETTERS)
+
+
+def _estimate_character_width(ch: str, font_size: float) -> float:
+    if (
+        0xFF00 <= ord(ch) <= 0xFFEF
+        and unicodedata.east_asian_width(ch) == 'H'
+    ):
+        return font_size * 0.5
+    if is_cjk_char(ch):
+        return font_size
+    if ch == ' ':
+        return font_size * 0.3
+    if ch in _FIXED_SPACE_EMS:
+        return font_size * _FIXED_SPACE_EMS[ch]
+    ch = _base_letter(ch)
+    if ch in 'mMwWOQ%':
+        return font_size * 0.75
+    if ch in 'iIlj!|':
+        return font_size * 0.3
+    if ch.isdigit():
+        # digits are tabular (uniform ~0.55em) in most UI fonts, including
+        # '1' — classing it with 'il|' under-sizes the box and makes
+        # renderers that ignore wrap="none" (LibreOffice) wrap the line
+        return font_size * 0.55
+    return font_size * 0.55
+
+
+def _estimate_grapheme_width(cluster: str, font_size: float) -> float:
+    bases = [
+        ch for ch in cluster
+        if ch not in {'\u200c', '\u200d'} and not _is_grapheme_extend(ch)
+    ]
+    if not bases:
+        return font_size * 0.55
+    if (
+        len(bases) > 1
+        and all(_is_regional_indicator(ch) for ch in bases)
+    ) or '\u20e3' in cluster or any(_is_emoji_base(ch) for ch in bases):
+        return font_size
+    # Spacing combining marks (Indic vowel signs such as Devanagari aa/ii/o)
+    # sit beside the base and advance the pen; non-spacing marks do not.
+    spacing_marks = sum(1 for ch in cluster if unicodedata.category(ch) == 'Mc')
+    return (
+        max(_estimate_character_width(ch, font_size) for ch in bases)
+        + font_size * 0.3 * spacing_marks
+    )
+
+
+_FONT_ADVANCES_CACHE = None
+
+
+def primary_font_family(font_family: str | None) -> str:
+    """Normalize the first family in a font stack."""
+    return str(font_family or '').split(',')[0].strip().strip('\'"').lower()
+
+
+def get_font_advances(
+    font_family: str | None,
+    font_weight: str = '400',
+    font_style: str = 'normal',
+) -> dict[str, float] | None:
+    """Return bundled glyph advances for the primary family and style."""
+    family = primary_font_family(font_family)
+    if not family:
+        return None
+
+    global _FONT_ADVANCES_CACHE
+    if _FONT_ADVANCES_CACHE is None:
+        with Path(__file__).with_name('font_advances.json').open(encoding='utf-8') as handle:
+            _FONT_ADVANCES_CACHE = json.load(handle)['families']
+
+    bold = font_weight in ('bold', '600', '700', '800', '900')
+    italic = font_style in ('italic', 'oblique')
+    style = 'bold' if bold else 'regular'
+    if italic:
+        style = 'bold-italic' if bold else 'italic'
+    entry = _FONT_ADVANCES_CACHE.get(family, {}).get(style)
+    return entry['advances'] if entry is not None else None
+
+
+def estimate_text_cluster_widths(
+    text: str,
+    font_size: float,
+    font_weight: str = '400',
+    *,
+    font_family: str | None = None,
+    font_style: str = 'normal',
+) -> list[float]:
+    """Estimate each project text cluster without inserting tracking."""
+    advances = get_font_advances(font_family, font_weight, font_style)
+    bold = font_weight in ('bold', '600', '700', '800', '900')
+    widths = []
+    for cluster in split_project_text_clusters(text):
+        cjk = any(is_cjk_char(ch) for ch in cluster)
+        if advances is not None and not cjk and all(
+            ch in advances and not _is_emoji_base(ch) and not _is_grapheme_extend(ch)
+            for ch in cluster
+        ):
+            widths.append(sum(advances[ch] for ch in cluster) * font_size)
+            continue
+        # A precomposed letter the table lacks advances like its base letter.
+        bases = [
+            _base_letter(ch) for ch in cluster if not _is_grapheme_extend(ch)
+        ]
+        if advances is not None and not cjk and bases and all(
+            ch in advances and not _is_emoji_base(ch) for ch in bases
+        ) and all(
+            unicodedata.category(ch) == 'Mn' and not 0xFE00 <= ord(ch) <= 0xFE0F

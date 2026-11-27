@@ -1,0 +1,113 @@
+                    group_cfg,
+                    path=path,
+                )
+            except ValueError:
+                continue
+            for effect_path, effect_cfg in effect_entries:
+                if 'sound' in effect_cfg:
+                    sounds.append((effect_path, effect_cfg['sound']))
+    return tuple(sounds)
+
+
+def _animation_sound_path_errors(
+    project_path: Path,
+    config: dict[str, Any],
+) -> list[str]:
+    """Validate declared animation sound files against the project root."""
+    errors: list[str] = []
+    project_root = project_path.resolve()
+    for label, raw_sound in _declared_animation_sounds(config):
+        if not isinstance(raw_sound, str) or not raw_sound.strip():
+            continue
+        sound_path = Path(raw_sound)
+        if sound_path.suffix.lower() not in AUDIO_CONTENT_TYPES:
+            errors.append(
+                f'animations.json {label} sound must use .m4a, .mp3, or .wav'
+            )
+            continue
+        if not sound_path.is_absolute():
+            sound_path = project_root / sound_path
+        sound_path = sound_path.resolve()
+        if not sound_path.exists():
+            errors.append(
+                f'animations.json {label} sound file not found: {sound_path}'
+            )
+        elif not sound_path.is_file():
+            errors.append(
+                f'animations.json {label} sound path is not a regular file: '
+                f'{sound_path}'
+            )
+    return errors
+
+
+def _declared_transition_sounds(
+    config: dict[str, Any],
+) -> tuple[tuple[str, object], ...]:
+    """Return explicitly declared non-null transition sound values."""
+    sounds: list[tuple[str, object]] = []
+    defaults = config.get('defaults', {})
+    if isinstance(defaults, dict):
+        transition = defaults.get('transition', {})
+        if (
+            isinstance(transition, dict)
+            and transition.get('sound') is not None
+        ):
+            sounds.append(('defaults transition', transition['sound']))
+
+    slides = config.get('slides', {})
+    if not isinstance(slides, dict):
+        return tuple(sounds)
+    for slide_name, slide_cfg in slides.items():
+        if not isinstance(slide_cfg, dict):
+            continue
+        transition = slide_cfg.get('transition', {})
+        if (
+            isinstance(transition, dict)
+            and transition.get('sound') is not None
+        ):
+            sounds.append(
+                (f'slide "{slide_name}" transition', transition['sound'])
+            )
+    return tuple(sounds)
+
+
+def _transition_sound_path_errors(
+    project_path: Path,
+    config: dict[str, Any],
+) -> list[str]:
+    """Validate transition sounds as project-contained WAV files."""
+    errors: list[str] = []
+    project_root = project_path.resolve()
+    for label, raw_sound in _declared_transition_sounds(config):
+        if not isinstance(raw_sound, str) or not raw_sound.strip():
+            continue
+        sound_path = Path(raw_sound)
+        if sound_path.is_absolute() or PureWindowsPath(raw_sound).drive:
+            errors.append(
+                f'animations.json {label} sound must be project-relative: '
+                f'{raw_sound!r}'
+            )
+            continue
+        if sound_path.suffix.lower() != '.wav':
+            continue
+        resolved_path = (project_root / sound_path).resolve()
+        try:
+            resolved_path.relative_to(project_root)
+        except ValueError:
+            errors.append(
+                f'animations.json {label} sound escapes the project root: '
+                f'{raw_sound!r}'
+            )
+            continue
+        if not resolved_path.exists():
+            errors.append(
+                f'animations.json {label} sound file not found: {resolved_path}'
+            )
+        elif not resolved_path.is_file():
+            errors.append(
+                f'animations.json {label} sound path is not a regular file: '
+                f'{resolved_path}'
+            )
+    return errors
+
+

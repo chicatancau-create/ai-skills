@@ -1,0 +1,102 @@
+    layout_count = sum(len(master.slide_layouts) for master in presentation.slide_masters)
+    placeholder_count = 0
+    if require_full_placeholder_frames:
+        for slide_number, slide in enumerate(presentation.slides, 1):
+            layout_placeholders = {
+                shape.placeholder_format.idx: shape
+                for shape in slide.slide_layout.placeholders
+            }
+            slide_placeholders = {
+                shape.placeholder_format.idx: shape
+                for shape in slide.placeholders
+            }
+            if set(slide_placeholders) != set(layout_placeholders):
+                raise ValueError(
+                    f"review slide {slide_number} placeholder indexes do not match "
+                    f"its Layout: {sorted(slide_placeholders)} != "
+                    f"{sorted(layout_placeholders)}"
+                )
+            for placeholder_idx, slide_shape in slide_placeholders.items():
+                layout_shape = layout_placeholders[placeholder_idx]
+                if (
+                    slide_shape.placeholder_format.type
+                    != layout_shape.placeholder_format.type
+                ):
+                    raise ValueError(
+                        f"review slide {slide_number} placeholder {placeholder_idx} "
+                        "type does not match its Layout"
+                    )
+                slide_frame = (
+                    slide_shape.left,
+                    slide_shape.top,
+                    slide_shape.width,
+                    slide_shape.height,
+                )
+                layout_frame = (
+                    layout_shape.left,
+                    layout_shape.top,
+                    layout_shape.width,
+                    layout_shape.height,
+                )
+                if slide_frame != layout_frame:
+                    raise ValueError(
+                        f"review slide {slide_number} placeholder {placeholder_idx} "
+                        f"uses a tight/local frame {slide_frame}; expected full "
+                        f"Layout frame {layout_frame}"
+                    )
+                placeholder_count += 1
+    return len(presentation.slides), master_count, layout_count, placeholder_count
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Export a complete template workspace as a structured PPTX review deck."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "template_workspace",
+        help="Workspace root containing templates/design_spec.md.",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        help=(
+            "Output PPTX path. Default: "
+            "<template_workspace>/exports/<template_id>_template_preview.pptx"
+        ),
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Replace an existing review PPTX after an intentional re-export.",
+    )
+    parser.add_argument(
+        "--native-charts-and-tables",
+        action="store_true",
+        help=(
+            "Replace eligible SVG chart/table fallbacks with PowerPoint-native "
+            "objects. Enabled automatically for typed chart/table placeholders; "
+            "otherwise the default keeps visible SVG fallbacks."
+        ),
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    require_skill_integrity()
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        workspace, template_dir = _resolve_workspace(Path(args.template_workspace))
+        all_svg_files = discover_slide_svgs(template_dir)
+        if not all_svg_files:
+            raise ValueError(f"template directory has no SVG prototypes: {template_dir}")
+        definition_only_files = [
+            path.name
+            for path in all_svg_files
+            if path.stem.startswith("layout_")
+        ]
+        if definition_only_files:

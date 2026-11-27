@@ -1,0 +1,72 @@
+                    item = TemplateElementSpec('number', 0, 'g', placeholder=kind,
+                                               placeholder_bounds=(0, 0, 100, 100))
+                    layout = builder._layout_placeholder_shape(shape, item, 1, fonts)
+                    builder._patch_slide_placeholder(shape, item, 1, theme_font_spec=fonts)
+                    for output in (shape, layout):
+                        self.assertEqual(output.find(f'.//{{{DML}}}latin').get('typeface'), expected)
+
+
+class TemplatePreviewTests(unittest.TestCase):
+    def test_n4_default_report_core_preview_compiles_typed_slots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()) as output:
+            code = template_preview_pptx.main([
+                str(TEMPLATES / 'layouts' / 'report_core'), '-o', str(Path(tmp) / 'review.pptx'),
+            ])
+            self.assertEqual(code, 0, output.getvalue())
+            self.assertIn('2 master(s)', output.getvalue())
+            self.assertIn('typed', output.getvalue())
+
+
+class TemplateBrowserTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('node'), 'Node.js is needed for the frontend behavior check')
+    def test_n5_explicit_checkboxes_expand_roots_and_reject_kind_conflicts(self) -> None:
+        source = (SCRIPTS_DIR / 'confirm_ui' / 'static' / 'app.js').read_text(encoding='utf-8')
+        selection_code = source[source.index('    function normalizeTemplateCandidates('):
+                                source.index('    function normalizeRecId(')]
+        validation_code = source[source.index('    function templateSelectionValid('):
+                                 source.index('    function submitStage1(')]
+        script = '''
+const assert = require('node:assert/strict');
+var TEMPLATE_KINDS = ['brand', 'style', 'layout', 'deck'];
+var TEMPLATE_SELECTIONS, TEMPLATE_OPTIONS, TEMPLATE_CANDIDATES, TEMPLATE_SELECTED_KEYS, TEMPLATE_MODE;
+var status = {}, inputs = [];
+var document = {
+    getElementById: id => id === 'confirm-status' ? status : null,
+    querySelectorAll: () => inputs
+};
+function t(key) { return key; }
+function localized(item, field) { return item[field]; }
+function el(tag, cls, text) {
+    var element = {children: [], appendChild(child) { this.children.push(child); },
+                   addEventListener(event, handler) { this[event] = handler; }};
+    if (tag === 'input') inputs.push(element);
+    return element;
+}
+''' + selection_code + validation_code + '''
+const explicit = [
+    {key: 'b', kind: 'brand', workspace_root: '/one'},
+    {key: 's', kind: 'style', workspace_root: '/one'},
+    {key: 'l', kind: 'layout', workspace_root: '/two'},
+    {key: 'x', kind: 'layout', workspace_root: '/conflict'}
+];
+initTemplateOptions({default_mode: 'templates', explicit, preselected_keys: ['b', 's']});
+renderExplicitTemplateChoices();
+assert.equal(inputs.length, 3);
+assert.deepEqual(TEMPLATE_SELECTED_KEYS, ['b', 's']);
+inputs[1].checked = true;
+inputs[1].change();
+assert.deepEqual(TEMPLATE_SELECTED_KEYS, ['b', 's', 'l']);
+assert.equal(templateSelectionValid(), true);
+inputs[2].checked = true;
+inputs[2].change();
+assert.equal(templateSelectionValid(), false);
+assert.deepEqual(TEMPLATE_SELECTED_KEYS, ['b', 's', 'l', 'x']);
+inputs[2].checked = false;
+inputs[2].change();
+assert.equal(templateSelectionValid(), true);
+chooseFreeDesign();
+assert.deepEqual(TEMPLATE_SELECTED_KEYS, []);
+assert.equal(inputs.some(input => input.checked), false);
+'''
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)

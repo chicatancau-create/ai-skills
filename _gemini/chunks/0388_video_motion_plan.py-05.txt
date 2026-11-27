@@ -1,0 +1,105 @@
+            if not isinstance(effect, str) or not effect:
+                raise ValueError(
+                    f"slide {slide_num} animation row has no resolved effect"
+                )
+            start_ms = _non_negative_int(
+                raw_row.get("offset_ms"),
+                f"slide {slide_num} animation offset_ms",
+            )
+            duration_ms = _positive_int(
+                raw_row.get("duration_ms"),
+                f"slide {slide_num} animation duration_ms",
+            )
+            playback_duration_ms = raw_row.get(
+                "playback_duration_ms",
+                duration_ms,
+            )
+            playback_duration_ms = _positive_int(
+                playback_duration_ms,
+                f"slide {slide_num} animation playback_duration_ms",
+            )
+            event = event_index.get(shape_id)
+            if event is None:
+                raise ValueError(
+                    f"slide {slide_num} animation shape {shape_id} has no "
+                    "conversion-trace bounds"
+                )
+            bounds = list(event["bounds_emu"])
+            area_ratio = _area_ratio(bounds, canvas_emu)
+            multiplier = _adaptive_multiplier(
+                style,
+                raw_slide.get("page_role"),
+                len(rows),
+                area_ratio,
+            )
+            direction = _direction_for_effect(
+                effect,
+                raw_row.get("filter_name"),
+                raw_row.get("effect_options"),
+            )
+            video = _video_effect(effect, direction, multiplier)
+            video["duration_ms"] = duration_ms
+
+            group_id = event.get("id")
+            if not isinstance(group_id, str) or not group_id.strip():
+                group_id = f"shape-{shape_id}"
+            objects.append({
+                "group_id": group_id,
+                "shape_id": shape_id,
+                "order": order,
+                "source_effect": effect,
+                "trigger": trigger,
+                "start_ms": start_ms,
+                "duration_ms": duration_ms,
+                "playback_duration_ms": playback_duration_ms,
+                "effect_options": raw_row.get("effect_options", {}),
+                "repeat_count": raw_row.get("repeat_count"),
+                "repeat_duration_ms": raw_row.get("repeat_duration_ms"),
+                "auto_reverse": raw_row.get("auto_reverse"),
+                "bounds_emu": bounds,
+                "area_ratio": round(area_ratio, 6),
+                "video": video,
+            })
+            total_objects += 1
+            if video["family"] != "hard_reveal":
+                enhanced_objects += 1
+
+        motion = raw_slide.get("motion")
+        advance_after_ms = (
+            motion.get("advance_after_ms")
+            if isinstance(motion, dict)
+            else None
+        )
+        content_end_ms = max(
+            (
+                item["start_ms"] + item["playback_duration_ms"]
+                for item in objects
+            ),
+            default=0,
+        )
+        if isinstance(advance_after_ms, int) and advance_after_ms > 0:
+            slide_duration_ms = max(advance_after_ms, content_end_ms)
+            duration_source = "recorded-advance"
+        else:
+            slide_duration_ms = max(default_duration_ms, content_end_ms + 750)
+            duration_source = "default-hold"
+
+        slides.append({
+            "slide_num": slide_num,
+            "svg": str(svg_path),
+            "page_role": raw_slide.get("page_role"),
+            "canvas_emu": list(canvas_emu),
+            "duration_ms": slide_duration_ms,
+            "duration_source": duration_source,
+            "transition": _transition_plan(motion),
+            "objects": objects,
+        })
+
+    return {
+        "schema": VIDEO_MOTION_SCHEMA,
+        "source_trace": str(path),
+        "source_pptx": trace.get("output"),
+        "style": style,
+        "locks": {
+            "object_identity": True,
+            "object_order": True,

@@ -1,0 +1,120 @@
+def placeholder_semantic_role(placeholder_type: str | None) -> str:
+    """Map an OOXML placeholder type to the exporter role vocabulary."""
+    normalized = placeholder_type or "obj"
+    role_by_type = {
+        "title": "title",
+        "ctrTitle": "title",
+        "body": "body",
+        "subTitle": "subtitle",
+        "obj": "object",
+        "pic": "picture",
+        "chart": "chart",
+        "tbl": "table",
+        "media": "media",
+        "dt": "date",
+        "ftr": "footer",
+        "sldNum": "slide-number",
+    }
+    return role_by_type.get(normalized, "other")
+
+
+def extract_placeholders(root: ET.Element | None) -> list[dict[str, Any]]:
+    if root is None:
+        return []
+    placeholders: list[dict[str, Any]] = []
+    for sp in root.findall(".//p:sp", NS):
+        ph = sp.find("p:nvSpPr/p:nvPr/p:ph", NS)
+        if ph is None:
+            continue
+        non_visual = sp.find("p:nvSpPr/p:cNvPr", NS)
+        placeholder_type = ph.attrib.get("type")
+        record: dict[str, Any] = {
+            "type": placeholder_type,
+            "idx": ph.attrib.get("idx"),
+            "size": ph.attrib.get("sz"),
+            "orient": ph.attrib.get("orient"),
+            "semanticRole": placeholder_semantic_role(placeholder_type),
+            "shapeId": non_visual.attrib.get("id") if non_visual is not None else None,
+            "shapeName": non_visual.attrib.get("name") if non_visual is not None else None,
+            "geometry": parse_xfrm_record(sp),
+            "textSamples": extract_text_samples(sp, limit=2),
+        }
+        style = extract_placeholder_text_style(sp)
+        if style:
+            record["textStyle"] = style
+        placeholders.append(record)
+    return placeholders
+
+
+def count_drawable_shapes(root: ET.Element | None) -> int:
+    """Count top-level visual shapes that are not placeholder definitions."""
+    if root is None:
+        return 0
+    sp_tree = root.find("p:cSld/p:spTree", NS)
+    if sp_tree is None:
+        return 0
+    visual_tags = {
+        f"{{{NS['p']}}}sp",
+        f"{{{NS['p']}}}grpSp",
+        f"{{{NS['p']}}}graphicFrame",
+        f"{{{NS['p']}}}pic",
+        f"{{{NS['p']}}}cxnSp",
+    }
+    count = 0
+    for child in sp_tree:
+        if child.tag not in visual_tags:
+            continue
+        if child.find("p:nvSpPr/p:nvPr/p:ph", NS) is not None:
+            continue
+        count += 1
+    return count
+
+
+def extract_placeholder_text_style(sp: ET.Element) -> dict[str, Any]:
+    style: dict[str, Any] = {}
+    rpr = sp.find(".//a:rPr", NS)
+    if rpr is None:
+        rpr = sp.find(".//a:endParaRPr", NS)
+    if rpr is None:
+        return style
+    if rpr.attrib.get("sz"):
+        try:
+            style["fontSizePx"] = round(int(rpr.attrib["sz"]) / 75, 2)
+        except ValueError:
+            pass
+    if rpr.attrib.get("b") == "1":
+        style["bold"] = True
+    if rpr.attrib.get("i") == "1":
+        style["italic"] = True
+    latin = rpr.find("a:latin", NS)
+    ea = rpr.find("a:ea", NS)
+    if latin is not None and latin.attrib.get("typeface"):
+        style["latinFont"] = latin.attrib["typeface"]
+    if ea is not None and ea.attrib.get("typeface"):
+        style["eastAsiaFont"] = ea.attrib["typeface"]
+    color = rpr.find("a:solidFill/a:srgbClr", NS)
+    if color is not None and color.attrib.get("val"):
+        style["fill"] = f"#{color.attrib['val']}"
+    return style
+
+
+def extract_text_samples(root: ET.Element | None, limit: int = 6) -> list[str]:
+    if root is None:
+        return []
+    samples: list[str] = []
+    for node in root.findall(".//a:t", NS):
+        text = (node.text or "").strip()
+        if not text:
+            continue
+        samples.append(text)
+        if len(samples) >= limit:
+            break
+    return samples
+
+
+def extract_image_targets(root: ET.Element | None, rels: dict[str, dict[str, str]]) -> list[str]:
+    if root is None:
+        return []
+    targets: list[str] = []
+    seen: set[str] = set()
+    for blip in root.findall(".//a:blip", NS):

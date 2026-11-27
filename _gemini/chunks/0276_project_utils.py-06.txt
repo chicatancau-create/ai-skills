@@ -1,0 +1,98 @@
+                f'{design_spec.name} §IX Slide {number:02d} plans {_fmt(planned_slides)}; '
+                'retarget the anchors or the plan so both name the current roster.'
+            )
+        if planned_externals != svg_externals:
+            def _fmt_links(links: set) -> str:
+                return ', '.join(sorted(links)) or '(none)'
+            errors.append(
+                f'Outline hyperlinks: {svg_file.name} links to {_fmt_links(svg_externals)} but '
+                f'{design_spec.name} §IX Slide {number:02d} plans {_fmt_links(planned_externals)}.'
+            )
+    return errors
+
+
+def validate_project_structure(
+    project_path: str,
+    verbose: bool = False,
+    *,
+    validate_communication: bool = True,
+) -> Tuple[bool, List[str], List[str]]:
+    """
+    Validate project structure completeness.
+
+    Args:
+        project_path: Project directory path
+        verbose: Whether to show detailed fix suggestions
+        validate_communication: Whether to run the communication trace check
+
+    Returns:
+        (is_valid, error_list, warning_list)
+    """
+    project_path = Path(project_path)
+    errors = []
+    warnings = []
+
+    # Try to import error helper
+    try:
+        from error_helper import ErrorHelper
+        use_helper = True
+    except ImportError:
+        use_helper = False
+
+    # Check if directory exists
+    if not project_path.exists():
+        msg = f"Project directory does not exist: {project_path}"
+        if use_helper and verbose:
+            msg += "\n" + ErrorHelper.format_error_message('missing_directory',
+                                                           {'project_path': str(project_path)})
+        errors.append(msg)
+        return False, errors, warnings
+
+    if not project_path.is_dir():
+        errors.append(f"Not a valid directory: {project_path}")
+        return False, errors, warnings
+
+    # Check required files
+    if not (project_path / 'README.md').exists():
+        msg = "Missing README.md (optional project notes; nothing reads it)"
+        if use_helper and verbose:
+            msg += "\n" + ErrorHelper.format_error_message('missing_readme',
+                                                           {'project_path': str(project_path)})
+        warnings.append(msg)
+
+    # Check design specification file
+    has_spec = any((project_path / name).exists() for name in _DESIGN_SPEC_NAMES)
+    if not has_spec:
+        msg = "Missing design specification file (suggested filename: design_spec.md)"
+        if use_helper and verbose:
+            msg += "\n" + ErrorHelper.format_error_message('missing_spec')
+        warnings.append(msg)
+    elif validate_communication:
+        errors.extend(validate_communication_trace(project_path))
+
+    # Check svg_output directory
+    svg_output = project_path / 'svg_output'
+    if not svg_output.exists():
+        msg = "Missing svg_output directory"
+        if use_helper and verbose:
+            msg += "\n" + \
+                ErrorHelper.format_error_message('missing_svg_output')
+        errors.append(msg)
+    elif not svg_output.is_dir():
+        errors.append("svg_output is not a directory")
+    else:
+        # Check for SVG files
+        svg_files = list(svg_output.glob('*.svg'))
+        if not svg_files:
+            msg = "svg_output directory is empty, no SVG files found"
+            if use_helper and verbose:
+                msg += "\n" + \
+                    ErrorHelper.format_error_message('empty_svg_output')
+            warnings.append(msg)
+        else:
+            # Validate SVG file naming (consistent with project_manager.py)
+            for svg_file in svg_files:
+                if not re.match(r'^(slide_\d+_\w+|P?\d+_.+)\.svg$', svg_file.name):
+                    msg = f"Non-standard SVG file naming: {svg_file.name}"
+                    if use_helper and verbose:
+                        msg += "\n" + ErrorHelper.format_error_message('invalid_svg_naming',

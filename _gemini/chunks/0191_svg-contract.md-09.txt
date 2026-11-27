@@ -1,0 +1,66 @@
+visible text with the root `viewBox` before that headroom. Per side, overflow
+through `1px` is ignored; module-boundary overflow warns through `5%` and
+fails above `5%`, while any larger root-`viewBox` text overflow fails. Bounds
+do not clip or reflow; unestimable visible text receives an advisory warning.
+Only a wholly off-canvas direct-root Morph endpoint may set
+`data-pptx-morph-staging="true"`; its own module bounds still apply, retained
+Morph uses an explicit pair, and the marker never excuses partial page
+overflow. Primitive fallback (a root with no top-level `<g>` at all) is capped
+at 8 visible primitives.
+
+---
+
+# Part II — Effects and Geometry Grammar (`svg-effects.md` §6)
+
+Section numbers mirror [`svg-effects.md`](../../references/svg-effects.md).
+The shared converter implementation for §§6.2–6.8 is
+[`utils.py`](../svg_to_pptx/drawingml/utils.py); paths use
+[`paths.py`](../svg_to_pptx/drawingml/paths.py).
+
+## §6.2 Color, alpha, and opacity
+
+Compatible paint grammar includes recognized named colors, `rgb()` / `rgba()`,
+`hsl()` / `hsla()`, and `#RGB` / `#RGBA` / `#RRGGBB` / `#RRGGBBAA`; the
+converter also tolerates legacy bare 3/4/6/8-digit hexadecimal tokens. The
+generated canonical form is uppercase six-digit `#RRGGBB`; the checker prints
+an optional canonical rewrite as a recommendation warning that never blocks
+export. Explicit empty, malformed, or unrecognized paint values are errors in
+both checker and exporter preflight; neither converts unknown intent into
+`noFill` or default black.
+
+| Intent | Canonical authoring | Native result / fidelity |
+|---|---|---|
+| Solid fill or text paint | `fill="#RRGGBB"` | Solid DrawingML paint; `Native-stable` |
+| Fill/text alpha | Opaque `fill` + `fill-opacity="0..1"` | Fill/run alpha; `Native-stable` |
+| Stroke alpha | Opaque `stroke` + `stroke-opacity="0..1"` | Line/outline alpha; `Native-stable` |
+| Gradient-stop alpha | Opaque `stop-color` + `stop-opacity="0..1"` | Per-stop alpha; `Native-stable` |
+| Shadow/glow alpha | Opaque `flood-color` + `flood-opacity="0..1"` | Glow `Native-stable`; outer shadow visually calibrated `Approximate` |
+| Picture fade | `<image opacity="0..1">` | Picture `<a:alphaModFix>`; `Native-stable` |
+| One atomic whole-object fade | Non-group element `opacity="0..1"` | Alpha compiled into its supported paint/effect channels; `Native-normalized` |
+| Pattern alpha | Opaque pattern child paint + child fill/stroke opacity | Conditional; `native-data-interface.md` |
+| CSS color alpha | Alpha-bearing named/functional/HEX paint | `Native-normalized`; recommendation warning only |
+| Group fade | `<g opacity>` compatibility | `Approximate`; fidelity warning; §2.2 |
+
+```text
+effective fill alpha
+= color alpha × ancestor group opacity × element opacity × fill-opacity
+```
+
+`opacity`, `fill-opacity`, `stroke-opacity`, `stop-opacity`, and
+`flood-opacity` are finite unitless numbers from `0` to `1`; the converter also
+accepts finite numeric values that SVG/CSS clamps into that interval, and
+`stop-opacity` / `flood-opacity` additionally accept finite percentages (the
+checker reports those spellings as recommendation warnings). Malformed or
+non-finite values are errors. `fill="transparent"` / `stroke="transparent"`
+become no fill/line. PPTX import is a user-input boundary: tolerant mode
+retains recognized color semantics, omits only unsupported paint properties,
+and records the decision in `conversion-report.json`; `--strict` keeps the
+closed parser checks.
+
+## §6.3 Gradients and text picture fill
+
+| Concern | Contract |
+|---|---|
+| Definition | Direct `<linearGradient>` / `<radialGradient>` child of `<defs>` with unique `id` |
+| Reference | Exact local `url(#id)` |
+| Stops | ≥2 direct `<stop>` children; explicit color; finite non-decreasing offset in `0..1` or `0%..100%` (ties form hard edges); optional alpha |

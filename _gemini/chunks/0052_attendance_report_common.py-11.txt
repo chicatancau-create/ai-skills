@@ -1,0 +1,128 @@
+        subtitle = sheet_def.get("subtitle")
+        merge_groups = sheet_def.get("merge_groups")
+        attend_result_columns = sheet_def.get("attend_result_columns")
+        attend_result_rows = sheet_def.get("attend_result_rows")
+        image_columns = sheet_def.get("image_columns")
+        image_size = sheet_def.get("image_size") or (80, 120)
+
+        ws = wb.create_sheet(title=name[:31])
+
+        title_row_count = (1 if title else 0) + (1 if subtitle else 0)
+        header_row = title_row_count + 1
+        first_data_row = header_row + 1
+
+        # 写入表头
+        for col_idx, header in enumerate(headers, start=1):
+            ws.cell(row=header_row, column=col_idx, value=header)
+
+        # 写入数据
+        for row_offset, row in enumerate(rows):
+            excel_row = first_data_row + row_offset
+            for col_idx, value in enumerate(row, start=1):
+                ws.cell(row=excel_row, column=col_idx, value=_excel_safe(value))
+
+        # 应用统一样式
+        if headers:
+            _apply_sheet_styles(
+                ws, headers, rows, styles,
+                title=title, subtitle=subtitle,
+                merge_groups=merge_groups,
+                attend_result_columns=attend_result_columns,
+                attend_result_rows=attend_result_rows,
+                image_columns=image_columns,
+                image_size=image_size,
+            )
+
+    out_abs = os.path.abspath(out_path)
+    wb.save(out_abs)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 输出文件命名
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_output_filename(start: datetime, end: datetime, *, suffix: str = "") -> str:
+    """
+    生成 attendance_report_<startDate>_<endDate>[_suffix].xlsx 形式的文件名，
+    落在当前工作目录。
+    """
+    base = f"attendance_report_{start.strftime(DATE_FMT)}_{end.strftime(DATE_FMT)}"
+    if suffix:
+        base = f"{base}_{suffix}"
+    return f"{base}.xlsx"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 请假数据查询（query-leave）
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 默认关注的 4 类假期
+DEFAULT_LEAVE_NAMES: tuple[str, ...] = ("事假", "调休", "病假", "年假")
+
+
+def _normalize_leave_date(raw: Any) -> str | None:
+    """把 query-leave 返回的 date 字段（毫秒时间戳字符串/数字）归一化为 YYYY-MM-DD。"""
+    if raw is None or raw == "":
+        return None
+    try:
+        ts = int(str(raw).strip())
+    except (TypeError, ValueError):
+        # 也可能本来就是 YYYY-MM-DD
+        s = str(raw).strip()
+        if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+            return s[:10]
+        return None
+    # 毫秒级
+    if ts >= 1_000_000_000_000:
+        ts = ts // 1000
+    try:
+        return datetime.fromtimestamp(ts).strftime(DATE_FMT)
+    except (OSError, ValueError, OverflowError):
+        return None
+
+
+def query_leave_data(
+    user_ids: list[str],
+    start: datetime,
+    end: datetime,
+    leave_names: Iterable[str] = DEFAULT_LEAVE_NAMES,
+    *,
+    stats: "CallStats | None" = None,
+) -> dict[str, dict[str, dict[str, float]]]:
+    """
+    分批分段调用 `dws attendance report query-leave`，聚合每个用户每天的假期数据。
+
+    返回结构：
+      {
+        userId: {
+          "YYYY-MM-DD": {
+            "事假": 1.0,
+            "调休": 0.5,
+            ...
+          },
+          ...
+        },
+        ...
+      }
+
+    若同一 (userId, date, leaveName) 在多次返回中出现（理论不会），按 sum 累加。
+    分批规则与 query-data 一致：≤ MAX_USERS_PER_BATCH 人/次、≤ MAX_DAYS_PER_SLICE 天/次。
+    """
+    result: dict[str, dict[str, dict[str, float]]] = {}
+    if not user_ids:
+        return result
+
+    leave_names_list = [n for n in leave_names if n]
+    if not leave_names_list:
+        return result
+
+    user_batches = chunk_users(user_ids)
+    date_slices = slice_date_range(start, end)
+    leave_arg = ",".join(leave_names_list)
+
+    log(
+        f"[leave] 查询 {len(user_ids)} 人 × {len(leave_names_list)} 类假期 × "
+        f"{len(date_slices)} 个时间片"
+    )
+
+    for bi, batch in enumerate(user_batches, start=1):

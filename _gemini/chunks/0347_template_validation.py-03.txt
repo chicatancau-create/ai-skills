@@ -1,0 +1,116 @@
+    """Validate reusable structure and ordinary Slide carriers by stable name."""
+    expected_sequence = tuple(expected_names)
+    expected_set = set(expected_sequence)
+    actual_names = _top_level_shape_names(root, context, errors)
+    counts = Counter(actual_names)
+    duplicates = sorted(name for name, count in counts.items() if count > 1)
+    if duplicates:
+        errors.append(
+            f"{context} repeats structured shape name(s): " + ", ".join(duplicates)
+        )
+    actual_set = set(actual_names)
+    missing = sorted(expected_set - actual_set)
+    if missing:
+        errors.append(
+            f"{context} is missing structured shape(s): " + ", ".join(missing)
+        )
+    if exact:
+        unexpected = sorted(actual_set - expected_set)
+        if unexpected:
+            errors.append(
+                f"{context} contains unexpected shape(s): "
+                + ", ".join(unexpected)
+            )
+    if ordered and not missing:
+        actual_sequence = (
+            actual_names
+            if exact
+            else tuple(name for name in actual_names if name in expected_set)
+        )
+        if actual_sequence != expected_sequence:
+            errors.append(
+                f"{context} structured shape order is {actual_sequence}, "
+                f"expected {expected_sequence}"
+            )
+
+
+def _top_level_shape_by_name(
+    root: ET.Element,
+    name: str,
+) -> ET.Element | None:
+    c_sld = root.find(f"{{{PML_NS}}}cSld")
+    shape_tree = (
+        c_sld.find(f"{{{PML_NS}}}spTree") if c_sld is not None else None
+    )
+    if shape_tree is None:
+        return None
+    for child in shape_tree:
+        if child.tag not in _TOP_LEVEL_VISIBLE_TAGS:
+            continue
+        c_nv_pr = next(child.iter(f"{{{PML_NS}}}cNvPr"), None)
+        if c_nv_pr is not None and c_nv_pr.get("name") == name:
+            return child
+    return None
+
+
+def _has_explicit_background(root: ET.Element) -> bool:
+    c_sld = root.find(f"{{{PML_NS}}}cSld")
+    return c_sld is not None and c_sld.find(f"{{{PML_NS}}}bg") is not None
+
+
+def _xml_payload_signature(elem: ET.Element) -> tuple[object, ...]:
+    """Return a namespace-stable exact XML payload signature."""
+    return (
+        elem.tag,
+        tuple(sorted(elem.attrib.items())),
+        (elem.text or "").strip(),
+        tuple(_xml_payload_signature(child) for child in elem),
+    )
+
+
+def _background_payload_signatures(
+    root: ET.Element,
+) -> tuple[tuple[object, ...], ...]:
+    c_sld = root.find(f"{{{PML_NS}}}cSld")
+    backgrounds = (
+        c_sld.findall(f"{{{PML_NS}}}bg")
+        if c_sld is not None
+        else []
+    )
+    return tuple(_xml_payload_signature(background) for background in backgrounds)
+
+
+def _expected_background_signature(
+    background_xml: str,
+) -> tuple[object, ...]:
+    """Parse a standalone p:bg fragment regardless of its serialized prefix."""
+    try:
+        wrapper = ET.fromstring(
+            f'<root xmlns:p="{PML_NS}" xmlns:a="{DML_NS}">'
+            f"{background_xml}</root>"
+        )
+    except ET.ParseError as exc:
+        raise ValueError(f"invalid expected p:bg payload: {exc}") from exc
+    children = list(wrapper)
+    if len(children) != 1 or children[0].tag != f"{{{PML_NS}}}bg":
+        raise ValueError("expected background payload must contain exactly one p:bg")
+    return _xml_payload_signature(children[0])
+
+
+def _relationships_part_for(source_part: str) -> str:
+    directory = posixpath.dirname(source_part)
+    filename = posixpath.basename(source_part)
+    return posixpath.join(directory, "_rels", f"{filename}.rels")
+
+
+def _resolve_relationship_target(
+    source_part: str,
+    relationship: _Relationship,
+    errors: list[str],
+    context: str,
+) -> str | None:
+    target_mode = (relationship.target_mode or "Internal").lower()
+    if target_mode != "internal":
+        errors.append(f"{context} relationship must be internal")
+        return None
+    raw_target = relationship.target

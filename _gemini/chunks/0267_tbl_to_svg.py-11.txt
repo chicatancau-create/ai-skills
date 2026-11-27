@@ -1,0 +1,110 @@
+                return True
+
+        default_r_pr = p_pr.find("a:defRPr", NS) if p_pr is not None else None
+        if _legacy_run_props_have_unsupported_formatting(default_r_pr):
+            return True
+        for run in paragraph.findall("a:r", NS):
+            r_pr = run.find("a:rPr", NS)
+            if _legacy_run_props_have_unsupported_formatting(r_pr):
+                return True
+            run_signatures.add(
+                _legacy_effective_run_signature(r_pr, default_r_pr)
+            )
+        end_r_pr = paragraph.find("a:endParaRPr", NS)
+        if _legacy_run_props_have_unsupported_formatting(end_r_pr):
+            return True
+        if not paragraph.findall("a:r", NS) and end_r_pr is not None:
+            run_signatures.add(
+                _legacy_effective_run_signature(end_r_pr, default_r_pr)
+            )
+
+    return len(run_signatures) > 1
+
+
+def _legacy_run_props_have_unsupported_formatting(
+    r_pr: ET.Element | None,
+) -> bool:
+    if r_pr is None:
+        return False
+    if ooxml_bool(r_pr.get("i")):
+        return True
+    if r_pr.get("u") not in {None, "none"}:
+        return True
+    if r_pr.get("strike") not in {None, "noStrike"}:
+        return True
+    if r_pr.get("baseline") not in {None, "0"}:
+        return True
+    if r_pr.get("cap") not in {None, "none"}:
+        return True
+    if r_pr.get("spc") not in {None, "0"}:
+        return True
+    allowed_attrs = {
+        "lang", "altLang", "sz", "b", "i", "u", "strike", "dirty",
+        "baseline", "cap", "spc",
+    }
+    if any(name not in allowed_attrs for name in r_pr.attrib):
+        return True
+    solid_fill = r_pr.find("a:solidFill", NS)
+    if solid_fill is not None and solid_fill.find(".//a:alpha", NS) is not None:
+        return True
+    return any(
+        child.tag.rsplit("}", 1)[-1] != "solidFill"
+        for child in r_pr
+    )
+
+
+def _legacy_effective_run_signature(
+    r_pr: ET.Element | None,
+    default_r_pr: ET.Element | None,
+) -> tuple[str | None, str | None, bytes | None]:
+    def attr(name: str) -> str | None:
+        if r_pr is not None and r_pr.get(name) is not None:
+            return r_pr.get(name)
+        return default_r_pr.get(name) if default_r_pr is not None else None
+
+    solid_fill = r_pr.find("a:solidFill", NS) if r_pr is not None else None
+    if solid_fill is None and default_r_pr is not None:
+        solid_fill = default_r_pr.find("a:solidFill", NS)
+    fill_xml = (
+        ET.tostring(solid_fill, encoding="utf-8")
+        if solid_fill is not None else None
+    )
+    return attr("b"), attr("sz"), fill_xml
+
+
+def _round_payload_number(value: float) -> int | float:
+    rounded = round(float(value), 3)
+    return int(rounded) if rounded.is_integer() else rounded
+
+
+def _native_table_payload(
+    tbl: ET.Element,
+    xfrm: Xfrm,
+    column_widths: list[float],
+    row_heights: list[float],
+    cells: list[list[_CellSlot | None]],
+    palette: ColorPalette | None,
+    theme_fonts: dict[str, str],
+) -> dict[str, Any]:
+    """Build the SVG native Table replacement payload for an unmerged table."""
+    tbl_pr = tbl.find("a:tblPr", NS)
+    payload: dict[str, Any] = {
+        "x": _round_payload_number(xfrm.x),
+        "y": _round_payload_number(xfrm.y),
+        "width": _round_payload_number(xfrm.w),
+        "height": _round_payload_number(xfrm.h),
+        "strict_grid": True,
+        "header_rows": (
+            1 if tbl_pr is not None and ooxml_bool(tbl_pr.get("firstRow")) else 0
+        ),
+        "column_widths": [_round_payload_number(width) for width in column_widths],
+        "row_heights": [_round_payload_number(height) for height in row_heights],
+        "rows": [],
+    }
+    style: dict[str, Any] = {
+        "band_row": bool(tbl_pr is not None and ooxml_bool(tbl_pr.get("bandRow"))),
+    }
+    if tbl_pr is not None:
+        table_style_id = tbl_pr.findtext("a:tableStyleId", default="", namespaces=NS).strip()
+        if table_style_id:
+            style["table_style_id"] = table_style_id

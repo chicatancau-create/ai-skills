@@ -1,0 +1,110 @@
+        else None
+    )
+    return {
+        side: (
+            _table_border_override(border_overrides[side], side)
+            if side in border_overrides
+            else legacy_spec if side in {"left", "right", "top", "bottom"}
+            else None
+        )
+        for side in _TABLE_BORDER_SIDES
+    }
+
+
+def _table_border_xml(
+    cell_data: dict[str, Any],
+    style: dict[str, Any],
+    theme_color_spec: ThemeColorSpec | None,
+) -> str:
+    border_xml: list[str] = []
+    for side, border in _table_border_specs(cell_data, style).items():
+        if border is None:
+            continue
+        tag = _TABLE_BORDER_TAGS[side]
+        if border.style == "none":
+            border_xml.append(f'<a:{tag}><a:noFill/></a:{tag}>')
+            continue
+        assert border.color is not None and border.width is not None
+        line_width = _powerpoint_line_width_emu(
+            border.width, f"table {side} border width",
+        )
+        border_xml.append(
+            f'<a:{tag} w="{line_width}">'
+            f'<a:solidFill>{color_node_xml(border.color, theme_color_spec, "stroke")}'
+            '</a:solidFill>'
+            '<a:prstDash val="solid"/>'
+            f'</a:{tag}>'
+        )
+    return "".join(border_xml)
+
+
+def _table_fill_xml(
+    fill: str | None,
+    opacity: float | None,
+    theme_color_spec: ThemeColorSpec | None,
+) -> str:
+    if fill is None:
+        return ""
+    alpha_xml = (
+        f'<a:alpha val="{round(opacity * 100000)}"/>'
+        if opacity is not None and opacity < 1
+        else ""
+    )
+    return (
+        '<a:solidFill>'
+        f'{color_node_xml(fill, theme_color_spec, "fill", alpha_xml)}'
+        '</a:solidFill>'
+    )
+
+
+def _table_merge_attrs(
+    region: _TableMergeRegion | None,
+    row_idx: int,
+    col_idx: int,
+) -> str:
+    if region is None:
+        return ""
+    attrs: list[str] = []
+    if row_idx == region.row and region.row_span > 1:
+        attrs.append(f'rowSpan="{region.row_span}"')
+    if col_idx == region.col and region.col_span > 1:
+        attrs.append(f'gridSpan="{region.col_span}"')
+    if col_idx > region.col:
+        attrs.append('hMerge="1"')
+    if row_idx > region.row:
+        attrs.append('vMerge="1"')
+    return (" " + " ".join(attrs)) if attrs else ""
+
+
+def _build_native_table(elem: ET.Element, ctx: ConvertContext, payload: dict[str, Any]) -> ShapeResult:
+    payload, table_rows, col_count, merge_layout = _validate_table_payload(payload)
+    header_rows = _table_header_rows(payload, len(table_rows))
+    preserve_source_style = native_import_source(elem) == "pptx"
+
+    style = payload.get("style") if isinstance(payload.get("style"), dict) else {}
+    # Fills are only what the payload says: a cell that resolves to no fill
+    # exports as noFill so the slide background shows through, matching a
+    # fallback that draws no cell rect. Text colour keeps a legible default
+    # because an invisible run is worse than a wrong one.
+    header_fill = _hex_or_none(style.get("header_fill"))
+    body_fill = _hex_or_none(style.get("body_fill"))
+    band_fill = _hex_or_none(style.get("band_fill"))
+    body_text = _clean_hex(style.get("body_text"), "#1F2937")
+    header_text = _clean_hex(
+        style.get("header_text"),
+        "#FFFFFF" if header_fill is not None else body_text,
+    )
+    font_face = str(style["font_family"]) if style.get("font_family") else None
+    if font_face is None and not preserve_source_style:
+        # Typography mirrors the fallback: an SVG-first table drawn in one face
+        # exports in that face rather than falling to the theme font.
+        inherited = getattr(ctx, "inherited_styles", None) or {}
+        font_face = _most_common_value(
+            _fallback_text_attr_values(elem, "font-family", inherited.get("font-family"))
+        )
+    body_font_size = _font_size_hpt(style.get("font_size"), 18)
+    band_rows_enabled = _table_bool(
+        style.get("band_row"),
+        "style.band_row",
+        default=True,
+    )

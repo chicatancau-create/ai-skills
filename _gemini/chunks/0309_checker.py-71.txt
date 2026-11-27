@@ -1,0 +1,105 @@
+        parts = [p.strip().strip('"\'').lower() for p in stack.split(',')]
+        return ','.join(p for p in parts if p)
+
+    def _categorize_issue(self, error_msg: str) -> str:
+        """Categorize issue type"""
+        if 'Invalid XML' in error_msg:
+            return 'XML well-formedness'
+        elif 'viewBox' in error_msg:
+            return 'viewBox issues'
+        elif 'foreignObject' in error_msg:
+            return 'foreignObject'
+        elif 'paint' in error_msg.lower() or 'color value' in error_msg.lower():
+            return 'Paint issues'
+        elif 'font' in error_msg.lower():
+            return 'Font issues'
+        else:
+            return 'Other'
+
+    def _configure_prototype_context(
+        self,
+        target_path: Path,
+        svg_files: List[Path],
+    ) -> None:
+        """Map generated pages to selected prototypes for inherited diagnostics."""
+        self._prototype_by_output = {}
+        self._active_prototype_path = None
+        self._active_template_reuse_scope = None
+        self._source_import_summary = {
+            'warning_count': 0,
+            'by_code': {},
+        }
+        if (
+            self.template_mode
+            or self.quick_generate
+            or _load_pptx_structure_lock is None
+        ):
+            return
+        project_path = self._resolve_project_path(target_path)
+        try:
+            structure_lock = _load_pptx_structure_lock(project_path)
+        except (_TemplateStructureError, OSError):
+            # The project-level structure gate reports the actionable parser
+            # error. Inherited classification is optional and stays silent.
+            return
+        if structure_lock is None:
+            return
+        self._active_template_reuse_scope = getattr(
+            structure_lock,
+            'template_reuse_scope',
+            None,
+        )
+        references = {
+            reference.slide_num: reference.svg_path
+            for reference in structure_lock.prototypes
+        }
+        if target_path.is_file():
+            sibling_files = discover_slide_svgs(target_path.parent)
+            resolved_target = target_path.resolve()
+            slide_num = next(
+                (
+                    index
+                    for index, sibling in enumerate(sibling_files, start=1)
+                    if sibling.resolve() == resolved_target
+                ),
+                1,
+            )
+            prototype = references.get(slide_num)
+            if prototype is not None:
+                self._prototype_by_output[resolved_target] = prototype.resolve()
+        else:
+            for slide_num, svg_path in enumerate(svg_files, start=1):
+                prototype = references.get(slide_num)
+                if prototype is not None:
+                    self._prototype_by_output[svg_path.resolve()] = prototype.resolve()
+
+        if self._active_template_reuse_scope not in {'mirror', 'layout'}:
+            return
+        manifest_path = (
+            project_path / 'templates' / 'template_execution_manifest.json'
+        )
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return
+        if manifest.get('schema') != 'ppt-master.template-execution-manifest.v1':
+            return
+        source_import = manifest.get('source_import')
+        if isinstance(source_import, dict):
+            self._source_import_summary = source_import
+
+    def check_directory(self, directory: str, expected_format: str = None) -> List[Dict]:
+        """
+        Check all SVG files in a directory
+
+        Args:
+            directory: Directory path
+            expected_format: Expected canvas format
+
+        Returns:
+            List of check results
+        """
+        dir_path = Path(directory)
+        self._has_incomplete_page_roster = False
+        self._structured_native_slots: list[str] = []
+        self._undeclared_size_occurrences = Counter()

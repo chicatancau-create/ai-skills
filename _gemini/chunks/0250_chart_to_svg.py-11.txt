@@ -1,0 +1,114 @@
+        representative = _representative_gradient_color(gradient, palette)
+        if representative is not None:
+            return representative[0].upper(), representative[1], True
+    return None, 1.0, False
+
+
+def _normalized_line_paint(
+    line: ET.Element | None,
+    palette: ColorPalette | None,
+) -> _LinePaint | None:
+    if line is None:
+        return None
+    color, opacity, explicit = _representative_fill(line, palette)
+    raw_width = line.attrib.get("w", "")
+    width = int(raw_width) / 9525.0 if raw_width.isdigit() else 1.5
+    width = max(0.0, min(1000.0, width))
+    cap = {
+        "rnd": "round",
+        "sq": "square",
+        "flat": "butt",
+    }.get(line.attrib.get("cap"), "round")
+    return _LinePaint(
+        color,
+        opacity,
+        width,
+        cap,
+        not (explicit and color is None),
+        not explicit,
+    )
+
+
+def _normalized_shape_paint(
+    sp_pr: ET.Element | None,
+    palette: ColorPalette | None,
+) -> _ShapePaint:
+    fill, opacity, explicit = _representative_fill(sp_pr, palette)
+    line = (
+        _normalized_line_paint(sp_pr.find("a:ln", C_NS), palette)
+        if sp_pr is not None
+        else None
+    )
+    return _ShapePaint(fill, opacity, explicit, line)
+
+
+def _normalized_marker_paint(
+    marker: ET.Element | None,
+    palette: ColorPalette | None,
+) -> _MarkerPaint:
+    if marker is None:
+        return _MarkerPaint(None, 5.0, _normalized_shape_paint(None, palette))
+    symbol = _element_val(marker.find("c:symbol", C_NS))
+    if symbol not in {None, "circle", "none"}:
+        symbol = "circle"
+    raw_size = _element_val(marker.find("c:size", C_NS))
+    try:
+        size = float(raw_size) if raw_size is not None else 5.0
+    except (TypeError, ValueError, OverflowError):
+        size = 5.0
+    return _MarkerPaint(
+        symbol,
+        max(2.0, min(72.0, size)),
+        _normalized_shape_paint(marker.find("c:spPr", C_NS), palette),
+    )
+
+
+def _normalized_chart_visual_styles(
+    payload: dict[str, Any],
+    plot: ET.Element,
+    palette: ColorPalette | None,
+) -> list[SeriesVisualStyle]:
+    """Keep chart data visible when source-only styling is not portable."""
+    chart_type = payload["type"]
+    series_nodes = plot.findall("c:ser", C_NS)
+    styles: list[SeriesVisualStyle] = []
+    if chart_type in {"pie", "doughnut", "of_pie"} and series_nodes:
+        expected_count = len(payload["categories"])
+        if chart_type == "of_pie":
+            expected_count += 1
+        series = series_nodes[0]
+        base_shape = _normalized_shape_paint(
+            series.find("c:spPr", C_NS),
+            palette,
+        )
+        points: dict[int, _ShapePaint] = {}
+        for point in series.findall("c:dPt", C_NS):
+            raw_index = _element_val(point.find("c:idx", C_NS))
+            if raw_index is None or not raw_index.isdigit():
+                continue
+            point_index = int(raw_index)
+            if 0 <= point_index < expected_count:
+                points[point_index] = _normalized_shape_paint(
+                    point.find("c:spPr", C_NS),
+                    palette,
+                )
+        for index in range(expected_count):
+            auto = _automatic_color(palette, index)
+            shape = points.get(index, base_shape)
+            fill = shape.fill if shape.fill_explicit else auto
+            line = shape.line
+            stroke = _line_color(line, "#FFFFFF")
+            styles.append(
+                SeriesVisualStyle(
+                    fill=fill,
+                    fill_opacity=shape.fill_opacity,
+                    stroke=stroke,
+                    stroke_opacity=line.opacity if line is not None else 1.0,
+                    stroke_width=line.width if line is not None else 1.0,
+                    line_cap=line.cap if line is not None else "round",
+                    marker_fill=fill,
+                    marker_stroke=stroke,
+                )
+            )
+    else:
+        for index, series in enumerate(series_nodes):

@@ -1,0 +1,112 @@
+        raise ValueError('animation targets must be a sequence of target tuples')
+    if not targets:
+        return ''
+    normalized_targets = [
+        _normalize_target(target, default_dur_ms, trigger)
+        for target in targets
+    ]
+    next_id = 3
+    main_targets = [
+        target
+        for target in normalized_targets
+        if target.trigger_shape_id is None
+    ]
+    interactive_targets = [
+        target
+        for target in normalized_targets
+        if target.trigger_shape_id is not None
+    ]
+
+    main_triggers = {target.trigger for target in main_targets}
+    main_trigger = (
+        next(iter(main_triggers))
+        if len(main_triggers) == 1
+        else None
+    )
+    needs_per_target_layout = (
+        main_trigger is None
+        or (
+            main_trigger == 'with-previous'
+            and any(target.delay_ms for target in main_targets)
+        )
+    )
+
+    if needs_per_target_layout and main_targets:
+        all_steps, next_id = _build_mixed_main_steps(main_targets, next_id)
+    elif main_trigger == 'on-click':
+        # Each element is an independent click-driven par directly under
+        # mainSeq. Three-level nesting per element: outer cTn holds for
+        # the click via delay="indefinite", innermost cTn owns the
+        # clickEffect + animation children. Each click advances the seq.
+        steps = []
+        for target in main_targets:
+            wrapper_id = next_id
+            inner_id = next_id + 1
+            leaf_id = next_id + 2
+            row_xml, next_id = _build_animation_row_xml(
+                target,
+                main_trigger,
+                leaf_id,
+                next_id + 3,
+            )
+            steps.append(f'''<p:par>
+  <p:cTn id="{wrapper_id}" fill="hold">
+    <p:stCondLst><p:cond delay="indefinite"/></p:stCondLst>
+    <p:childTnLst>
+      <p:par>
+        <p:cTn id="{inner_id}" fill="hold">
+          <p:stCondLst><p:cond delay="0"/></p:stCondLst>
+          <p:childTnLst>
+            <p:par>
+              {row_xml}
+            </p:par>
+          </p:childTnLst>
+        </p:cTn>
+      </p:par>
+    </p:childTnLst>
+  </p:cTn>
+</p:par>''')
+        all_steps = '\n              '.join(steps)
+    else:
+        # with-previous / after-previous: wrap the entire cascade in ONE
+        # par so the sequence has a real trigger anchor under mainSeq.
+        #
+        # Native PowerPoint after-previous export uses two timing layers:
+        # each row owns its TriggerDelayTime, while its wrapper owns the
+        # previous row's absolute end. Their sum is the absolute start offset.
+        outer_id = next_id
+        next_id += 1
+        inner_steps = []
+        with_wrapper_id = None
+        if main_trigger == 'with-previous':
+            with_wrapper_id = next_id
+            next_id += 1
+        elapsed_ms = 0
+        for target_index, target in enumerate(main_targets, 1):
+            if main_trigger == 'with-previous':
+                leaf_id = next_id
+                row_xml, next_id = _build_animation_row_xml(
+                    target,
+                    main_trigger,
+                    leaf_id,
+                    next_id + 1,
+                )
+                inner_steps.append(f'''<p:par>
+                  {row_xml}
+                </p:par>''')
+            else:
+                if elapsed_ms > MAX_OOXML_MILLISECONDS:
+                    raise ValueError(
+                        'animation sequence offset exceeds the OOXML '
+                        f'millisecond limit at target {target_index}: {elapsed_ms}'
+                    )
+                wrapper_id = next_id
+                leaf_id = next_id + 1
+                row_xml, next_id = _build_animation_row_xml(
+                    target,
+                    main_trigger,
+                    leaf_id,
+                    next_id + 2,
+                )
+                inner_steps.append(f'''<p:par>
+                  <p:cTn id="{wrapper_id}" fill="hold">

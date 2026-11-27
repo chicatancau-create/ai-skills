@@ -1,0 +1,123 @@
+                background=background,
+                tolerance=transparent_tolerance,
+            )
+        width, height = _image_dimensions(output_path)
+        updated["pixel_width"] = width
+        updated["pixel_height"] = height
+        updated["ratio"] = round(width / height, 4) if height else None
+        updated["status"] = "Rendered"
+        updated.pop("error", None)
+    except RuntimeError as exc:
+        updated["status"] = "Failed"
+        updated["error"] = str(exc)
+
+    return updated
+
+
+def render_manifest(
+    project_path: Path,
+    manifest_path: Path,
+    *,
+    default_dpi: int = DEFAULT_DPI,
+    providers: list[str] | None = None,
+    dry_run: bool = False,
+) -> int:
+    """Render all formulas declared in a manifest."""
+    manifest = _load_manifest(manifest_path)
+    output_dir = project_path / "images"
+    updated_items: list[dict[str, Any]] = []
+    provider_chain = _parse_providers(providers or manifest.get("providers"))
+
+    if not dry_run:
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+    failures = 0
+    for index, raw_item in enumerate(manifest["items"], 1):
+        if not isinstance(raw_item, dict):
+            raise RuntimeError(f"Formula item #{index} must be an object.")
+        updated = _process_item(
+            raw_item,
+            index,
+            project_path,
+            output_dir,
+            default_dpi,
+            provider_chain,
+            dry_run,
+        )
+        updated_items.append(updated)
+        status = updated.get("status")
+        label = updated.get("id") or updated.get("filename")
+        print(f"{status}: {label} -> {updated.get('file')}", file=sys.stderr)
+        if status == "Failed":
+            failures += 1
+            print(f"  {updated.get('error')}", file=sys.stderr)
+
+    if dry_run:
+        print(f"Dry run: {len(updated_items)} formula item(s) parsed.", file=sys.stderr)
+        return 0
+
+    manifest["items"] = updated_items
+    manifest["renderer"] = {
+        "providers": provider_chain,
+        "default_dpi": default_dpi,
+        "output_dir": _project_relative(output_dir, project_path),
+    }
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    if failures:
+        print(f"Formula rendering completed with {failures} failure(s).", file=sys.stderr)
+        return 2
+    print(f"Formula rendering complete: {len(updated_items)} item(s).", file=sys.stderr)
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI parser."""
+    parser = argparse.ArgumentParser(
+        description="Render project-declared LaTeX formulas to PNG assets.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("project_path", type=Path, help="Project directory.")
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        default=None,
+        help=f"Formula manifest path. Default: <project>/{DEFAULT_MANIFEST}",
+    )
+    parser.add_argument(
+        "--dpi",
+        type=int,
+        default=DEFAULT_DPI,
+        help=f"Default render DPI when an item omits `dpi` (default: {DEFAULT_DPI}).",
+    )
+    parser.add_argument(
+        "--providers",
+        default=None,
+        help=(
+            "Comma-separated provider fallback chain "
+            f"(default: {','.join(DEFAULT_PROVIDERS)})."
+        ),
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate and list formula items without rendering or writing files.",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the CLI entry point."""
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    project_path = args.project_path.resolve()
+    if not project_path.is_dir():
+        print(f"Error: project directory not found: {project_path}", file=sys.stderr)
+        return 1
+
+    manifest_path = args.manifest
+    if manifest_path is None:

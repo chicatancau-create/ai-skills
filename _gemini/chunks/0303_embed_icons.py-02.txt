@@ -1,0 +1,102 @@
+    if pattern.fullmatch(value.strip()) is None:
+        raise ValueError(f'Invalid icon {attr}: {value!r}; use a plain SVG {attr} value')
+    return value
+
+
+def _get_viewbox_size(content: str) -> float:
+    """Extract the width from viewBox attribute (assumed square). Returns 0 if not found."""
+    m = re.search(r'viewBox=["\']0 0 ([\d.]+)', content)
+    if m:
+        return float(m.group(1))
+    return 0
+
+
+def _get_viewbox_geometry(content: str) -> tuple[float, float, float, float] | None:
+    """Extract full viewBox geometry as (min_x, min_y, width, height)."""
+    match = re.search(r'viewBox=["\']([^"\']+)["\']', content)
+    if not match:
+        return None
+    parts = re.split(r'[\s,]+', match.group(1).strip())
+    if len(parts) < 4:
+        return None
+    try:
+        min_x, min_y, width, height = [float(part) for part in parts[:4]]
+    except ValueError:
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    return min_x, min_y, width, height
+
+
+def _format_number(value: object) -> str:
+    """Format SVG numeric values compactly without losing meaningful precision."""
+    if isinstance(value, float):
+        return f'{value:g}'
+    return str(value)
+
+
+def _base_geometry(base_size: BaseGeometry) -> tuple[float, float, float, float]:
+    """Normalize scalar icon size and full viewBox geometry."""
+    if isinstance(base_size, tuple):
+        return base_size
+    return 0.0, 0.0, float(base_size), float(base_size)
+
+
+def _is_preserve_color_asset(content: str) -> bool:
+    """Project illustrations are vector assets, not recolorable monochrome icons.
+
+    The `data-icon-style="preserve-color"` marker is stamped by
+    extract_svg_assets.py and is the single source of truth — hand-authored
+    multi-color assets must carry it to keep their colors and aspect ratio.
+    """
+    return 'data-icon-style="preserve-color"' in content
+
+
+def _detect_icon_style(content: str) -> str:
+    """Detect whether an icon is fill-based or stroke-based."""
+    # stroke="currentColor" with fill="none" → stroke style
+    if 'stroke="currentColor"' in content and 'fill="none"' in content:
+        return 'stroke'
+    return 'fill'
+
+
+def _extract_svg_body(content: str) -> list[str]:
+    """Return the root SVG body for preserve-color assets without editing attrs."""
+    match = re.search(r'<svg\b[^>]*>(.*)</svg>\s*$', content, re.DOTALL)
+    if not match:
+        return []
+    body = match.group(1).strip()
+    return [body] if body else []
+
+
+def _extract_shape_elements(content: str, color: str) -> list[str]:
+    """
+    Extract all drawable shape elements from an icon SVG, replacing
+    fill/stroke color references (currentColor or #xxxxxx) with the target color.
+
+    Supports: <path>, <circle>, <rect>, <line>, <polyline>, <polygon>, <ellipse>
+    """
+    shape_tags = ('path', 'circle', 'rect', 'line', 'polyline', 'polygon', 'ellipse')
+    pattern = r'<(' + '|'.join(shape_tags) + r')(\s[^>]*)?(?:/>|></\1>)'
+    matches = re.findall(pattern, content, re.DOTALL)
+
+    elements = []
+    for tag, attrs in matches:
+        # Remove standalone fill/stroke color attrs so outer <g> controls color.
+        # Also strip stroke-width so the outer <g> can override it (otherwise the
+        # icon's source stroke-width="2" would shadow any caller-specified value).
+        attrs_clean = re.sub(r'\s*fill="(?:currentColor|#[0-9a-fA-F]{3,6}|none)"', '', attrs)
+        attrs_clean = re.sub(r'\s*stroke="(?:currentColor|#[0-9a-fA-F]{3,6}|none)"', '', attrs_clean)
+        attrs_clean = re.sub(r'\s*stroke-width="[^"]*"', '', attrs_clean)
+        elements.append(f'<{tag}{attrs_clean}/>')
+
+    return elements
+
+
+def _split_icon_identifier(icon_name: str) -> tuple[str, str]:
+    """Parse one complete canonical ``library/name`` identifier."""
+    match = _ICON_IDENTIFIER_RE.fullmatch(icon_name)
+    if match is None:
+        raise ValueError(
+            "data-icon must be a complete project-local library/name identifier: "
+            f"{icon_name!r}"

@@ -1,0 +1,60 @@
+| 日期 | `createTime` / `modifiedTime` / `gmtCreate`，转成本地可读时间 |
+| 标题 | `report_name` / `reportName` / `title` / `summary` / `report_template_name`，没有标题时用「<发送人>的日志」 |
+| 发送人 | `creatorName` / `senderName` / `userName` |
+| 已读状态 | `readStatus` / `isRead` / `hasRead` / `read`；字段缺失时不展示，不要编造 |
+| 模板 | `report_template_name` / `templateName`，用户关心分类时展示 |
+| 查看详情 | 从 `_internalDetailCommands[].command` 取内部详情命令；面向用户展示为“查看详情”，不要展示命令本身 |
+| 钉钉链接 | 详情接口返回 `dingtalkOpenMarkdownLink` / `dingtalkOpenUrl` / `result.url` 后，展示成 markdown 链接 |
+
+CLI 列表命令只返回 JSON-first 数据，不把 Markdown 表作为裸文本直接输出。`report inbox list` / `report outbox list` 会对当前页 `result[]` 中所有带 `reportId` 的日志逐条调用 `dws report entry get --report-id <reportId> --format json` 补齐展示字段；返回 JSON 会携带 `agentDisplayRequired=true`、`agentDisplayRequiredColumns`、`agentDisplayLinkColumn=钉钉链接`、`agentDisplayMarkdownRequired=true`、`agentDisplayMarkdown`、`agentDisplayMarkdownHeader` 等字段，这些是面向 Agent 的强制展示合同，不是可选建议。Agent 必须在 final reply 直接原样输出 `agentDisplayMarkdown`，让客户端按 Markdown 渲染出带可点击 `钉钉链接` 列的表格；不要自行重组列，不要改表头。
+
+展示列按方向区分：`inbox list` 是收件箱，只展示 `日期 | 标题 | 发送人 | 状态 | 钉钉链接`，**禁止返回或展示日志正文、完整内容或日志内容摘要**；`outbox list` 是发件箱，可展示 `日期 | 标题 | 发送人 | 状态 | 日志内容 | 钉钉链接`，其中 `日志内容` 来自详情补齐，方便用户快速确认自己发出的内容。凡用户说"列出 / 找到 / 查询 / 搜索 / 看看日志"，默认都要在 final reply 渲染 Markdown 表；只有用户明确表示"不关心列表内容 / 只要原始 JSON / 只要数量 / 只要 ID"时，才可以不渲染表。推荐用户可读输出：
+
+| 日期 | 标题 | 发送人 | 状态 | 钉钉链接 |
+|------|------|--------|------|----------|
+| 2026-05-09 23:08 | 张成强的周报 | 张成强 | 未读 | [在钉钉中查看日志](...) |
+
+操作列规则：
+
+- `inbox list` 列表阶段：每条 `result[]` 只带 `日期` / `标题` / `发送人` / `状态` / `钉钉链接` 五个展示字段；使用 `result[].钉钉链接` 作为可点击操作列。禁止额外返回或展示 `日志内容` / `日志内容摘要`。
+- `outbox list` 列表阶段：每条 `result[]` 可带 `日志内容`，表头固定为 `日期 | 标题 | 发送人 | 状态 | 日志内容 | 钉钉链接`。如果用户点名某一条或说"打开第 N 条/看正文"，Agent 用 `_internalDetailCommands[N].command` 调 `dws report entry get --report-id ... --format json`。
+- 详情阶段：`entry get` 返回里如果有 `dingtalkOpenMarkdownLink`，优先把操作列替换为该 markdown 链接；否则用 `dingtalkOpenUrl` 或 `result.url` 包成 `[在钉钉中查看日志](url)`。
+- `钉钉链接` 是强制列：禁止省略、改名、合并到标题里，也禁止改成不含链接列的摘要表。
+- 不要在用户表格里展示 `_internalDetailCommands`、raw `reportId`、raw `dingtalk://...`。链接必须是 markdown 可点击文本。
+- `dws report inbox list` 默认会对当前页所有可查看日志自动补 `entry get`，但只返回日期、标题、发送人、状态与可点击钉钉链接；需要正文时必须显式调用 `dws report entry get --report-id ... --format json`。
+- `dws report outbox list` 默认会对当前页所有可查看日志自动补 `entry get`，并可把 `日志内容` 纳入发件箱表格展示。
+
+只有在用户明确要求"给我日志 ID / 方便我后续查询"时，才额外展示 `reportId`。否则 final reply 应保留可读信息，并说明"需要看正文或打开钉钉，我可以继续打开某一条"。
+
+## 提交链路硬约束（必读）
+
+当用户意图涉及"填模板 / 提交日志 / 提交日报 / 提交周报"等需要 submit 的场景时，**必须**按以下步骤执行，**禁止跳步**：
+
+1. `dws report template list --format json` — 取 `report_template_id` 与可见模版名
+2. `dws report template get --name "<模版名>" --format json` — 取 `result.report_template_fields[]`，每项含 `field_name` / `field_sort` / `field_type`
+3. `dws report entry submit --template-id <id> --contents-file <tmp.json> --format json` — contents 数组按上面「字段映射」严格对齐第 2 步：`field_name → key`，`field_sort → sort`，`field_type → type`，再填 `content` 与 `contentType`；CLI 提交成功后会自动反查详情并追加钉钉打开链接字段，返回中直接取 `reportId` 与 `dingtalkOpenMarkdownLink` / `dingtalkOpenUrl`
+4. 仅当第 3 步返回中缺少 `dingtalkOpenUrl` 时，执行 `dws report entry get --report-id <reportId> --format json` 补取 `result.url`（`dingtalk://...` 协议深链接）。final reply 中优先使用 `dingtalkOpenMarkdownLink`，否则用 `[在钉钉中查看日志](dingtalkOpenUrl)`。**禁止把 raw `dingtalk://...` URL 原样写进回复**，必须包成 markdown link 让用户可点击跳转钉钉客户端
+
+跳步风险（已实证）：
+
+- 跳过第 1 步直接编 templateId → 服务端返回 `PARAM_ERROR`，且**不告诉你哪个 ID 错**；
+- 跳过第 2 步用 LLM 经验编 `key` 名 → 服务端返回 `PARAM_ERROR`，且**不告诉你哪个字段错**；服务端 PARAM_ERROR 信号弱，事后无法定位，**只能靠前置 schema 同步避免**；
+- 未取到 `dingtalkOpenUrl` 且不补查 `entry get` → 用户拿不到跳转链接，无法在钉钉客户端打开刚提交的日志查看 / 修改；
+- 用 `--contents` 直传长 JSON → shell 引号转义破坏 JSON → `INPUT_INVALID_JSON`。**长内容务必走 `--contents-file <path>` 或 `--contents -` (stdin)**。
+- contents JSON 大小限制为 10MB，**不支持分批次提交**。超过限制需精简内容或拆分为多个独立日志提交。
+
+推荐：Agent 在多轮场景中应在内存里持久化第 1/2 步的结果，避免每轮重新跑。
+
+## 命令总览
+
+### 获取日志模版列表
+```
+Usage:
+  dws report template list [flags]
+Example:
+  dws report template list
+```
+
+### 读取单个日志模版的字段定义
+```
+Usage:

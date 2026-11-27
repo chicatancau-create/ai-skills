@@ -1,0 +1,100 @@
+                            "uses an external hyperlink relationship>"
+                        )
+                    continue
+                if rel_type == SLIDE_REL_TYPE:
+                    if target_mode:
+                        problems.append(
+                            f"{part_rel} -> <slide relationship "
+                            f"{relationship_id!r} cannot be External>"
+                        )
+                    if action != SLIDE_JUMP_ACTION:
+                        problems.append(
+                            f"{part_rel} -> <slide relationship "
+                            f"{relationship_id!r} lacks hlinksldjump action>"
+                        )
+                    resolved = resolve_internal_opc_target(rels_rel, target)
+                    if resolved is not None and resolved not in roster:
+                        problems.append(
+                            f"{part_rel} -> <slide jump {relationship_id!r} "
+                            f"targets non-roster part {resolved}>"
+                        )
+                    continue
+                if action == SLIDE_JUMP_ACTION:
+                    problems.append(
+                        f"{part_rel} -> <slide jump {relationship_id!r} uses "
+                        f"relationship type {rel_type!r}>"
+                    )
+    return problems
+
+
+def verify_internal_relationships(extract_dir: Path) -> list[str]:
+    """Return invalid or dangling internal relationships in an OPC package."""
+    package_parts: set[str] = set()
+    for path in extract_dir.rglob("*"):
+        if not path.is_file():
+            continue
+        key = canonical_opc_part_path(
+            path.relative_to(extract_dir).as_posix()
+        )
+        if key is not None:
+            package_parts.add(key)
+
+    problems: list[str] = []
+    for rels_path in sorted(extract_dir.rglob("*.rels")):
+        rels_rel = rels_path.relative_to(extract_dir).as_posix()
+        try:
+            root = ET.parse(rels_path).getroot()
+        except ET.ParseError as exc:
+            problems.append(
+                f"{rels_rel} -> <invalid relationships XML: {exc}>"
+            )
+            continue
+        if root.tag != _RELATIONSHIPS_TAG:
+            problems.append(
+                f"{rels_rel} -> <invalid Relationships namespace>"
+            )
+            continue
+
+        seen_ids: set[str] = set()
+        for element in root:
+            if element.tag != _RELATIONSHIP_TAG:
+                problems.append(
+                    f"{rels_rel} -> <invalid relationships child "
+                    f"{element.tag!r}>"
+                )
+                continue
+            relationship_id = (element.attrib.get("Id") or "").strip()
+            relationship_type = (
+                element.attrib.get("Type") or ""
+            ).strip()
+            target = (element.attrib.get("Target") or "").strip()
+            target_mode = (
+                element.attrib.get("TargetMode") or ""
+            ).strip()
+
+            if not relationship_id:
+                problems.append(f"{rels_rel} -> <missing relationship Id>")
+            elif relationship_id in seen_ids:
+                problems.append(
+                    f"{rels_rel} -> <duplicate relationship Id "
+                    f"{relationship_id!r}>"
+                )
+            else:
+                seen_ids.add(relationship_id)
+            if not relationship_type:
+                problems.append(
+                    f"{rels_rel} -> <missing relationship Type>"
+                )
+            if not target:
+                problems.append(f"{rels_rel} -> <missing Target>")
+                continue
+            if target_mode and target_mode.lower() not in {
+                "internal",
+                "external",
+            }:
+                problems.append(
+                    f"{rels_rel} -> <invalid TargetMode "
+                    f"{target_mode!r}>"
+                )
+                continue
+            if target_mode.lower() == "external":

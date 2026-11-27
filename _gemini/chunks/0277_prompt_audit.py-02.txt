@@ -1,0 +1,80 @@
+            raise AuditError(f"Manifest is missing required key: {key}")
+    if raw["audit_only"] is not True or raw["runtime_consumed"] is not False:
+        raise AuditError("Manifest must remain audit-only and excluded from runtime loading")
+    if raw["budget_policy"] != "fixed_upper_bound":
+        raise AuditError("Manifest budget_policy must remain fixed_upper_bound")
+    if raw["encoding"] != "o200k_base":
+        raise AuditError("Manifest encoding must remain o200k_base")
+    documents = raw["documents"]
+    if not isinstance(documents, dict):
+        raise AuditError("documents must be an object")
+    _validate_fixed_budget("documents.max_tokens", documents.get("max_tokens"))
+    for key in ("load_sets", "file_budgets", "duplicates", "coverage"):
+        if key in raw and not isinstance(raw[key], dict):
+            raise AuditError(f"{key} must be an object")
+    for key in ("authority_edges", "registries", "schema_grammars"):
+        if key in raw and not isinstance(raw[key], list):
+            raise AuditError(f"{key} must be an array")
+    for file_path, budget in raw.get("file_budgets", {}).items():
+        _validate_fixed_budget(f"file_budgets.{file_path}", budget)
+    for name, load_set in raw.get("load_sets", {}).items():
+        if not isinstance(load_set, dict):
+            raise AuditError(f"load_sets.{name} must be an object")
+        _validate_fixed_budget(
+            f"load_sets.{name}.max_tokens",
+            load_set.get("max_tokens"),
+        )
+
+    schema_configs = raw.get("schema_grammars", [])
+    for index, config in enumerate(schema_configs):
+        label = f"schema_grammars[{index}]"
+        if not isinstance(config, dict):
+            raise AuditError(f"{label} must be an object")
+        source = config.get("source")
+        if not isinstance(source, str) or not source.strip():
+            raise AuditError(f"{label}.source must be a non-empty path")
+        fields = config.get("fields")
+        if fields is not None and (
+            not isinstance(fields, list)
+            or not fields
+            or not all(isinstance(item, str) and item.strip() for item in fields)
+            or len(set(fields)) != len(fields)
+        ):
+            raise AuditError(
+                f"{label}.fields must be a non-empty array of unique field names"
+            )
+        scan = config.get("scan")
+        if scan is not None and (
+            not isinstance(scan, list)
+            or not scan
+            or not all(isinstance(item, str) and item.strip() for item in scan)
+        ):
+            raise AuditError(
+                f"{label}.scan must be a non-empty array of path patterns"
+            )
+        accepted = config.get("accepted", [])
+        if not isinstance(accepted, list):
+            raise AuditError(f"{label}.accepted must be an array")
+        accepted_fields: set[str] = set()
+        for accepted_index, entry in enumerate(accepted):
+            accepted_label = f"{label}.accepted[{accepted_index}]"
+            field_name = entry.get("field") if isinstance(entry, dict) else None
+            owner_fingerprint = (
+                entry.get("owner_fingerprint") if isinstance(entry, dict) else None
+            )
+            projections = entry.get("projections") if isinstance(entry, dict) else None
+            if (
+                not isinstance(entry, dict)
+                or not isinstance(field_name, str)
+                or not field_name.strip()
+                or not isinstance(owner_fingerprint, str)
+                or re.fullmatch(r"[0-9a-f]{12}", owner_fingerprint) is None
+                or not isinstance(projections, list)
+                or not projections
+            ):
+                raise AuditError(
+                    f"{accepted_label} requires field, a 12-hex owner_fingerprint, "
+                    "and non-empty projections"
+                )
+            if field_name in accepted_fields:
+                raise AuditError(

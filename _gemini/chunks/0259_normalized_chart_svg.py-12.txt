@@ -1,0 +1,115 @@
+                "show_value",
+            )
+        ) else None
+    if point.get("delete") is True:
+        return None
+    return {**config, **point}
+
+
+def _label_font_size(config: dict[str, Any], fallback: float) -> float:
+    try:
+        size = float(config.get("font_size", fallback - 1.0))
+    except (TypeError, ValueError, OverflowError):
+        size = fallback - 1.0
+    return max(6.0, min(size, 24.0))
+
+
+def _format_data_label_value(value: float, number_format: Any) -> str:
+    """Render the safe numeric subset used by normalized data labels.
+
+    Unknown Excel format programs raise so the caller falls back to the
+    reconstruction-only route instead of displaying a materially wrong label.
+    """
+    code = str(number_format or "").strip()
+    if not code or code.lower() == "general":
+        return _format_number(value)
+    match = re.fullmatch(
+        r"(?P<prefix>[$¥￥€£]?)(?P<group>#,##)?0"
+        r"(?P<decimals>\.0+)?(?P<percent>%?)",
+        code,
+    )
+    if match is None:
+        raise ValueError(f"unsupported normalized data-label format: {code!r}")
+    scaled = value * 100.0 if match.group("percent") else value
+    decimals = len((match.group("decimals") or "").lstrip("."))
+    grouping = "," if match.group("group") else ""
+    quantum = Decimal(1).scaleb(-decimals)
+    rounded = Decimal(str(abs(scaled))).quantize(
+        quantum,
+        rounding=ROUND_HALF_UP,
+    )
+    absolute = format(rounded, f"{grouping}.{decimals}f")
+    sign = "-" if scaled < 0 else ""
+    return (
+        f"{sign}{match.group('prefix')}{absolute}{match.group('percent')}"
+    )
+
+
+def _nice_scale(
+    values: list[float],
+    *,
+    include_zero: bool,
+    percent: bool = False,
+) -> tuple[float, float, list[float]]:
+    finite = [value for value in values if math.isfinite(value)]
+    if not finite:
+        finite = [0.0, 1.0]
+    lo = min(finite)
+    hi = max(finite)
+    if include_zero:
+        lo = min(lo, 0.0)
+        hi = max(hi, 0.0)
+    if percent:
+        lo = min(lo, 0.0)
+        hi = max(hi, 1.0)
+    if math.isclose(lo, hi):
+        delta = max(abs(lo) * 0.1, 1.0)
+        lo -= delta
+        hi += delta
+    raw_step = (hi - lo) / 5.0
+    magnitude = 10 ** math.floor(math.log10(raw_step))
+    normalized = raw_step / magnitude
+    nice = 1.0 if normalized <= 1 else 2.0 if normalized <= 2 else 2.5 if normalized <= 2.5 else 5.0 if normalized <= 5 else 10.0
+    step = nice * magnitude
+    nice_lo = math.floor(lo / step) * step
+    nice_hi = math.ceil(hi / step) * step
+    count = max(1, int(round((nice_hi - nice_lo) / step)))
+    ticks = [nice_lo + idx * step for idx in range(count + 1)]
+    return nice_lo, nice_hi, ticks
+
+
+def _sector_path(
+    cx: float,
+    cy: float,
+    outer: float,
+    start: float,
+    end: float,
+    inner: float,
+) -> str:
+    x1 = cx + math.cos(start) * outer
+    y1 = cy + math.sin(start) * outer
+    x2 = cx + math.cos(end) * outer
+    y2 = cy + math.sin(end) * outer
+    large = 1 if end - start > math.pi else 0
+    if inner <= 0:
+        return (
+            f"M {_fmt(cx)} {_fmt(cy)} L {_fmt(x1)} {_fmt(y1)} "
+            f"A {_fmt(outer)} {_fmt(outer)} 0 {large} 1 {_fmt(x2)} {_fmt(y2)} Z"
+        )
+    ix2 = cx + math.cos(end) * inner
+    iy2 = cy + math.sin(end) * inner
+    ix1 = cx + math.cos(start) * inner
+    iy1 = cy + math.sin(start) * inner
+    return (
+        f"M {_fmt(x1)} {_fmt(y1)} A {_fmt(outer)} {_fmt(outer)} 0 {large} 1 {_fmt(x2)} {_fmt(y2)} "
+        f"L {_fmt(ix2)} {_fmt(iy2)} A {_fmt(inner)} {_fmt(inner)} 0 {large} 0 {_fmt(ix1)} {_fmt(iy1)} Z"
+    )
+
+
+def _full_ring_path(cx: float, cy: float, outer: float, inner: float) -> str:
+    return (
+        f"M {_fmt(cx + outer)} {_fmt(cy)} "
+        f"A {_fmt(outer)} {_fmt(outer)} 0 1 1 {_fmt(cx - outer)} {_fmt(cy)} "
+        f"A {_fmt(outer)} {_fmt(outer)} 0 1 1 {_fmt(cx + outer)} {_fmt(cy)} Z "
+        f"M {_fmt(cx + inner)} {_fmt(cy)} "
+        f"A {_fmt(inner)} {_fmt(inner)} 0 1 0 {_fmt(cx - inner)} {_fmt(cy)} "

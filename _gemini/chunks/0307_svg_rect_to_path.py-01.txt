@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""
+PPT Master - Legacy SVG Rounded Rectangle Diagnostic
+
+Historical diagnostic that converts <rect> elements with rx/ry to equivalent
+<path> elements. It is not part of finalize_svg.py or the supported export
+workflow; PowerPoint's manual "Convert to Shape" behavior is not supported.
+
+Usage:
+    python3 scripts/svg_finalize/svg_rect_to_path.py <SVG file or directory>
+    python3 scripts/svg_finalize/svg_rect_to_path.py <project_path> -s output
+    python3 scripts/svg_finalize/svg_rect_to_path.py <project_path> -s final -o svg_rounded
+
+Examples:
+    python3 scripts/svg_finalize/svg_rect_to_path.py projects/ppt169_demo
+    python3 scripts/svg_finalize/svg_rect_to_path.py projects/ppt169_demo/svg_output/01_cover.svg
+
+Output:
+    - Directory mode: outputs to svg_rounded/ subdirectory
+    - File mode: outputs to <filename>_rounded.svg
+"""
+
+import sys
+import re
+import argparse
+from pathlib import Path
+from typing import Any, Tuple
+from xml.etree import ElementTree as ET
+
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from console_encoding import configure_utf8_stdio  # noqa: E402
+
+configure_utf8_stdio()
+
+
+def rect_to_rounded_path(
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    rx: float,
+    ry: float,
+) -> str:
+    """
+    Convert a rounded rectangle to an SVG path string.
+    Uses elliptical arc commands to draw rounded corners.
+    """
+    # Limit corner radius to half of width/height
+    rx = min(rx, width / 2)
+    ry = min(ry, height / 2)
+    
+    # Calculate key points
+    x1 = x + rx
+    x2 = x + width - rx
+    y1 = y + ry
+    y2 = y + height - ry
+    
+    # Build path
+    path = (
+        f"M{x1:.2f},{y:.2f} "
+        f"H{x2:.2f} "
+        f"A{rx:.2f},{ry:.2f} 0 0 1 {x + width:.2f},{y1:.2f} "
+        f"V{y2:.2f} "
+        f"A{rx:.2f},{ry:.2f} 0 0 1 {x2:.2f},{y + height:.2f} "
+        f"H{x1:.2f} "
+        f"A{rx:.2f},{ry:.2f} 0 0 1 {x:.2f},{y2:.2f} "
+        f"V{y1:.2f} "
+        f"A{rx:.2f},{ry:.2f} 0 0 1 {x1:.2f},{y:.2f} "
+        f"Z"
+    )
+    
+    # Clean up excess decimals
+    path = re.sub(r'\.00(?=\s|,|[A-Za-z]|$)', '', path)
+    
+    return path
+
+
+def parse_float(val: str, default: float = 0.0) -> float:
+    """Safely parse a float value."""
+    if not val:
+        return default
+    try:
+        # Remove units
+        val = re.sub(r'(px|pt|em|%|rem)$', '', val.strip())
+        return float(val)
+    except ValueError:
+        return default
+
+
+def process_svg(content: str, verbose: bool = False) -> Tuple[str, int]:
+    """
+    Process SVG content, converting rounded rectangles to paths.
+    Returns (processed content, conversion count).
+    """
+    converted_count = 0
+    
+    # Save original XML declaration
+    xml_declaration = ''
+    if content.strip().startswith('<?xml'):
+        match = re.match(r'(<\?xml[^?]*\?>)', content)
+        if match:
+            xml_declaration = match.group(1) + '\n'
+    
+    # Register SVG namespaces
+    ET.register_namespace('', 'http://www.w3.org/2000/svg')
+    ET.register_namespace('xlink', 'http://www.w3.org/1999/xlink')
+    
+    try:
+        root = ET.fromstring(content)
+    except ET.ParseError as e:
+        if verbose:
+            print(f"    XML parse error: {e}")
+        return content, 0
+    
+    # Get default namespace
+    ns = ''
+    if root.tag.startswith('{'):
+        ns = root.tag.split('}')[0] + '}'
+    
+    def get_tag_name(tag: str) -> str:
+        """Get tag name without namespace."""
+        if tag.startswith('{'):
+            return tag.split('}')[1]
+        return tag
+    
+    def process_element(elem: ET.Element) -> None:
+        """Process a single element."""
+        nonlocal converted_count
+        tag_name = get_tag_name(elem.tag)
+        
+        # Process rounded rectangles
+        if tag_name == 'rect':
+            rx = parse_float(elem.get('rx', '0'))
+            ry = parse_float(elem.get('ry', '0'))
+            

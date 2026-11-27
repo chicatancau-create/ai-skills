@@ -1,0 +1,104 @@
+    if lin is not None:
+        # ang is 1/60000 deg. 0° = horizontal left-to-right.
+        _validate_linear_gradient_structure(lin)
+        angle = _linear_gradient_angle(lin)
+        _validate_or_normalize_linear_gradient_scaling(lin, angle, palette)
+        angle_deg = angle / ANGLE_UNIT
+        x1, y1, x2, y2 = _angle_to_unit_endpoints(angle_deg)
+        defs_xml = (
+            f'<linearGradient id="{grad_id}" '
+            f'x1="{fmt_num(x1, 4)}" y1="{fmt_num(y1, 4)}" '
+            f'x2="{fmt_num(x2, 4)}" y2="{fmt_num(y2, 4)}">'
+            + "".join(stops_xml)
+            + "</linearGradient>"
+        )
+    elif rad is not None:
+        _validate_path_gradient_structure(rad)
+        _validate_path_gradient_type(rad)
+        focus = _validate_path_gradient_focus(rad)
+        focus_attrs = ""
+        if focus is not None:
+            focus_x = focus["l"]
+            focus_y = focus["t"]
+            point_focus = (
+                focus_x + focus["r"] == Decimal(1)
+                and focus_y + focus["b"] == Decimal(1)
+                and Decimal(0) <= focus_x <= Decimal(1)
+                and Decimal(0) <= focus_y <= Decimal(1)
+                and (
+                    (focus_x - Decimal("0.5")) ** 2
+                    + (focus_y - Decimal("0.5")) ** 2
+                    <= Decimal("0.25") + _SVG_RADIAL_FOCUS_TOLERANCE
+                )
+            )
+            if (
+                point_focus
+                and (
+                    focus_x != Decimal("0.5")
+                    or focus_y != Decimal("0.5")
+                )
+            ):
+                focus_attrs = (
+                    f' fx="{format_ooxml_unit_ratio(float(focus_x))}"'
+                    f' fy="{format_ooxml_unit_ratio(float(focus_y))}"'
+                )
+            elif not point_focus and palette is not None:
+                palette._diagnose(
+                    "path-gradient-focus-normalized",
+                    "DrawingML path gradient focus is not one point within "
+                    "the canonical SVG radial circle",
+                    "center the radial gradient while preserving its stops",
+                )
+        # Treat as radial regardless of path="circle" / "rect" / "shape" — SVG
+        # only has circle/ellipse. Point-style fillToRect retains its focus;
+        # the outer center and radius remain normalized.
+        defs_xml = (
+            f'<radialGradient id="{grad_id}" cx="0.5" cy="0.5" '
+            f'r="0.5"{focus_attrs}>'
+            + "".join(stops_xml)
+            + "</radialGradient>"
+        )
+    else:
+        # No direction specified — default to horizontal linear
+        defs_xml = (
+            f'<linearGradient id="{grad_id}" x1="0" y1="0" x2="1" y2="0">'
+            + "".join(stops_xml)
+            + "</linearGradient>"
+        )
+
+    defs_xml = _attach_native_gradient_metadata(defs_xml, elem)
+    return FillResult(
+        attrs={"fill": f"url(#{grad_id})"},
+        defs=[defs_xml],
+    )
+
+
+def _attach_native_gradient_metadata(
+    svg_gradient_xml: str,
+    grad_fill: ET.Element,
+) -> str:
+    """Bind the normalized SVG preview to its exact source gradFill."""
+    preview = ET.fromstring(svg_gradient_xml)
+    preview.attrib.update(native_gradient_metadata(grad_fill, preview))
+    return ET.tostring(preview, encoding="unicode")
+
+
+def _gradient_stop_position(gs: ET.Element) -> float:
+    """Parse one required DrawingML fixed-percentage stop position."""
+    raw = gs.get("pos")
+    if raw is None:
+        raise ValueError("DrawingML gradient stop requires a pos attribute")
+    token = raw.strip()
+    if _OOXML_INTEGER_RE.fullmatch(token) is None:
+        raise ValueError(
+            f"Invalid DrawingML gradient stop position: {raw!r}"
+        )
+    position = int(token)
+    if not 0 <= position <= PERCENT_UNIT:
+        raise ValueError(
+            f"DrawingML gradient stop position={position} is outside "
+            f"0..{PERCENT_UNIT}"
+        )
+    return position / PERCENT_UNIT
+
+

@@ -1,0 +1,106 @@
+            element.set("id", mapping[element_id])
+        for name, value in list(element.attrib.items()):
+            if name == "id":
+                continue
+            if value.startswith("#") and value[1:] in mapping:
+                element.set(name, f"#{mapping[value[1:]]}")
+                continue
+            rewritten = _URL_REFERENCE_RE.sub(
+                lambda match: f"url(#{mapping.get(match.group(2), match.group(2))})",
+                value,
+            )
+            if name.rsplit("}", 1)[-1] in {"aria-describedby", "aria-labelledby"}:
+                rewritten = " ".join(mapping.get(token, token) for token in rewritten.split())
+            element.set(name, rewritten)
+        if _local_name(element.tag) == "style" and element.text:
+            element.text = _CSS_ID_RE.sub(
+                lambda match: f"#{mapping.get(match.group(1), match.group(1))}",
+                element.text,
+            )
+
+
+def _parse_style(value: str | None) -> dict[str, str]:
+    declarations: dict[str, str] = {}
+    for raw in (value or "").split(";"):
+        if ":" not in raw:
+            continue
+        name, declaration = raw.split(":", 1)
+        if name.strip() and declaration.strip():
+            declarations[name.strip().lower()] = declaration.strip()
+    return declarations
+
+
+def _style_text(declarations: dict[str, str]) -> str:
+    return ";".join(f"{name}:{value}" for name, value in declarations.items())
+
+
+def _hidden(element: ET.Element) -> bool:
+    style = _parse_style(element.get("style"))
+    display = (element.get("display") or style.get("display") or "").strip().lower()
+    visibility = (
+        element.get("visibility") or style.get("visibility") or ""
+    ).strip().lower()
+    opacity = (element.get("opacity") or style.get("opacity") or "").strip()
+    if display == "none" or visibility in {"hidden", "collapse"}:
+        return True
+    try:
+        return bool(opacity) and float(opacity) <= 0
+    except ValueError:
+        return False
+
+
+def _paint_value(element: ET.Element, name: str) -> str | None:
+    value = element.get(name)
+    if value is not None:
+        return value.strip().lower()
+    return _parse_style(element.get("style")).get(name)
+
+
+def _visible_leaf(element: ET.Element) -> bool:
+    if _hidden(element):
+        return False
+    tag = _local_name(element.tag)
+    if tag in _NON_VISUAL_TAGS:
+        return False
+    if tag in {"g", "svg", "a"}:
+        return any(_visible_leaf(child) for child in element)
+    if tag in {"rect", "image", "foreignObject"}:
+        for dimension in ("width", "height"):
+            raw = element.get(dimension)
+            if raw is not None:
+                try:
+                    if float(raw) <= 0:
+                        return False
+                except ValueError:
+                    pass
+        return True
+    if tag in {"line", "polyline"}:
+        stroke = _paint_value(element, "stroke")
+        return stroke not in {None, "none", "transparent"}
+    if tag in {"path", "polygon", "circle", "ellipse"}:
+        fill = _paint_value(element, "fill")
+        stroke = _paint_value(element, "stroke")
+        return not (
+            fill in {"none", "transparent"}
+            and stroke in {None, "none", "transparent"}
+        )
+    if tag == "text":
+        return bool("".join(element.itertext()).strip())
+    return True
+
+
+def _merge_group_inheritance(parent: ET.Element, child: ET.Element) -> None:
+    child_tag = _local_name(child.tag)
+    for name in _INHERITED_PRESENTATION_ATTRIBUTES:
+        if (
+            name in _TEXT_PRESENTATION_ATTRIBUTES
+            and child_tag not in _TEXT_PRESENTATION_CONTAINERS
+        ):
+            continue
+        if parent.get(name) is not None and child.get(name) is None:
+            child.set(name, parent.get(name, ""))
+    parent_style = _parse_style(parent.get("style"))
+    child_style = _parse_style(child.get("style"))
+    if parent_style:
+        merged = {
+            name: value

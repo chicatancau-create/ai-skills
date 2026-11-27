@@ -1,0 +1,116 @@
+    previous_baseline = baselines[0]
+    for index, (source, baseline) in enumerate(zip(texts, baselines)):
+        space_before = (
+            0.0
+            if index == 0
+            else max(0.0, baseline - previous_baseline - line_height)
+        )
+        combined.append(
+            _semantic_paragraph_from_text(
+                source,
+                combined,
+                space_before=space_before,
+            )
+        )
+        previous_baseline = baseline
+
+    siblings = list(shape)
+    first_index = siblings.index(texts[0])
+    for text in texts:
+        shape.remove(text)
+    shape.insert(first_index, combined)
+    return combined
+
+
+def _compact_semantic_shapes(root: ET.Element, stats: ProjectionStats) -> None:
+    """Collapse each semantic shape to one geometry carrier and one text body."""
+    for shape in root.iter():
+        if shape.get(SEMANTIC_OBJECT_ATTRIBUTE) != SEMANTIC_SHAPE_KIND:
+            continue
+        carriers = [
+            child
+            for child in shape
+            if child.get("data-pptx-part") == "geometry"
+            and _local_name(child.tag) in _DRAWABLE_TAGS
+        ]
+        if len(carriers) != 1:
+            raise ValueError("Semantic shape requires exactly one geometry carrier")
+        carrier = carriers[0]
+        stats.compatibility_normalizations += _make_geometry_carrier_visible(carrier)
+        for name in list(carrier.attrib):
+            if (
+                name not in _SEMANTIC_CARRIER_OWNER_ATTRIBUTES
+                and not name.startswith("data-pptx-av-")
+            ):
+                continue
+            owner_value = shape.get(name)
+            if owner_value is None or owner_value != carrier.get(name):
+                raise ValueError(
+                    f"Semantic shape owner/carrier values differ for {name}"
+                )
+            carrier.attrib.pop(name, None)
+            stats.compatibility_normalizations += 1
+
+        direct_texts = [
+            child for child in shape
+            if _local_name(child.tag) == "text"
+        ]
+        all_texts = [
+            item for item in shape.iter()
+            if _local_name(item.tag) == "text"
+        ]
+        for text in direct_texts:
+            if _normalize_semantic_text_lines(text):
+                stats.compatibility_normalizations += 1
+        if len(all_texts) > 1:
+            if direct_texts != all_texts:
+                raise ValueError(
+                    "Multi-paragraph semantic shape text must be direct children"
+                )
+            _merge_semantic_shape_texts(shape, direct_texts)
+
+        for child in list(shape):
+            if child is carrier:
+                continue
+            tag = _local_name(child.tag)
+            part = child.get("data-pptx-part")
+            if tag in _DRAWABLE_TAGS or part in {
+                "geometry-detail",
+                "geometry-preview",
+            }:
+                _remove_child(shape, child)
+                stats.compatibility_normalizations += 1
+
+
+def _append_tail(parent: ET.Element, index: int, tail: str | None) -> None:
+    if not tail:
+        return
+    if index > 0:
+        previous = list(parent)[index - 1]
+        previous.tail = (previous.tail or "") + tail
+    else:
+        parent.text = (parent.text or "") + tail
+
+
+def _remove_child(parent: ET.Element, child: ET.Element) -> None:
+    children = list(parent)
+    index = children.index(child)
+    tail = child.tail
+    parent.remove(child)
+    _append_tail(parent, index, tail)
+
+
+def _unwrap_preview(parent: ET.Element, wrapper: ET.Element) -> bool:
+    """Promote a marker-only preview wrapper without changing its geometry."""
+    if wrapper.attrib or (wrapper.text and wrapper.text.strip()):
+        return False
+
+    siblings = list(parent)
+    index = siblings.index(wrapper)
+    promoted = list(wrapper)
+    wrapper_tail = wrapper.tail
+    for child in promoted:
+        wrapper.remove(child)
+    parent.remove(wrapper)
+
+    for offset, child in enumerate(promoted):

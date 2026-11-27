@@ -1,0 +1,25 @@
+# Narration Tools
+
+Tool behavior behind the [`generate-audio`](../../workflows/stages/generate-audio.md) stage: `notes_to_audio.py`, `narration_sync.py`, the narrated `svg_to_pptx.py` export, `powerpoint_video.py`, `video_sound_mix.py`, and `video_subtitles.py`. The stage owns when each runs and what the user confirms; this page owns what the tools do. Model and audio-parameter recommendations live in [`docs/audio-narration.md`](../../../../docs/audio-narration.md).
+
+## Prerequisites
+
+- `edge-tts` for the default backend (`python3 -m pip install edge-tts`); `ffprobe` for recorded-narration export (slide timings come from actual audio duration); `ffmpeg` plus `numpy` for post-export video calibration and the sound mix.
+- Cloud keys: ElevenLabs `ELEVENLABS_API_KEY`; MiniMax `MINIMAX_API_KEY` (China endpoint by default; `MINIMAX_TTS_BASE_URL=https://api.minimax.io/v1/t2a_v2` for overseas); Qwen `QWEN_API_KEY` or `DASHSCOPE_API_KEY`; CosyVoice `COSYVOICE_API_KEY` or `DASHSCOPE_API_KEY`. Keys come from the process environment or the first `.env` found in: current working directory, skill directory (e.g. `~/.agents/skills/ppt-master/.env`), clone repo root, `~/.ppt-master/.env`.
+- Automatic video export requires Windows PowerPoint 2016+. macOS PowerPoint has no `CreateVideo` automation contract and its manual movie export drops animation effects; UI scripting is not a substitute.
+
+## `notes_to_audio.py`
+
+```bash
+python3 skills/ppt-master/scripts/notes_to_audio.py --list-voices --locale <locale>              # edge
+python3 skills/ppt-master/scripts/notes_to_audio.py --provider <elevenlabs|minimax|qwen|cosyvoice> --list-voices
+python3 skills/ppt-master/scripts/notes_to_audio.py <project_path> --voice <ShortName> --rate=<rate> [--pitch=<pitch>] [--volume=<volume>] [--concurrency <N>]
+python3 skills/ppt-master/scripts/notes_to_audio.py <project_path> --provider elevenlabs --voice-id <id> --elevenlabs-model eleven_multilingual_v2
+python3 skills/ppt-master/scripts/notes_to_audio.py <project_path> --provider minimax --voice-id <id> --minimax-model speech-2.8-hd
+python3 skills/ppt-master/scripts/notes_to_audio.py <project_path> --provider qwen --voice-id <voice> --qwen-model qwen3-tts-flash --qwen-language-type Chinese
+python3 skills/ppt-master/scripts/notes_to_audio.py <project_path> --provider cosyvoice --voice-id <voice> --cosyvoice-model cosyvoice-v3-flash [--cosyvoice-audio-only]
+```
+
+- **Roster preflight**: the notes roster comes from `svg_output/*.svg` on Generate projects or from `page_plan.json` / the identity roster on round-trip workspaces (copies inherit source notes). Every expected note must exist, be readable, and contain spoken text before any TTS request; exit code `2` returns the caller to notes generation. Narration text is read verbatim; only `# ...` heading lines are skipped.
+- **Outputs**: one `audio/<stem>.<ext>` per note plus `audio/<stem>.srt` on provider-timed paths (edge, ElevenLabs, MiniMax, timestamp-capable CosyVoice); Qwen and explicit `--cosyvoice-audio-only` write audio only. The flat `audio/` directory is the single active set — no provider subdirectories unless the user asks to keep variants. Stale `audio/manifest.json` and `audio/total.srt` are removed before generation; a successful audio-only run also removes same-stem stale SRT; the manifest (provider/model, formats, voice settings, SHA-256 voice fingerprint — no per-slide inventory, hashes, or keys) is published atomically only after the complete roster succeeds.
+- **Formats**: PowerPoint-reliable audio is `m4a` (AAC), `mp3`, or `wav`; edge defaults to `mp3`; provider `pcm` / `opus` / `flac` output must be transcoded before embedding.

@@ -1,0 +1,115 @@
+            root = parse_source_xml(data)
+    except Exception as exc:
+        return [f"invalid slide XML: {exc}"]
+    return validate_slide_transition_structure(root) + validate_mce_prefixes(data)
+
+
+def _insert_show_properties(root: Any, element: Any) -> None:
+    for index, child in enumerate(list(root)):
+        if child.tag in {
+            _qn(PML_NS, "clrMru"),
+            _qn(PML_NS, "extLst"),
+        }:
+            root.insert(index, element)
+            return
+    root.append(element)
+
+
+def _next_relationship_id(rels_xml: str) -> str:
+    root = ET.fromstring(rels_xml)
+    numbers: list[int] = []
+    for relationship in root:
+        match = re.fullmatch(r"rId(\d+)", relationship.get("Id", ""))
+        if match is not None:
+            numbers.append(int(match.group(1)))
+    return f"rId{max(numbers, default=0) + 1}"
+
+
+def _presentation_props_part(rels_root: Any) -> str | None:
+    for relationship in rels_root:
+        if relationship.get("Type") != PRESENTATION_PROPS_REL_TYPE:
+            continue
+        if relationship.get("TargetMode") == "External":
+            raise ValueError("presentation properties relationship must be internal")
+        target = str(relationship.get("Target") or "").replace("\\", "/")
+        if not target:
+            raise ValueError("presentation properties relationship has no target")
+        if target.startswith("/"):
+            part_name = target.lstrip("/")
+        else:
+            part_name = posixpath.normpath(posixpath.join("ppt", target))
+        if part_name == ".." or part_name.startswith("../"):
+            raise ValueError(
+                "presentation properties relationship escapes the PPTX package"
+            )
+        return part_name
+    return None
+
+
+def _ensure_presentation_props_references(
+    parts: MutableMapping[str, bytes],
+    *,
+    props_part: str,
+) -> None:
+    rels_source = parts[PRESENTATION_RELS_PART]
+    rels_root = parse_source_xml(rels_source)
+    if _presentation_props_part(rels_root) is None:
+        ET.SubElement(
+            rels_root,
+            _qn(PACKAGE_REL_NS, "Relationship"),
+            {
+                "Id": _next_relationship_id(rels_source.decode("utf-8")),
+                "Type": PRESENTATION_PROPS_REL_TYPE,
+                "Target": "presProps.xml",
+            },
+        )
+        parts[PRESENTATION_RELS_PART] = serialize_source_xml(
+            rels_root,
+            rels_source,
+        )
+
+    content_source = parts[CONTENT_TYPES_PART]
+    content_root = parse_source_xml(content_source)
+    part_name = "/" + props_part.lstrip("/")
+    if not any(
+        override.get("PartName") == part_name
+        and override.get("ContentType") == PRESENTATION_PROPS_CONTENT_TYPE
+        for override in content_root
+    ):
+        ET.SubElement(
+            content_root,
+            _qn(CONTENT_TYPES_NS, "Override"),
+            {
+                "PartName": part_name,
+                "ContentType": PRESENTATION_PROPS_CONTENT_TYPE,
+            },
+        )
+        parts[CONTENT_TYPES_PART] = serialize_source_xml(
+            content_root,
+            content_source,
+        )
+
+
+def set_package_use_timings(
+    parts: MutableMapping[str, bytes],
+    *,
+    enabled: bool = True,
+) -> None:
+    """Set presentation-wide timing playback in ppt/presProps.xml."""
+    rels_root = parse_source_xml(parts[PRESENTATION_RELS_PART])
+    existing_props_part = _presentation_props_part(rels_root)
+    props_part = existing_props_part or PRESENTATION_PROPS_PART
+    if props_part in parts:
+        source = parts[props_part]
+        root = parse_source_xml(source)
+    else:
+        if existing_props_part is not None:
+            raise ValueError(
+                f"presentation properties part is missing: {props_part}"
+            )
+        source = (
+            f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            f'<p:presentationPr xmlns:p="{PML_NS}"/>'
+        ).encode("utf-8")
+        root = parse_source_xml(source)
+

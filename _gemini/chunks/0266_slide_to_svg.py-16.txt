@@ -1,0 +1,114 @@
+            chunk = _convert_node(child, ctx, top_level=False)
+            if chunk:
+                inner_parts.append(chunk)
+    finally:
+        ctx.group_fills.pop()
+    if not inner_parts:
+        return ""
+    inner = "\n".join(inner_parts)
+    effect_metadata = unsupported_target_effect_metadata(
+        node.xml.find("p:grpSpPr", NS),
+        "group",
+    )
+    _diagnose_unsupported_effect(ctx, effect_metadata)
+    return _wrap_shape_group(
+        inner,
+        node,
+        ctx,
+        top_level=top_level,
+        extra_attrs=_metadata_group_attrs(effect_metadata),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Graphic frame fallback (<p:graphicFrame>)
+# ---------------------------------------------------------------------------
+
+def _convert_graphic_fallback(node: ShapeNode, ctx: AssemblyContext,
+                              *, top_level: bool) -> str:
+    """Render a <p:graphicFrame> by dispatching on its graphicData uri.
+
+    Currently:
+    - ``...drawingml/2006/table`` → real table renderer (`convert_tbl`)
+    - ``...presentationml/2006/ole`` → render the ``mc:Fallback`` preview
+      bitmap that PowerPoint bakes alongside every embedded OLE object.
+      Visually identical to what PowerPoint shows for an unedited embed.
+    - supported classic charts → baked preview plus native chart metadata.
+    - everything else (SmartArt / diagram / unsupported chart) → labelled
+      preview or bounding rectangle plus transparent unsupported metadata.
+    """
+    graphic_data = node.xml.find("a:graphic/a:graphicData", NS)
+    uri = graphic_data.attrib.get("uri", "graphicFrame") if graphic_data is not None else "graphicFrame"
+
+    if uri == "http://schemas.openxmlformats.org/drawingml/2006/table":
+        rendered, replacement_attrs, payload_metadata = _render_graphic_table(
+            node,
+            ctx,
+            graphic_data,
+        )
+        if rendered:
+            inner = (
+                f"{payload_metadata}\n{rendered}"
+                if payload_metadata
+                else rendered
+            )
+            roundtrip_metadata, roundtrip_attrs = (
+                _roundtrip_graphic_frame_metadata(
+                    node,
+                    ctx,
+                    inner,
+                    top_level=top_level,
+                )
+            )
+            if roundtrip_metadata:
+                inner = f"{roundtrip_metadata}\n{inner}"
+            return _wrap_shape_group(
+                inner,
+                node,
+                ctx,
+                top_level=top_level,
+                extra_attrs=replacement_attrs + roundtrip_attrs,
+            )
+
+    preview_svg = ""
+    if ctx.render_graphic_previews:
+        try:
+            preview_svg = _render_graphic_preview(node, ctx)
+        except MediaResolutionError as exc:
+            if ctx.strict:
+                raise
+            ctx.diagnose(
+                "preview-omitted",
+                str(exc),
+                "omit the missing baked preview and retain the native, "
+                "normalized, or placeholder fallback",
+            )
+
+    chart_replacement_attrs: list[str] = []
+    chart_payload_metadata = ""
+    if uri in {CHART_URI, CHARTEX_URI}:
+        rendered, chart_replacement_attrs, chart_payload_metadata = (
+            _render_graphic_chart(
+                node,
+                ctx,
+                graphic_data,
+                preview_svg,
+            )
+        )
+        if rendered:
+            inner = (
+                f"{chart_payload_metadata}\n{rendered}"
+                if chart_payload_metadata
+                else rendered
+            )
+            return _wrap_shape_group(
+                inner,
+                node,
+                ctx,
+                top_level=top_level,
+                extra_attrs=chart_replacement_attrs,
+            )
+
+    if uri == "http://schemas.openxmlformats.org/presentationml/2006/ole":
+        if preview_svg:
+            labelled = (

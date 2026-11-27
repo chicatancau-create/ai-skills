@@ -1,0 +1,117 @@
+            for index, (owner, _xml_space, raw) in enumerate(raw_runs)
+            if not raw or index in normalized
+        ]
+
+    @classmethod
+    def _paragraph_line_text_runs(
+        cls,
+        text_el: ET.Element,
+        line_group: List[ET.Element],
+        synthetic_first: ET.Element | None,
+    ) -> List[Tuple[ET.Element, str]] | None:
+        """Return one classified visual line's normalized source runs."""
+        if (
+            _normalize_project_text_segments is None
+            or _resolve_project_xml_space is None
+        ):
+            return None
+        try:
+            parent_xml_space = _resolve_project_xml_space(text_el, 'default')
+        except ValueError:
+            return None
+
+        raw_runs: List[Tuple[ET.Element, str, str]] = []
+        for member in line_group:
+            if member is synthetic_first:
+                if member.text:
+                    raw_runs.append((text_el, parent_xml_space, member.text))
+                continue
+            member_runs = cls._inline_text_segments(
+                member,
+                parent_xml_space,
+                include_container_dx=member is not line_group[0],
+            )
+            if member_runs is None:
+                return None
+            raw_runs.extend(member_runs)
+            if member.tail:
+                raw_runs.append((text_el, parent_xml_space, member.tail))
+        return cls._normalize_source_text_runs(raw_runs)
+
+    @staticmethod
+    def _unchanged_txbody_group_ids(
+        root: ET.Element,
+    ) -> set[int]:
+        """Return imported shape groups whose original text body will survive."""
+        if _preserved_native_text_body is None:
+            return set()
+        unchanged: set[int] = set()
+        for group in root.iter(f'{{{SVG_NS}}}g'):
+            try:
+                if _preserved_native_text_body(
+                    group,
+                    trust_runtime_snapshot=False,
+                ) is not None:
+                    unchanged.add(id(group))
+            except _SvgNativeConversionError:
+                # The dedicated txBody contract check owns the diagnostic.
+                continue
+        return unchanged
+
+    @staticmethod
+    def _check_preserved_txbody_contract(
+        root: ET.Element,
+        result: Dict,
+    ) -> None:
+        """Validate imported txBody payloads independently of text geometry."""
+        if _preserved_native_text_body is None:
+            return
+        errors: set[str] = set()
+        for group in root.iter(f'{{{SVG_NS}}}g'):
+            try:
+                _preserved_native_text_body(
+                    group,
+                    trust_runtime_snapshot=False,
+                )
+            except _SvgNativeConversionError as exc:
+                errors.add(
+                    f'{_element_label(group)} cannot preserve source '
+                    f'txBody: {exc}'
+                )
+        result['errors'].extend(sorted(errors))
+
+    @staticmethod
+    def _has_ancestor_id(
+        elem: ET.Element,
+        parent_by_id: Dict[int, ET.Element],
+        ancestor_ids: set[int],
+    ) -> bool:
+        current = parent_by_id.get(id(elem))
+        while current is not None:
+            if id(current) in ancestor_ids:
+                return True
+            current = parent_by_id.get(id(current))
+        return False
+
+    @classmethod
+    def _resolved_single_line_text_runs(
+        cls,
+        text_el: ET.Element,
+        parent_by_id: Dict[int, ET.Element],
+        font_sizes: Dict[int, float],
+        letter_spacings: Dict[int, float],
+    ) -> List[Dict] | None:
+        """Resolve the same run metrics used by generated text-frame sizing."""
+        source_runs = cls._single_line_text_runs(text_el)
+        if source_runs is None:
+            return None
+        return cls._resolved_text_runs(
+            source_runs,
+            parent_by_id,
+            font_sizes,
+            letter_spacings,
+        )
+
+    @classmethod
+    def _resolved_text_runs(
+        cls,

@@ -1,0 +1,115 @@
+@dataclass(frozen=True)
+class TemplateElementSpec:
+    """One direct SVG child carrying explicit PPTX structure metadata."""
+
+    element_id: str
+    order: int
+    tag: str
+    layer: str | None = None
+    placeholder: str | None = None
+    placeholder_bounds: tuple[float, float, float, float] | None = None
+    placeholder_idx: int | None = None
+    placeholder_binding: str | None = None
+    placeholder_carrier_tag: str | None = None
+    is_background: bool = False
+
+    def contract_signature(self) -> tuple[object, ...]:
+        """Return metadata that must agree across slides sharing a structure."""
+        return (
+            self.element_id,
+            self.tag,
+            self.layer,
+            self.placeholder,
+            self.placeholder_bounds,
+            self.placeholder_idx,
+            self.placeholder_binding,
+            self.placeholder_carrier_tag,
+            self.is_background,
+        )
+
+
+@dataclass(frozen=True)
+class TemplateSlideSpec:
+    """Explicit structure contract parsed from one SVG slide."""
+
+    slide_num: int
+    svg_path: Path
+    master_key: str
+    master_name: str
+    layout_key: str
+    layout_name: str
+    layout_show_master_shapes: bool
+    slide_show_inherited_shapes: bool
+    elements: tuple[TemplateElementSpec, ...]
+
+    @property
+    def master_elements(self) -> tuple[TemplateElementSpec, ...]:
+        return tuple(item for item in self.elements if item.layer == "master")
+
+    @property
+    def layout_elements(self) -> tuple[TemplateElementSpec, ...]:
+        return tuple(item for item in self.elements if item.layer == "layout")
+
+    @property
+    def placeholders(self) -> tuple[TemplateElementSpec, ...]:
+        return tuple(item for item in self.elements if item.placeholder)
+
+    @property
+    def layout_contract(self) -> tuple[tuple[object, ...], ...]:
+        return tuple(
+            item.contract_signature()
+            for item in self.elements
+            if item.layer == "layout" or item.placeholder
+        )
+
+
+def is_proxy_placeholder(item: TemplateElementSpec) -> bool:
+    """Return whether a visible composite slot uses an invisible binding proxy."""
+    return item.placeholder_binding == "proxy"
+
+
+@dataclass(frozen=True)
+class TemplatePlaceholderBinding:
+    """Resolved PowerPoint identity for one template placeholder."""
+
+    element: TemplateElementSpec
+    placeholder_type: str
+    assigned_idx: int | None
+
+    @property
+    def effective_idx(self) -> int:
+        """Return the OOXML idx value after applying its default of zero."""
+        return self.assigned_idx if self.assigned_idx is not None else 0
+
+
+def template_placeholder_bindings(
+    spec: TemplateSlideSpec,
+) -> tuple[TemplatePlaceholderBinding, ...]:
+    """Assign deterministic, collision-free PowerPoint placeholder identities."""
+    next_idx = 1
+    used_indices: dict[int, str] = {}
+    bindings: list[TemplatePlaceholderBinding] = []
+    for item in spec.placeholders:
+        placeholder_type = TEMPLATE_PLACEHOLDER_TYPES.get(item.placeholder or "")
+        if placeholder_type is None:
+            raise TemplateStructureError(
+                f"{spec.svg_path.name}: unsupported placeholder type "
+                f"{item.placeholder!r}"
+            )
+        if item.placeholder == "title" and item.placeholder_idx is None:
+            assigned_idx = None
+        else:
+            assigned_idx = (
+                item.placeholder_idx
+                if item.placeholder_idx is not None
+                else next_idx
+            )
+        effective_idx = assigned_idx if assigned_idx is not None else 0
+        if effective_idx > OOXML_UINT32_MAX:
+            raise TemplateStructureError(
+                f"{spec.svg_path.name}: layout {spec.layout_key!r} placeholder "
+                f"{item.element_id!r} idx exceeds the OOXML UInt32 maximum "
+                f"{OOXML_UINT32_MAX}"
+            )
+        previous = used_indices.get(effective_idx)
+        if previous is not None:

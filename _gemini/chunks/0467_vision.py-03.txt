@@ -1,0 +1,86 @@
+    parser.add_argument("--lang", choices=["zh", "en"], default="zh", help="回答语言, 默认中文")
+    parser.add_argument("--no-cache", action="store_true", help="不使用缓存, 强制重新发现服务")
+    parser.add_argument("--no-save", action="store_true", help="不保存 last_response.txt")
+    args = parser.parse_args()
+
+    if args.question is None and args.question_opt is not None:
+        args.question = args.question_opt
+    if not args.images:
+        eprint("[vision] 错误: 请提供至少一张图片")
+        sys.exit(2)
+    if args.question is None and len(args.images) > 1:
+        last = args.images[-1]
+        if not os.path.isfile(last) and os.path.splitext(last)[1].lower() not in IMAGE_EXTENSIONS:
+            args.question = args.images.pop()
+
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+    for p in args.images:
+        if not os.path.isfile(p):
+            eprint("[vision] 错误: 文件不存在: %s" % p)
+            sys.exit(2)
+        if os.path.splitext(p)[1].lower() not in IMAGE_EXTENSIONS:
+            eprint("[vision] 警告: 非图片扩展名: %s" % p)
+
+    endpoint, model_id = args.endpoint, args.model
+    if not endpoint or not model_id:
+        discovered_ep, discovered_model = discover(use_cache=not args.no_cache)
+        if endpoint is None:
+            endpoint = discovered_ep
+        if model_id is None:
+            model_id = discovered_model["id"] if discovered_model else None
+        if endpoint and model_id:
+            save_cache({"endpoint": endpoint, "model": model_id})
+
+    if not endpoint or not model_id:
+        eprint("[vision] 未发现运行中的本地模型服务。请先启动牧羊人(Herdsman AI)并加载视觉模型。")
+        sys.exit(1)
+
+    eprint("[vision] 端点: %s  模型: %s" % (endpoint, model_id))
+    eprint("[vision] 正在分析 %d 张图片..." % len(args.images))
+
+    messages = build_messages(args.images, args.question, args.lang)
+    try:
+        answer = call_model(endpoint, model_id, messages)
+    except Exception as exc:
+        if args.endpoint and args.model:
+            eprint("[vision] 调用失败: %s" % exc)
+            sys.exit(1)
+        eprint("[vision] 端点 %s 调用失败(%s), 尝试重新发现服务..." % (endpoint, exc))
+        endpoint, model_id = None, None
+        discovered_ep, discovered_model = discover(use_cache=False)
+        if discovered_ep and discovered_model:
+            endpoint, model_id = discovered_ep, discovered_model["id"]
+            save_cache({"endpoint": endpoint, "model": model_id})
+            eprint("[vision] 已切换到端点: %s  模型: %s" % (endpoint, model_id))
+            answer = call_model(endpoint, model_id, messages)
+        else:
+            eprint("[vision] 未发现可用的本地模型服务。")
+            sys.exit(1)
+
+    answer = (answer or "").strip()
+    if not answer:
+        eprint("[vision] 模型返回为空。")
+        sys.exit(1)
+
+    if not args.no_save:
+        try:
+            os.makedirs(STATE_DIR, exist_ok=True)
+            with io.open(LAST_RESPONSE_PATH, "w", encoding="utf-8") as f:
+                f.write(answer)
+        except Exception:
+            pass
+
+    sys.stdout.write(answer + "\n")
+    sys.stdout.flush()
+
+
+if __name__ == "__main__":
+    main()

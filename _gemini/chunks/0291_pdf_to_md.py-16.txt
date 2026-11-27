@@ -1,0 +1,98 @@
+                    if heading_level > 0:
+                        prefix = '#' * heading_level + ' '
+                        clean_line = re.sub(r'\*+([^*]+)\*+', r'\1', line_text)
+                        final_text = prefix + clean_line
+                    elif is_list:
+                        final_text = list_content
+                    else:
+                        final_text = line_text
+
+                    page_elements.append({
+                        "y0": line["bbox"][1],
+                        "type": 0,
+                        "content": final_text,
+                        "is_heading": heading_level > 0,
+                        "is_list": is_list,
+                        "is_code": is_code_line
+                    })
+
+            elif block["type"] == 1:
+                if images == "none":
+                    pass
+                elif images == "all" or should_keep_image(block, page.rect, seen_image_hashes):
+                    page_elements.append({
+                        "y0": block["bbox"][1],
+                        "type": 1,
+                        "content": block
+                    })
+                else:
+                    w, h = block.get("width", 0), block.get("height", 0)
+                    print(f"  [SKIP] Filtered small/decorative image: {w}x{h}px, {len(block.get('image', b''))} bytes")
+
+        page_elements.sort(key=lambda x: x["y0"])
+
+        # Merge adjacent same-level short headings
+        page_elements = merge_adjacent_headings(page_elements)
+
+        merged_elements = []
+        i = 0
+        while i < len(page_elements):
+            el = page_elements[i]
+            if el["type"] == 0 and not el.get("is_heading") and not el.get("is_list"):
+                merged_content = el["content"]
+                j = i + 1
+                while j < len(page_elements):
+                    next_el = page_elements[j]
+                    if next_el["type"] != 0:
+                        break
+                    if not should_merge_lines({"content": merged_content, "is_heading": False, "is_list": False}, next_el):
+                        break
+                    merged_content = join_wrapped_text(merged_content, next_el["content"])
+                    j += 1
+                merged_elements.append({
+                    "type": 0,
+                    "content": remove_page_footer(merged_content),
+                    "is_heading": False,
+                    "is_list": False
+                })
+                i = j
+            else:
+                merged_elements.append(el)
+                i += 1
+
+        prev_was_list = False
+        prev_was_code = False
+        code_block_lines = []
+
+        def flush_code_block():
+            """Flush accumulated code block."""
+            nonlocal code_block_lines, markdown_content
+            if code_block_lines:
+                markdown_content += "```\n"
+                markdown_content += "\n".join(code_block_lines) + "\n"
+                markdown_content += "```\n\n"
+                code_block_lines = []
+
+        for el in merged_elements:
+            if el["type"] == 0:
+                is_list = el.get("is_list", False)
+                is_heading = el.get("is_heading", False)
+                is_code = el.get("is_code", False)
+
+                if is_code:
+                    # Accumulate code lines
+                    if prev_was_list:
+                        markdown_content += "\n"
+                        prev_was_list = False
+                    code_block_lines.append(el["content"])
+                    prev_was_code = True
+                else:
+                    # Non-code line, flush accumulated code block first
+                    if prev_was_code:
+                        flush_code_block()
+                        prev_was_code = False
+
+                    if is_heading:
+                        if prev_was_list:
+                            markdown_content += "\n"
+                        markdown_content += el["content"] + "\n\n"

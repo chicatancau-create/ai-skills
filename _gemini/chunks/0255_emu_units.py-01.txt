@@ -1,0 +1,113 @@
+"""EMU <-> pixel conversion and DrawingML unit constants.
+
+Mirrors svg_to_pptx/drawingml/utils.py and pptx_package/dimensions.py, in reverse.
+
+DrawingML unit conventions:
+- Coordinates / sizes: EMU (English Metric Unit). 914400 EMU = 1 inch = 96 px.
+- Font size: hundredths of a point. 1 px = 0.75 pt = 75 hundredths-of-a-point.
+- Angle: 60000ths of a degree.
+- Color tint/shade/lumMod/lumOff/satMod: percent in 1000ths (100% = 100000).
+- srcRect / fillRect: percent in 1000ths of the unit rect.
+"""
+
+from __future__ import annotations
+
+from decimal import Decimal, ROUND_HALF_UP, localcontext
+from xml.etree import ElementTree as ET
+
+EMU_PER_INCH = 914400
+EMU_PER_PX = 9525  # 96 dpi
+HUNDREDTHS_PT_PER_PX = 75  # 1 px = 0.75 pt = 75 hundredths
+ANGLE_UNIT = 60000  # 1 degree = 60000 angle units
+PERCENT_UNIT = 100000  # 100% = 100000 (DrawingML "ST_PositivePercentage")
+SRCRECT_UNIT = 100000  # srcRect l/t/r/b are in 1000ths of percent (i.e. 100000 = 100%)
+
+
+# Namespaces used throughout OOXML
+NS = {
+    "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+    "p": "http://schemas.openxmlformats.org/presentationml/2006/main",
+    "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+    "rel": "http://schemas.openxmlformats.org/package/2006/relationships",
+    "ct": "http://schemas.openxmlformats.org/package/2006/content-types",
+    "asvg": "http://schemas.microsoft.com/office/drawing/2016/SVG/main",
+    "mc": "http://schemas.openxmlformats.org/markup-compatibility/2006",
+}
+
+# Register so ET output emits clean prefixes (writers normally don't need this
+# since the SVG output uses the SVG namespace, but keep it consistent).
+for prefix, uri in NS.items():
+    try:
+        ET.register_namespace(prefix, uri)
+    except (ValueError, AttributeError):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Length conversions
+# ---------------------------------------------------------------------------
+
+def emu_to_px(emu: float | int | None, default: float = 0.0) -> float:
+    """Convert EMU to SVG px (96 dpi). None / unparsable -> default."""
+    if emu is None:
+        return default
+    try:
+        return float(emu) / EMU_PER_PX
+    except (ValueError, TypeError):
+        return default
+
+
+def emu_attr_to_px(elem: ET.Element | None, attr: str, default: float = 0.0) -> float:
+    """Read EMU integer attribute and return px."""
+    if elem is None:
+        return default
+    return emu_to_px(elem.get(attr), default)
+
+
+def hundredths_pt_to_px(val: float | int | str | None, default: float = 0.0) -> float:
+    """Convert font size (a:rPr@sz) to px. 100 = 1 pt = 4/3 px."""
+    if val is None:
+        return default
+    try:
+        return float(val) / HUNDREDTHS_PT_PER_PX
+    except (ValueError, TypeError):
+        return default
+
+
+def angle_to_deg(val: float | int | str | None, default: float = 0.0) -> float:
+    """Convert DrawingML angle (1/60000 deg) to plain degrees."""
+    if val is None:
+        return default
+    try:
+        return float(val) / ANGLE_UNIT
+    except (ValueError, TypeError):
+        return default
+
+
+def percent_to_ratio(val: float | int | str | None, default: float = 0.0) -> float:
+    """Convert DrawingML percentage units (100000 = 100%) to a ratio."""
+    if val is None:
+        return default
+    try:
+        return float(val) / PERCENT_UNIT
+    except (ValueError, TypeError):
+        return default
+
+
+def ooxml_bool(value: str | None, default: bool = False) -> bool:
+    """Parse the boolean lexical forms accepted by OOXML."""
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "on"}:
+        return True
+    if normalized in {"0", "false", "off"}:
+        return False
+    return default
+
+
+# ---------------------------------------------------------------------------
+# xfrm / transform parsing
+# ---------------------------------------------------------------------------
+
+class Xfrm:

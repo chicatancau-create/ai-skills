@@ -1,0 +1,109 @@
+                        f'dy="{fmt_num(line_advance)}">'
+                        f'{_run_tspan_markup(run)}</tspan>'
+                    )
+                else:
+                    spans.append(
+                        f'<tspan x="{fmt_num(anchor_x)}" '
+                        f'dy="{fmt_num(line_advance)}"'
+                        f'{attrs}>{_xml_escape(run.text)}</tspan>'
+                    )
+            else:
+                spans.append(_run_tspan_markup(run))
+
+    base_attrs = _text_base_attrs(first_run, anchor_x, first_baseline, text_anchor)
+    return f"<text{base_attrs}>{''.join(spans)}</text>"
+
+
+def _text_base_attrs(run: TextRun | None, x: float, y: float,
+                     text_anchor: str) -> str:
+    parts = [
+        f'x="{fmt_num(x)}"',
+        f'y="{fmt_num(y)}"',
+        f'text-anchor="{text_anchor}"',
+        'xml:space="preserve"',
+    ]
+    if run is None:
+        return " " + " ".join(parts)
+    parts.append(f'font-family="{run.font_family}"')
+    parts.append(f'font-size="{fmt_num(run.font_size_px)}"')
+    parts.append(f'fill="{run.fill}"')
+    if run.fill_opacity < 1.0:
+        parts.append(
+            f'fill-opacity="{format_ooxml_alpha(run.fill_opacity)}"'
+        )
+    if run.bold:
+        parts.append('font-weight="bold"')
+    if run.italic:
+        parts.append('font-style="italic"')
+    if run.underline and run.strikethrough:
+        parts.append('text-decoration="underline line-through"')
+    elif run.underline:
+        parts.append('text-decoration="underline"')
+    elif run.strikethrough:
+        parts.append('text-decoration="line-through"')
+    if run.letter_spacing_px:
+        parts.append(f'letter-spacing="{fmt_num(run.letter_spacing_px)}"')
+    return " " + " ".join(parts)
+
+
+def _run_tspan_attrs(run: TextRun) -> str:
+    """Per-run overrides on a <tspan>. Only emit attributes that differ from
+    the run that drove the parent <text> (we keep things simple: emit only
+    overrides that can plausibly change run-to-run, never re-emit common
+    defaults). For v1 we always emit fill, font family, and font size so each
+    imported run keeps its resolved typeface even when adjacent runs differ.
+    """
+    parts = [
+        f'fill="{run.fill}"',
+        f'font-family="{run.font_family}"',
+        f'font-size="{fmt_num(run.font_size_px)}"',
+    ]
+    if run.fill_opacity < 1.0:
+        parts.append(
+            f'fill-opacity="{format_ooxml_alpha(run.fill_opacity)}"'
+        )
+    if run.bold:
+        parts.append('font-weight="bold"')
+    if run.italic:
+        parts.append('font-style="italic"')
+    if run.underline and run.strikethrough:
+        parts.append('text-decoration="underline line-through"')
+    elif run.underline:
+        parts.append('text-decoration="underline"')
+    elif run.strikethrough:
+        parts.append('text-decoration="line-through"')
+    if run.letter_spacing_px:
+        parts.append(f'letter-spacing="{fmt_num(run.letter_spacing_px)}"')
+    return " " + " ".join(parts)
+
+
+def _run_tspan_markup(run: TextRun) -> str:
+    formula_attr = ""
+    if run.formula_latex is not None:
+        formula_attr = (
+            ' data-pptx-inline-formula="'
+            + _xml_escape(run.formula_latex)
+            + '"'
+        )
+    return (
+        f"<tspan{_run_tspan_attrs(run)}{formula_attr}>"
+        f"{_xml_escape(run.text)}</tspan>"
+    )
+
+
+def _wrap_run_hyperlink(markup: str, run: TextRun) -> str:
+    """Wrap one visible SVG run in the canonical hyperlink carrier."""
+    if not run.hyperlink_href:
+        return markup
+    provenance = (
+        f' {SOURCE_HREF_ATTR}="{_xml_escape(run.hyperlink_href)}"'
+        if run.hyperlink_href.startswith('#slide-') else ''
+    )
+    return f'<a href="{_xml_escape(run.hyperlink_href)}"{provenance}>{markup}</a>'
+
+
+def _xml_escape(text: str) -> str:
+    return (text.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace('"', "&quot;"))

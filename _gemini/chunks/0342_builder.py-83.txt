@@ -1,0 +1,93 @@
+                content_types = _add_default_content_type(content_types, 'png', 'image/png')
+            with open(content_types_path, 'w', encoding='utf-8') as f:
+                f.write(content_types)
+
+        # Add notes master / slides content types
+        if enable_notes and notes_slides_created:
+            for part_name in sorted(notes_master_theme_parts_created):
+                content_types = _add_content_type_override(
+                    content_types,
+                    part_name,
+                    THEME_CONTENT_TYPE,
+                )
+            for part_name in sorted(notes_master_parts_used):
+                content_types = _add_content_type_override(
+                    content_types,
+                    part_name,
+                    _NOTES_MASTER_CONTENT_TYPE,
+                )
+            for i in sorted(notes_slides_created):
+                notes_target = _find_relationship_target(
+                    extract_dir / 'ppt' / 'slides' / '_rels' / f'slide{i}.xml.rels',
+                    NOTES_SLIDE_REL_TYPE,
+                )
+                if notes_target is None:
+                    raise RuntimeError(f"Slide {i} lost its generated notes relationship")
+                content_types = _add_content_type_override(
+                    content_types,
+                    '/' + _resolve_package_target(f'ppt/slides/slide{i}.xml', notes_target),
+                    'application/vnd.openxmlformats-officedocument.presentationml.'
+                    'notesSlide+xml',
+                )
+            with open(content_types_path, 'w', encoding='utf-8') as f:
+                f.write(content_types)
+
+        if source_content_types_bytes is not None:
+            current_content_types = content_types_path.read_bytes()
+            if (
+                _content_type_contract(current_content_types)
+                == _content_type_contract(source_content_types_bytes)
+            ):
+                content_types_path.write_bytes(source_content_types_bytes)
+
+        if roundtrip_export:
+            edited_slide_parts = {
+                f"ppt/slides/slide{index}.xml" for index, patch in slide_patches.items()
+                if patch.visual_changed
+            }
+        else:
+            # Generated slides own every relationship they carry; a shape
+            # promoted to a Master/Layout part leaves its slide entry behind.
+            edited_slide_parts = {
+                path.relative_to(extract_dir).as_posix()
+                for path in (extract_dir / 'ppt' / 'slides').glob('slide*.xml')
+            }
+        if page_plan_export or edited_slide_parts:
+            pruned_page_plan_parts = prune_unreferenced_directory_parts(
+                extract_dir, edited_slide_parts=edited_slide_parts,
+            )
+            if verbose and pruned_page_plan_parts:
+                print(
+                    "  Package: pruned "
+                    f"{pruned_page_plan_parts} unreachable part(s)"
+                )
+
+        if package_uses_timings or kiosk:
+            set_directory_use_timings(
+                extract_dir,
+                enabled=True if package_uses_timings else None,
+                kiosk=kiosk,
+            )
+
+        reinjected_resources = _reinject_roundtrip_resources(
+            extract_dir,
+            resource_root,
+            late_roundtrip_resources,
+        )
+        if verbose and reinjected_resources:
+            print(
+                "  Round-trip resources: reinjected "
+                f"{reinjected_resources} source package part(s)"
+            )
+
+        if not enable_notes:
+            _remove_all_notes_parts(extract_dir)
+
+        rels_problems = verify_internal_relationships(extract_dir)
+        if rels_problems:
+            details = '\n'.join(f'  - {p}' for p in rels_problems)
+            raise RuntimeError(
+                'PPTX package contains dangling internal relationship targets; '
+                'PowerPoint will report the file as corrupt:\n' + details
+            )
+

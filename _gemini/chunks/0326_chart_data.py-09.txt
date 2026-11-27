@@ -1,0 +1,93 @@
+    raw_style = payload.get("radar_style") or payload.get("radarStyle") or alias_style or "line"
+    aliases = {
+        "filled": ("filled", None),
+        "line": ("marker", "none"),
+        "linemarker": ("marker", "circle"),
+        "marker": ("marker", "none"),
+        "markers": ("marker", "circle"),
+        "standard": ("marker", "none"),
+    }
+    style = aliases.get(_compact_key(raw_style))
+    if not style:
+        raise RuntimeError(
+            f"Native PPTX radar_style {raw_style} is outside current basic chart support"
+        )
+    return style
+
+
+def _point_color(color: Any, chart_type: str) -> str | None:
+    """Hex per-point colour; line series may leave a point unmarked with ``null``."""
+    if chart_type == "line" and (color is None or _compact_key(color) == "none"):
+        return None
+    if color is None:
+        raise RuntimeError(
+            f"Native PPTX {chart_type} chart series point_colors entries must be "
+            "colours (only a line series may leave a point null)"
+        )
+    return _clean_hex(color, "#4472C4")
+
+
+def _marker_size(source: dict[str, Any], chart_type: str) -> float | None:
+    """Line marker diameter in SVG px (``marker_size``), validated for the 2..72pt range."""
+    raw = _first_present(source.get("marker_size"), source.get("markerSize"))
+    if raw is None:
+        return None
+    if chart_type != "line":
+        raise RuntimeError("Native PPTX chart marker_size applies to line series only")
+    size = _number(raw, "chart marker_size")
+    if not 2 <= size * 0.75 <= 72:
+        raise RuntimeError("Native PPTX chart marker_size must resolve to 2..72pt")
+    return size
+
+
+def _gap_width(source: dict[str, Any], chart_type: str) -> int | None:
+    """Bar/column gap width as a percentage of one bar (``gap_width``, 0..500)."""
+    raw = _first_present(source.get("gap_width"), source.get("gapWidth"))
+    if raw is None:
+        return None
+    if chart_type not in {"bar", "column"}:
+        raise RuntimeError("Native PPTX chart gap_width applies to bar and column charts only")
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not 0 <= raw <= 500:
+        raise RuntimeError("Native PPTX chart gap_width must be a number between 0 and 500")
+    return int(round(raw))
+
+
+def _overlap(source: dict[str, Any], chart_type: str) -> int | None:
+    """Bar/column series overlap as a percentage of one bar (``overlap``, -100..100)."""
+    raw = source.get("overlap")
+    if raw is None:
+        return None
+    if chart_type not in {"bar", "column"}:
+        raise RuntimeError("Native PPTX chart overlap applies to bar and column charts only")
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not -100 <= raw <= 100:
+        raise RuntimeError("Native PPTX chart overlap must be a number between -100 and 100")
+    return int(round(raw))
+
+
+def _category_series(
+    payload: dict[str, Any],
+    categories: list[Any],
+    *,
+    chart_type: str,
+    grouping: str | None,
+    typed_combo: bool = False,
+) -> list[dict[str, Any]]:
+    raw_series = payload.get("series", [])
+    if not categories or not isinstance(raw_series, list) or not raw_series:
+        raise RuntimeError("Native PPTX chart requires non-empty categories and series")
+    root_point_colors = _first_present(
+        payload.get("point_colors"),
+        payload.get("pointColors"),
+    )
+    if root_point_colors is not None and len(raw_series) != 1:
+        raise RuntimeError("Native PPTX chart root point_colors is only valid for one series")
+
+    series: list[dict[str, Any]] = []
+    for idx, item in enumerate(raw_series, start=1):
+        if not isinstance(item, dict):
+            raise RuntimeError("Native PPTX chart series entries must be objects")
+        if (
+            _first_present(item.get("line_style"), item.get("lineStyle")) is not None
+            and not typed_combo
+        ):
+            raise RuntimeError(

@@ -1,0 +1,103 @@
+) -> tuple[list[GroupTarget], list[str]]:
+    """Scan one SVG for top-level visible group ids and anonymous groups."""
+    # The converter imports animation policy; defer this shared visibility scan.
+    from .drawingml.converter import collect_hidden_visuals
+
+    root = ET.parse(str(svg_path)).getroot()
+    hidden_by_id = {id(element): reason for element, reason in collect_hidden_visuals(root)}
+    targets: list[GroupTarget] = []
+    anonymous_groups: list[str] = []
+    visual_index = 0
+    page_reference_size = _page_reference_size(root)
+
+    for child in root:
+        child = effective_top_level(child)
+        tag = _tag_name(child)
+        if tag in _NON_VISUAL_TAGS:
+            continue
+        visual_index += 1
+        if tag != 'g':
+            continue
+        hidden_reason = hidden_by_id.get(id(child))
+        if hidden_reason and not include_hidden:
+            continue
+        group_id = usable_animation_group_id(child.get('id'))
+        if group_id is None:
+            if hidden_reason is None:
+                anonymous_groups.append(f'{svg_path.stem}: top-level group #{visual_index}')
+            continue
+        role = child.get('data-pptx-role')
+        placeholder = child.get('data-pptx-placeholder')
+        has_explicit_semantics = role is not None or placeholder is not None
+        has_structural_layer = child.get('data-pptx-layer') is not None
+        semantic_static = (
+            has_explicit_semantics
+            and is_static_page_frame(role, placeholder)
+        )
+        # A static role/placeholder marker makes a group chrome (kept out of
+        # scaffold, listing, and automatic animation) but not structural: an
+        # explicit sidecar entry may still animate or Morph-pair it. Only a
+        # ``data-pptx-layer`` group is structural.
+        structurally_static = has_structural_layer
+        if has_structural_layer:
+            chrome = True
+        elif has_explicit_semantics:
+            chrome = semantic_static
+        else:
+            chrome = is_chrome_id(group_id)
+            if (
+                chrome
+                and _names_title_block(group_id)
+                and _holds_page_title(child, page_reference_size)
+            ):
+                chrome = False
+        targets.append(
+            GroupTarget(
+                slide=svg_path.stem,
+                group_id=group_id,
+                order=visual_index,
+                chrome=chrome,
+                structurally_static=structurally_static,
+                hidden_reason=hidden_reason,
+                placeholder=placeholder,
+                on_structured_page=root.get('data-pptx-layout') is not None,
+                has_hyperlink=any(
+                    _tag_name(descendant) == 'a'
+                    or descendant.get(SHAPE_HYPERLINK_ATTR) is not None
+                    for descendant in child.iter()
+                ),
+            )
+        )
+
+    return targets, anonymous_groups
+
+
+def _duplicate_target_ids(targets: list[GroupTarget]) -> tuple[str, ...]:
+    """Return duplicate top-level animation anchors in deterministic order."""
+    counts: dict[str, int] = {}
+    for target in targets:
+        counts[target.group_id] = counts.get(target.group_id, 0) + 1
+    return tuple(sorted(group_id for group_id, count in counts.items() if count > 1))
+
+
+def _duplicate_target_error(slide_name: str, duplicates: tuple[str, ...]) -> str:
+    rendered = ', '.join(repr(group_id) for group_id in duplicates)
+    return (
+        f'SVG slide "{slide_name}" has duplicate top-level group id(s): '
+        f'{rendered}; animation target ids must be unique'
+    )
+
+
+def _require_unique_target_ids(
+    slide_name: str,
+    targets: list[GroupTarget],
+) -> None:
+    duplicates = _duplicate_target_ids(targets)
+    if duplicates:
+        raise ValueError(_duplicate_target_error(slide_name, duplicates))
+
+
+ROUNDTRIP_AUTHORING_DIR = 'authoring-svg-flat'
+ROUNDTRIP_PAGE_PLAN = 'page_plan.json'
+
+

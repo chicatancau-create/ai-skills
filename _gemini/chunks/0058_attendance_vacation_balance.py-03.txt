@@ -1,0 +1,119 @@
+    leave_types: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for record in raw_records:
+        code = first_nonempty(record, LEAVE_CODE_KEYS)
+        name = first_nonempty(record, LEAVE_NAME_KEYS)
+        if not code and not name:
+            continue
+        stable_key = str(code or name)
+        if stable_key in seen:
+            continue
+        seen.add(stable_key)
+        unit = normalize_leave_unit(first_nonempty(record, UNIT_KEYS))
+        source = first_nonempty(record, SOURCE_KEYS)
+        leave_types.append({
+            "code": str(code or name),
+            "name": str(name or code),
+            "unit": unit,
+            "source": str(source or ""),
+        })
+    return leave_types
+
+
+def normalize_balance_records(payload: Any) -> list[dict[str, Any]]:
+    raw_records = recursively_collect_dicts(payload)
+    return [record for record in raw_records if first_nonempty(record, USER_ID_KEYS) or first_nonempty(record, LEAVE_CODE_KEYS) or first_nonempty(record, LEAVE_NAME_KEYS)]
+
+
+def query_leave_types(inspect: bool) -> list[dict[str, str]]:
+    payload = cmn.run_dws(["attendance", "vacation", "types"])
+    if inspect:
+        records = recursively_collect_dicts(payload)
+        cmn.log("[inspect] vacation types first record:\n" + json.dumps(records[:1], ensure_ascii=False, indent=2))
+    leave_types = normalize_leave_types(payload)
+    cmn.log(f"[types] 获取到 {len(leave_types)} 个假期规则")
+    return leave_types
+
+
+def extract_message(payload: Any) -> str:
+    if isinstance(payload, dict):
+        message = first_nonempty(payload, MESSAGE_KEYS)
+        if message:
+            return str(message)
+        for value in payload.values():
+            nested_message = extract_message(value)
+            if nested_message:
+                return nested_message
+    if isinstance(payload, list):
+        for item in payload:
+            nested_message = extract_message(item)
+            if nested_message:
+                return nested_message
+    return ""
+
+
+def enrich_balance_record(record: dict[str, Any], leave_type: dict[str, str]) -> dict[str, Any]:
+    enriched = dict(record)
+    enriched.setdefault("leaveCode", leave_type["code"])
+    enriched.setdefault("leaveName", leave_type["name"])
+    if leave_type.get("unit"):
+        enriched.setdefault("unit", leave_type["unit"])
+    if leave_type.get("source"):
+        enriched.setdefault("source", leave_type["source"])
+    return enriched
+
+
+def build_message_balance_records(
+    batch: list[str],
+    leave_type: dict[str, str],
+    message: str,
+) -> list[dict[str, Any]]:
+    if not message:
+        return []
+    return [
+        {
+            "userId": user_id,
+            "leaveCode": leave_type["code"],
+            "leaveName": leave_type["name"],
+            "unit": leave_type.get("unit") or "",
+            "source": leave_type.get("source") or "",
+            "message": message,
+        }
+        for user_id in batch
+    ]
+
+
+def query_balance_payload(batch: list[str], leave_code: str) -> Any:
+    return cmn.run_dws([
+        "attendance", "vacation", "balance",
+        "--users", ",".join(batch),
+        "--leave-code", leave_code,
+    ])
+
+
+def normalize_query_records(
+    payload: Any,
+    batch: list[str],
+    leave_type: dict[str, str],
+) -> list[dict[str, Any]]:
+    records = [
+        enrich_balance_record(record, leave_type)
+        for record in normalize_balance_records(payload)
+    ]
+    if records:
+        return records
+    return build_message_balance_records(batch, leave_type, extract_message(payload))
+
+
+def query_single_user_after_batch_error(
+    user_id: str,
+    leave_type: dict[str, str],
+    batch_error: cmn.DwsCallError,
+) -> list[dict[str, Any]]:
+    leave_code = leave_type["code"]
+    try:
+        payload = query_balance_payload([user_id], leave_code)
+    except cmn.DwsCallError as error:
+        if is_external_leave_type(leave_type) and not error.is_permission_error:
+            return build_message_balance_records(
+                [user_id],

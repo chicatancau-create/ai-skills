@@ -1,0 +1,125 @@
+ALTER TABLE orders ADD COLUMN item_count int NOT NULL DEFAULT 0;
+-- Update via trigger or application code on order_item insert/delete
+
+-- Pattern 3: JSONB snapshot (freeze-at-write-time)
+-- Store a copy of the product details at the time of purchase
+CREATE TABLE order_items (
+    id          bigserial PRIMARY KEY,
+    order_id    bigint NOT NULL REFERENCES orders(id),
+    product_id  bigint REFERENCES products(id),
+    quantity    int NOT NULL,
+    unit_price  numeric(10,2) NOT NULL,      -- frozen price
+    product_snapshot jsonb NOT NULL           -- frozen name, description, image
+);
+```
+
+---
+
+## 3. Indexing Strategy (CRITICAL)
+
+### Index Types (PostgreSQL)
+
+| Type | When | Example |
+|------|------|---------|
+| **B-Tree** (default) | Equality, range, ORDER BY | `WHERE status = 'active'`, `WHERE created_at > '2025-01-01'` |
+| **Hash** | Equality only (rare, B-Tree usually better) | `WHERE id = 123` (large tables, Postgres 10+) |
+| **GIN** | Arrays, JSONB, full-text search | `WHERE tags @> '{go}'`, `WHERE data->>'key' = 'val'` |
+| **GiST** | Geometry, ranges, nearest-neighbor | PostGIS, tsrange, ltree |
+| **BRIN** | Very large tables with natural ordering | Time-series data sorted by timestamp |
+
+### Index Decision Rules
+
+```
+Rule 1: Index every column in WHERE clauses
+Rule 2: Index every column used in JOIN ON conditions
+Rule 3: Index every column in ORDER BY (if queried with LIMIT)
+Rule 4: Composite index for multi-column WHERE (leftmost prefix rule)
+Rule 5: Partial index when filtering a subset (e.g., only active records)
+Rule 6: Covering index (INCLUDE) to avoid table lookup
+Rule 7: DON'T index low-cardinality columns alone (e.g., boolean)
+```
+
+### Composite Index: Column Order Matters
+
+```sql
+-- Query: WHERE user_id = ? AND status = ? ORDER BY created_at DESC
+-- ✅ Optimal: matches query pattern left-to-right
+CREATE INDEX idx_orders_user_status_created
+ON orders(user_id, status, created_at DESC);
+
+-- ❌ Wrong order: can't use for this query efficiently
+CREATE INDEX idx_orders_created_user_status
+ON orders(created_at DESC, user_id, status);
+```
+
+**Leftmost prefix rule:** Index on `(A, B, C)` supports queries on `(A)`, `(A, B)`, `(A, B, C)` but NOT `(B)`, `(C)`, or `(B, C)`.
+
+### Partial Index (Index Only What Matters)
+
+```sql
+-- Only 5% of orders are 'pending', but queried frequently
+CREATE INDEX idx_orders_pending
+ON orders(created_at DESC)
+WHERE status = 'pending';
+
+-- Only active users matter for login
+CREATE INDEX idx_users_active_email
+ON users(email)
+WHERE is_active = true;
+```
+
+### Covering Index (Avoid Table Lookup)
+
+```sql
+-- Query only needs id and status, no need to read the table row
+CREATE INDEX idx_orders_user_covering
+ON orders(user_id) INCLUDE (status, total);
+
+-- Now this query is index-only:
+SELECT status, total FROM orders WHERE user_id = 123;
+```
+
+### When NOT to Index
+
+```
+❌ Columns rarely used in WHERE/JOIN/ORDER BY
+❌ Tables with < 1,000 rows (sequential scan is faster)
+❌ Columns with very low cardinality alone (e.g., boolean is_active)
+❌ Write-heavy tables where index maintenance cost > read benefit
+❌ Duplicate indexes (check pg_stat_user_indexes for unused indexes)
+```
+
+---
+
+## 4. Zero-Downtime Migrations (HIGH)
+
+### The Golden Rule
+
+```
+NEVER make destructive changes in one step.
+Always: ADD → MIGRATE DATA → REMOVE OLD (in separate deploys).
+```
+
+### Safe Migration Patterns
+
+**Rename a column (3 deploys):**
+
+```
+Deploy 1: Add new column
+  ALTER TABLE users ADD COLUMN full_name text;
+  UPDATE users SET full_name = name;           -- backfill
+  -- App writes to BOTH name and full_name
+
+Deploy 2: Switch reads to new column
+  -- App reads from full_name, still writes to both
+
+Deploy 3: Drop old column
+  ALTER TABLE users DROP COLUMN name;
+  -- App only uses full_name
+```
+
+**Add a NOT NULL column (2 deploys):**
+
+```sql
+-- Deploy 1: Add nullable column, backfill
+ALTER TABLE orders ADD COLUMN currency text;              -- nullable first

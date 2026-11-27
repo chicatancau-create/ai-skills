@@ -1,0 +1,115 @@
+        except Exception as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        backend = AudioBackend(
+            provider=args.provider,
+            extension=extension,
+            api_key=api_key,
+            voice_id=voice_id,
+        )
+    else:
+        backend = AudioBackend(
+            provider=args.provider,
+            extension=backend_edge.edge_output_extension(),
+            voice_id=args.voice,
+        )
+
+    project = args.project_path
+    notes_dir = project / "notes"
+    output_dir = args.output or (project / "audio")
+    subtitle_dir = output_dir
+    writes_subtitles = backend.provider in {
+        "edge",
+        "elevenlabs",
+        "minimax",
+    } or (
+        backend.provider == "cosyvoice"
+        and not args.cosyvoice_audio_only
+    )
+
+    try:
+        note_roster = _expected_note_roster(project)
+        if not note_roster:
+            raise ValueError(f"no per-slide notes found in {notes_dir}")
+        jobs = _prepare_audio_jobs(
+            note_roster,
+            output_dir,
+            backend.extension,
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = output_dir / "manifest.json"
+    try:
+        manifest_path.unlink(missing_ok=True)
+        (output_dir / "total.srt").unlink(missing_ok=True)
+    except OSError as exc:
+        print(f"error: failed to clear stale narration metadata: {exc}", file=sys.stderr)
+        return 1
+
+    generated = 0
+    if backend.provider == "edge":
+        print(
+            f"[Edge] Generating {len(jobs)} audio/SRT pair(s) "
+            f"with concurrency={args.concurrency}"
+        )
+        try:
+            results = asyncio.run(_generate_edge_jobs(
+                jobs,
+                subtitle_dir,
+                voice=args.voice,
+                rate=args.rate,
+                pitch=args.pitch,
+                volume=args.volume,
+                subtitle_max_chars=args.subtitle_max_chars,
+                concurrency=args.concurrency,
+            ))
+        except Exception as exc:
+            print(f"error: Edge audio generation failed: {exc}", file=sys.stderr)
+            return 1
+
+        failed = False
+        for job, result in zip(jobs, results):
+            subtitle_path = subtitle_dir / f"{job.output_path.stem}.srt"
+            if result is not None:
+                print(
+                    f"error: failed to generate {job.output_path}: {result}",
+                    file=sys.stderr,
+                )
+                failed = True
+                continue
+            try:
+                _remove_stale_audio_variants(job.output_path)
+            except OSError as exc:
+                print(
+                    f"error: failed to remove stale audio for "
+                    f"{job.output_path.stem}: {exc}",
+                    file=sys.stderr,
+                )
+                failed = True
+                continue
+            generated += 1
+            print(f"[OK] {job.output_path}")
+            print(f"     {subtitle_path}")
+        if failed:
+            return 1
+    else:
+        for job in jobs:
+            output_path = job.output_path
+            text = job.text
+            subtitle_path: Path | None = None
+            try:
+                if backend.provider == "elevenlabs":
+                    if writes_subtitles:
+                        subtitle_path = subtitle_dir / f"{output_path.stem}.srt"
+                    backend_elevenlabs.generate(
+                        text,
+                        output_path,
+                        api_key=backend.api_key,
+                        voice_id=backend.voice_id,
+                        model=args.elevenlabs_model,
+                        output_format=args.elevenlabs_output_format,
+                        stability=args.elevenlabs_stability,
+                        similarity_boost=args.elevenlabs_similarity_boost,

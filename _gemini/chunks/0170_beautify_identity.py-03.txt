@@ -1,0 +1,104 @@
+                    face = font_refs.get(face, "")
+                if face:
+                    bucket[face] = bucket.get(face, 0) + 1
+        for run in root.iterfind(".//a:r", NS):
+            rpr = run.find("a:rPr", NS)
+            sz = (rpr.attrib.get("sz") or "").strip() if rpr is not None else ""
+            if sz.isdigit():
+                pt = int(sz) / 100
+                size_runs[pt] = size_runs.get(pt, 0) + 1
+                size_chars[pt] = size_chars.get(pt, 0) + len(run.findtext("a:t", "", NS))
+        for elem in root.iterfind(".//a:srgbClr", NS):
+            val = (elem.attrib.get("val") or "").strip().upper()
+            if val:
+                colors[f"#{val}"] = colors.get(f"#{val}", 0) + 1
+    ranked_sizes = sorted(size_chars, key=lambda pt: (-size_chars[pt], -size_runs[pt], pt))
+    return {
+        "fonts": {"latin": _rank(latin, 5), "ea": _rank(ea, 5)},
+        "sizes_pt": [
+            {"value": pt, "count": size_runs[pt], "chars": size_chars[pt]}
+            for pt in ranked_sizes[:8]
+        ],
+        "colors": _rank(colors, 8),
+    }
+
+
+def extract_identity(pptx_path: Path) -> dict:
+    """Resolve the deck's theme + observed-usage identity, plus canvas."""
+    with OoxmlPackage(pptx_path) as pkg:
+        first = pkg.get_slide(1)
+        master = first.master if first else None
+        theme = pkg.resolve_theme(master)
+        palette_resolver = ColorPalette(master, theme, strict=False)
+
+        # Presentation-level scheme names; ColorPalette applies clrMap + aliases.
+        scheme = {
+            "background": palette_resolver.resolve_scheme("bg1"),
+            "background_alt": palette_resolver.resolve_scheme("bg2"),
+            "text": palette_resolver.resolve_scheme("tx1"),
+            "text_alt": palette_resolver.resolve_scheme("tx2"),
+            "hyperlink": palette_resolver.resolve_scheme("hlink"),
+        }
+        accents = {
+            f"accent{i}": palette_resolver.resolve_scheme(f"accent{i}")
+            for i in range(1, 7)
+        }
+        palette = {
+            k: (f"#{v}" if v else None)
+            for k, v in {**scheme, **accents}.items()
+        }
+        # accent1 is the conventional primary.
+        palette["primary"] = palette.get("accent1")
+
+        fonts = {}
+        if theme is not None:
+            fonts = {
+                "title": _font_pair(theme.xml, "majorFont"),
+                "body": _font_pair(theme.xml, "minorFont"),
+            }
+        sizes = _master_text_sizes(master.xml) if master is not None else {}
+
+        w, h = pkg.slide_size_px
+        canvas = {
+            "width_px": round(w),
+            "height_px": round(h),
+            "aspect": round(w / h, 4) if h else None,
+        }
+
+        return {
+            "source": str(pptx_path),
+            "slide_count": pkg.slide_count,
+            "canvas": canvas,
+            "theme": {"palette": palette, "fonts": fonts, "sizes": sizes},
+            "observed": _sample_observed(pkg, _theme_font_refs(fonts)),
+            "layout_sizes_pt": _layout_text_sizes(pkg),
+        }
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Extract a source deck's theme palette + fonts + sizes + canvas as JSON.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("source", help="Source .pptx file")
+    parser.add_argument(
+        "-o", "--output",
+        help="Write JSON here (default: stdout)",
+    )
+    return parser
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
+    src = Path(args.source)
+    if not src.is_file():
+        print(f"[ERROR] source not found: {src}", file=sys.stderr)
+        return 1
+
+    try:
+        identity = extract_identity(src)
+    except (RuntimeError, KeyError, ValueError) as exc:
+        print(f"[ERROR] failed to extract identity: {exc}", file=sys.stderr)
+        return 1
+
+    payload = json.dumps(identity, ensure_ascii=False, indent=2)

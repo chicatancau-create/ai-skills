@@ -1,0 +1,119 @@
+            "--groupId", str(group_id),
+            "--scheduleVOS", schedules_json,
+            "--yes",
+        ])
+    except DwsCallError as exc:
+        error(f"排班导入失败: {exc}")
+        if exc.is_permission_error:
+            error("提示: 当前账号可能不是考勤管理员，请确认权限")
+        raise SystemExit(1) from exc
+
+    log("✅ 排班导入完成")
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 主流程
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="考勤排班导入（含校验、回显、执行）",
+        epilog="执行前必须阅读 attendance-schedule.md",
+    )
+    parser.add_argument(
+        "--group-id", required=True, type=int,
+        help="考勤组 ID（必填，必须为排班制考勤组）",
+    )
+    parser.add_argument(
+        "--schedules", required=True,
+        help="排班记录 JSON 数组（必填），每条记录包含 userId/workDate/classId/isRest",
+    )
+    parser.add_argument(
+        "--confirm", action="store_true",
+        help="用户已确认排班内容（必填，表示用户已在 Agent 回显中确认）",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="仅校验和回显，不实际执行排班",
+    )
+    args = parser.parse_args()
+
+    # ── 解析排班记录 JSON ──
+    try:
+        schedules: list[dict] = json.loads(args.schedules)
+    except json.JSONDecodeError as exc:
+        error(f"--schedules JSON 格式错误: {exc}")
+        raise SystemExit(1) from exc
+
+    if not isinstance(schedules, list) or len(schedules) == 0:
+        error("--schedules 必须是非空 JSON 数组")
+        raise SystemExit(1)
+
+    # ── 校验必填字段 ──
+    required_fields = ("userId", "workDate", "classId", "isRest")
+    for idx, schedule in enumerate(schedules):
+        for field_name in required_fields:
+            if field_name not in schedule:
+                error(f"schedule[{idx}] 缺少必填字段: {field_name}")
+                raise SystemExit(1)
+
+    # ── 标准化日期格式 ──
+    for idx, schedule in enumerate(schedules):
+        try:
+            schedule["workDate"] = normalize_work_date(schedule["workDate"])
+        except ValueError as exc:
+            error(f"schedule[{idx}] 日期格式错误: {exc}")
+            raise SystemExit(1) from exc
+
+    # ── 阶段 1: 校验考勤组（必须为 TURN 排班制） ──
+    group_info = validate_group_is_turn(args.group_id)
+    group_name = group_info.get("name", f"ID:{args.group_id}")
+
+    # ── 阶段 2: 解析员工姓名 ──
+    user_ids = list({s["userId"] for s in schedules})
+    user_names = resolve_user_names(user_ids)
+
+    # ── 阶段 3: 校验班次（必须属于该考勤组） ──
+    group_bound_class_ids = extract_group_bound_classes(group_info)
+    all_classes = fetch_all_classes()
+    if group_bound_class_ids:
+        log(f"📋 考勤组「{group_name}」绑定了 {len(group_bound_class_ids)} 个班次:")
+        for cid in sorted(group_bound_class_ids):
+            cname = all_classes.get(cid, f"ID:{cid}")
+            log(f"   - {cname} (ID: {cid})")
+    validate_class_ids(schedules, group_bound_class_ids, all_classes, group_name)
+    log("✅ 班次校验通过")
+
+    # ── 阶段 4: 回显排班内容 ──
+    print_schedule_preview(group_name, args.group_id, schedules, all_classes, user_names)
+
+    if args.dry_run:
+        print("\n[dry-run] 仅校验和回显，未实际执行排班")
+        return
+
+    if not args.confirm:
+        print("\n⚠️ 未传入 --confirm 参数，排班未执行")
+        print("请在 Agent 回显确认后，添加 --confirm 参数重新执行")
+        return
+
+    # ── 阶段 5: 执行排班 ──
+    execute_schedule_import(args.group_id, schedules)
+
+    # ── 阶段 6: 输出摘要 ──
+    print(f"\n✅ 排班导入成功！")
+    print(f"   考勤组: {group_name}")
+    print(f"   排班人数: {len(user_ids)}")
+    print(f"   排班记录: {len(schedules)} 条")
+    dates = sorted({s.get('workDate', '')[:10] for s in schedules})
+    if dates:
+        print(f"   日期范围: {dates[0]} ~ {dates[-1]}")
+
+    # 展示所有排班明细
+    print(f"\n{'员工姓名':<12} {'日期':<14} {'班次':<16} {'是否排休':<8}")
+    print("-" * 54)
+    for schedule in sorted(schedules, key=lambda s: (s.get("userId", ""), s.get("workDate", ""))):
+        uid = schedule.get("userId", "")
+        uname = user_names.get(uid, uid)
+        wdate = str(schedule.get("workDate", ""))[:10]
+        cid = int(schedule.get("classId", 0))

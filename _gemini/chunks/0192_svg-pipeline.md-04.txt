@@ -1,0 +1,89 @@
+Without `-o`, round-trip export names the deck `<workspace-directory-name>_<timestamp>[<flavor-suffix>].pptx` under `exports/`.
+
+Before export, run `python3 scripts/svg_quality_checker.py <workspace> --roundtrip --json`
+as the round-trip text-capacity gate. It resolves the output roster from
+`authoring-svg-flat/` and optional `page_plan.json`, then applies the shared
+font-family, font-size, text-width, and canvas metrics only to new text or
+changed source-ref objects. The gate asserts horizontal capacity: it estimates
+single-line width for each positioned line and does not model vertical
+wrapping. Width beyond an explicit ancestor `data-pptx-frame` is blocking;
+overflow against the nearest-rect-sibling fallback is advisory, while bounds
+leaving the page canvas remain blocking. Other advisories remain non-blocking.
+Unchanged source refs, source proxies, and generated-project-only spec,
+template, canonical-authoring, and resource-manifest checks are excluded.
+
+The checker also enforces the exporter's semantic shape text contract on
+converted content: a `data-pptx-semantic-object="shape"` group may contain at
+most one direct `<text>`, with `data-pptx-frame` on its owner. Multiple lines
+belong in that component's `<tspan>` paragraphs. Ordinary groups are unaffected;
+unchanged native source objects remain excluded. Generate checks the same
+contract.
+
+`--json` writes `validation/svg_quality_report.json`. Both tools fingerprint
+`authoring-svg-flat/*.svg` and the optional `page_plan.json`; changing either
+after validation makes the export receipt `quality_gate=stale`. A current
+report with no blocking errors yields `quality_gate=passed`. Without a report,
+export remains allowed and reports `quality_gate=not-provided`.
+
+`--roundtrip --no-notes` removes all speaker notes slide/master parts, their
+relationships, and Content-Type overrides, including on the identity export
+without a page plan. `pptx_delivery_check.py` reports unreferenced notes parts
+as an advisory.
+
+Regenerate the summary after direct edits that do not pass through one of the
+in-place normalization tools:
+
+```bash
+python3 scripts/svg_authoring_view.py <authoring-dir> --refresh-summary
+```
+
+This projection is separate from canonical preset authoring. New project SVGs
+and project-owned templates use the compact authored form: one atomic
+`<g data-pptx-authoring="preset">` owns the preset intent and base paint, with
+the registry-generated visible `<path>` layers as direct children. Quality
+check and export rerender the locked registry to validate that group, so the
+compact form has no hidden carrier, preview wrapper, or serialized preview
+fingerprint. `pptx_to_svg.py` continues to emit the expanded carrier/preview
+evidence required for import and round-trip decisions. The normative boundary
+is owned by [`shared-standards-core.md`](../../references/shared-standards-core.md) §1.5, with
+authoring guidance in
+[`native-shape-authoring.md`](../../references/native-shape-authoring.md).
+
+## Shape Boolean maintenance smoke
+
+Run this manual smoke from the repository root after changing
+`shape_boolean_svg.py`, preset geometry, path conversion, or custom-geometry
+import/export. It uses only a gitignored `projects/_smoke_*` workspace and the
+inline-smoke convention from [`code-style.md`](../../../../docs/rules/code-style.md)
+§11; do not turn it into a test file or example deck.
+
+```bash
+python3 - <<'PY'
+import re
+import subprocess
+import sys
+import tempfile
+import zipfile
+from pathlib import Path
+from xml.etree import ElementTree as ET
+
+import pathops
+
+project = Path(tempfile.mkdtemp(prefix="_smoke_shape_boolean_", dir="projects"))
+scripts = Path("skills/ppt-master/scripts")
+svg_output = project / "svg_output"
+svg_output.mkdir()
+(project / "spec_lock.md").write_text(
+    """<!-- ppt-master-schema: spec-lock/v1 -->
+# Execution Lock
+
+## canvas
+- viewBox: 0 0 1280 720
+- format: ppt169
+## communication
+- audience:
+- objective:
+- core_message:
+## mode
+- mode: briefing
+## visual_style

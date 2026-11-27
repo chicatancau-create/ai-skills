@@ -1,0 +1,93 @@
+        for elem in root.iter():
+            if elem.tag.rsplit('}', 1)[-1] == 'metadata':
+                continue
+            reason = native_marker_release_block_reason(elem)
+            if reason is None:
+                continue
+            marker_id = elem.get('id') or elem.get('data-name') or '<unnamed>'
+            blocked.append((svg_path.name, marker_id, reason))
+    return blocked
+
+
+def _reconstruction_only_graphics(
+    svg_files: list[Path],
+) -> list[tuple[str, str, bool]]:
+    """Return valid placeholder routes for non-blocking diagnostics."""
+    diagnostics: list[tuple[str, str, bool]] = []
+    for svg_path in svg_files:
+        try:
+            root = ET.parse(svg_path).getroot()
+        except (OSError, ET.ParseError):
+            continue
+        for elem in root.iter():
+            if elem.tag.rsplit('}', 1)[-1] == 'metadata':
+                continue
+            if native_fallback_kind(elem) != 'placeholder':
+                continue
+            if native_marker_release_block_reason(elem) is not None:
+                continue
+            marker_id = elem.get('id') or elem.get('data-name') or '<unnamed>'
+            active_native = bool(native_replacement_kind(elem))
+            diagnostics.append((svg_path.name, marker_id, active_native))
+    return diagnostics
+
+
+def _recorded_narration_on_click_slides(
+    ref_files: list[Path],
+    animation_config: dict | None,
+    animation: str | None,
+    animation_trigger: str,
+    animation_cli_overrides: dict[str, bool],
+    *,
+    roundtrip_source: Path | None = None,
+    roundtrip_pages: tuple[RoundtripPage, ...] = (),
+    roundtrip_patches: dict[int, RoundtripSlidePatch] | None = None,
+) -> list[str]:
+    """Return slides whose effective recorded-video animation trigger is on-click."""
+    if animation_cli_overrides.get('animation') and animation is None:
+        return []
+    slides_cfg = _as_dict(_as_dict(animation_config).get('slides'))
+    blocked: list[str] = []
+    preserved: dict[str, tuple[int, tuple[int, ...]]] = {}
+    if roundtrip_source is not None:
+        from pptx_to_svg.ooxml_loader import OoxmlPackage
+
+        with OoxmlPackage(roundtrip_source) as package:
+            for page in roundtrip_pages:
+                slide_patch = (roundtrip_patches or {}).get(page.output_index)
+                if slide_patch is not None and slide_patch.animation_changed:
+                    continue
+                source = package.get_slide(page.source_slide)
+                preserved[page.svg_stem] = (
+                    page.source_slide,
+                    read_slide_click_dependencies(ET.tostring(source.part.xml)),
+                )
+    for svg_path in ref_files:
+        if svg_path.stem in preserved:
+            source_index, shape_ids = preserved[svg_path.stem]
+            if shape_ids:
+                blocked.append(
+                    f"{svg_path.stem} (source slide {source_index}; shape id(s): "
+                    + ', '.join(str(shape_id) for shape_id in shape_ids) + ')'
+                )
+            continue
+        slide_cfg = _as_dict(slides_cfg.get(svg_path.stem))
+        anim_cfg = _as_dict(slide_cfg.get('animation'))
+
+        slide_animation = animation
+        if not animation_cli_overrides.get('animation') and 'effect' in anim_cfg:
+            slide_animation = normalize_animation_effect(anim_cfg.get('effect'))
+        slide_trigger = animation_trigger
+        if (
+            not animation_cli_overrides.get('animation_trigger')
+            and anim_cfg.get('trigger')
+        ):
+            slide_trigger = normalize_animation_trigger(anim_cfg.get('trigger'))
+
+        groups_cfg = _as_dict(slide_cfg.get('groups'))
+        has_interactive_animation = False
+        for group_id, group_cfg in groups_cfg.items():
+            if not isinstance(group_cfg, dict):
+                continue
+            group_path = (
+                f'slides[{json.dumps(svg_path.stem, ensure_ascii=False)}]'

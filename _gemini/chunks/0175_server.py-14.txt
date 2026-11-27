@@ -1,0 +1,113 @@
+        or recommendations.get('content_language')
+        or recommendations.get('language')
+    )
+    if isinstance(value, dict):
+        return value.get('value') or value.get('id') or value.get('code') or ''
+    return value
+
+
+def _primary_language_error(recommendations: dict) -> Optional[str]:
+    """Require and canonicalize the staged content-language source of truth."""
+    return _canonicalize_primary_language(recommendations, required=True)
+
+
+def _canonicalize_primary_language(
+    recommendations: dict,
+    *,
+    required: bool,
+) -> Optional[str]:
+    """Write a canonical primary language into one recommendation/result object."""
+    value = _recommendation_language(recommendations)
+    if not isinstance(value, str) or not value.strip():
+        if required:
+            return (
+                'Stage 1 recommendations must declare a valid primary_language '
+                'BCP-47 tag; lang controls only the Confirm UI language'
+            )
+        return None
+    try:
+        recommendations['primary_language'] = normalize_language_tag(value)
+    except LanguageTagError as exc:
+        return f'invalid primary_language: {exc}'
+    return None
+
+
+def _typography_font_value(
+    font: dict,
+    field: str,
+    *,
+    english_primary: bool,
+) -> object:
+    """Return a canonical typography font value, accepting its language-aware alias."""
+    legacy_field = 'latin' if field == 'english' or english_primary else 'cjk'
+    value = font.get(field)
+    if not isinstance(value, str) or not value.strip():
+        value = font.get(legacy_field)
+    return value
+
+
+def _typography_error(
+    typography: object,
+    label: str,
+    *,
+    require_sizes: bool,
+    main_language: object = '',
+) -> Optional[str]:
+    """Validate one complete user-facing typography recommendation or choice."""
+    if not isinstance(typography, dict):
+        return f'{label} must be an object'
+    english_primary = _is_english_language(main_language)
+    for role in ('heading', 'body'):
+        font = typography.get(role)
+        if not isinstance(font, dict):
+            return f'{label}.{role} must be an object'
+        fields = (('primary', 'latin' if english_primary else 'cjk'),)
+        if not english_primary:
+            fields += (('english', 'latin'),)
+        for field, legacy_field in fields:
+            value = _typography_font_value(
+                font,
+                field,
+                english_primary=english_primary,
+            )
+            if not isinstance(value, str) or not value.strip():
+                return (
+                    f'{label}.{role}.{field} '
+                    f'(or legacy {legacy_field}) must be non-empty'
+                )
+        if not isinstance(font.get('css'), str) or not font['css'].strip():
+            return f'{label}.{role}.css must be non-empty'
+    if not _positive_number(typography.get('body_size')):
+        return f'{label}.body_size must be a positive number'
+    if not require_sizes:
+        return None
+    sizes = typography.get('sizes')
+    if not isinstance(sizes, dict):
+        return f'{label}.sizes must be an object'
+    for role in _TYPOGRAPHY_SIZE_ROLES:
+        if not _positive_number(sizes.get(role)):
+            return f'{label}.sizes.{role} must be a positive number'
+    return None
+
+
+def _typography_signature(
+    typography: dict,
+    *,
+    main_language: object,
+) -> tuple[str, ...]:
+    """Return the language-relevant font choices that distinguish one candidate."""
+    english_primary = _is_english_language(main_language)
+    fields = ('primary',) if english_primary else ('primary', 'english')
+    values = []
+    for role in ('heading', 'body'):
+        font = typography[role]
+        for field in fields:
+            value = _typography_font_value(
+                font,
+                field,
+                english_primary=english_primary,
+            )
+            values.append(str(value).strip().casefold())
+    return tuple(values)
+
+

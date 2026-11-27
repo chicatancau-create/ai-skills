@@ -1,0 +1,114 @@
+                result.close()
+                if rgba is not None:
+                    rgba.close()
+                if alpha is not None:
+                    alpha.close()
+                rgb.close()
+                return width, height
+            finally:
+                if oriented is not source:
+                    oriented.close()
+    except (OSError, UnidentifiedImageError) as exc:
+        raise RuntimeError(f"unable to read or treat source image {source_path}: {exc}") from exc
+
+
+def _rewrite_attribution_text(item: dict, source_name: str, output_name: str) -> str:
+    value = item.get("attribution_text")
+    if not isinstance(value, str) or not value:
+        return value if isinstance(value, str) else ""
+    if not value.startswith(source_name):
+        return value
+    remainder = value[len(source_name) :]
+    if remainder and not (remainder[0].isspace() or remainder[0] in "—–-:"):
+        return value
+    return output_name + remainder
+
+
+def _prepare_provenance(
+    manifest_path: Path,
+    source_name: str,
+    output_name: str,
+    treatments: list[dict],
+) -> Optional[dict]:
+    if manifest_path.is_symlink():
+        raise ValueError(f"image source manifest must not be a symlink: {manifest_path}")
+    if not manifest_path.exists():
+        return None
+
+    payload = _read_sources_manifest(manifest_path)
+    items = payload.get("items") or []
+    source_item = None
+    for item in items:
+        filename = item.get("filename")
+        if not isinstance(filename, str):
+            continue
+        if filename.casefold() == output_name.casefold():
+            raise ValueError(
+                f"output already has an image_sources.json record: {filename!r}"
+            )
+        if filename.casefold() == source_name.casefold():
+            if filename != source_name:
+                raise ValueError(
+                    "source filename casing does not match image_sources.json: "
+                    f"{source_name!r} vs {filename!r}"
+                )
+            source_item = item
+
+    if source_item is None:
+        return None
+    derived_item = copy.deepcopy(source_item)
+    derived_item["filename"] = output_name
+    derived_item["attribution_text"] = _rewrite_attribution_text(
+        source_item,
+        source_name,
+        output_name,
+    )
+    derived_item["derived_from"] = source_name
+    derived_item["treatments"] = copy.deepcopy(treatments)
+    return derived_item
+
+
+def _assert_manifest_output_absent(manifest_path: Path, output_name: str) -> None:
+    payload = _read_sources_manifest(manifest_path)
+    for item in payload.get("items") or []:
+        filename = item.get("filename")
+        if isinstance(filename, str) and filename.casefold() == output_name.casefold():
+            raise RuntimeError(
+                f"output already has an image_sources.json record: {filename!r}"
+            )
+
+
+def _is_staged_output(temporary_path: Path, output_path: Path) -> bool:
+    try:
+        return not output_path.is_symlink() and os.path.samefile(temporary_path, output_path)
+    except OSError:
+        return False
+
+
+def _write_derivative(
+    source_path: Path,
+    output_path: Path,
+    manifest_path: Path,
+    provenance_item: Optional[dict],
+    args: argparse.Namespace,
+) -> None:
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{output_path.stem}.",
+        suffix=".tmp.png",
+        dir=str(output_path.parent),
+    )
+    os.close(fd)
+    temporary_path = Path(temporary_name)
+    try:
+        width, height = _apply_treatments(source_path, temporary_path, args)
+        if provenance_item is not None:
+            provenance_item["width"] = width
+            provenance_item["height"] = height
+            _assert_manifest_output_absent(manifest_path, output_path.name)
+        _assert_output_absent(output_path)
+        try:
+            os.chmod(temporary_path, 0o644)
+        except OSError:
+            pass
+        try:
+            os.link(temporary_path, output_path)

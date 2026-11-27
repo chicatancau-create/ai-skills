@@ -1,0 +1,92 @@
+        positioned = [name for name in _POSITION_ATTRIBUTES if marker.get(name) is not None]
+        if positioned:
+            errors.append(
+                f"{label} is an inline run and cannot set " + ", ".join(positioned)
+            )
+        paragraph_attrs = [
+            name for name in _PARAGRAPH_ATTRIBUTES
+            if marker.get(name) is not None
+        ]
+        if paragraph_attrs:
+            errors.append(
+                f"{label} cannot own paragraph layout metadata: "
+                + ", ".join(paragraph_attrs)
+            )
+
+        effective_fill: str | None = None
+        style_owner: ET.Element | None = marker
+        while style_owner is not None:
+            inline_style = parse_inline_style(style_owner.get("style"))
+            effective_fill = inline_style.get("fill")
+            if effective_fill is None:
+                effective_fill = style_owner.get("fill")
+            if effective_fill is not None:
+                break
+            style_owner = parent_map.get(style_owner)
+        color, alpha = parse_svg_color(effective_fill or "#000000")
+        if color is None or alpha <= 0:
+            errors.append(
+                f"{label} requires one visible solid fill color inherited "
+                "from itself or its text ancestors"
+            )
+
+        parent = parent_map.get(marker)
+        text_owner: ET.Element | None = None
+        nested_marker = False
+        inside_block_formula = False
+        inside_native_replacement = False
+        inside_preserved_text = False
+        inside_placeholder = False
+        inside_skipped_transport = False
+        inside_baseline_shift = marker.get("baseline-shift") is not None
+        invalid_inline_container: str | None = None
+        non_output_ancestor: str | None = None
+        fixed_structure_layer: str | None = None
+        while parent is not None:
+            parent_tag = parent.tag.rsplit("}", 1)[-1]
+            if text_owner is None and parent.tag == _SVG_TEXT:
+                text_owner = parent
+            elif (
+                text_owner is None
+                and parent.tag not in {_SVG_A, _SVG_TSPAN}
+                and invalid_inline_container is None
+            ):
+                invalid_inline_container = parent_tag
+            if parent_tag in _NON_OUTPUT_ANCESTORS:
+                non_output_ancestor = parent_tag
+            if parent.get(INLINE_FORMULA_ATTR) is not None:
+                nested_marker = True
+            if parent.get("baseline-shift") is not None:
+                inside_baseline_shift = True
+            replacement = (
+                parent.get("data-pptx-replace-with") or ""
+            ).strip().lower()
+            if replacement:
+                inside_native_replacement = True
+                inside_block_formula = (
+                    inside_block_formula or replacement == "formula"
+                )
+            if (parent.get("data-pptx-part") or "").strip() in {
+                "geometry-detail",
+                "geometry-preview",
+            }:
+                inside_skipped_transport = True
+            if parent.get("data-pptx-placeholder") is not None:
+                inside_placeholder = True
+            layer = (parent.get("data-pptx-layer") or "").strip().lower()
+            if layer in {"master", "layout"}:
+                fixed_structure_layer = layer
+            if any(
+                child.tag.rsplit("}", 1)[-1] == "metadata"
+                and child.get("data-pptx-part") == "txbody"
+                for child in parent
+            ):
+                inside_preserved_text = True
+            parent = parent_map.get(parent)
+        if text_owner is None:
+            errors.append(f"{label} must be inside an SVG <text> element")
+        elif invalid_inline_container is not None:
+            errors.append(
+                f"{label} can only be nested through <tspan>/<a> elements before "
+                f"its owning <text>, found <{invalid_inline_container}>"
+            )

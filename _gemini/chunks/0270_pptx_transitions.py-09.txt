@@ -1,0 +1,120 @@
+    effect_options: object = None,
+) -> tuple[str, str, str, dict[str, Any], str | None]:
+    info = NATIVE_TRANSITIONS[effect]
+    prefix = str(info.get("prefix", "p"))
+    namespace = TRANSITION_NAMESPACES[prefix]
+    element = str(info["element"])
+    attrs = dict(info.get("attrs", {}))
+    fallback = info.get("fallback")
+    options = {
+        name: option_spec["default"]
+        for name, option_spec in info["effectOptions"].items()
+    }
+    options.update(
+        normalize_transition_effect_options(effect, effect_options)
+    )
+    option_specs = info["effectOptions"]
+    for name, value in options.items():
+        override = option_specs[name]["values"][value]
+        if "prefix" in override:
+            prefix = str(override["prefix"])
+            namespace = TRANSITION_NAMESPACES[prefix]
+        if "element" in override:
+            element = str(override["element"])
+        for attribute in override.get("remove_attrs", ()):
+            attrs.pop(str(attribute), None)
+        attrs.update(
+            {
+                str(attribute): str(attribute_value)
+                for attribute, attribute_value in override.get("attrs", {}).items()
+            }
+        )
+        if "fallback" in override:
+            fallback = override["fallback"]
+    return prefix, namespace, element, attrs, str(fallback) if fallback else None
+
+
+def _effect_xml(
+    effect: str,
+    effect_options: object = None,
+) -> tuple[str, str, str]:
+    prefix, _namespace, element, effect_attrs, _fallback = _effect_spec(
+        effect,
+        effect_options,
+    )
+    attrs = " ".join(
+        f'{key}="{value}"'
+        for key, value in effect_attrs.items()
+    )
+    suffix = f" {attrs}" if attrs else ""
+    return prefix, element, suffix
+
+
+def _transition_attributes(
+    *,
+    duration_ms: int | None,
+    advance_after_ms: int | None,
+    advance_on_click: bool | None,
+    declare_p14: bool,
+) -> str:
+    attrs: list[str] = []
+    if duration_ms is not None:
+        attrs.append(f'p14:dur="{duration_ms}"')
+    if declare_p14:
+        attrs.append(f'xmlns:p14="{P14_NS}"')
+    if advance_on_click is not None:
+        attrs.append(f'advClick="{1 if advance_on_click else 0}"')
+    if advance_after_ms is not None:
+        attrs.append(f'advTm="{advance_after_ms}"')
+    return " " + " ".join(attrs) if attrs else ""
+
+
+def _normalize_transition_sound(
+    sound: Mapping[str, object] | None,
+) -> dict[str, str] | None:
+    """Validate one packaged transition-sound relationship descriptor."""
+    if sound is None:
+        return None
+    if not isinstance(sound, Mapping):
+        raise ValueError("transition sound must be a relationship descriptor")
+    unknown = set(sound) - {"relationship_id", "name"}
+    if unknown:
+        raise ValueError(
+            "transition sound has unknown field(s): "
+            + ", ".join(sorted(str(field) for field in unknown))
+        )
+    relationship_id = sound.get("relationship_id")
+    name = sound.get("name")
+    if not isinstance(relationship_id, str) or not relationship_id.strip():
+        raise ValueError(
+            "transition sound relationship_id must be a non-empty string"
+        )
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("transition sound name must be a non-empty string")
+    return {
+        "relationship_id": relationship_id,
+        "name": name,
+    }
+
+
+def _transition_sound_xml(
+    sound: Mapping[str, str] | None,
+    *,
+    indent: str,
+) -> str:
+    """Return the optional p:sndAc payload at one indentation level."""
+    if sound is None:
+        return ""
+    relationship_id = quoteattr(sound["relationship_id"])
+    name = quoteattr(sound["name"])
+    return (
+        f"{indent}<p:sndAc>\n"
+        f"{indent}  <p:stSnd>\n"
+        f"{indent}    <p:snd r:embed={relationship_id} name={name}/>\n"
+        f"{indent}  </p:stSnd>\n"
+        f"{indent}</p:sndAc>\n"
+    )
+
+
+def create_transition_xml(
+    effect: str | None = DEFAULT_TRANSITION,

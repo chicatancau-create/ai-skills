@@ -1,0 +1,112 @@
+        root.insert(insert_at, notes_master_list)
+    ET.SubElement(
+        notes_master_list,
+        id_tag,
+        {relationship_attr: relationship_id},
+    )
+    _write_xml_tree(presentation_path, tree)
+
+
+def _ensure_notes_master(
+    extract_dir: Path,
+    primary_language: str | None = None,
+) -> _NotesMasterReference:
+    """Reuse or create a notes master and wire it into the presentation package."""
+    ppt_dir = extract_dir / 'ppt'
+    notes_masters_dir = ppt_dir / 'notesMasters'
+    notes_masters_dir.mkdir(exist_ok=True)
+    presentation_rels_path = ppt_dir / '_rels' / 'presentation.xml.rels'
+    presentation_path = ppt_dir / 'presentation.xml'
+    content_types = _content_type_overrides(extract_dir)
+    relationships = _read_relationships(presentation_rels_path)
+
+    try:
+        presentation_root = ET.parse(presentation_path).getroot()
+    except (OSError, ET.ParseError) as exc:
+        raise RuntimeError(
+            f'Cannot parse presentation package part: {presentation_path}'
+        ) from exc
+    relationship_attr = f'{{{REL_NS}}}id'
+    referenced_ids = [
+        elem.get(relationship_attr, '')
+        for elem in presentation_root.findall(
+            f'./{{{PML_NS}}}notesMasterIdLst/{{{PML_NS}}}notesMasterId'
+        )
+    ]
+    notes_relationship_ids = [
+        rel_id
+        for rel_id, attrs in relationships.items()
+        if attrs.get('Type') == _NOTES_MASTER_REL_TYPE
+        and attrs.get('TargetMode') != 'External'
+    ]
+    ordered_relationship_ids = list(
+        dict.fromkeys(referenced_ids + notes_relationship_ids)
+    )
+    relationship_id_by_part: dict[str, str] = {}
+    selected_part: str | None = None
+    selected_rid: str | None = None
+    for rel_id in ordered_relationship_ids:
+        attrs = relationships.get(rel_id)
+        if (
+            not attrs
+            or attrs.get('Type') != _NOTES_MASTER_REL_TYPE
+            or attrs.get('TargetMode') == 'External'
+        ):
+            continue
+        target = attrs.get('Target', '')
+        part_name = _notes_master_part_from_target(target)
+        if part_name is None:
+            raise RuntimeError(
+                f'Notes master relationship {rel_id} has an invalid target: {target}'
+            )
+        part_name = _validate_notes_master_part(
+            extract_dir,
+            part_name,
+            content_types,
+        )
+        relationship_id_by_part.setdefault(part_name, rel_id)
+        if selected_part is None:
+            selected_part = part_name
+            selected_rid = rel_id
+
+    if selected_part is None:
+        for part_name, content_type in sorted(content_types.items()):
+            if content_type != _NOTES_MASTER_CONTENT_TYPE:
+                continue
+            selected_part = _validate_notes_master_part(
+                extract_dir,
+                part_name,
+                content_types,
+            )
+            selected_rid = relationship_id_by_part.get(selected_part)
+            break
+
+    created_theme_part: str | None = None
+    if selected_part is None:
+        occupied_parts = set(content_types)
+        occupied_parts.update(
+            part_name
+            for attrs in relationships.values()
+            if attrs.get('Type') == _NOTES_MASTER_REL_TYPE
+            and (part_name := _notes_master_part_from_target(
+                attrs.get('Target', '')
+            )) is not None
+        )
+        index = 1
+        while True:
+            selected_part = f'ppt/notesMasters/notesMaster{index}.xml'
+            if (
+                selected_part not in occupied_parts
+                and not (extract_dir / selected_part).exists()
+            ):
+                break
+            index += 1
+        notes_master_path = extract_dir / selected_part
+        notes_master_path.write_text(
+            create_notes_master_xml(primary_language),
+            encoding='utf-8',
+        )
+
+        theme_dir = ppt_dir / 'theme'
+        theme_dir.mkdir(exist_ok=True)
+        theme1_path = theme_dir / 'theme1.xml'

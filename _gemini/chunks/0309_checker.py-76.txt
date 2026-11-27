@@ -1,0 +1,91 @@
+        if not standard_project and not self.template_mode and not has_metadata:
+            return
+        if (
+            _load_pptx_structure_lock is None
+            or _parse_template_structure_slide is None
+            or _parse_template_structure_slides is None
+            or _structure_subtree_signature is None
+            or _template_lock_errors is None
+            or _TemplateStructureError is None
+        ):
+            self._pptx_structure_issues.append((
+                'error',
+                'Structured PPTX project validation is unavailable because the '
+                'template_structure module could not be imported.',
+            ))
+            return
+
+        if self.template_mode:
+            try:
+                specs = _parse_template_structure_slides(svg_files)
+            except _TemplateStructureError as exc:
+                self._pptx_structure_issues.append(('error', str(exc)))
+                return
+            self._pptx_structure_issues.extend(
+                ('error', message)
+                for message in self._shared_fixed_layer_errors(specs)
+            )
+            self._pptx_structure_issues.extend(
+                ('warning', message)
+                for message in self._duplicate_layout_key_warnings(specs)
+            )
+            return
+
+        if standard_project and declared_mode != 'structured':
+            self._pptx_structure_issues.append((
+                'error',
+                'release SVG projects require spec_lock.md pptx_structure.mode: '
+                'flat (free design / brand-only) or structured (deck/layout '
+                f'template); found {declared_mode!r}. Create a template '
+                'workspace through skills/ppt-master/workflows/create-template.md '
+                'before generating structured SVG pages. Existing PPTX/SVG files '
+                'are not upgraded in place.',
+            ))
+            return
+
+        try:
+            structure_lock = _load_pptx_structure_lock(project_path)
+        except _TemplateStructureError as exc:
+            self._pptx_structure_issues.append(('error', str(exc)))
+            return
+        if structure_lock is None or structure_lock.mode != 'structured':
+            self._pptx_structure_issues.append((
+                'error',
+                'spec_lock.md must contain one complete '
+                'pptx_structure.mode: structured contract.',
+            ))
+            return
+        complete_roster = target_path.is_dir()
+        try:
+            if not complete_roster and target_path.is_file():
+                sibling_files = discover_slide_svgs(target_path.parent)
+                resolved_target = target_path.resolve()
+                slide_num = next(
+                    (
+                        index
+                        for index, sibling in enumerate(sibling_files, start=1)
+                        if sibling.resolve() == resolved_target
+                    ),
+                    1,
+                )
+                specs = [
+                    _parse_template_structure_slide(target_path, slide_num)
+                ]
+            else:
+                specs = _parse_template_structure_slides(svg_files)
+        except _TemplateStructureError as exc:
+            self._pptx_structure_issues.append(('error', str(exc)))
+            return
+
+        dependency_specs = list(specs)
+        try:
+            # Use the exporter's registered dependencies, including explicitly
+            # retained prototypes which have no public page in this deck.
+            definition_files = _structured_layout_definition_files(specs, structure_lock)
+            dependency_specs.extend(
+                _parse_template_structure_slide(path, len(specs) + index)
+                for index, path in enumerate(definition_files, start=1)
+            )
+        except _TemplateStructureError as exc:
+            if complete_roster:
+                self._pptx_structure_issues.append(('error', str(exc)))

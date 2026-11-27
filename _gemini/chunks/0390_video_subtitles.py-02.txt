@@ -1,0 +1,126 @@
+def _hard_split_span(
+    text: str,
+    span: tuple[int, int],
+    max_chars: int,
+) -> list[tuple[int, int]]:
+    """Split an overlong clause span without dropping characters."""
+    start, end = _trim_span(text, *span)
+    parts: list[tuple[int, int]] = []
+    while _display_length(text, start, end) > max_chars:
+        visible = 0
+        split_at = start
+        whitespace_split = start
+        for index in range(start, end):
+            if text[index].isspace():
+                whitespace_split = index + 1
+                continue
+            visible += 1
+            if visible > max_chars:
+                break
+            split_at = index + 1
+        if whitespace_split > start and whitespace_split <= split_at:
+            split_at = whitespace_split
+        if split_at <= start:
+            raise ValueError("Unable to split an overlong subtitle clause")
+        part = _trim_span(text, start, split_at)
+        if part[0] < part[1]:
+            parts.append(part)
+        start = _trim_span(text, split_at, end)[0]
+    part = _trim_span(text, start, end)
+    if part[0] < part[1]:
+        parts.append(part)
+    return parts
+
+
+def _split_sentence(text: str, max_chars: int) -> list[str]:
+    """Keep one sentence unless its display length requires clause splitting."""
+    sentence = re.sub(r"\s+", " ", text).strip()
+    if _display_length(sentence, 0, len(sentence)) <= max_chars:
+        return [sentence]
+
+    clauses: list[tuple[int, int]] = []
+    start = 0
+    for index, character in enumerate(sentence):
+        if character not in _CLAUSE_END:
+            continue
+        clause = _trim_span(sentence, start, index + 1)
+        if clause[0] < clause[1]:
+            clauses.append(clause)
+        start = index + 1
+    tail = _trim_span(sentence, start, len(sentence))
+    if tail[0] < tail[1]:
+        clauses.append(tail)
+
+    atoms = [
+        part
+        for clause in clauses
+        for part in _hard_split_span(sentence, clause, max_chars)
+    ]
+    merged: list[tuple[int, int]] = []
+    for atom in atoms:
+        if not merged:
+            merged.append(atom)
+            continue
+        candidate = (merged[-1][0], atom[1])
+        if _display_length(sentence, *candidate) <= max_chars:
+            merged[-1] = candidate
+        else:
+            merged.append(atom)
+    return [sentence[span_start:span_end] for span_start, span_end in merged]
+
+
+def _page_subtitle_paths(subtitle_dir: Path) -> list[Path]:
+    """Resolve the ordered page-local SRT set without reading notes."""
+    paths = [
+        path
+        for path in sorted(subtitle_dir.glob("*.srt"))
+        if path.stem != "total"
+    ]
+    if not paths:
+        raise FileNotFoundError(
+            f"No page-local narration SRT files found under {subtitle_dir}"
+        )
+    return paths
+
+
+def _frozen_transcript_lines(
+    subtitle_dir: Path,
+    max_chars: int,
+) -> list[str]:
+    """Return display lines derived from the exact text used for TTS."""
+    lines: list[str] = []
+    for path in _page_subtitle_paths(subtitle_dir):
+        for cue in _parse_srt(path):
+            lines.extend(_split_sentence(cue.text, max_chars))
+    if not lines:
+        raise ValueError("The page-local SRT set contains no narration text")
+    return lines
+
+
+def _require_stable_whisper() -> Any:
+    try:
+        import stable_whisper
+    except ImportError as exc:
+        raise RuntimeError(
+            "Final-video subtitle alignment requires stable-ts. "
+            "Install it with: python3 -m pip install stable-ts"
+        ) from exc
+    return stable_whisper
+
+
+def _text_key(text: str) -> str:
+    return "".join(character for character in text if not character.isspace())
+
+
+def align_video_subtitles(
+    *,
+    video_path: Path,
+    subtitle_dir: Path,
+    output_path: Path,
+    language: str,
+    model_name: str,
+    device: str | None,
+    max_chars: int,
+    force: bool,
+) -> tuple[int, int]:
+    """Align frozen narration text to the final video's actual audio track."""

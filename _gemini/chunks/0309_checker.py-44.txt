@@ -1,0 +1,111 @@
+                _parse_inline_style(current.get('style'))
+                if _parse_inline_style is not None
+                else {}
+            )
+            raw = style_values.get('opacity')
+            if raw is None:
+                raw = current.get('opacity')
+            if raw is not None:
+                value = raw.strip()
+                try:
+                    opacity = (
+                        float(value[:-1]) / 100
+                        if value.endswith('%')
+                        else float(value)
+                    )
+                except ValueError:
+                    pass
+                else:
+                    if opacity <= 0:
+                        return True
+            current = parent_by_id.get(id(current))
+        return False
+
+    @classmethod
+    def _visible_image_elements(
+        cls,
+        root: ET.Element,
+    ) -> Tuple[ET.Element, Dict[int, ET.Element], List[ET.Element]]:
+        """Return rendered image instances after expanding static local uses."""
+        working_root = copy.deepcopy(root)
+        if (
+            _expand_local_use_references is not None
+            and _UseExpansionError is not None
+        ):
+            try:
+                _expand_local_use_references(working_root)
+            except _UseExpansionError:
+                # The local-reference validator owns the actionable failure.
+                working_root = copy.deepcopy(root)
+
+        parent_by_id = {
+            id(child): parent
+            for parent in working_root.iter()
+            for child in list(parent)
+        }
+        images = [
+            element
+            for element in working_root.iter(f'{{{SVG_NS}}}image')
+            if not cls._is_hidden_element(element, parent_by_id)
+            and not cls._has_non_visual_ancestor(
+                element,
+                working_root,
+                parent_by_id,
+            )
+            and not cls._has_zero_opacity(element, parent_by_id)
+        ]
+        return working_root, parent_by_id, images
+
+    @staticmethod
+    def _has_non_visual_ancestor(
+        element: ET.Element,
+        module: ET.Element,
+        parent_by_id: Dict[int, ET.Element],
+    ) -> bool:
+        """Return whether an element lives in a non-rendered module subtree."""
+        current: ET.Element | None = element
+        while current is not None and current is not module:
+            if _local_name(current) in _NON_VISUAL_SVG_TAGS:
+                return True
+            current = parent_by_id.get(id(current))
+        return False
+
+    def _check_module_bounds_contract(
+        self,
+        root: ET.Element,
+        result: Dict,
+    ) -> None:
+        """Validate ordinary direct-root module boundaries in the SVG canvas."""
+        parent_by_id = {
+            id(child): parent
+            for parent in root.iter()
+            for child in list(parent)
+        }
+        viewbox = _parse_viewbox_values(root.get('viewBox') or '')
+        canvas = None
+        if viewbox is not None:
+            x, y, width, height = viewbox
+            canvas = (x, y, x + width, y + height)
+
+        for element in root.iter():
+            if element.get(_BOUNDS_ATTR) is None:
+                continue
+            if _local_name(element) != 'g':
+                result['errors'].append(
+                    f'{_element_label(element)} {_BOUNDS_ATTR} is valid '
+                    'only on <g> layout modules'
+                )
+
+        for element in root.iter():
+            raw_staging = element.get(_MORPH_STAGING_ATTR)
+            if raw_staging is None:
+                continue
+            label = _element_label(element)
+            if raw_staging != 'true':
+                result['errors'].append(
+                    f'{label} {_MORPH_STAGING_ATTR} must equal "true"; '
+                    'set the exact value or remove the marker'
+                )
+                continue
+            if _local_name(element) != 'g':
+                result['errors'].append(

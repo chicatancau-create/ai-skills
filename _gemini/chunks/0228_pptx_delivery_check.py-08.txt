@@ -1,0 +1,97 @@
+            if corrupt_member is not None:
+                errors.append(
+                    _issue(
+                        "zip_integrity_failed",
+                        f"PPTX ZIP integrity failed at {corrupt_member}.",
+                        part=corrupt_member,
+                    )
+                )
+            if duplicate_parts:
+                errors.append(
+                    _issue(
+                        "duplicate_package_parts",
+                        "PPTX package contains duplicate part names.",
+                        parts=duplicate_parts,
+                    )
+                )
+            if canonical_collisions:
+                errors.append(
+                    _issue(
+                        "duplicate_opc_part_names",
+                        (
+                            "PPTX package contains case- or encoding-equivalent "
+                            "part names."
+                        ),
+                        parts=canonical_collisions,
+                    )
+                )
+            if invalid_part_names:
+                errors.append(
+                    _issue(
+                        "invalid_opc_part_name",
+                        "PPTX package contains invalid OPC part names.",
+                        parts=sorted(invalid_part_names),
+                    )
+                )
+
+            defaults, overrides = _content_type_maps(archive, errors)
+            declared_types = Counter(
+                _declared_content_type_for_part(name, defaults, overrides)
+                for name in part_names
+            )
+            package["parts"].update({
+                key: declared_types[content_type]
+                for key, content_type in _PRESENTATION_PART_TYPES.items()
+            })
+            content_type_registry_valid = not any(
+                issue.get("code") in {
+                    "missing_content_types",
+                    "invalid_content_types",
+                }
+                for issue in errors
+                if isinstance(issue, dict)
+            )
+            if content_type_registry_valid:
+                missing_content_types = sorted(
+                    name
+                    for name in part_names
+                    if name != "[Content_Types].xml"
+                    and _declared_content_type_for_part(
+                        name,
+                        defaults,
+                        overrides,
+                    )
+                    is None
+                )
+                if missing_content_types:
+                    errors.append(
+                        _issue(
+                            "missing_part_content_type",
+                            (
+                                "PPTX package parts are missing a declared "
+                                "Default or Override content type."
+                            ),
+                            parts=missing_content_types,
+                        )
+                    )
+            declared_fonts = _xml_and_font_inventory(
+                archive,
+                part_names,
+                errors,
+            )
+            reference_counts, relationship_types, external_media = (
+                _relationship_inventory(archive, part_names, errors)
+            )
+            orphan_notes = sorted(
+                name for name in part_names
+                if _content_type_for_part(name, defaults, overrides) in {
+                    'application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml',
+                    'application/vnd.openxmlformats-officedocument.presentationml.notesMaster+xml',
+                }
+                and reference_counts.get(canonical_opc_part_path(name) or '', 0) == 0
+            )
+            if orphan_notes:
+                advisories.append(_issue(
+                    "orphan_notes_parts",
+                    "Unreferenced speaker notes parts remain in the package; remove them if no longer needed.",
+                    parts=orphan_notes,

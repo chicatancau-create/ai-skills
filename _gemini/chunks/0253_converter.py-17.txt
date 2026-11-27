@@ -1,0 +1,112 @@
+                "file": note_path.as_posix(),
+                "sha256": _sha256_file(output_dir / note_path),
+                "sourcePart": note.source_part,
+                "sourceSha256": note.source_sha256,
+            }
+        slides.append(row)
+    payload = {
+        "schema": "ppt-master.roundtrip-workspace.v1",
+        "source": {
+            "file": SOURCE_PPTX_PATH.as_posix(),
+            "sha256": _sha256_file(source_path),
+        },
+        "structure": NATIVE_STRUCTURE_PATH.as_posix(),
+        "conversionReport": CONVERSION_REPORT_PATH.as_posix(),
+        "sidecars": {
+            "animations": {
+                "file": "animations.json",
+                "sha256": _sha256_file(animation_path),
+                "baseline": result.animation_config,
+            },
+            "notesTotal": None,
+        },
+        "directories": {
+            "authoringSvg": AUTHORING_SVG_FLAT_DIR.as_posix(),
+            "layeredSvg": ROUNDTRIP_LAYERED_SVG_DIR.as_posix(),
+            "flatSvg": (
+                ROUNDTRIP_FLAT_SVG_DIR.as_posix()
+                if result.flat_slides
+                else None
+            ),
+            "images": options.images_subdir,
+            "sourceObjectPreviews": (
+                Path(options.images_subdir) / "source-object-previews"
+            ).as_posix(),
+            "sounds": options.sound_subdir,
+            "audio": "audio",
+            "video": "video",
+            "notes": "notes",
+            "nativePayloads": "native-payloads",
+        },
+        "slides": slides,
+        "resources": resource_manifest,
+    }
+    target = output_dir / ROUNDTRIP_MANIFEST_PATH
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _write_artifacts(
+    output_dir: Path,
+    result: ConvertResult,
+    options: ConvertOptions,
+) -> None:
+    """Stage a complete conversion, then atomically publish its exact roster."""
+    output_dir = output_dir.absolute()
+    reject_removed_workspace_layout(output_dir)
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging_root = Path(tempfile.mkdtemp(
+        prefix=f".{output_dir.name}.convert-",
+        dir=output_dir.parent,
+    ))
+    staged_dir = staging_root / "generated"
+    try:
+        _write_artifact_tree(staged_dir, result, options)
+        publish_staged_workspace(output_dir, staged_dir)
+    finally:
+        shutil.rmtree(staging_root, ignore_errors=True)
+
+
+def _write_conversion_report(
+    output_dir: Path,
+    result: ConvertResult,
+    options: ConvertOptions,
+    *,
+    embedded_fonts_descriptor: dict[str, object] | None = None,
+    embedded_font_paths: tuple[str, ...] = (),
+) -> None:
+    """Write the user-visible tolerant-import report."""
+    animation_media = [
+        (PurePosixPath(options.sound_subdir) / filename).as_posix()
+        for filename in sorted(result.animation_media_files)
+    ]
+    source_theme: dict[str, object] = {
+        "colors": result.theme_colors,
+        "fonts": result.theme_fonts,
+    }
+    if result.theme_xml is not None:
+        source_theme["ooxml"] = {
+            "encoding": "base64",
+            "sha256": hashlib.sha256(result.theme_xml).hexdigest(),
+            "payload": base64.b64encode(result.theme_xml).decode("ascii"),
+        }
+    source_document: dict[str, object] = {
+        "canvasPx": {
+            "width": result.canvas_px[0],
+            "height": result.canvas_px[1],
+        },
+        "theme": source_theme,
+    }
+    if embedded_fonts_descriptor is not None:
+        source_document["embeddedFonts"] = embedded_fonts_descriptor
+    artifacts: dict[str, object] = {
+        "animationConfig": "animations.json",
+        "animationMedia": animation_media,
+        "resources": [
+            resource.workspace_path
+            for resource in result.resource_inventory.resources
+            if not (options.embed_images and resource.kind == "image")
+        ],

@@ -1,0 +1,108 @@
+            if len(bad_hrefs) > 3:
+                preview += " ..."
+            print(
+                f"[INFO] EPUB manifest sanitized: removed "
+                f"{len(bad_hrefs)} broken item(s) [{preview}]"
+            )
+            return out_path, True
+    except (zipfile.BadZipFile, ET.ParseError, OSError) as exc:
+        print(
+            f"[WARN] EPUB sanitize skipped "
+            f"({exc.__class__.__name__}: {exc}); using original file"
+        )
+        return src, False
+
+
+def _epub_image_candidates(src: str, document_name: str) -> list[str]:
+    """Build lookup candidates for an image reference inside an EPUB document."""
+    parsed = urlparse(src)
+    raw_path = parsed.path if parsed.scheme else src
+    decoded_path = unquote(raw_path)
+    normalized_path = posixpath.normpath(decoded_path).lstrip("/")
+    document_dir = posixpath.dirname(document_name)
+    relative_path = posixpath.normpath(
+        posixpath.join(document_dir, decoded_path)
+    ).lstrip("/")
+
+    candidates = [
+        src,
+        raw_path,
+        decoded_path,
+        normalized_path,
+        relative_path,
+        Path(decoded_path).name,
+        Path(normalized_path).name,
+    ]
+    return [candidate for candidate in dict.fromkeys(candidates) if candidate]
+
+
+def _convert_epub(input_file: Path, out_file: Path) -> str:
+    try:
+        import ebooklib
+        from ebooklib import epub
+        from markdownify import markdownify
+        from bs4 import BeautifulSoup
+    except ImportError as e:
+        print(f"[ERROR] Missing dependency: {e.name}. "
+              f"Run: pip install ebooklib markdownify beautifulsoup4")
+        return ""
+
+    media_dir, rel_media_dir = _ensure_media_dir(out_file)
+    sanitized_path, is_temp_copy = _sanitize_epub_manifest(input_file)
+    try:
+        book = epub.read_epub(str(sanitized_path))
+    finally:
+        if is_temp_copy:
+            try:
+                sanitized_path.unlink()
+            except OSError:
+                pass
+
+    # Extract images, remembering original path → new filename mapping
+    img_map: dict[str, str] = {}
+    index = 0
+    for item in book.get_items_of_type(ebooklib.ITEM_IMAGE):
+        index += 1
+        ext = Path(item.file_name).suffix or ".bin"
+        filename = f"image_{index:03d}{ext}"
+        (media_dir / filename).write_bytes(item.get_content())
+        # Map both full and basename for robust lookup
+        img_map[item.file_name] = filename
+        img_map[Path(item.file_name).name] = filename
+
+    # Iterate document items in spine order
+    html_parts: list[str] = []
+    spine_ids = [sid for sid, _ in book.spine]
+    id_to_item = {it.get_id(): it for it in book.get_items_of_type(ebooklib.ITEM_DOCUMENT)}
+    for sid in spine_ids:
+        item = id_to_item.get(sid)
+        if item is None:
+            continue
+        soup = BeautifulSoup(item.get_content(), "html.parser")
+        for img in soup.find_all("img"):
+            src = img.get("src", "")
+            if not src:
+                continue
+            # Try exact match, basename, decoded path, and path relative to this XHTML file.
+            candidates = _epub_image_candidates(src, item.file_name)
+            resolved = next((img_map[c] for c in candidates if c in img_map), None)
+            if resolved:
+                img["src"] = f"{rel_media_dir}/{resolved}"
+        body = soup.find("body") or soup
+        html_parts.append(str(body))
+
+    combined_html = "\n\n".join(html_parts)
+    markdown = markdownify(combined_html, heading_style="ATX", bullets="-")
+    markdown = re.sub(r"\n{3,}", "\n\n", markdown).strip() + "\n"
+    out_file.write_text(markdown, encoding="utf-8")
+    _write_generic_image_manifest(media_dir, rel_media_dir, markdown, "epub_image")
+
+    if not any(media_dir.iterdir()):
+        media_dir.rmdir()
+        media_dir = None  # type: ignore[assignment]
+
+    _report_result(out_file, media_dir)
+    return markdown
+
+
+# ─────────────────────────────────────────────────────────────

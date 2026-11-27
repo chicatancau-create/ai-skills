@@ -1,0 +1,73 @@
+                result, root, ctx = self._convert(_marker(_payload(
+                    type="treemap", levels=[["A", "B"]], values=[1, 2], **companions,
+                )))
+                if companions:
+                    group = self._assert_group(result, root, ctx)
+                    self.assertEqual([n.text for n in group.findall(".//a:t", NS)],
+                                     ["Tree", "Subtitle", "Note"])
+                else:
+                    self.assertEqual(root[0].tag, f"{{{NS['p']}}}graphicFrame")
+                chart = root.find(".//cx:chart", NS)
+                self.assertIsNotNone(chart)
+                self.assertEqual(chart.get(f"{{{NS['r']}}}id"), ctx.rel_entries[0]["id"])
+                self.assertTrue(ctx.rel_entries[0]["type"].endswith("/chartEx"))
+                self.assertIn("ppt/charts/chartEx101.xml", ctx.package_files)
+                self.assertIn("ppt/charts/style101.xml", ctx.package_files)
+                self.assertIn("ppt/charts/colors101.xml", ctx.package_files)
+                self.assertIn("ppt/embeddings/Microsoft_Excel_Sheet101.xlsx", ctx.package_files)
+
+    def test_source_package_keeps_claimed_frame_id_and_exact_parts(self) -> None:
+        _, original, source_ctx = self._convert(_marker(_payload()))
+        frame = original[0]
+        frame.find("p:nvGraphicFramePr/p:cNvPr", NS).set("id", "77")
+        frame_bytes = ET.tostring(frame, encoding="utf-8")
+
+        def blob(data: bytes) -> dict:
+            return {"encoding": "base64", "payload": base64.b64encode(data).decode("ascii"),
+                    "sha256": hashlib.sha256(data).hexdigest()}
+
+        source = {
+            "chart_part": "ppt/charts/chart101.xml",
+            "frame": blob(frame_bytes),
+            "parts": [{
+                "name": name, **blob(data),
+                "content_type": source_ctx.content_type_overrides.get(name),
+            } for name, data in source_ctx.package_files.items()],
+        }
+        elem = _marker(_payload(source_package=source, notes=["Must not be synthesized"]),
+                       **{"data-pptx-shape-id": "77"})
+        _, root, ctx = self._convert(
+            elem, reserved_shape_ids=frozenset({77}),
+            source_shape_id_map={("slide", "77"): 77}, rel_id_counter=8,
+        )
+        self.assertEqual(len(root), 1)
+        self.assertEqual(root[0].tag, f"{{{NS['p']}}}graphicFrame")
+        self.assertEqual(_shape_id(root[0]), 77)
+        self.assertEqual(ctx.anim_targets, [(77, "sales-chart")])
+        self.assertEqual(ctx.package_files, source_ctx.package_files)
+        self.assertEqual(ctx.content_type_overrides, source_ctx.content_type_overrides)
+        frame.find(".//c:chart", NS).set(f"{{{NS['r']}}}id", "rId8")
+        self.assertEqual(ET.tostring(root[0]), ET.tostring(frame))
+
+    def test_table_stays_one_native_frame(self) -> None:
+        _, root, ctx = self._convert(_marker({
+            "schema": "ppt-master.semantic-table.v2",
+            "x": 100, "y": 80, "width": 400, "height": 240,
+            "rows": [["A", "B"], ["1", "2"]],
+        }, kind="table"))
+        self.assertEqual(len(root), 1)
+        self.assertEqual(root[0].tag, f"{{{NS['p']}}}graphicFrame")
+        self.assertIsNotNone(root.find(".//a:tbl", NS))
+        self.assertEqual(ctx.anim_targets, [(_shape_id(root[0]), "sales-chart")])
+
+    def test_svg_fallback_still_groups_and_reports_visual_geometry(self) -> None:
+        elem = _marker(_payload(notes=["Fallback label"]))
+        elem.attrib.pop("data-pptx-native-authority")
+        stamp_native_fallback_baseline(elem)
+        ctx = ConvertContext(trace_events=[])
+        result = convert_element(elem, ctx)
+        root = _parse(result.xml)
+        self.assertEqual(len(root), 1)
+        self.assertEqual(root[0].tag, f"{{{NS['p']}}}grpSp")
+        self.assertIsNone(root.find(".//p:graphicFrame", NS))
+        self.assertEqual(ctx.anim_targets, [(_shape_id(root[0]), "sales-chart")])

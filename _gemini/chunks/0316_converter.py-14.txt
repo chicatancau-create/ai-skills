@@ -1,0 +1,121 @@
+    # anchor's own depth, so a top-level <a href><g id> stays an animation
+    # anchor, and the click lands on its leaves.
+    wrapped = anchor_wrapped_group(elem)
+    result = convert_g(wrapped if wrapped is not None else elem, ctx)
+    if result is None:
+        return None
+    return apply_shape_hyperlink(result, ctx, svg_hyperlink_href(elem))
+
+
+# ---------------------------------------------------------------------------
+# Defs collection & element dispatch
+# ---------------------------------------------------------------------------
+
+_NON_VISUAL_TAGS = frozenset(('defs', 'title', 'desc', 'metadata', 'style'))
+
+_CONVERTERS = {
+    'rect': convert_rect,
+    'circle': convert_circle,
+    'ellipse': convert_ellipse,
+    'line': convert_line,
+    'path': convert_path,
+    'polygon': convert_polygon,
+    'polyline': convert_polyline,
+    'text': convert_text,
+    'image': convert_image,
+    'g': convert_g,
+    'a': convert_a,
+    'svg': convert_nested_svg,
+}
+
+_SUPPORTED_VISUAL_CHILD_TAGS = frozenset(('tspan',))
+
+
+def _parse_svg_canvas(root: ET.Element) -> tuple[float, float, float, float]:
+    """Return the SVG canvas as (x, y, width, height) in SVG units."""
+    viewbox = parse_project_viewbox(root.get('viewBox'))
+    return 0.0, 0.0, float(viewbox.width), float(viewbox.height)
+
+
+def _is_full_canvas_rect(
+    elem: ET.Element,
+    ctx: ConvertContext,
+    canvas: tuple[float, float, float, float],
+) -> bool:
+    """Return whether a rect is a safe candidate for native slide background."""
+    if elem.get('transform') or elem.get('filter') or elem.get('clip-path'):
+        return False
+    if any(
+        elem.get(attr) is not None
+        for attr in (
+            'data-pptx-object',
+            'data-pptx-prst',
+            'data-pptx-frame',
+            'data-pptx-geometry-status',
+        )
+    ):
+        return False
+    if (
+        parse_svg_length(elem.get('rx'), 0.0) > 0
+        or parse_svg_length(elem.get('ry'), 0.0) > 0
+    ):
+        return False
+
+    canvas_x, canvas_y, canvas_w, canvas_h = canvas
+    if canvas_w <= 0 or canvas_h <= 0:
+        return False
+
+    tolerance = 0.5
+    if abs(parse_svg_length(elem.get('x'), 0.0) - canvas_x) > tolerance:
+        return False
+    if abs(parse_svg_length(elem.get('y'), 0.0) - canvas_y) > tolerance:
+        return False
+    if abs(parse_svg_length(elem.get('width'), 0.0) - canvas_w) > tolerance:
+        return False
+    if abs(parse_svg_length(elem.get('height'), 0.0) - canvas_h) > tolerance:
+        return False
+
+    fill = _get_attr(elem, 'fill', ctx)
+    if fill == 'none':
+        return False
+
+    stroke = _get_attr(elem, 'stroke', ctx)
+    stroke_width = parse_svg_length(_get_attr(elem, 'stroke-width', ctx), 1.0)
+    stroke_opacity = get_stroke_opacity(elem, ctx)
+    if stroke and stroke != 'none' and stroke_width > 0 and stroke_opacity != 0:
+        return False
+
+    return True
+
+
+def _background_xml_from_rect(
+    elem: ET.Element,
+    ctx: ConvertContext,
+) -> str:
+    """Build native ``p:bg`` XML from a full-slide SVG background rect."""
+    fill_xml = build_fill_xml(
+        elem,
+        ctx,
+        get_fill_opacity(elem, ctx),
+        usage="background",
+    )
+    if not fill_xml or '<a:noFill' in fill_xml:
+        return ''
+    return f'<p:bg><p:bgPr>{fill_xml}<a:effectLst/></p:bgPr></p:bg>'
+
+
+def _extract_background_candidate(
+    root: ET.Element,
+    ctx: ConvertContext,
+) -> tuple[str, int | None]:
+    """Promote a first-layer SVG background rect to native PowerPoint bgPr.
+
+    PowerPoint stores page background fills under ``p:cSld/p:bg/p:bgPr``.
+    Keeping the full-canvas SVG rect in ``p:spTree`` makes it an ordinary
+    selectable shape, so users hit it during bulk element selection. Only the
+    first visual layer is considered, matching pptx_to_svg's round-trip output
+    and avoiding accidental promotion of content panels.
+    """
+    canvas = _parse_svg_canvas(root)
+    for child in root:
+        tag = child.tag.replace(f'{{{SVG_NS}}}', '')

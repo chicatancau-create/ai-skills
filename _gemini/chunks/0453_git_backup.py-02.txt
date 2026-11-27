@@ -1,0 +1,59 @@
+            "\n".join(files[:40]) + ("\n…" if len(files) > 40 else ""))
+        rc, out, err = git(["commit", "-q", "-m", msg], path)
+        if rc != 0:
+            log("%s: commit failed rc=%d %s" % (name, rc, err[:200]))
+            return False
+        log("%s: committed %d file(s)" % (name, len(files)))
+    ok = True
+    for r in REMOTES:
+        rc, out, err = git(["push", r, "main"], path)
+        if rc != 0:
+            ok = False
+            log("%s: push %s FAILED rc=%d %s" % (name, r, rc, (err or out)[:220]))
+        else:
+            rc2, head, _ = git(["rev-parse", "HEAD"], path)
+            rc3, remote, _ = git(["ls-remote", "--heads", r], path, timeout=120)
+            match = rc3 == 0 and head in remote
+            log("%s: push %s ok, remote HEAD match=%s" % (name, r, match))
+            ok = ok and match
+    mark(name)
+    return ok
+
+
+def status():
+    for path, name in REPOS:
+        print("\n=== %s (%s) ===" % (name, path))
+        rc, head, _ = git(["rev-parse", "--short", "HEAD"], path)
+        rc2, dirty, _ = git(["status", "--porcelain"], path)
+        n = len([x for x in dirty.splitlines() if x.strip()])
+        print("  HEAD=%s  uncommitted=%d" % (head, n))
+        for r in REMOTES:
+            rc3, out, err = git(["ls-remote", "--heads", r], path, timeout=120)
+            rc4, full, _ = git(["rev-parse", "HEAD"], path)
+            print("  %-8s rc=%d match=%s %s" %
+                  (r, rc3, rc3 == 0 and full in out, out.split()[0][:12] if out else err[:80]))
+        la = last_attempt(name)
+        print("  last auto attempt: %s" %
+              (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(la)) if la else "never"))
+    if os.path.isfile(LOG):
+        print("\n--- log tail ---")
+        for ln in open(LOG, encoding="utf-8", errors="replace").read().splitlines()[-12:]:
+            print(" ", ln)
+
+
+if __name__ == "__main__":
+    args = sys.argv[1:]
+    if not args or args[0] == "status":
+        status()
+    elif args[0] == "auto":
+        for p, n in REPOS:
+            try:
+                sync(p, n)
+            except Exception as e:
+                log("%s: auto error %s: %s" % (n, type(e).__name__, e))
+    elif args[0] == "now":
+        for p, n in REPOS:
+            sync(p, n, force=True)
+        status()
+    else:
+        print("usage: git_backup.py [status|auto|now]")

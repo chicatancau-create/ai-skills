@@ -1,0 +1,90 @@
+        except RuntimeError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        if needs_selection:
+            print(
+                f"[Batch] {needs_selection} row(s) await thumbnail selection."
+            )
+        # A successfully prepared shortlist is an intermediate success. Only
+        # provider failures or exhausted/manual rows make acquisition fail.
+        return 1 if needs_manual or failed else 0
+
+    # --- Single-query search mode ---
+    if not args.query:
+        parser.error("query is required unless --batch, --promote, or --from-url is used")
+    if not args.filename:
+        parser.error("--filename is required in single-query mode")
+
+    saved_request = _load_saved_candidate_request(output_dir, args.filename)
+    if args.candidate_page > 1 and saved_request is None:
+        parser.error(
+            f"--candidate-page {args.candidate_page} continues an existing "
+            f"candidate pool, but none was saved for {args.filename!r}; run "
+            "page 1 with --save-candidates first"
+        )
+    if saved_request is not None and args.candidate_page > 1:
+        saved_query = str(saved_request.get("query") or "")
+        if saved_query and saved_query != args.query:
+            parser.error(
+                f"--candidate-page {args.candidate_page} must keep the pool's "
+                f"query {saved_query!r}; a changed query starts a new page-1 "
+                "pool instead"
+            )
+    required_terms = _parse_required_terms(args.require_terms)
+    query_variants = _parse_query_variants(args.query_variant)
+    orientation = "" if args.orientation == "any" else args.orientation
+    min_width = args.min_width
+    min_height = args.min_height
+    if saved_request is not None and args.candidate_page > 1:
+        inherited: list[str] = []
+        if not required_terms and saved_request.get("required_terms"):
+            required_terms = _parse_required_terms(saved_request["required_terms"])
+            inherited.append(f"required_terms={list(required_terms)}")
+        if not query_variants and saved_request.get("query_variants"):
+            query_variants = _parse_query_variants(saved_request["query_variants"])
+            inherited.append(f"query_variants={list(query_variants)}")
+        saved_orientation = str(saved_request.get("orientation") or "any")
+        if not orientation and saved_orientation != "any":
+            orientation = saved_orientation
+            inherited.append(f"orientation={orientation}")
+        for field in ("min_width", "min_height"):
+            saved_value = saved_request.get(field)
+            if (
+                isinstance(saved_value, int)
+                and not isinstance(saved_value, bool)
+                and saved_value > 0
+                and getattr(args, field) == parser.get_default(field)
+                and saved_value != getattr(args, field)
+            ):
+                if field == "min_width":
+                    min_width = saved_value
+                else:
+                    min_height = saved_value
+                inherited.append(f"{field}={saved_value}")
+        if inherited:
+            print(
+                "  continuing the saved candidate pool; inherited "
+                + ", ".join(inherited),
+                file=sys.stderr,
+            )
+    request = ImageSearchRequest(
+        query=args.query,
+        purpose=args.purpose,
+        orientation=orientation,
+        filename=args.filename,
+        slide=args.slide,
+        min_width=min_width,
+        min_height=min_height,
+        required_terms=required_terms,
+        query_variants=query_variants,
+    )
+    _warn_weak_required_terms(request.required_terms)
+
+    providers = [args.provider] if args.provider else _default_provider_chain()
+
+    manifest_path = (
+        Path(args.manifest) if args.manifest else default_manifest_path(args.output)
+    )
+    try:
+        _read_existing_manifest(manifest_path)
+    except RuntimeError as exc:

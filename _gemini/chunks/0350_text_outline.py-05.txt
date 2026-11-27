@@ -1,0 +1,119 @@
+        font_size=font_size,
+        font_weight=weight,
+        italic=bool(parsed_style.value),
+        anchor=str(parsed_anchor.value),
+        letter_spacing=letter_spacing,
+    )
+
+
+def _updated_property(
+    element: ET.Element,
+    inline: Mapping[str, str],
+    name: str,
+    inherited: str,
+) -> str:
+    raw = inline.get(name, element.get(name))
+    if raw is None or raw.strip().lower() == "inherit":
+        return inherited
+    value = raw.strip()
+    if not value:
+        raise ValueError(f"{_element_label(element)} {name} must not be empty")
+    return value
+
+
+def _effective_property(
+    chain: Sequence[ET.Element],
+    name: str,
+) -> str | None:
+    value: str | None = None
+    for current in chain:
+        inline = parse_inline_style(current.get("style"))
+        raw = inline.get(name, current.get(name))
+        if raw is not None and raw.strip().lower() != "inherit":
+            value = raw.strip()
+    return value
+
+
+def _text_position(element: ET.Element, name: str) -> float:
+    raw = element.get(name)
+    if raw is None:
+        return 0.0
+    try:
+        return parse_project_geometry_length(raw, name)
+    except ValueError as exc:
+        raise ValueError(
+            f"{_element_label(element)} {name}={raw!r}: {exc}"
+        ) from exc
+
+
+def _parse_font_family_stack(raw: str) -> tuple[str, ...]:
+    families = tuple(
+        value.strip().strip("'\"")
+        for value in raw.split(",")
+    )
+    if not families or any(not family for family in families):
+        raise ValueError("font-family must contain at least one family name")
+    return families
+
+
+def _normalize_explicit_font_dirs(
+    font_dirs: Sequence[str | Path],
+) -> tuple[str, ...]:
+    if isinstance(font_dirs, (str, bytes)):
+        raise ValueError(
+            "Shape Boolean font_dirs must be a sequence of directory paths"
+        )
+    roots: list[str] = []
+    seen: set[str] = set()
+    for raw in font_dirs:
+        root = Path(raw).expanduser()
+        if not root.is_dir():
+            raise ValueError(f"Shape Boolean font directory not found: {root}")
+        resolved = str(root.resolve())
+        if resolved not in seen:
+            roots.append(resolved)
+            seen.add(resolved)
+    return tuple(roots)
+
+
+@lru_cache(maxsize=8)
+def _font_catalog(explicit_roots: tuple[str, ...]) -> tuple[_FontFace, ...]:
+    hb = _load_harfbuzz()
+    records: list[_FontFace] = []
+    for path in _font_files(explicit_roots):
+        try:
+            data = path.read_bytes()
+            first_face = hb.Face(data, 0)
+            face_count = max(1, int(first_face.count))
+        except (OSError, RuntimeError, ValueError):
+            continue
+        for index in range(face_count):
+            try:
+                face = hb.Face(data, index)
+                families = _face_names(face, _FAMILY_NAME_IDS)
+                if not families:
+                    continue
+                font = hb.Font(face)
+                weight_value = font.get_style_value(hb.StyleTag.WEIGHT)
+                italic_value = font.get_style_value(hb.StyleTag.ITALIC)
+                slant_value = font.get_style_value(hb.StyleTag.SLANT_ANGLE)
+                axes = {
+                    axis.tag: axis
+                    for axis in face.axis_infos
+                }
+                coverage = frozenset(int(value) for value in face.unicodes)
+            except (OSError, RuntimeError, TypeError, ValueError):
+                continue
+            weight = int(round(weight_value)) if math.isfinite(weight_value) else 400
+            weight = min(1000, max(1, weight))
+            italic = (
+                math.isfinite(italic_value) and italic_value >= 0.5
+            ) or (
+                math.isfinite(slant_value) and abs(slant_value) > 0.01
+            )
+            records.append(_FontFace(
+                path=path,
+                index=index,
+                families=families,
+                weight=weight,
+                italic=italic,

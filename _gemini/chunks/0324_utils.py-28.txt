@@ -1,0 +1,108 @@
+                    value = float(raw_value)
+                except (TypeError, ValueError):
+                    value = math.nan
+                if (
+                    not math.isfinite(value)
+                    or (non_negative and value < 0)
+                    or (
+                        primitive_tag == 'feFuncA'
+                        and attribute_name == 'slope'
+                        and value > 1
+                    )
+                ):
+                    if attribute_name in {'stdDeviation', 'dx', 'dy'}:
+                        parameters_are_valid = False
+                    qualifier = (
+                        ' from 0 to 1'
+                        if primitive_tag == 'feFuncA'
+                        else ''
+                    )
+                    errors.add(
+                        f'{label} <{primitive_tag}> {attribute_name} must be a '
+                        f'finite number{qualifier}; got {raw_value!r}'
+                    )
+        if len(effect_primitives) == 1 and parameters_are_valid:
+            try:
+                params = parse_project_filter_params(filter_elem)
+                project_filter_drawingml_coordinates(params)
+            except (TypeError, ValueError) as exc:
+                errors.add(f'{label} {exc}')
+    return sorted(errors)
+
+
+def _is_compact_authored_preset_filter_target(elem: ET.Element) -> bool:
+    """Recognize one validated project-authored preset shape filter target."""
+    if (
+        _svg_element_tag(elem) != 'g'
+        or elem.get('data-pptx-authoring') != 'preset'
+        or elem.get('data-pptx-object') != 'shape'
+        or elem.get('data-pptx-part') is not None
+    ):
+        return False
+    from pptx_to_svg.preset_authoring import (  # Local to avoid layer coupling.
+        authored_preset_encoding,
+        validate_authored_preset_group,
+    )
+
+    return (
+        authored_preset_encoding(elem) == 'compact'
+        and not validate_authored_preset_group(elem)
+    )
+
+
+def _is_imported_preset_preview_filter_target(
+    elem: ET.Element,
+    parents: dict[ET.Element, ET.Element],
+) -> bool:
+    """Recognize the render-only aggregate filter on an imported preset.
+
+    DrawingML presets can contain several visible path layers but own one
+    shape-level effect.  The lossless importer therefore keeps the native
+    filter on the hidden geometry carrier and mirrors the same reference onto
+    its hash-locked preview group.  The preview group is never exported as a
+    separate PowerPoint object; other ordinary or authored ``<g filter>``
+    forms remain outside the project contract.
+    """
+    if (
+        _svg_element_tag(elem) != 'g'
+        or elem.get('data-pptx-part') != 'geometry-preview'
+    ):
+        return False
+    parent = parents.get(elem)
+    if (
+        parent is None
+        or _svg_element_tag(parent) != 'g'
+        or parent.get('data-pptx-object') not in {'shape', 'connector'}
+        or not parent.get('data-pptx-prst')
+        or not parent.get('data-pptx-frame')
+    ):
+        return False
+    previews = [
+        child
+        for child in parent
+        if child.get('data-pptx-part') == 'geometry-preview'
+    ]
+    if len(previews) != 1 or previews[0] is not elem:
+        return False
+    preview_children = list(elem)
+    if not preview_children or any(
+        _svg_element_tag(child) != 'path'
+        or child.get('data-pptx-part') != 'geometry-detail'
+        or len(child) != 0
+        for child in preview_children
+    ):
+        return False
+    carriers = [
+        child
+        for child in parent
+        if child.get('data-pptx-part') == 'geometry'
+    ]
+    if len(carriers) != 1:
+        return False
+    carrier = carriers[0]
+    if not (
+        _svg_element_tag(carrier) == 'path'
+        and carrier.get('visibility') == 'hidden'
+        and carrier.get('pointer-events') == 'none'
+        and carrier.get('data-pptx-object') == parent.get('data-pptx-object')
+        and carrier.get('data-pptx-prst') == parent.get('data-pptx-prst')

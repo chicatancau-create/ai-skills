@@ -1,0 +1,104 @@
+        if target_part is None:
+            errors.append(
+                f"transition sound relationship {relationship_id} has an "
+                f"invalid target: {target!r}"
+            )
+            continue
+        if Path(target_part).suffix.lower() != ".wav":
+            errors.append(
+                f"transition sound relationship {relationship_id} must target "
+                f"a .wav part: {target_part}"
+            )
+        if target_part not in package_names:
+            errors.append(
+                f"transition sound relationship {relationship_id} target is "
+                f"missing: {target_part}"
+            )
+            continue
+        content_type = _package_part_content_type(package, target_part)
+        if str(content_type or "").lower() not in WAV_CONTENT_TYPES:
+            errors.append(
+                f"transition sound target {target_part} must declare a WAV "
+                f"content type; found {content_type!r}"
+            )
+        payload = package.read(target_part)
+        if not (
+            len(payload) >= 12
+            and payload[:4] in {b"RIFF", b"RF64"}
+            and payload[8:12] == b"WAVE"
+        ):
+            errors.append(
+                f"transition sound target {target_part} is not RIFF/RF64 WAVE"
+            )
+
+    return errors
+
+
+def validate_pptx_transition_package(
+    pptx_path: Path,
+    *,
+    require_use_timings: bool = False,
+) -> dict[str, TransitionSummary]:
+    """Read back and validate every slide transition in a written PPTX.
+
+    Return summaries keyed by package part name. Raise ``ValueError`` when the
+    ZIP, slide transition structure, MCE bindings, or required presentation
+    timing metadata is invalid.
+    """
+    errors: list[str] = []
+    summaries: dict[str, TransitionSummary] = {}
+    try:
+        with zipfile.ZipFile(pptx_path, "r") as package:
+            names = package.namelist()
+            part_counts: dict[str, int] = {}
+            for name in names:
+                part_counts[name] = part_counts.get(name, 0) + 1
+            duplicate_names = sorted(
+                name for name, count in part_counts.items() if count > 1
+            )
+            if duplicate_names:
+                errors.append(
+                    "duplicate package parts: " + ", ".join(duplicate_names)
+                )
+
+            package_names = set(names)
+            slide_names = sorted(
+                name
+                for name in names
+                if name.startswith("ppt/slides/slide")
+                and name.endswith(".xml")
+            )
+            for slide_name in slide_names:
+                slide_xml = package.read(slide_name)
+                for problem in validate_slide_transition_xml(slide_xml):
+                    errors.append(f"{slide_name}: {problem}")
+                try:
+                    summaries[slide_name] = read_slide_transition_xml(slide_xml)
+                except Exception as exc:
+                    errors.append(f"{slide_name}: transition read-back failed: {exc}")
+                try:
+                    sound_errors = _validate_transition_sound_package_parts(
+                        package,
+                        package_names,
+                        slide_name,
+                        slide_xml,
+                    )
+                except Exception as exc:
+                    errors.append(
+                        f"{slide_name}: transition sound read-back failed: {exc}"
+                    )
+                else:
+                    for problem in sound_errors:
+                        errors.append(f"{slide_name}: {problem}")
+
+            if require_use_timings:
+                errors.extend(_validate_package_use_timings(package, names))
+    except (OSError, zipfile.BadZipFile, KeyError, ET.ParseError) as exc:
+        errors.append(f"unable to read PPTX transition package: {exc}")
+
+    if errors:
+        raise ValueError("; ".join(errors))
+    return summaries
+
+
+def _top_level_shape_types_by_name(

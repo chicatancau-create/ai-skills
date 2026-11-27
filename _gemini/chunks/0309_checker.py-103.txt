@@ -1,0 +1,101 @@
+        blocking = categories['blocking']
+        introduced = categories['introduced']
+        inherited = categories['inherited']
+        project_issues = categories['project_issues']
+
+        # Keep the legacy `drift` JSON field for report compatibility. Its
+        # colors/fonts entries are informational anchor comparisons; sparse
+        # size entries are informational until their third occurrence.
+        drift = {
+            category: {
+                value: sorted(files)
+                for value, files in sorted(values.items())
+            }
+            for category, values in self._anchor_value_summary.items()
+        }
+        source_import = categories['source_import']
+        payload = {
+            'schema': 'ppt-master.svg-quality-report.v1',
+            'stage': stage,
+            'target': str(Path(target).resolve()),
+            'source_fingerprint': (
+                self._roundtrip_source_fingerprint
+                if self._roundtrip_source_fingerprint is not None
+                else _quality_source_fingerprint(self.results)
+            ),
+            'summary': dict(self.summary),
+            'issue_types': dict(sorted(self.issue_types.items())),
+            'categories': {
+                'blocking': {
+                    'count': len(blocking),
+                    'issues': blocking,
+                },
+                'introduced': {
+                    'count': len(introduced),
+                    'issues': introduced,
+                },
+                'inherited': {
+                    'count': len(inherited),
+                    'issues': inherited,
+                },
+                'source-import': {
+                    'count': _source_import_warning_count(source_import),
+                    'summary': source_import,
+                },
+            },
+            'drift': drift,
+            'carrier_receipt': self._carrier_receipt_summary(),
+            'project_issues': project_issues,
+            'files': self.results,
+        }
+        report_path = Path(output_file)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + '\n',
+            encoding='utf-8',
+        )
+        print(f"\n[REPORT] JSON quality report exported: {report_path}")
+
+
+def _source_import_warning_count(summary: Dict[str, object]) -> int:
+    """Return only a schema-compatible non-negative warning count."""
+    value = summary.get('warning_count')
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return 0
+    return value
+
+
+def _quality_source_fingerprint(results: List[Dict]) -> Dict[str, object]:
+    """Bind a quality report to the exact SVG bytes that were checked."""
+    files: List[Dict[str, object]] = []
+    aggregate = hashlib.sha256()
+    candidates = sorted(
+        (
+            result
+            for result in results
+            if result.get('exists') and result.get('path')
+        ),
+        key=lambda result: Path(str(result['path'])).name,
+    )
+    for result in candidates:
+        path = Path(str(result['path']))
+        file_sha256 = result.get('source_sha256')
+        if not isinstance(file_sha256, str):
+            files.append({
+                'file': path.name,
+                'sha256': None,
+                'error': 'source bytes were not available during validation',
+            })
+            file_sha256 = 'unreadable'
+        else:
+            files.append({'file': path.name, 'sha256': file_sha256})
+        aggregate.update(path.name.encode('utf-8'))
+        aggregate.update(b'\0')
+        aggregate.update(file_sha256.encode('ascii'))
+        aggregate.update(b'\n')
+    return {
+        'algorithm': 'sha256',
+        'digest': aggregate.hexdigest(),
+        'file_count': len(files),
+        'files': files,
+    }

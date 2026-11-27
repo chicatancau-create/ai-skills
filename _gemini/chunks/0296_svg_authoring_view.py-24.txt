@@ -1,0 +1,109 @@
+        help="Explicit destination directory for projected SVG copies",
+    )
+    parser.add_argument(
+        "--refresh-summary",
+        action="store_true",
+        help=(
+            "Regenerate authoring_summary.json for an existing authoring "
+            "bundle; input must be that bundle directory and -o is omitted"
+        ),
+    )
+    parser.add_argument(
+        "--adopt-object",
+        metavar="<from.svg>:<element-id>",
+        help=(
+            "Copy one object from another page as authored SVG, strip its "
+            "source/native transport, and refresh the bundle summary"
+        ),
+    )
+    parser.add_argument(
+        "--into",
+        metavar="<target.svg>",
+        help="Target page for --adopt-object",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Replace authoring files/manifest that already exist "
+            "(never changes source files)"
+        ),
+    )
+    parser.add_argument(
+        "--projection-kind",
+        choices=("layered", "flat", "generic"),
+        default="generic",
+        help="Record the IR representation kind in bundle metadata",
+    )
+    return parser
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    input_path = args.input.resolve()
+
+    if not input_path.exists():
+        print(f"Error: input does not exist: {input_path}", file=sys.stderr)
+        return 1
+    if args.refresh_summary and args.adopt_object is not None:
+        parser.error("--refresh-summary and --adopt-object are mutually exclusive")
+    if args.adopt_object is not None:
+        if args.into is None:
+            parser.error("--adopt-object requires --into <target.svg>")
+        if args.output_dir is not None:
+            parser.error("--adopt-object does not accept -o/--output-dir")
+        if args.force:
+            parser.error("--adopt-object does not accept --force")
+        if args.projection_kind != "generic":
+            parser.error("--adopt-object does not accept --projection-kind")
+        try:
+            result = adopt_authoring_object(
+                input_path,
+                args.adopt_object,
+                args.into,
+            )
+        except (OSError, ValueError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    if args.into is not None:
+        parser.error("--into requires --adopt-object")
+    if args.refresh_summary:
+        if args.output_dir is not None:
+            print(
+                "Error: --refresh-summary does not accept -o/--output-dir",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            summary_path = write_authoring_summary(input_path)
+        except (OSError, ValueError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps({
+            "authoring_dir": str(input_path),
+            "summary": str(summary_path),
+            "summary_bytes": summary_path.stat().st_size,
+        }, ensure_ascii=False, indent=2))
+        return 0
+    if args.output_dir is None:
+        parser.error("-o/--output-dir is required unless --refresh-summary is used")
+    output_dir = args.output_dir.resolve()
+
+    if output_dir.exists() and not output_dir.is_dir():
+        print(f"Error: output path is not a directory: {output_dir}", file=sys.stderr)
+        return 1
+    if input_path.is_dir() and _is_within(output_dir, input_path):
+        print("Error: output directory must not be inside the input directory", file=sys.stderr)
+        return 1
+
+    try:
+        mapping = _source_mapping(input_path, output_dir)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    same_file = [source for source, target in mapping if source.resolve() == target.resolve()]
+    if same_file:

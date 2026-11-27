@@ -1,0 +1,110 @@
+            "Error: templates/source_themes.json is allowed only for a "
+            "structured mirror contract",
+            file=sys.stderr,
+        )
+        return 1
+    if mirror_source_themes:
+        try:
+            source_theme_xml_by_master = load_template_source_themes(
+                project_path / "templates"
+            )
+        except TemplateStructureError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+    if args.image_max_dimension < 1:
+        print("Error: --image-max-dimension must be >= 1", file=sys.stderr)
+        return 1
+    if args.image_scale < 1:
+        print("Error: --image-scale must be >= 1", file=sys.stderr)
+        return 1
+    if not 1 <= args.image_quality <= 100:
+        print("Error: --image-quality must be between 1 and 100", file=sys.stderr)
+        return 1
+
+    if args.roundtrip:
+        project_name = project_path.resolve().name
+    else:
+        try:
+            project_info = get_project_info(str(project_path))
+            project_name = project_info.get('name', project_path.name)
+        except Exception:
+            project_name = project_path.name
+
+    canvas_format = args.format
+    expected_viewbox = (
+        None
+        if lockless_export
+        else _declared_canvas_viewbox(project_path)
+    )
+    if expected_viewbox is None and not lockless_export:
+        print(
+            "Error: spec_lock.md must contain canvas.viewBox for release export",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Native DrawingML is the only PPTX product. ``svg_output/`` is the default;
+    # ``-s`` selects another project-relative SVG directory.
+    native_source = args.source or 'output'
+    native_files, native_source_dir = find_svg_files(
+        project_path,
+        native_source,
+        allow_fallback=False,
+    )
+    if args.roundtrip:
+        native_files = [
+            path
+            for path in native_files
+            if re.fullmatch(r'slide_\d+\.svg', path.name)
+        ]
+    if not native_files:
+        if args.quick_generate:
+            print(
+                "Error: No SVG files found for --quick-generate in: "
+                f"{project_path / 'svg_output'}",
+                file=sys.stderr,
+            )
+        elif compatibility_export and args.source is None:
+            print(
+                "Error: No SVG files found for dangerous compatibility export in: "
+                f"{project_path / 'svg_output'}",
+                file=sys.stderr,
+            )
+        elif args.source is not None:
+            requested_dir = project_path / native_source_dir
+            print(
+                "Error: No SVG files found in explicitly requested source: "
+                f"{requested_dir}",
+                file=sys.stderr,
+            )
+        else:
+            print("Error: No SVG files found", file=sys.stderr)
+        return 1
+
+    quick_template_specs = None
+    if args.quick_generate:
+        try:
+            quick_template_specs = parse_optional_layout_slides(native_files)
+        except TemplateStructureError as exc:
+            print(
+                "Error: Quick Generate SVG structure inference failed: "
+                f"{exc}",
+                file=sys.stderr,
+            )
+            return 1
+        pptx_structure = (
+            'structured' if quick_template_specs is not None else 'flat'
+        )
+        print(
+            "  Quick PPTX structure: "
+            f"{pptx_structure} (inferred from {len(native_files)} SVG page(s))"
+        )
+        if primary_language is not None and theme_font_spec is None:
+            # A lockless roster that declares its language still gets theme
+            # fonts (and their script slots) from the faces its pages use.
+            theme_font_spec = load_theme_font_spec_from_pages(project_path, primary_language)
+        if quick_template_specs is not None:
+            try:
+                (
+                    master_text_style_spec,
+                    quick_title_px,

@@ -1,0 +1,118 @@
+            continue
+
+        token_end = index + 1
+        if not _is_unspaced_character(character):
+            while token_end < len(characters):
+                following = characters[token_end]
+                if (
+                    not following.isalnum()
+                    or _is_unspaced_character(following)
+                ):
+                    break
+                token_end += 1
+
+        start = _seconds_to_ticks(starts[index], field="start time")
+        end = _seconds_to_ticks(ends[token_end - 1], field="end time")
+        if start < 0 or end <= start:
+            raise RuntimeError(
+                "ElevenLabs alignment contains an invalid character interval"
+            )
+        if boundaries and start < boundaries[-1]["offset"]:
+            raise RuntimeError(
+                "ElevenLabs alignment is not in chronological order"
+            )
+        boundaries.append({
+            "text": "".join(characters[index:token_end]),
+            "offset": start,
+            "duration": end - start,
+        })
+        index = token_end
+
+    if not boundaries:
+        raise RuntimeError("ElevenLabs alignment contains no timed words")
+    return boundaries
+
+
+def generate(
+    text: str,
+    output_path: Path,
+    *,
+    api_key: str,
+    voice_id: str,
+    model: str,
+    output_format: str,
+    stability: float | None,
+    similarity_boost: float | None,
+    style: float | None,
+    speed: float | None,
+    speaker_boost: bool | None,
+    subtitle_path: Path | None = None,
+    subtitle_max_chars: int = DEFAULT_SUBTITLE_MAX_CHARS,
+) -> None:
+    payload: dict[str, object] = {
+        "text": text,
+        "model_id": model,
+    }
+
+    voice_settings: dict[str, object] = {}
+    if stability is not None:
+        voice_settings["stability"] = stability
+    if similarity_boost is not None:
+        voice_settings["similarity_boost"] = similarity_boost
+    if style is not None:
+        voice_settings["style"] = style
+    if speed is not None:
+        voice_settings["speed"] = speed
+    if speaker_boost is not None:
+        voice_settings["use_speaker_boost"] = speaker_boost
+    if voice_settings:
+        payload["voice_settings"] = voice_settings
+
+    query = urlencode({"output_format": output_format})
+    suffix = "/with-timestamps" if subtitle_path is not None else ""
+    url = (
+        f"{API_BASE}/text-to-speech/{quote(voice_id, safe='')}{suffix}?{query}"
+    )
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = request.Request(
+        url,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "xi-api-key": api_key,
+        },
+        method="POST",
+    )
+    try:
+        with request.urlopen(req, timeout=120) as response:
+            response_data = response.read()
+    except error.HTTPError as exc:
+        raise RuntimeError(_read_http_error(exc)) from exc
+    except error.URLError as exc:
+        raise RuntimeError(f"ElevenLabs request failed: {exc.reason}") from exc
+
+    if subtitle_path is None:
+        publish_audio_bytes(response_data, output_path)
+        return
+
+    try:
+        data = json.loads(response_data.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            "ElevenLabs timing response is not valid UTF-8 JSON"
+        ) from exc
+    encoded_audio = data.get("audio_base64")
+    if not isinstance(encoded_audio, str) or not encoded_audio:
+        raise RuntimeError("ElevenLabs timing response contains no audio")
+    try:
+        audio = base64.b64decode(encoded_audio, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise RuntimeError(
+            "ElevenLabs timing response audio is not valid base64"
+        ) from exc
+    subtitle = format_word_timed_srt(
+        text,
+        _word_boundaries(text, data.get("alignment")),
+        subtitle_max_chars,
+        provider_label="ElevenLabs",
+    )

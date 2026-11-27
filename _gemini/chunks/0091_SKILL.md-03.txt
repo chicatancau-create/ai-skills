@@ -1,0 +1,58 @@
+多浏览器候选轮转时，每个候选在自己的 finally 里清，别留到最外层。残留排查(本机踩过一次 22 进程 / 796MB)：只按**命令行里含自己 profile 前缀**筛目标，逐条判僵尸——父链已 GONE + CDP 端口无人连 + 命令行是 `--headless=new --user-data-dir=...Temp\...` 三条都满足才杀。**别用一条 PowerShell 查询的自匹配结果当作残留证据**(它会把自己列进去)。
+
+不要顺手杀：`127.0.0.1:4173`、`127.0.0.1:5173`，以及父进程是 `Qoder.exe` 的 node/bash。杀完后 Alt+Tab 里的全白卡片是 explorer 缓存幽灵，不代表进程还在。
+
+## 症状对照表
+
+| 症状 | 根因 | 处置 |
+|---|---|---|
+| 用户说「我的页面被你跳走了」 | 探了固定端口, 连上 Qoder 内置隐藏 Chrome(9333) | 端口只从自有 profile 的 `DevToolsActivePort` 读 |
+| `node xxx.js` 不返回, 被超时杀掉 | ws + http server 挂着事件循环 | 清理后显式 `process.exit()` |
+| Chrome 下 SW target 永不出现 | 稳定版 Chrome 137+ 忽略 `--load-extension` | Edge 优先；以 SW target 出现判加载成功, 否则换候选 |
+| 390px 截图右侧元素被切 | `--window-size=390,844` 实际给 ~496px 桌面渲染再裁切 | 用 `DeviceMetricsOverride`；或含 390px iframe 的工装页, 并回读 `innerWidth` 自证 |
+| 截图与用户看到的色调不一致 | 本机系统主题为深色, 浏览器默认报 dark | `Emulation.setEmulatedMedia` 钉成 light |
+| 刚导航就报读不到 `documentElement` | 提交瞬间文档尚未替换 | 取不到返回哨兵值继续轮询, 别当成断言失败 |
+| 断言两次都红, 代码看着没问题 | 按网络包边界判断了内容批次 | 先确认拆包粒度(实测 1800 字符/包), 再定断言粒度 |
+| evaluate 返回 undefined 被当成 0 | 页面抛异常被吞 | 检查 `exceptionDetails` 并注册 `Runtime.exceptionThrown` |
+
+## 报告口径
+
+交付时逐项写明：
+
+- 浏览器与版本(打印 `/json/version` 的 `Browser`)、被测 URL、断言总数与通过数、截图落盘目录。
+- mock 拦截请求数；**明确列出被 mock 掉的外部依赖**，不许把 mock 跑绿说成端到端已验证。
+- 做过回滚验证的断言才算「有牙齿」；没做的标注出来。
+- 临时 profile 与进程已清理；未清理的说清残留位置。
+- 结论只写量到的。本机特定事实带日期(如 9333 归属、Chrome 153 忽略 `--load-extension` 均记于 2026-09-20)，环境会变，引用旧事实前先重新确认。
+
+## 零 CDP 快速回路（实拍 + 注入探针取数）
+
+> 本节自 `verify-page-in-headless-edge` 合并而来(合并与删除发生于 2026-09-25，节内实测数据记于 2026-09-24)。全程只有 `msedge --headless` 的三次调用 + 一段注入脚本：不写 CDP 客户端、不起静态服务、不开调试端口，因此不可能连到用户的浏览器。
+
+### 本回路的五条硬规则(实测于 Edge 153 / 2026-09-24)
+
+1. **输出路径必须绝对，判据是文件而不是退出码。** 相对路径的实测后果：
+
+   ```
+   [ERROR:components\headless\command_handler\headless_command_handler.cc:266] Failed to write file desk.png: 拒绝访问。 (0x5)
+   ```
+
+   命令**返回码仍是 0**，`ls *.png` 只会告诉你没有这个文件。`--screenshot`、`--user-data-dir`、以及 `--dump-dom` 的重定向目标全部写绝对路径；判据永远是 `os.path.exists(p) and os.path.getsize(p) > 0`。
+   配套坑：Git Bash 的 `/tmp/xxx` 与 Windows 原生 `python` 不是一套路径，会出现 `FileNotFoundError: '/tmp/kw_dump.html'`(bash 刚写完它)。运行目录用 `C:\Users\<user>\AppData\Local\Temp\<run>\`，一次一个新目录，别复用。
+
+2. **`--dump-dom` 在 load 那一刻就序列化。** 不带 `--virtual-time-budget` 时探针实测在 `T=13ms` 出结果——异步回调、`setTimeout` 兜底、动效结束后的状态**全都读不到**；加了 budget 才读到 `T=2014ms`。所以取数必须放在延时之后，并且**每个读数自报 `T=` 和一个 rAF 帧计数**。探针节点抽出来是空串 = 你的读取时刻还没到，不是「页面没问题」。
+
+3. **读数只走带唯一 id 的 PROBE 节点，按 id 正则取回。** 直接对 dump grep 关键字是错的：实测一份 dump 里含 `aria-invalid` 的有 7 行，**第一行是探针自己写的 `querySelectorAll('[aria-invalid="true"]')` 源码**，与 DOM 里真实的 `aria-invalid="true"` 属性长得一样。固定做法：页面里放 `<div id="PROBE" hidden></div>`，探针把 `key=value | key=value` 写进它的 `textContent`，取回时按 id 正则切出来再 `html.unescape`(dump 里 `->` 会变成 `-&gt;`)。
+
+4. **入场动画必须 fail-open，且回显选择器的特异性要够。** CSS **默认必须可见**，只有加上 `.js` 网关后才隐藏：`.reveal{opacity:1}` + `.js .reveal{opacity:0}` + 一条能把显示态赢回来的规则；兜底定时器要注册在**任何可能抛错的代码之前**。
+   第三条**不能写成裸单类**。`.revealed{opacity:1}` / `.force{opacity:1}` 的特异性只有 (0,1,0)，干不过 `.js .reveal` 的 (0,2,0) —— 照这么写等于网关没生效，一个完全正常的页面会被判成「永久不可见」。实测(同一份 fail-open 页、已中和 transition/animation)：
+
+   | 回显选择器写法 | 类加在哪 | `INVISIBLE` |
+   |---|---|---|
+   | `.force{opacity:1}` 裸单类 | `html` | **3/3** 假报警 |
+   | `.force .reveal{opacity:1}` 后代 | `html` | 0/3 正确 |
+   | `.reveal.revealed{opacity:1}` 复合 | 每个 `.reveal` 元素 | 0/3 正确 |
+
+   即：回显选择器的特异性必须 **≥** `.js .reveal`，且加类的位置要和选择器对得上。另外 `web-taste/references/motion-recipes.md` 第 2 节 Entrance Reveal 是裸写法 `.reveal{opacity:0;transform:translateY(20px)}`，无 no-JS 守卫、无兜底 —— 绑定该设计系统时必须补上 fail-open。
+
+5. **实拍与取数共用同一组 flag，并钉死 `--force-device-scale-factor=1`。** 截图像素宽 = window-size × devicePixelRatio。实测：传 `=2` 会把 500×800 的窗口拍成 **1000×1600** —— 这个参数是真生效的，别假设命令行会忽略它。本机默认 DPR=1，所以**不传与传 `=1` 的截图逐字节相同**(两张 500×800 PNG md5 均为 `ea29f4eb…`)；这条 no-op 只在本机当前缩放下成立。

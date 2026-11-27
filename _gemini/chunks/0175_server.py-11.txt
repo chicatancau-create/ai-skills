@@ -1,0 +1,125 @@
+    """Open the browser after Flask has had a moment to bind its socket."""
+    def _open() -> None:
+        time.sleep(delay)
+        open_preview_browser(url, logger=logger)
+
+    threading.Thread(target=_open, daemon=True).start()
+
+
+def _wait_for_result(
+    result_file: Path,
+    proc: subprocess.Popen,
+    timeout: int,
+    expected_stage: str,
+) -> int:
+    """Wait until this launch writes a fresh result file or the server exits."""
+    logger.info('waiting for browser confirmation...')
+    deadline = None if timeout <= 0 else time.time() + timeout
+    while True:
+        status = _wait_result_status(result_file, expected_stage)
+        if status is not None:
+            return status
+
+        returncode = proc.poll()
+        if returncode is not None:
+            logger.error('confirm UI exited before a fresh result was written')
+            return returncode or 1
+
+        if deadline is not None and time.time() >= deadline:
+            logger.error(
+                'timed out waiting for browser confirmation — the page is still '
+                'open; re-check %s before falling back to chat', result_file,
+            )
+            return 124
+
+        time.sleep(0.5)
+
+
+def _result_stage(result_file: Path) -> Optional[str]:
+    """Return the current result stage (Stage 1 or final), or None."""
+    if not result_file.is_file():
+        return None
+    try:
+        data = _read_result_object(result_file)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    stage = _stage_key(data.get('stage'))
+    status = data.get('status')
+    if stage == 'stage1' and status == 'stage1-confirmed':
+        return stage
+    if stage == 'final' and status == 'confirmed':
+        return stage
+    return None
+
+
+def _stage_key(value: object) -> Optional[str]:
+    """Normalize the two current recommendation/result stage names."""
+    if value is None:
+        return None
+    raw = str(value).strip().lower()
+    if raw == 'stage1':
+        return 'stage1'
+    if raw == 'stage2':
+        return 'stage2'
+    if raw == 'final':
+        return 'final'
+    return None
+
+
+def _recommendation_stage(data: dict) -> int:
+    """Return a recommendation payload's declared stage."""
+    stage = _stage_key(data.get('stage'))
+    if stage == 'stage1':
+        return 1
+    if stage == 'stage2':
+        return 2
+    return 0
+
+
+def _stage_name(number: Optional[int]) -> Optional[str]:
+    """Return the canonical stage key for a stage number."""
+    if number == 1:
+        return 'stage1'
+    if number == 2:
+        return 'stage2'
+    return None
+
+
+def _result_stage_number(stage: Optional[str]) -> int:
+    """Return result progression: stage1=1, final=2."""
+    if stage == 'stage1':
+        return 1
+    if stage == 'final':
+        return 2
+    return 0
+
+
+def _expected_recommendation_stage(result_stage: Optional[str]) -> int:
+    """Return the recommendation stage that follows the current result."""
+    if result_stage in {'stage1', 'final'}:
+        return 2
+    return 1
+
+
+def _stage_recommendations_path(confirm_dir: Path, stage_number: int) -> Path:
+    """Return the stage-specific recommendation path for one handoff."""
+    return confirm_dir / RECOMMENDATION_STAGE_NAMES[stage_number]
+
+
+def _stage1_sha256(confirm_dir: Path) -> str:
+    """Hash the complete authored recommendation, independent of timestamps."""
+    return _json_sha256(_read_json_object(confirm_dir / RECOMMENDATION_STAGE_NAMES[1]))
+
+
+def _fresh_template_restart(confirm_dir: Path) -> bool:
+    """A changed Stage-1 recommendation invalidates every prior receipt."""
+    try:
+        result = _read_result_object(confirm_dir / RESULT_NAME)
+        return result.get('stage1_sha256') != _stage1_sha256(confirm_dir)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return True
+
+
+def _active_recommendations_path(confirm_dir: Path) -> Path:
+    """Resolve the recommendation file for the current two-stage session."""
+    if _fresh_template_restart(confirm_dir):

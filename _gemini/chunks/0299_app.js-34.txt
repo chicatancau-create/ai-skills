@@ -1,0 +1,82 @@
+            "font-family": "fontFamily",
+            "font-weight": "fontWeight",
+            "text-anchor": "textAnchor"
+        };
+        return normalizeSvgLengthValue(key, (map[key] && style[map[key]]) || "");
+    }
+
+    function renderBatchControl(spec) {
+        var placeholder = spec.mixed ? t("multi_mixed") : "";
+        if (spec.type === "color") {
+            return '<input type="color" class="prop-edit prop-edit-batch-color" data-key="' +
+                escapeHtml(spec.key) + '" value="' + normalizeHexForPicker(spec.value) + '">' +
+                '<input type="text" class="prop-edit prop-edit-batch" data-key="' +
+                escapeHtml(spec.key) + '" placeholder="' + escapeHtml(placeholder) +
+                '" value="' + escapeHtml(spec.mixed ? "" : spec.value) + '">';
+        }
+        if (spec.type === "number") {
+            return '<input type="number" class="prop-edit prop-edit-batch" data-key="' +
+                escapeHtml(spec.key) + '" min="' + escapeHtml(spec.min || "") +
+                '" max="' + escapeHtml(spec.max || "") + '" step="' +
+                escapeHtml(spec.step || "1") + '" placeholder="' + escapeHtml(placeholder) +
+                '" value="' + escapeHtml(spec.mixed ? "" : spec.value) + '">';
+        }
+        if (spec.type === "select") {
+            var html = '<select class="prop-edit prop-edit-batch" data-key="' + escapeHtml(spec.key) + '">';
+            spec.options.forEach(function (opt) {
+                var label = opt || placeholder || "";
+                var selected = !spec.mixed && spec.value === opt ? " selected" : "";
+                html += '<option value="' + escapeHtml(opt) + '"' + selected + '>' +
+                    escapeHtml(label) + '</option>';
+            });
+            html += '</select>';
+            return html;
+        }
+        return '<input type="text" class="prop-edit prop-edit-batch" data-key="' +
+            escapeHtml(spec.key) + '" placeholder="' + escapeHtml(placeholder) +
+            '" value="' + escapeHtml(spec.mixed ? "" : spec.value) + '">';
+    }
+
+    function attachMultiSelectionEditors(ids) {
+        var panel = elementPropsEl;
+        var moveEls = topLevelSelectedElements(ids);
+        if (moveEls.length === 0) return;
+
+        var readGeo = function (k) {
+            var inp = panel.querySelector('.prop-edit-multi-geo[data-geo="' + k + '"]');
+            return inp ? parseFloat(inp.value) : NaN;
+        };
+        var commitMove = function () {
+            var rb;
+            try { rb = computeElementsBox(moveEls); } catch (e) { return; }
+            var nx = readGeo("x"), ny = readGeo("y");
+            if (isNaN(nx) || isNaN(ny)) return;
+            var dx = nx - rb.x, dy = ny - rb.y;
+            if (Math.abs(dx) < 1e-6 && Math.abs(dy) < 1e-6) return;
+
+            var jobs = [];
+            moveEls.forEach(function (el) {
+                var attrs;
+                try { attrs = attrsForMove(el, dx, dy); } catch (e) { attrs = null; }
+                if (!attrs) return;
+                var payload = payloadForMovedElement(el, attrs);
+                jobs.push(stageEditRequest(el.id, payload).then(function () {
+                    if (payload.promote_tspan) promoteTspanDom(el, payload.promote_tspan);
+                    else {
+                        applyElementAttrs(el, attrs);
+                        markCommittedAttrs(el, attrs);
+                    }
+                }));
+            });
+
+            Promise.all(jobs)
+                .then(function () { updateSelectionPanel(); })
+                .catch(function (err) { showError(t("err_edit") + err.message); });
+        };
+
+        panel.querySelectorAll(".prop-edit-multi-geo").forEach(function (inp) {
+            inp.addEventListener("change", commitMove);
+        });
+
+        panel.querySelectorAll(".prop-edit-batch-color").forEach(function (picker) {
+            var key = picker.getAttribute("data-key");

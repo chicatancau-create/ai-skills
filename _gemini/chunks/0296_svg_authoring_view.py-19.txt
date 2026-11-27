@@ -1,0 +1,127 @@
+def _append_adopted_definitions(
+    target_root: ET.Element,
+    definitions: list[ET.Element],
+) -> None:
+    if not definitions:
+        return
+    target_defs = next(
+        (
+            child
+            for child in target_root
+            if _local_name(child.tag) == "defs"
+        ),
+        None,
+    )
+    if target_defs is None:
+        target_defs = ET.Element(f"{{{SVG_NS}}}defs")
+        target_root.insert(0, target_defs)
+    target_defs.extend(definitions)
+
+
+def _authoring_source_document_ids(
+    authoring_dir: Path,
+    manifest: dict[str, object],
+    authoring_name: str,
+) -> set[str]:
+    """Return ids hidden behind source refs in one authoring document."""
+    documents = manifest.get("documents")
+    if not isinstance(documents, list):
+        return set()
+    document = next(
+        (
+            item
+            for item in documents
+            if isinstance(item, dict)
+            and item.get("authoring") == authoring_name
+        ),
+        None,
+    )
+    source_root_value = manifest.get("source_root")
+    source_name = document.get("source") if document is not None else None
+    if not isinstance(source_root_value, str) or not isinstance(source_name, str):
+        return set()
+    source_dir = (authoring_dir / source_root_value).resolve()
+    source_path = _authoring_page_path(
+        source_dir,
+        source_name,
+        label="--adopt-object target source",
+    )
+    source_root = _parse_authoring_svg(source_path)
+    return {
+        item_id
+        for item in source_root.iter()
+        if (item_id := item.get("id"))
+    }
+
+
+def _strip_adopted_transport(element: ET.Element) -> tuple[set[str], int]:
+    stripped: set[str] = set()
+    removed_metadata = 0
+
+    def visit(parent: ET.Element) -> None:
+        nonlocal removed_metadata
+        for child in list(parent):
+            original_part = child.get("data-pptx-part")
+            has_transport = any(
+                name in ADOPT_OBJECT_STRIPPED_ATTRIBUTES
+                for name in child.attrib
+            )
+            is_json_metadata = (
+                _local_name(child.tag) == "metadata"
+                and child.get("type") == "application/json"
+            )
+            if (
+                _local_name(child.tag) == "metadata"
+                and not is_json_metadata
+                and (original_part is not None or has_transport)
+            ):
+                stripped.update(
+                    name
+                    for name in child.attrib
+                    if name in ADOPT_OBJECT_STRIPPED_ATTRIBUTES
+                )
+                parent.remove(child)
+                removed_metadata += 1
+                continue
+            visit(child)
+
+    visit(element)
+    for item in element.iter():
+        for name in list(item.attrib):
+            if name not in ADOPT_OBJECT_STRIPPED_ATTRIBUTES:
+                continue
+            stripped.add(name)
+            item.attrib.pop(name, None)
+        if item.get(SEMANTIC_OBJECT_ATTRIBUTE) == SEMANTIC_SHAPE_KIND:
+            stripped.add(SEMANTIC_OBJECT_ATTRIBUTE)
+            item.attrib.pop(SEMANTIC_OBJECT_ATTRIBUTE, None)
+    return stripped, removed_metadata
+
+
+def _write_svg_atomically(path: Path, root: ET.Element) -> None:
+    payload = _serialize_svg(root)
+    if not payload.endswith(b"\n"):
+        payload += b"\n"
+    with tempfile.NamedTemporaryFile(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+        delete=False,
+    ) as handle:
+        temporary_path = Path(handle.name)
+        handle.write(payload)
+    try:
+        temporary_path.chmod(path.stat().st_mode)
+        temporary_path.replace(path)
+    except OSError:
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+
+def adopt_authoring_object(
+    authoring_dir: Path,
+    source_spec: str,
+    target_name: str,
+) -> dict[str, object]:
+    """Copy one cross-page object as authored SVG with no source identity."""
+    authoring_dir = authoring_dir.resolve()

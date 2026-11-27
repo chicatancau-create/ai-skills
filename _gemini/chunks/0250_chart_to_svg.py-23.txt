@@ -1,0 +1,102 @@
+    """Recognize exporter-canonical or basic Office rich title structure."""
+    if title is None:
+        return None
+    title_child_names = [_local_name(child.tag) for child in title]
+    if title_child_names not in (["tx", "layout"], ["tx", "layout", "overlay"]):
+        return None
+    overlay = title.find("c:overlay", C_NS)
+    if overlay is not None and (
+        set(overlay.attrib) != {"val"}
+        or list(overlay)
+        or ooxml_bool(overlay.attrib.get("val"), True)
+    ):
+        return None
+    tx = title.find("c:tx", C_NS)
+    layout = title.find("c:layout", C_NS)
+    rich = title.find("c:tx/c:rich", C_NS)
+    if (
+        tx is None
+        or tx.attrib
+        or [_local_name(child.tag) for child in tx] != ["rich"]
+        or layout is None
+        or layout.attrib
+        or list(layout)
+        or rich is None
+        or rich.attrib
+    ):
+        return None
+    children = list(rich)
+    child_names = [_local_name(child.tag) for child in children]
+    if child_names not in (
+        ["bodyPr", "lstStyle", "p"],
+        ["bodyPr", "lstStyle", "p", "p"],
+    ):
+        return None
+    if children[0].attrib or list(children[0]) or children[1].attrib or list(children[1]):
+        return None
+    entries = [_canonical_title_paragraph(paragraph) for paragraph in children[2:]]
+    if any(entry is None for entry in entries):
+        return None
+    return [entry for entry in entries if entry is not None]
+
+
+def _data_label_text_style(tx_pr: ET.Element) -> dict[str, Any]:
+    """Extract the subset of label text properties emitted by this exporter."""
+    body_pr = tx_pr.find("a:bodyPr", C_NS)
+    list_style = tx_pr.find("a:lstStyle", C_NS)
+    if body_pr is None or body_pr.attrib or list(body_pr):
+        raise _UnsupportedChart("unsupported-chart-data-labels")
+    if list_style is None or list_style.attrib or list(list_style):
+        raise _UnsupportedChart("unsupported-chart-data-labels")
+    paragraphs = tx_pr.findall("a:p", C_NS)
+    if len(paragraphs) != 1:
+        raise _UnsupportedChart("unsupported-chart-data-labels")
+    paragraph = paragraphs[0]
+    if any(
+        child.tag.rsplit("}", 1)[-1] not in {"pPr", "endParaRPr"}
+        for child in paragraph
+    ):
+        raise _UnsupportedChart("unsupported-chart-data-labels")
+    p_pr = paragraph.find("a:pPr", C_NS)
+    if p_pr is None or p_pr.attrib:
+        raise _UnsupportedChart("unsupported-chart-data-labels")
+    if any(
+        child.tag.rsplit("}", 1)[-1] != "defRPr"
+        for child in p_pr
+    ):
+        raise _UnsupportedChart("unsupported-chart-data-labels")
+    end_r_pr = paragraph.find("a:endParaRPr", C_NS)
+    if end_r_pr is not None and (
+        any(name not in {"lang", "altLang"} for name in end_r_pr.attrib)
+        or list(end_r_pr)
+    ):
+        raise _UnsupportedChart("unsupported-chart-data-labels")
+
+    r_pr = p_pr.find("a:defRPr", C_NS)
+    if r_pr is None:
+        return {}
+    allowed_attrs = {"sz", "b"}
+    if any(name not in allowed_attrs for name in r_pr.attrib):
+        raise _UnsupportedChart("unsupported-chart-data-labels")
+    allowed_children = {"solidFill", "latin", "ea"}
+    if any(
+        child.tag.rsplit("}", 1)[-1] not in allowed_children
+        for child in r_pr
+    ):
+        raise _UnsupportedChart("unsupported-chart-data-labels")
+
+    style: dict[str, Any] = {}
+    raw_size = r_pr.attrib.get("sz")
+    if raw_size is not None:
+        try:
+            size_px = float(raw_size) / 75.0
+        except ValueError:
+            raise _UnsupportedChart("unsupported-chart-data-labels") from None
+        if size_px <= 0 or not math.isfinite(size_px):
+            raise _UnsupportedChart("unsupported-chart-data-labels")
+        style["font_size"] = int(size_px) if size_px.is_integer() else round(size_px, 3)
+    if r_pr.attrib.get("b") is not None:
+        style["bold"] = ooxml_bool(r_pr.attrib.get("b"), True)
+
+    solid_fill = r_pr.find("a:solidFill", C_NS)
+    if solid_fill is not None:

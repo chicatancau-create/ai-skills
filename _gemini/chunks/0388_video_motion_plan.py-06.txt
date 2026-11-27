@@ -1,0 +1,119 @@
+            "semantic_direction": True,
+            "timing_anchor": True,
+            "source_effect": True,
+        },
+        "optimizer_scope": [
+            "easing",
+            "travel_distance",
+            "opacity",
+            "scale",
+            "mask_feather",
+            "blur",
+            "motion_blur",
+            "overshoot",
+        ],
+        "slide_count": len(slides),
+        "object_count": total_objects,
+        "enhanced_object_count": enhanced_objects,
+        "slides": slides,
+    }
+
+
+def write_video_motion_plan(
+    trace_path: str | Path,
+    output_path: str | Path,
+    *,
+    style: str = "adaptive",
+    default_slide_duration: float = 5.0,
+    force: bool = False,
+) -> Path:
+    """Build and write one video motion plan."""
+    output = Path(output_path)
+    if output.exists() and not force:
+        raise FileExistsError(
+            f"output already exists: {output}; pass --force to overwrite"
+        )
+    plan = build_video_motion_plan(
+        trace_path,
+        style=style,
+        default_slide_duration=default_slide_duration,
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps(plan, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return output.resolve()
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Derive an effect-aware video motion plan from a resolved "
+            "SVG-to-PPTX conversion trace."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "trace",
+        help="Path to validation/<output_stem>.trace.json",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="Output JSON path; default: <trace>.video-motion.json",
+    )
+    parser.add_argument(
+        "--style",
+        choices=VIDEO_MOTION_STYLES,
+        default="adaptive",
+        help="Video-only enhancement intensity; default: adaptive",
+    )
+    parser.add_argument(
+        "--default-slide-duration",
+        type=float,
+        default=5.0,
+        help="Fallback seconds for slides without recorded advance timing",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite an existing output plan",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    trace_path = Path(args.trace)
+    output_path = (
+        Path(args.output)
+        if args.output
+        else trace_path.with_suffix(".video-motion.json")
+    )
+    try:
+        written = write_video_motion_plan(
+            trace_path,
+            output_path,
+            style=args.style,
+            default_slide_duration=args.default_slide_duration,
+            force=args.force,
+        )
+    except (FileExistsError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    plan = _read_json_object(written)
+    print(written)
+    print(
+        f"Slides: {plan['slide_count']}; objects: {plan['object_count']}; "
+        f"video-enhanced: {plan['enhanced_object_count']}",
+        file=sys.stderr,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

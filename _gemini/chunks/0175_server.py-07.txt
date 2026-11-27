@@ -1,0 +1,85 @@
+                f'{TEMPLATE_SELECTION_NAME} selections[{index}] must be an object'
+            )
+        source = selection.get('source')
+        if source not in {'library', 'explicit'}:
+            raise ValueError(
+                f'{TEMPLATE_SELECTION_NAME} selections[{index}] has invalid source'
+            )
+        kind = selection.get('kind')
+        if kind not in _TEMPLATE_LIBRARY_CONFIG:
+            raise ValueError(
+                f'{TEMPLATE_SELECTION_NAME} selections[{index}] has invalid kind'
+            )
+        expected_keys = {'source', 'kind', 'workspace_root'}
+        if source == 'library':
+            expected_keys.add('id')
+            if not _safe_template_id(selection.get('id')):
+                raise ValueError(
+                    f'{TEMPLATE_SELECTION_NAME} selections[{index}] has invalid id'
+                )
+        if kind in seen_kinds:
+            raise ValueError(
+                'template selection allows at most one workspace for kind '
+                f'{kind!r}'
+            )
+        seen_kinds.add(kind)
+        if set(selection) != expected_keys:
+            raise ValueError(
+                f'{TEMPLATE_SELECTION_NAME} selections[{index}] has invalid fields'
+            )
+        workspace_root = selection.get('workspace_root')
+        if not isinstance(workspace_root, str) or not workspace_root:
+            raise ValueError(
+                f'{TEMPLATE_SELECTION_NAME} selections[{index}] '
+                'workspace_root must be a non-empty string'
+            )
+        root = Path(workspace_root)
+        if not root.is_absolute() or str(root.resolve()) != workspace_root:
+            raise ValueError(
+                f'{TEMPLATE_SELECTION_NAME} selections[{index}] '
+                'workspace_root must be a canonical absolute path'
+            )
+        if (workspace_root, kind) in seen_root_kinds:
+            raise ValueError(
+                f'{TEMPLATE_SELECTION_NAME} contains duplicate workspace root '
+                f'for kind {kind!r}: {workspace_root}'
+            )
+        seen_root_kinds.add((workspace_root, kind))
+    snapshots = data.get('root_snapshots')
+    if not isinstance(snapshots, list):
+        raise ValueError(f'{TEMPLATE_SELECTION_NAME} requires root_snapshots; confirm Stage 1 again')
+    snapshot_selections = []
+    try:
+        for root in snapshots:
+            if sorted(spec['kind'] for spec in root['specs']) != root['kinds']:
+                raise ValueError('snapshot kinds do not match specs')
+            if not isinstance(root['files'], dict) or any(spec['path'] not in root['files'] for spec in root['specs']):
+                raise ValueError('snapshot is missing spec fingerprints')
+            for spec in root['specs']:
+                item = {'source': root['source'], 'kind': spec['kind'], 'workspace_root': root['workspace_root']}
+                if root['source'] == 'library':
+                    item['id'] = spec['id']
+                snapshot_selections.append(item)
+    except (KeyError, TypeError) as exc:
+        raise ValueError(f'{TEMPLATE_SELECTION_NAME} has invalid root_snapshots') from exc
+    if sorted(map(_json_sha256, snapshot_selections)) != sorted(map(_json_sha256, selections)):
+        raise ValueError(f'{TEMPLATE_SELECTION_NAME} root_snapshots do not match selections')
+    if not isinstance(data.get('confirmed_at'), str) or not data['confirmed_at']:
+        raise ValueError(
+            f'{TEMPLATE_SELECTION_NAME} confirmed_at must be a non-empty string'
+        )
+    expected_selection_sha256 = _template_selection_sha256(
+        mode,
+        selections,
+        options_sha256,
+        snapshots,
+    )
+    if selection_sha256 != expected_selection_sha256:
+        raise ValueError(f'{TEMPLATE_SELECTION_NAME} selection_sha256 does not match')
+
+
+def _validate_explicit_root_closure(
+    selections: list[dict],
+    candidates: dict[str, dict],
+) -> None:
+    """Require every selected explicit root to contribute all exposed kinds."""

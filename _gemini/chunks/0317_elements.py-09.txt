@@ -1,0 +1,98 @@
+    if raw_frame is not None:
+        parts = re.split(r'[\s,]+', raw_frame.strip())
+        if len(parts) != 4:
+            raise ValueError(
+                'data-pptx-frame must contain exactly four numbers: x y width height'
+            )
+        try:
+            frame = tuple(float(part) for part in parts)
+        except ValueError as exc:
+            raise ValueError(f'Invalid data-pptx-frame {raw_frame!r}') from exc
+        if not all(math.isfinite(value) for value in frame):
+            raise ValueError(f'data-pptx-frame must contain finite numbers, got {raw_frame!r}')
+        is_connector = (
+            elem.get('data-pptx-object') == 'connector'
+            or prst in CONNECTOR_PRESET_TYPES
+        )
+        if is_connector:
+            if frame[2] < 0 or frame[3] < 0 or (frame[2] == 0 and frame[3] == 0):
+                raise ValueError(
+                    'Connector data-pptx-frame dimensions must be non-negative '
+                    f'and not both zero, got {raw_frame!r}'
+                )
+        elif frame[2] <= 0 or frame[3] <= 0:
+            raise ValueError(
+                f'data-pptx-frame width and height must be positive, got {raw_frame!r}'
+            )
+        validate_ooxml_xfrm(
+            px_to_emu(frame[0]),
+            px_to_emu(frame[1]),
+            px_to_emu(frame[2]),
+            px_to_emu(frame[3]),
+        )
+
+    return prst, guides, frame
+
+
+def validate_preset_geometry_metadata(elem: ET.Element) -> list[str]:
+    """Return native shape metadata errors for authoring-time validation."""
+    errors: list[str] = []
+    try:
+        _parse_preset_geometry_metadata(elem)
+    except ValueError as exc:
+        errors.append(str(exc))
+    if elem.get('data-pptx-custgeom') is not None:
+        try:
+            _build_preserved_custom_geom(elem)
+        except ValueError as exc:
+            errors.append(str(exc))
+    if elem.get('data-pptx-shape-style') is not None:
+        try:
+            _decode_shape_style(elem)
+        except ValueError as exc:
+            errors.append(str(exc))
+    raw_shape_id = elem.get('data-pptx-shape-id')
+    if raw_shape_id is not None:
+        try:
+            shape_id = int(raw_shape_id)
+        except ValueError:
+            errors.append(f'Invalid data-pptx-shape-id {raw_shape_id!r}')
+        else:
+            if shape_id < 2 or shape_id > 0xFFFFFFFF:
+                errors.append(
+                    'data-pptx-shape-id must be between 2 and 4294967295'
+                )
+    scope = elem.get('data-pptx-shape-scope')
+    if scope is not None and re.fullmatch(r'[A-Za-z0-9_.-]{1,64}', scope) is None:
+        errors.append(f'Invalid data-pptx-shape-scope {scope!r}')
+    for endpoint in ('start', 'end'):
+        target = elem.get(f'data-pptx-{endpoint}-shape-id')
+        site = elem.get(f'data-pptx-{endpoint}-site')
+        if (target is None) != (site is None):
+            errors.append(
+                f'Connector {endpoint} endpoint requires both shape-id and site'
+            )
+        if target is not None:
+            try:
+                target_id = int(target)
+                site_id = int(site or '')
+            except ValueError:
+                errors.append(f'Invalid connector {endpoint} endpoint metadata')
+            else:
+                if target_id < 2 or target_id > 0xFFFFFFFF:
+                    errors.append(f'Connector {endpoint} shape-id is out of range')
+                if site_id < 0 or site_id > 0xFFFFFFFF:
+                    errors.append(f'Connector {endpoint} site is out of range')
+    return errors
+
+
+def complete_preset_adjustments(
+    prst: str,
+    guides: list[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    """Fill missing preset adjustments in the definition's native order."""
+    # PowerPoint repairs a preset whose avLst lists only some of the
+    # adjustments the preset defines, so emit the full set in the preset's own
+    # order with authored values overriding the normative defaults.
+    authored = dict(guides)
+    return [

@@ -1,0 +1,105 @@
+    try:
+        defaults, overrides = _package_content_types(ctx)
+        pending = [chart_part]
+        seen: set[str] = set()
+        parts: list[dict[str, str]] = []
+        while pending:
+            part_name = pending.pop()
+            if part_name in seen:
+                continue
+            if not part_name.startswith(
+                ("ppt/charts/", "ppt/embeddings/", "ppt/theme/")
+            ):
+                return None
+            payload = ctx.pkg.read_part_bytes(part_name)
+            if payload is None:
+                return None
+            seen.add(part_name)
+            content_type = overrides.get(part_name) or defaults.get(
+                posixpath.splitext(part_name)[1].lstrip(".").lower(),
+                "",
+            )
+            parts.append({
+                "content_type": content_type,
+                "encoding": "base64",
+                "name": part_name,
+                "payload": base64.b64encode(payload).decode("ascii"),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            })
+
+            rels_name = _package_rels_path(part_name)
+            rels_payload = ctx.pkg.read_part_bytes(rels_name)
+            if rels_payload is None:
+                continue
+            try:
+                rels_root = ET.fromstring(rels_payload)
+            except ET.ParseError:
+                return None
+            for relationship in rels_root.findall(
+                f"{{{NS['rel']}}}Relationship"
+            ):
+                if relationship.attrib.get("TargetMode") == "External":
+                    return None
+                target = relationship.attrib.get("Target")
+                if not target:
+                    return None
+                resolved = posixpath.normpath(
+                    posixpath.join(posixpath.dirname(part_name), target)
+                ).lstrip("/")
+                if resolved.startswith("../"):
+                    return None
+                pending.append(resolved)
+            parts.append({
+                "content_type": "",
+                "encoding": "base64",
+                "name": rels_name,
+                "payload": base64.b64encode(rels_payload).decode("ascii"),
+                "sha256": hashlib.sha256(rels_payload).hexdigest(),
+            })
+    except RuntimeError:
+        return None
+
+    frame = copy.deepcopy(node.xml)
+    nv_pr = frame.find("p:nvGraphicFramePr/p:nvPr", NS)
+    custom_data = nv_pr.find("p:custDataLst", NS) if nv_pr is not None else None
+    if custom_data is not None:
+        nv_pr.remove(custom_data)
+    relationship_attrs = [
+        (owner, name)
+        for owner in frame.iter()
+        for name in owner.attrib
+        if isinstance(name, str) and name.startswith(f"{{{NS['r']}}}")
+    ]
+    if len(relationship_attrs) != 1 or relationship_attrs[0][0].tag != f"{{{CHART_URI}}}chart":
+        return None
+    frame_payload = ET.tostring(frame, encoding="utf-8")
+    return {
+        "chart_part": chart_part,
+        "frame": {
+            "encoding": "base64",
+            "payload": base64.b64encode(frame_payload).decode("ascii"),
+            "sha256": hashlib.sha256(frame_payload).hexdigest(),
+        },
+        "parts": sorted(parts, key=lambda item: item["name"]),
+    }
+
+
+def _roundtrip_graphic_frame_metadata(
+    node: ShapeNode,
+    ctx: AssemblyContext,
+    visible_markup: str,
+    *,
+    top_level: bool,
+) -> tuple[str, list[str]]:
+    """Preserve one relationship-free native frame behind its SVG fallback."""
+    if not ctx.preserve_placeholder_inheritance or not top_level:
+        return "", []
+    native_frame = copy.deepcopy(node.xml)
+    nv_pr = native_frame.find("p:nvGraphicFramePr/p:nvPr", NS)
+    custom_data = (
+        nv_pr.find("p:custDataLst", NS)
+        if nv_pr is not None else None
+    )
+    if custom_data is not None:
+        # Office tags are non-visual, slide-relationship-bound metadata. The
+        # validated source package sidecar retains them; the portable native

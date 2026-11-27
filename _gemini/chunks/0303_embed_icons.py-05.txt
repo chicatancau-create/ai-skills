@@ -1,0 +1,110 @@
+    width = attrs.get('width', base_width)
+    height = attrs.get('height', base_height)
+    color = resolve_icon_color(attrs, style)
+    icon_name = attrs.get('icon', 'unknown')
+
+    scale_x = float(width) / base_width
+    scale_y = float(height) / base_height
+
+    if attrs.get('transform'):
+        # This transform is authoritative: the editor computes it from the
+        # expanded <g>, so composing it with x/y would apply placement twice.
+        transform = str(attrs['transform'])
+    elif abs(scale_x - 1) < 1e-6 and abs(scale_y - 1) < 1e-6:
+        transform = f'translate({_format_number(x)}, {_format_number(y)})'
+    elif abs(scale_x - scale_y) < 1e-6:
+        transform = f'translate({_format_number(x)}, {_format_number(y)}) scale({_format_number(scale_x)})'
+    else:
+        transform = (
+            f'translate({_format_number(x)}, {_format_number(y)}) '
+            f'scale({_format_number(scale_x)}, {_format_number(scale_y)})'
+        )
+
+    elements_str = '\n    '.join(elements)
+
+    if style == 'preserve':
+        if min_x or min_y:
+            inner_transform = f'translate({_format_number(-min_x)}, {_format_number(-min_y)})'
+            elements_str = f'<g transform="{_xml_attr(inner_transform)}">\n    {elements_str}\n    </g>'
+        return f'''<!-- icon: {_xml_attr(icon_name)} -->
+  <g transform="{_xml_attr(transform)}">
+    {elements_str}
+  </g>'''
+
+    if style == 'stroke':
+        # Default to 2 — matches the source stroke-width baked into tabler-outline
+        # (and any other stroke library) so omitting the attribute reproduces
+        # pre-change visual output.
+        stroke_width = attrs.get('stroke-width', '2')
+        color_attrs = f'fill="none" stroke="{_xml_attr(color)}" stroke-width="{_xml_attr(stroke_width)}"'
+    else:
+        color_attrs = f'fill="{_xml_attr(color)}"'
+
+    return f'''<!-- icon: {_xml_attr(icon_name)} -->
+  <g transform="{_xml_attr(transform)}" {color_attrs}>
+    {elements_str}
+  </g>'''
+
+
+def process_svg_file(
+    svg_path: Path,
+    icons_dir: Path,
+    dry_run: bool = False,
+    verbose: bool = False,
+) -> int:
+    """
+    Process a single SVG file, replacing all icon placeholders.
+
+    Args:
+        svg_path: SVG file path
+        icons_dir: Icon directory path
+        dry_run: Whether to only preview without modifying
+        verbose: Whether to show detailed information
+
+    Returns:
+        Number of icons replaced
+    """
+    if not svg_path.exists():
+        raise FileNotFoundError(f"SVG file not found: {svg_path}")
+    
+    content = svg_path.read_text(encoding='utf-8')
+    
+    # Match self-closing <use data-icon="..."/> placeholders. Attribute
+    # parsing below accepts both single and double quotes.
+    use_pattern = r'<use\b(?=[^>]*\bdata-icon\s*=)[^>]*/>'
+    matches = list(re.finditer(use_pattern, content, re.IGNORECASE | re.DOTALL))
+    
+    if not matches:
+        if verbose:
+            print(f"[SKIP] No icon placeholders: {svg_path}")
+        return 0
+    
+    replaced_count = 0
+    new_content = content
+    
+    # Replace from back to front to avoid position offset
+    for match in reversed(matches):
+        use_str = match.group(0)
+        attrs = parse_use_element(use_str)
+        
+        icon_name = attrs.get('icon')
+        if not icon_name:
+            raise ValueError(
+                f'{svg_path.name}: icon placeholder has an empty data-icon value'
+            )
+
+        try:
+            icon_path, _ = resolve_icon_path(str(icon_name), icons_dir)
+        except ValueError as exc:
+            raise ValueError(f'{svg_path.name}: {exc}') from exc
+        if not icon_path.exists():
+            suggestion = suggest_icon_name(str(icon_name), icons_dir)
+            hint = (
+                f"; identifiers are case-sensitive; use '{suggestion}'"
+                if suggestion else ""
+            )
+            raise FileNotFoundError(
+                f'{svg_path.name}: project-local icon not found: '
+                f'{icon_name}{hint}'
+            )
+

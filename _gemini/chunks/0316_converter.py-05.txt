@@ -1,0 +1,105 @@
+def parse_transform(transform_str: str) -> tuple[float, float, float, float, float]:
+    """Parse an SVG transform list into (dx, dy, sx, sy, angle_deg).
+
+    Composes every translate/scale/rotate/matrix operation rather than picking
+    the first occurrence — needed for idioms like
+    ``translate(cx cy) scale(-1 -1) translate(-cx -cy)`` which encode a flip
+    around a non-origin pivot.
+
+    When the composed matrix has no rotation, the decomposition preserves
+    signed scale for flips. With rotation, scale uses the column magnitudes and
+    angle uses the first transformed axis. Zero or non-orthogonal axes fail
+    before decomposition because this tuple cannot represent them faithfully.
+    """
+    if not transform_str:
+        return 0.0, 0.0, 1.0, 1.0, 0.0
+
+    matrix = parse_transform_matrix(transform_str)
+    validate_dml_shape_matrix(matrix)
+    a, b, c, d, e, f = matrix
+
+    # No shear / rotation: direct decomposition preserves the original signs of
+    # sx / sy. ctx_x / ctx_y use the simple ``val * sx + tx`` formula, so this
+    # is the only form that survives flip-around-pivot composites without
+    # collapsing them into a rotation that the consumer can't honour.
+    if abs(b) < 1e-9 and abs(c) < 1e-9:
+        sx = a if a != 0 else 1.0
+        sy = d if d != 0 else 1.0
+        return e, f, sx, sy, 0.0
+
+    sx = math.hypot(a, b)
+    sy = math.hypot(c, d)
+    if sx == 0:
+        sx = 1.0
+    if sy == 0:
+        sy = 1.0
+
+    angle_deg = math.degrees(math.atan2(b, a))
+    return e, f, sx, sy, angle_deg
+
+
+# ``rotate(angle)`` defaults to pivot (0,0); ``rotate(angle, cx, cy)`` rotates
+# around (cx, cy). DrawingML grpSp ``rot`` always rotates around the group's
+# own bounding-box centre — we need the SVG pivot so ``convert_g`` can
+# compensate for the offset between those two centres.
+def _root_viewport_size(root: ET.Element) -> tuple[float, float]:
+    """Return the SVG root viewport size in user units."""
+    viewbox = parse_project_viewbox(root.get('viewBox'))
+    return float(viewbox.width), float(viewbox.height)
+
+
+def _extract_rotate_pivot(transform_str: str) -> tuple[float, float] | None:
+    """Return the (cx, cy) pivot of a sole ``rotate(...)`` in *transform_str*.
+
+    Returns ``None`` when the transform list contains anything other than one
+    rotate (other ops compose with rotate in a way the pivot-compensation
+    fallback can't express). A bare ``rotate(angle)`` returns (0, 0).
+    """
+    if not transform_str:
+        return None
+    operations = parse_transform_operations(transform_str)
+    if len(operations) != 1 or operations[0][0] != 'rotate':
+        return None
+    args = operations[0][1]
+    cx = args[1] if len(args) == 3 else 0.0
+    cy = args[2] if len(args) == 3 else 0.0
+    return cx, cy
+
+
+def _txbody_metadata(elem: ET.Element) -> ET.Element | None:
+    for child in elem:
+        if (
+            child.tag.replace(f'{{{SVG_NS}}}', '') == 'metadata'
+            and child.get('data-pptx-part') == 'txbody'
+        ):
+            return child
+    return None
+
+
+def _placeholder_sp_pr_metadata(elem: ET.Element) -> ET.Element | None:
+    for child in elem:
+        if (
+            child.tag.replace(f'{{{SVG_NS}}}', '') == 'metadata'
+            and child.get('data-pptx-part') == 'placeholder-sppr'
+        ):
+            return child
+    return None
+
+
+_TXBODY_UNCHANGED_ATTR = 'data-pptx-runtime-txbody-unchanged'
+_PREVIEW_UNCHANGED_ATTR = 'data-pptx-runtime-preview-unchanged'
+
+
+def _mark_unchanged_txbody_groups(root: ET.Element) -> None:
+    """Snapshot author-visible text state before exporter preprocessing."""
+    for group in root.iter():
+        if group.tag.replace(f'{{{SVG_NS}}}', '') != 'g':
+            continue
+        metadata = _txbody_metadata(group)
+        if metadata is None:
+            continue
+        expected = metadata.get('data-pptx-text-sha256')
+        actual = svg_text_fingerprint(group)
+        group.set(_TXBODY_UNCHANGED_ATTR, '1' if expected == actual else '0')
+
+

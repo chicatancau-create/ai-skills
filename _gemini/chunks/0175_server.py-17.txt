@@ -1,0 +1,107 @@
+    recommendations_file: Path,
+    recommendations: dict,
+    template_required: bool,
+) -> Optional[str]:
+    """Reject a confirmation that does not match the staged recommendation."""
+    rec_stage_number = _recommendation_stage(recommendations)
+    if rec_stage_number == 0:
+        return 'recommendations must declare stage1 or stage2'
+
+    if rec_stage_number == 1:
+        language_error = _primary_language_error(recommendations)
+        if language_error:
+            return language_error
+
+    if rec_stage_number == 2:
+        try:
+            previous_result = _read_result_object(confirm_dir / RESULT_NAME)
+        except (OSError, json.JSONDecodeError, ValueError):
+            previous_result = {}
+        language_source = (
+            previous_result
+            if _recommendation_language(previous_result)
+            else recommendations
+        )
+        language_error = _canonicalize_primary_language(
+            language_source,
+            required=True,
+        )
+        if language_error:
+            return language_error
+        main_language = _recommendation_language(language_source)
+        recommendation_error = _template_stage2_error(
+            recommendations,
+            template_required=template_required,
+        )
+        if recommendation_error:
+            return recommendation_error
+        recommendation_error = _stage2_custom_candidates_error(recommendations)
+        if recommendation_error:
+            return recommendation_error
+        recommendation_error = _stage2_design_directions_error(
+            recommendations,
+            main_language=main_language,
+        )
+        if recommendation_error:
+            return recommendation_error
+
+    allowed_submissions = {
+        1: {'stage1'},
+        2: {'final'},
+    }
+    if submitted_stage not in allowed_submissions[rec_stage_number]:
+        expected = 'final' if rec_stage_number == 2 else 'stage1'
+        return (
+            f'confirmation stage mismatch: {recommendations_file.name} is '
+            f'{_stage_name(rec_stage_number)}, so the submitted stage must be '
+            f'{expected}'
+        )
+
+    previous_stage = (
+        None
+        if _fresh_template_restart(confirm_dir)
+        else _result_stage(confirm_dir / RESULT_NAME)
+    )
+    allowed_predecessors = {
+        1: {None},
+        2: {'stage1'},
+    }
+    if previous_stage not in allowed_predecessors[rec_stage_number]:
+        expected_previous = 'stage1' if rec_stage_number == 2 else 'no prior result'
+        return (
+            f'confirmation predecessor mismatch: {_stage_name(rec_stage_number)} '
+            f'requires a confirmed {expected_previous} result, found '
+            f'{previous_stage or "absent"}'
+        )
+    return None
+
+
+def _custom_selection_error(result: dict) -> Optional[str]:
+    """Require behavior prose whenever a creative custom choice is selected."""
+    if result.get('mode') == 'custom' and not str(
+        result.get('mode_behavior') or ''
+    ).strip():
+        return 'mode=custom requires non-empty mode_behavior'
+    if result.get('visual_style') == 'custom' and not str(
+        result.get('visual_style_behavior') or ''
+    ).strip():
+        return 'visual_style=custom requires non-empty visual_style_behavior'
+    image_strategy = result.get('image_strategy')
+    if isinstance(image_strategy, dict) and image_strategy.get('rendering') == 'custom':
+        behavior = image_strategy.get('behavior') or image_strategy.get('custom')
+        if not str(behavior or '').strip():
+            return 'image_strategy.rendering=custom requires non-empty behavior'
+    return None
+
+
+def _stage2_solution_error(
+    result: dict,
+    *,
+    main_language: object = '',
+) -> Optional[str]:
+    """Reject a Stage 2/final payload with an incomplete design system."""
+    production_error = _stage2_production_result_error(result)
+    if production_error:
+        return production_error
+
+    color = result.get('color')

@@ -1,0 +1,78 @@
+            if part.startswith("ppt/charts/chart") and not part.endswith(".rels")
+        )
+        assert f'<c:lang val="{language}"/>' in chart_xml
+        assert f'lang="{language}"' in chart_xml
+
+        notes_xml = create_notes_slide_xml(
+            1,
+            sample + "\n2026 AI",
+            language,
+        )
+        assert f'lang="{language}"' in notes_xml
+        assert ("rtl=\"1\"" in notes_xml) == (language in rtl_languages)
+
+        output = root / f"{index}.pptx"
+        assert create_pptx_with_native_svg(
+            [svg],
+            output,
+            canvas_format="ppt169",
+            verbose=False,
+            transition=None,
+            notes={stem: sample + "\n2026 AI"},
+            pptx_structure="flat",
+            structure_name="multilingual-smoke",
+            primary_language=language,
+        )
+        with zipfile.ZipFile(output) as archive:
+            assert archive.testzip() is None
+            packaged_slide = archive.read(
+                "ppt/slides/slide1.xml"
+            ).decode("utf-8")
+            packaged_notes = archive.read(
+                "ppt/notesSlides/notesSlide1.xml"
+            ).decode("utf-8")
+            core = archive.read("docProps/core.xml").decode("utf-8")
+            assert f'lang="{language}"' in packaged_slide
+            assert f'lang="{language}"' in packaged_notes
+            assert f"<dc:language>{language}</dc:language>" in core
+        assert len(Presentation(str(output)).slides) == 1
+
+    # A legacy lock with no language field keeps the previous per-run path.
+    legacy_svg = root / "legacy.svg"
+    legacy_svg.write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" '
+        'viewBox="0 0 1280 720">'
+        '<text x="100" y="140" font-size="42">한국어 2026</text>'
+        "</svg>",
+        encoding="utf-8",
+    )
+    legacy_output = root / "legacy.pptx"
+    assert create_pptx_with_native_svg(
+        [legacy_svg],
+        legacy_output,
+        canvas_format="ppt169",
+        verbose=False,
+        transition=None,
+        pptx_structure="flat",
+        structure_name="legacy-smoke",
+    )
+    with zipfile.ZipFile(legacy_output) as archive:
+        assert archive.testzip() is None
+        legacy_slide = archive.read(
+            "ppt/slides/slide1.xml"
+        ).decode("utf-8")
+        assert 'lang="ko-KR"' in legacy_slide
+
+print("Multilingual text smoke: passed")
+PY
+```
+
+Expected output:
+
+```text
+Multilingual text smoke: passed
+```
+
+The RTL contract is paragraph `a:pPr rtl="1"` plus run-level `a:rtl` only
+when the run contains strong RTL characters. Do not use `rtlCol`; it controls
+column order, not paragraph direction.

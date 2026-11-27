@@ -1,0 +1,121 @@
+        f'{label} animation',
+    )
+    if 'effect' in animation:
+        effect_error = _animation_effect_error(animation['effect'], label)
+        if effect_error:
+            errors.append(effect_error)
+
+    for field, allow_zero in (('duration', False), ('stagger', True)):
+        if field not in animation:
+            continue
+        try:
+            animation_seconds_to_milliseconds(
+                animation[field],
+                f'animations.json {label} animation {field}',
+                allow_zero=allow_zero,
+            )
+        except ValueError as exc:
+            errors.append(str(exc))
+
+    if 'trigger' in animation:
+        trigger_error = _animation_trigger_error(animation['trigger'], label)
+        if trigger_error:
+            errors.append(trigger_error)
+    errors.extend(
+        _animation_parameter_errors(
+            animation,
+            f'{label} animation',
+            inherited_effect='auto',
+        )
+    )
+    return errors
+
+
+def _animation_group_errors(
+    slide_name: object,
+    slide_cfg: dict[str, Any],
+) -> list[str]:
+    if 'groups' not in slide_cfg:
+        return []
+    groups = slide_cfg['groups']
+    if not isinstance(groups, dict):
+        return [
+            f'animations.json slide "{slide_name}" field "groups" must be an object'
+        ]
+
+    errors: list[str] = []
+    for group_id, group_cfg in groups.items():
+        path = (
+            f'slides[{json.dumps(str(slide_name), ensure_ascii=False)}]'
+            f'.groups[{json.dumps(str(group_id), ensure_ascii=False)}]'
+        )
+        if not isinstance(group_cfg, dict):
+            errors.append(f'animations.json {path} must be an object')
+            continue
+
+        if 'effects' not in group_cfg:
+            errors.extend(
+                _animation_effect_entry_errors(
+                    group_cfg,
+                    path,
+                    require_effect=False,
+                    target_group_id=str(group_id),
+                )
+            )
+            continue
+
+        extra_fields = sorted(set(group_cfg) - {'effects'})
+        if extra_fields:
+            rendered = ', '.join(repr(field) for field in extra_fields)
+            errors.append(
+                f'animations.json {path} cannot combine "effects" with '
+                f'other group-level field(s): {rendered}'
+            )
+        effects = group_cfg['effects']
+        if not isinstance(effects, list):
+            errors.append(f'animations.json {path}.effects must be an array')
+            continue
+        if not effects:
+            errors.append(
+                f'animations.json {path}.effects must contain at least one effect'
+            )
+            continue
+        for index, effect_cfg in enumerate(effects):
+            effect_path = f'{path}.effects[{index}]'
+            if not isinstance(effect_cfg, dict):
+                errors.append(
+                    f'animations.json {effect_path} must be an object'
+                )
+                continue
+            errors.extend(
+                _animation_effect_entry_errors(
+                    effect_cfg,
+                    effect_path,
+                    require_effect=True,
+                    target_group_id=str(group_id),
+                )
+            )
+    return errors
+
+
+def _animation_effect_entry_errors(
+    effect_cfg: dict[str, Any],
+    path: str,
+    *,
+    require_effect: bool,
+    target_group_id: str,
+) -> list[str]:
+    """Validate one legacy group block or one ``effects[]`` row."""
+    errors = _unknown_field_errors(
+        effect_cfg,
+        _GROUP_EFFECT_FIELDS,
+        path,
+    )
+    if require_effect and 'effect' not in effect_cfg:
+        errors.append(f'animations.json {path}.effect is required')
+    elif 'effect' in effect_cfg:
+        effect_error = _animation_effect_error(effect_cfg['effect'], path)
+        if effect_error:
+            errors.append(effect_error)
+
+    for field, allow_zero in (('duration', False), ('delay', True)):

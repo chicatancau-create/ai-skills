@@ -1,0 +1,101 @@
+        parent_by_id: Dict[int, ET.Element],
+    ) -> Tuple[str, ...]:
+        """Return objective clipping mechanisms affecting one image instance."""
+        mechanisms: List[str] = []
+        current: ET.Element | None = image
+        while current is not None:
+            tag = _local_name(current)
+            style_values = (
+                _parse_inline_style(current.get('style'))
+                if _parse_inline_style is not None
+                else {}
+            )
+            for property_name in ('clip-path', 'mask'):
+                value = style_values.get(property_name)
+                if value is None:
+                    value = current.get(property_name)
+                if value and value.strip().lower() != 'none':
+                    mechanisms.append(f"<{tag}> {property_name}")
+            overflow = style_values.get('overflow')
+            if overflow is None:
+                overflow = current.get('overflow')
+            if overflow and overflow.strip().lower() in {'hidden', 'clip'}:
+                mechanisms.append(f"<{tag}> overflow={overflow.strip()!r}")
+            if current is not root and tag == 'svg':
+                mechanisms.append('nested <svg> viewport')
+            current = parent_by_id.get(id(current))
+        return tuple(dict.fromkeys(mechanisms))
+
+    def _check_planned_image_closure(
+        self,
+        rows: List[Dict[str, str]],
+        project_path: Path,
+        lock_entries: Dict[str, List[Dict[str, str]]],
+        lock_error: str | None,
+        svg_references: Dict[Path, Dict[str, set[Path]]],
+        inline_image_counts: Dict[Path, int],
+        image_placements: Dict[
+            str,
+            List[Tuple[Path, str, Tuple[str, ...]]],
+        ],
+    ) -> None:
+        """Close Design Spec, execution lock, files, SVGs, and provenance."""
+        project_root = project_path.resolve()
+        if inline_image_counts:
+            total = sum(inline_image_counts.values())
+            shown = ', '.join(
+                f"{path.name} ({count})"
+                for path, count in sorted(inline_image_counts.items())
+            )
+            self._illustration_issues.append((
+                'error',
+                'svg_inline_image_untracked',
+                f"svg_output contains {total} inline data-URI image(s): "
+                f"{shown}. Current projects must keep external project-local "
+                "image hrefs so every placement closes through Design Spec "
+                "§VIII and spec_lock.md.",
+            ))
+        valid_acquisitions = {
+            'ai',
+            'web',
+            'user',
+            'formula',
+            'placeholder',
+            'slice',
+        }
+        valid_statuses = {
+            'pending',
+            'failed',
+            'generated',
+            'sourced',
+            'rendered',
+            'needs-manual',
+            'existing',
+            'placeholder',
+        }
+        terminal_by_acquisition = {
+            'ai': {'generated', 'needs-manual'},
+            'web': {'sourced', 'needs-manual'},
+            'user': {'existing', 'needs-manual'},
+            'formula': {'rendered', 'needs-manual'},
+            'placeholder': {'placeholder'},
+            'slice': {'generated', 'needs-manual'},
+        }
+        current_image_contract = (
+            any('Crop Policy' in row for row in rows)
+            or any(
+                entry.get('legacy') == 'false'
+                for entries in lock_entries.values()
+                for entry in entries
+            )
+        )
+        seen_filenames: set[str] = set()
+        for row in rows:
+            raw_filename = self._row_raw_filename(row)
+            filename = self._row_filename(row)
+            acquire = self._row_acquire(row)
+            status = self._row_status(row)
+            layout = self._row_layout(row)
+            crop = self._row_crop(row)
+            filename_is_bare = bool(filename) and (
+                filename not in {'.', '..'}

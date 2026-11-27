@@ -1,0 +1,111 @@
+    '◆': '◆',
+    '◇': '◇',
+    '◦': '◦',
+    '‣': '‣',
+}
+_TEXT_BULLET_RE = re.compile(
+    r'^(?P<prefix>\s*)(?P<marker>[·•●▪■◆◇◦‣])(?P<space>\s*)'
+)
+_INLINE_FORMULA_ATTR = 'data-pptx-inline-formula'
+_INLINE_FORMULA_KEY = '_inline_formula_latex'
+
+
+def _text_line_vertical_extent(
+    runs: list[dict[str, Any]],
+    font_size: float,
+) -> tuple[float, float, bool]:
+    """Return native-math-aware ascent/descent for one authored text line."""
+    ascent = font_size * 0.85
+    descent = font_size * 0.35
+    has_inline_formula = False
+    from ..native_objects.formula_compiler import (
+        estimate_inline_formula_vertical_extent,
+    )
+
+    for run in runs:
+        latex = run.get(_INLINE_FORMULA_KEY)
+        if latex is None:
+            continue
+        has_inline_formula = True
+        run_font_size = float(run.get('font_size', font_size))
+        extent = estimate_inline_formula_vertical_extent(str(latex))
+        ascent = max(ascent, run_font_size * extent.ascent_em)
+        descent = max(descent, run_font_size * extent.descent_em)
+    return ascent, descent, has_inline_formula
+
+
+def _native_text_line_frame_height(
+    ascent: float,
+    descent: float,
+    font_size: float,
+) -> float:
+    """Add the ordinary text-frame headroom to one visible line extent."""
+    return ascent + descent + font_size * 0.30
+
+
+def _normalize_text_run_whitespace(
+    runs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Apply the shared whitespace contract without losing run ownership."""
+    normalized: list[dict[str, Any]] = []
+    segments = [
+        (str(run.get('_xml_space', 'default')), str(run.get('text', '')))
+        for run in runs
+    ]
+    text_by_index = dict(normalize_project_text_segments(segments))
+    for index, source_run in enumerate(runs):
+        if '_inline_dx' in source_run:
+            # Insert after whitespace normalization so dx neither preserves
+            # indentation nor disappears with an empty/whitespace-only tspan.
+            run = {**source_run, 'text': ' ', 'letter_spacing': 0.0, 'text_decoration': 'none'}
+            dx = run.pop('_inline_dx')
+            run['letter_spacing'] = dx - _estimate_run_text_width(run)
+            run.update(text='\u00a0', _inline_dx=dx)
+            run.pop('_xml_space', None)
+            normalized.append(run)
+            continue
+        text = text_by_index.get(index)
+        if text is None:
+            continue
+        run = {**runs[index], 'text': text}
+        run.pop('_xml_space', None)
+        normalized.append(run)
+    return normalized
+
+
+def _letter_spacing_to_drawingml_spc(letter_spacing_px: float) -> str:
+    """Convert SVG px letter spacing into DrawingML rPr@spc."""
+    spacing = drawingml_letter_spacing(letter_spacing_px)
+    if spacing == 0:
+        return ''
+    return f' spc="{spacing}"'
+
+
+def _is_serif_face(typeface: str) -> bool:
+    """Return whether one resolved DrawingML typeface is serif-like."""
+    name = typeface.strip().strip("'\"").lower()
+    if not name or name in {'sans-serif', 'sans serif'}:
+        return False
+    if name in _SERIF_WIDTH_FAMILIES:
+        return True
+    return 'serif' in name and 'sans' not in name
+
+
+def _run_script_segments(run: dict[str, Any]) -> list[tuple[str, bool]]:
+    """Split one run's text into ``(text, is_cjk)`` segments.
+
+    PowerPoint draws CJK clusters (fullwidth punctuation included) with the
+    run's ``ea`` typeface and every other cluster with ``latin``, the same
+    split :func:`parse_font_family` resolves. Width headroom is a property of
+    the face that actually draws a glyph, so it is applied per segment.
+    """
+    segments: list[list[Any]] = []
+    for cluster in split_project_text_clusters(str(run.get('text', ''))):
+        cjk = any(is_cjk_char(ch) for ch in cluster)
+        if segments and segments[-1][1] == cjk:
+            segments[-1][0] += cluster
+        else:
+            segments.append([cluster, cjk])
+    return [(text, cjk) for text, cjk in segments]
+
+

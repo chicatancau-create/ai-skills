@@ -1,0 +1,108 @@
+    alpha = 1.0
+
+    for child in list(color_elem):
+        if not isinstance(child.tag, str):
+            continue
+        tag, value = _parse_color_modifier(child)
+
+        if tag == "tint":
+            # Tint blends toward white. r' = r + (1-r)*(1-val) is the common
+            # interpretation; OOXML actually defines tint on luminance.
+            # Use luminance-based tint per ECMA-376.
+            ratio = value / 100000.0
+            lum = lum * ratio + (1.0 - ratio)
+        elif tag == "shade":
+            # Shade blends toward black on luminance.
+            lum = lum * (value / 100000.0)
+        elif tag == "lumMod":
+            lum = lum * (value / 100000.0)
+        elif tag == "lumOff":
+            lum = lum + (value / 100000.0)
+        elif tag == "satMod":
+            sat = sat * (value / 100000.0)
+        elif tag == "satOff":
+            sat = sat + (value / 100000.0)
+        elif tag == "hueMod":
+            h = (h * (value / 100000.0)) % 1.0
+        elif tag == "hueOff":
+            h = (h + value / 21_600_000.0) % 1.0
+        elif tag == "alpha":
+            alpha = value / 100000.0
+        elif tag == "alphaMod":
+            alpha = max(0.0, min(1.0, alpha * (value / 100000.0)))
+        elif tag == "alphaOff":
+            alpha = max(0.0, min(1.0, alpha + (value / 100000.0)))
+        elif tag == "gray":
+            # Convert to grayscale based on luminance.
+            sat = 0.0
+        elif tag == "comp":
+            # Complement: hue rotated 180°
+            h = (h + 0.5) % 1.0
+        elif tag == "inv":
+            # RGB invert
+            rr, gg, bb = colorsys.hls_to_rgb(h, lum, sat)
+            rr, gg, bb = 1.0 - rr, 1.0 - gg, 1.0 - bb
+            h, lum, sat = colorsys.rgb_to_hls(rr, gg, bb)
+
+        # Clamp luminance / saturation to [0,1]
+        lum = max(0.0, min(1.0, lum))
+        sat = max(0.0, min(1.0, sat))
+
+    rr, gg, bb = colorsys.hls_to_rgb(h, lum, sat)
+    return _rgb01_to_hex(rr, gg, bb), alpha
+
+
+# ---------------------------------------------------------------------------
+# Hex / RGB / HSL helpers
+# ---------------------------------------------------------------------------
+
+def _normalize_hex(value: str | None) -> str | None:
+    """Strip '#' and validate 6-digit hex. Return uppercase or None on failure."""
+    if value is None:
+        return None
+    v = value.strip()
+    if v.startswith("#"):
+        v = v[1:]
+    if len(v) == 3:
+        v = "".join(c * 2 for c in v)
+    if len(v) != 6:
+        return None
+    try:
+        int(v, 16)
+    except ValueError:
+        return None
+    return v.upper()
+
+
+def _hex_to_rgb01(hex_color: str) -> tuple[float, float, float]:
+    h = _normalize_hex(hex_color) or "000000"
+    r = int(h[0:2], 16) / 255.0
+    g = int(h[2:4], 16) / 255.0
+    b = int(h[4:6], 16) / 255.0
+    return r, g, b
+
+
+def _rgb01_to_hex(r: float, g: float, b: float) -> str:
+    r = max(0.0, min(1.0, r))
+    g = max(0.0, min(1.0, g))
+    b = max(0.0, min(1.0, b))
+    return f"{int(round(r * 255)):02X}{int(round(g * 255)):02X}{int(round(b * 255)):02X}"
+
+
+def _linear_rgb01_to_hex(r: float, g: float, b: float) -> str:
+    """Encode linear-light RGB channels as an SVG sRGB hex color."""
+    encoded = (
+        12.92 * channel
+        if channel <= 0.0031308
+        else 1.055 * channel ** (1.0 / 2.4) - 0.055
+        for channel in (r, g, b)
+    )
+    return _rgb01_to_hex(*encoded)
+
+
+def _hsl_to_hex(h: float, s: float, l: float) -> str:
+    h = h % 1.0 if h != 1.0 else 1.0
+    s = max(0.0, min(1.0, s))
+    l = max(0.0, min(1.0, l))
+    r, g, b = colorsys.hls_to_rgb(h, l, s)
+    return _rgb01_to_hex(r, g, b)

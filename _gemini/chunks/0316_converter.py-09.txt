@@ -1,0 +1,114 @@
+    return (
+        decoded[:match.end('open')]
+        + guide_xml
+        + decoded[match.start('close'):]
+    )
+
+
+def preserved_native_text_body(
+    group: ET.Element,
+    *,
+    trust_runtime_snapshot: bool = True,
+) -> tuple[ET.Element, str] | None:
+    """Return the geometry carrier and unchanged native text body, if usable."""
+    metadata = _txbody_metadata(group)
+    logical_text_shape = (
+        group.get('data-pptx-object') == 'shape'
+        and (
+            group.get('data-pptx-prst') is not None
+            or group.get('data-pptx-geometry-kind') == 'custom'
+        )
+        and metadata is not None
+    )
+    if not logical_text_shape:
+        return None
+    decoded_text = _decode_unchanged_txbody(
+        group,
+        metadata,
+        trust_runtime_snapshot=trust_runtime_snapshot,
+    )
+    carrier_children = [
+        child for child in group
+        if child.get('data-pptx-part') == 'geometry'
+    ]
+    allowed_parts = {
+        'geometry',
+        'geometry-detail',
+        'geometry-preview',
+        'txbody',
+    }
+    has_foreign_visual = any(
+        child.tag.replace(f'{{{SVG_NS}}}', '') not in {'text', 'metadata'}
+        and child.get('data-pptx-part') not in allowed_parts
+        and not _is_import_text_flip_compensation(child)
+        for child in group
+    )
+    if decoded_text is None:
+        return None
+    native_text, has_run_effects = decoded_text
+    if len(carrier_children) != 1 or has_foreign_visual:
+        if has_run_effects:
+            raise SvgNativeConversionError(
+                'The source txBody contains run-level effects but cannot be '
+                'restored as one native text shape; export stopped to avoid '
+                'silently discarding those effects'
+            )
+        return None
+    return carrier_children[0], native_text
+
+
+def _is_import_text_flip_compensation(elem: ET.Element) -> bool:
+    """Recognize the importer-only wrapper that keeps flipped text upright."""
+    if (
+        elem.tag.replace(f'{{{SVG_NS}}}', '') != 'g'
+        or elem.get('data-pptx-text-flip-compensation') != 'true'
+    ):
+        return False
+    return all(
+        child.tag.replace(f'{{{SVG_NS}}}', '') in {'g', 'text', 'tspan', 'a'}
+        for child in elem.iter()
+        if child is not elem
+    )
+
+
+def _roundtrip_graphic_frame(
+    elem: ET.Element,
+    ctx: ConvertContext,
+) -> ShapeResult | None:
+    """Restore an unchanged relationship-free imported graphicFrame."""
+    if elem.get('data-pptx-roundtrip-object') != 'graphic-frame':
+        return None
+    if native_replacement_kind(elem) in {'chart', 'table'}:
+        # Eligible data objects follow the public authority/activation route:
+        # default export keeps their SVG fallback, while explicit native export
+        # rebuilds them from inline JSON. The opaque round-trip payload must not
+        # bypass either decision.
+        return None
+    if elem.get('data-pptx-object') != 'graphic-frame':
+        raise SvgNativeConversionError(
+            'round-trip graphic-frame metadata requires '
+            'data-pptx-object="graphic-frame"'
+        )
+    require_fresh_native_fallback(
+        elem,
+        use_runtime_snapshot=True,
+    )
+    metadata = next(
+        (
+            child
+            for child in elem
+            if child.tag.replace(f'{{{SVG_NS}}}', '') == 'metadata'
+            and child.get('data-pptx-part') == 'roundtrip-graphic-frame'
+        ),
+        None,
+    )
+    if metadata is None or metadata.get('data-pptx-encoding') != 'base64':
+        raise SvgNativeConversionError(
+            'round-trip graphic-frame metadata requires a base64 payload'
+        )
+    expected_hash = metadata.get('data-pptx-ooxml-sha256')
+    if not expected_hash or not re.fullmatch(r'[0-9a-f]{64}', expected_hash):
+        raise SvgNativeConversionError(
+            'round-trip graphic-frame metadata requires a lowercase SHA-256'
+        )
+    try:

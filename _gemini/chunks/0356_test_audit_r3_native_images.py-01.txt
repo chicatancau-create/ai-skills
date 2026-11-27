@@ -1,0 +1,87 @@
+"""Regressions for round-three native object, calculator, and image findings."""
+
+from __future__ import annotations
+
+import contextlib
+import io
+import json
+import math
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+from xml.etree import ElementTree as ET
+
+from PIL import Image, ImageDraw
+
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+import image_treat  # noqa: E402
+import slice_images  # noqa: E402
+import svg_position_calculator as position_calculator  # noqa: E402
+from svg_to_pptx.native_objects.chart_data import _chart_data  # noqa: E402
+from svg_to_pptx.native_objects.chart_xml import _chart_xml  # noqa: E402
+
+
+class OpaqueImageDerivativeTests(unittest.TestCase):
+    def _derive(self, image: Image.Image, *, transparent: bool) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            images = project / "images"
+            images.mkdir()
+            source = images / "source.png"
+            image.save(source)
+            original = source.read_bytes()
+            output = images / "derived.jpg"
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                result = image_treat.main([
+                    str(project), source.name, "--output", output.name, "--fit", "64x40",
+                ])
+            self.assertEqual(source.read_bytes(), original)
+            self.assertEqual(result, 1 if transparent else 0, stderr.getvalue())
+            if transparent:
+                self.assertFalse(output.exists())
+                self.assertIn("JPEG output cannot hold the source's transparency", stderr.getvalue())
+                self.assertEqual(sorted(p.name for p in images.iterdir()), [source.name])
+            else:
+                with Image.open(output) as derivative:
+                    self.assertEqual(derivative.format, "JPEG")
+                    self.assertEqual(derivative.mode, "RGB")
+                    self.assertEqual(derivative.size, (64, 40))
+
+    def test_rgb_and_opaque_alpha_modes_allow_jpeg(self) -> None:
+        for mode, color in (("RGB", (30, 80, 120)), ("RGBA", (30, 80, 120, 255)), ("LA", (80, 255))):
+            with self.subTest(mode=mode), Image.new(mode, (128, 80), color) as image:
+                self._derive(image, transparent=False)
+
+    def test_actual_alpha_pixels_refuse_jpeg_without_output(self) -> None:
+        for mode, color in (("RGBA", (30, 80, 120, 255)), ("LA", (80, 255))):
+            for alpha in (0, 254):
+                with self.subTest(mode=mode, alpha=alpha), Image.new(mode, (128, 80), color) as image:
+                    image.putpixel((64, 40), (*color[:-1], alpha))
+                    self._derive(image, transparent=True)
+
+    def test_palette_transparency_depends_on_used_pixels(self) -> None:
+        for transparency in (1, bytes([255, 0] + [255] * 254), bytes([255, 254] + [255] * 254)):
+            for used in (False, True):
+                with self.subTest(transparency=repr(transparency)[:32], used=used):
+                    with Image.new("P", (128, 80), 0) as image:
+                        image.putpalette([30, 80, 120, 80, 120, 160] + [0] * 762)
+                        image.info["transparency"] = transparency
+                        if used:
+                            image.putpixel((64, 40), 1)
+                        self._derive(image, transparent=used)
+
+
+class ChartSeriesLineStyleTests(unittest.TestCase):
+    def _marker_symbols(self, payload: dict) -> list[str]:
+        marker = ET.fromstring('<g xmlns="http://www.w3.org/2000/svg" id="chart"/>')
+        xml = _chart_xml(
+            marker, payload, chart_rels_id="rId1", chart_data=_chart_data(payload),
+            chart_bounds=(0, 0, 12192000, 6858000),
+        )
+        root = ET.fromstring(xml)

@@ -1,0 +1,102 @@
+            >= fit_widths[end] * _PREFERRED_BREAK_MIN_FILL - 1e-6
+        ):
+            line_end = preferred_end
+        lines.append(_joined_units(units, start, line_end))
+        widths.append(fit_widths[line_end])
+        start = line_end
+    return lines, widths, oversized
+
+
+def _render_wrapped_svg(lines: list[str], *, x: float, dy: float, y: float | None) -> str:
+    escaped = [html.escape(line, quote=False) for line in lines]
+    tspan = f'<tspan x="{_format_number(x)}" dy="{_format_number(dy)}">'
+    inner = escaped[0] + ''.join(f'{tspan}{line}</tspan>' for line in escaped[1:])
+    return inner if y is None else (
+        f'<text x="{_format_number(x)}" y="{_format_number(y)}">{inner}</text>'
+    )
+
+
+def text_box(
+    *, x: float, baseline_y: float, size: float, lines: int, dy: float,
+    width: float, anchor: str,
+) -> dict[str, float]:
+    """Calculate the module bounds for a positioned text block."""
+    left = x - width / 2 if anchor == 'middle' else x - width if anchor == 'end' else x
+    top = baseline_y - 0.85 * size
+    bottom = baseline_y + (lines - 1) * dy + 0.35 * size
+    return dict(x=left, y=top, width=width, height=bottom - top, top=top, bottom=bottom)
+
+
+def _role_argument(value: str) -> tuple[str, str, float, str]:
+    weight = 'normal'
+    parts = value.rsplit(':', 1)
+    if len(parts) == 2 and parts[1].strip().casefold() in _ROLE_WEIGHTS:
+        value, weight = parts[0], parts[1].strip().casefold()
+    try:
+        name_and_family, raw_size = value.rsplit(':', 1)
+        name, family = name_and_family.split(':', 1)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError('expected NAME:FAMILY:SIZE[:bold]') from exc
+    name, family = name.strip().casefold(), family.strip()
+    if not name or not family:
+        raise argparse.ArgumentTypeError('expected non-empty NAME and FAMILY')
+    try:
+        size = _positive_float(raw_size)
+    except (argparse.ArgumentTypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError('SIZE must be a positive finite number') from exc
+    return name, family, size, weight
+
+
+_ROLE_WEIGHTS = frozenset({'normal', 'bold'})
+
+
+def _ordered_roles(roles: dict[str, tuple[str, float]]) -> list[tuple[str, str, float]]:
+    names = [name for name in _CORE_CALIBRATION_ROLES if name in roles]
+    names.extend(sorted(set(roles) - set(names)))
+    return [(name, *roles[name]) for name in names]
+
+
+def _roles_from_spec_lock(
+    lock_path: Path,
+    fallbacks: dict[str, str] | None = None,
+    weights: dict[str, str] | None = None,
+) -> dict[str, tuple[str, float]]:
+    lock = parse_spec_lock(lock_path, report_duplicate_fields=True)
+    typography = next(
+        (
+            fields
+            for heading, fields in lock.items()
+            if heading.strip().casefold() == 'typography'
+        ),
+        {},
+    )
+    rows = {
+        str(key).strip().casefold(): str(value).strip()
+        for key, value in typography.items()
+    }
+    roles: dict[str, tuple[str, float]] = {}
+    for role, raw_size in rows.items():
+        if role == 'font_family' or role.endswith('_family'):
+            continue
+        try:
+            size = _positive_float(raw_size)
+        except (argparse.ArgumentTypeError, ValueError) as exc:
+            raise ValueError(
+                f'spec_lock.md typography role {role!r} has invalid size {raw_size!r}'
+            ) from exc
+        family = rows.get(f'{role}_family', '')
+        if not family:
+            display_role = 'title' in role or 'numeral' in role
+            fallback = 'title_family' if display_role else 'body_family'
+            family = rows.get(fallback, '') or rows.get('font_family', '')
+            if fallbacks is not None:
+                fallbacks[role] = fallback
+        if not family:
+            raise ValueError(
+                f'spec_lock.md typography role {role!r} has no resolvable font family'
+            )
+        roles[role] = (family, size)
+    return roles
+
+
+def _clean_planned_line(raw: str) -> str:

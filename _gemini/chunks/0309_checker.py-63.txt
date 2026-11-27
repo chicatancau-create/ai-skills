@@ -1,0 +1,94 @@
+            elem.get('data-pptx-layer') is not None
+            for elem in root.iter()
+        )
+        has_layout_atom = any(
+            child.get('data-pptx-layer') == 'layout'
+            for child in list(root)
+        )
+        has_placeholder = any(
+            elem.get('data-pptx-placeholder') is not None
+            for elem in root.iter()
+        )
+        if not has_layer_mark:
+            messages.append(
+                'Mapped page declares data-pptx-layout but no data-pptx-layer '
+                'mark; the exported Master gets no shared background/chrome '
+                'and the Layout gets no static framing. Generated templates '
+                'should mark the deck-wide '
+                'background data-pptx-layer="master" and this layout key\'s '
+                'framing data-pptx-layer="layout". No change or disposition '
+                'is required.'
+            )
+        if not has_placeholder and not has_layout_atom:
+            messages.append(
+                'Mapped page has no placeholder slot and no '
+                'data-pptx-layer="layout" atom; its Layout exports empty. '
+                'Generated templates should declare the slots the page actually '
+                'has (title / subtitle / '
+                'body / picture / slide-number / footer) and mark the layout '
+                'key\'s static framing unless this is intentionally a fixed '
+                'zero-slot composition. No change or disposition is required.'
+            )
+        elif not has_placeholder:
+            messages.append(
+                'Mapped Layout has static framing but no insertable '
+                'placeholder slot. Generated templates should declare the '
+                'slots the page actually has (title / subtitle / body / '
+                'picture / slide-number / footer) unless zero-slot is the '
+                'intended reusable contract. No change or disposition is required.'
+            )
+        return messages
+
+    @staticmethod
+    def _check_legacy_pptx_attributes(
+        root: ET.Element,
+        svg_path: Path,
+        result: Dict,
+    ) -> None:
+        """Reject superseded long-form authoring attributes."""
+        for element in root.iter():
+            for legacy, canonical in _LEGACY_PPTX_ATTRIBUTE_RENAMES.items():
+                if element.get(legacy) is None:
+                    continue
+                result['errors'].append(
+                    f'{svg_path.name}: {_element_label(element)} uses legacy '
+                    f'{legacy}; rename it to {canonical}'
+                )
+
+    def _check_semantic_markers(
+        self,
+        root: ET.Element,
+        svg_path: Path,
+        result: Dict,
+    ) -> None:
+        """Validate minimal compiler hints without changing SVG rendering."""
+        has_semantics = any(
+            elem.get(attr) is not None
+            for elem in root.iter()
+            for attr in _SEMANTIC_ATTRS
+        )
+        require_page_role = (
+            svg_path.parent.name in {'svg_output', 'svg_final'}
+            and root.get('data-pptx-layout') is None
+        )
+        if _validate_semantic_markers is None:
+            if has_semantics:
+                result['warnings'].append(
+                    "Detected Semantic SVG markers, but their validator could "
+                    "not be imported."
+                )
+            return
+        for issue in _validate_semantic_markers(
+            root,
+            require_page_role=require_page_role,
+        ):
+            if issue.severity == 'error':
+                result['errors'].append(issue.message)
+            else:
+                result['warnings'].append(issue.message)
+
+    def _get_spec_lock(self, svg_path: Path):
+        """Locate and parse spec_lock.md near the SVG. Returns dict or None.
+
+        Looks in svg_path.parent and svg_path.parent.parent (covers the two
+        common layouts: SVG directly under <project>/ or under

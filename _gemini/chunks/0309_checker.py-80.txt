@@ -1,0 +1,98 @@
+        rows = self._extract_image_resource_rows(spec_text)
+        if not rows and not current_contract:
+            return
+
+        lock_entries, lock_error = self._load_project_lock_image_entries(
+            project_path
+        )
+        lock_images = set(lock_entries)
+        svg_references, inline_image_counts, image_placements = (
+            self._load_project_svg_image_references(project_path)
+        )
+        all_svg_references = (
+            set().union(*(
+                set(references)
+                for references in svg_references.values()
+            ))
+            if svg_references
+            else set()
+        )
+
+        sheet_rows = [
+            row
+            for row in rows
+            if self._row_type(row).lower() == 'illustration sheet'
+        ]
+        slice_rows = [row for row in rows if self._row_acquire(row) == 'slice']
+        for row in sheet_rows:
+            filename = self._row_filename(row)
+            if not filename:
+                continue
+            if filename in lock_images:
+                self._illustration_issues.append((
+                    'error',
+                    'sheet_in_lock',
+                    f"{filename} is an Illustration Sheet but is listed in spec_lock.md images; "
+                    "only sliced element rows may be listed.",
+                ))
+            if filename in all_svg_references:
+                self._illustration_issues.append((
+                    'error',
+                    'sheet_referenced',
+                    f"{filename} is an Illustration Sheet but is referenced by an SVG; "
+                    "generate it only as a slice source, never place it.",
+                ))
+            if (
+                self._row_status(row) == 'generated'
+                and not (project_path / 'images' / filename).is_file()
+            ):
+                self._illustration_issues.append((
+                    'error',
+                    'sheet_file_missing',
+                    f"{filename} is a Generated Illustration Sheet but "
+                    f"images/{filename} does not exist.",
+                ))
+
+        # ``Type: Source`` marks a web/user/ai original that only feeds
+        # prepared derivatives; like a sheet it never enters the lock or a page.
+        derived_parents = set()
+        for row in rows:
+            match = re.search(
+                r'derived\s+from\s+`?([^;|`]+?)`?\s*(?:;|$)',
+                row.get('Reference', ''),
+                re.IGNORECASE,
+            )
+            if match:
+                derived_parents.add(Path(match.group(1).strip()).name)
+        for row in rows:
+            if self._row_type(row).lower() != 'source':
+                continue
+            filename = self._row_filename(row)
+            if not filename:
+                continue
+            if filename in lock_images:
+                self._illustration_issues.append((
+                    'error',
+                    'source_in_lock',
+                    f"{filename} is a Source row (unplaced derivation parent) "
+                    "but is listed in spec_lock.md images; lock only its "
+                    "placed derivatives.",
+                ))
+            if filename in all_svg_references:
+                self._illustration_issues.append((
+                    'error',
+                    'source_referenced',
+                    f"{filename} is a Source row but is referenced by an SVG; "
+                    "give the row a placed Type or place a derivative instead.",
+                ))
+            if filename not in derived_parents:
+                self._illustration_issues.append((
+                    'error',
+                    'source_without_derivative',
+                    f"{filename} is a Source row but no row is `Derived from "
+                    f"{filename}`; a Source row exists only to feed prepared "
+                    "derivatives.",
+                ))
+
+        if current_contract:
+            self._check_planned_image_closure(

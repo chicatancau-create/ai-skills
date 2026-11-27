@@ -1,0 +1,124 @@
+    dry_run: bool = False,
+    quiet: bool = False,
+    compress: bool = True,
+    max_dimension: int | None = 2560,
+    image_scale: float = 2.0,
+) -> bool:
+    """
+    Finalize SVG files in the project
+
+    Args:
+        project_dir: Project directory path
+        options: Processing options dictionary
+        dry_run: Preview only, do not execute
+        quiet: Quiet mode, reduce output
+        compress: Compress images before embedding
+        max_dimension: Downscale images exceeding this dimension
+        image_scale: Target image pixels per SVG display pixel
+    """
+    svg_output = project_dir / 'svg_output'
+    svg_final = project_dir / 'svg_final'
+    icons_dir = icon_dir_for_project(project_dir)
+
+    # Check if svg_output exists
+    if not svg_output.exists():
+        safe_print(f"[ERROR] svg_output directory not found: {svg_output}")
+        return False
+
+    # Get list of SVG files
+    svg_files = list(svg_output.glob('*.svg'))
+    if not svg_files:
+        safe_print(f"[ERROR] No SVG files in svg_output")
+        return False
+
+    if not quiet:
+        print()
+        safe_print(f"[DIR] Project: {project_dir.name}")
+        safe_print(f"[FILE] {len(svg_files)} SVG file(s)")
+
+    if dry_run:
+        safe_print("[PREVIEW] Preview mode, no operations will be performed")
+        return True
+
+    candidate_dir = Path(
+        tempfile.mkdtemp(
+            prefix=f".{svg_final.name}.candidate-",
+            dir=svg_final.parent,
+        )
+    )
+    try:
+        try:
+            shutil.copytree(svg_output, candidate_dir, dirs_exist_ok=True)
+            candidate_ready = _process_candidate_directory(
+                candidate_dir,
+                options=options,
+                quiet=quiet,
+                compress=compress,
+                max_dimension=max_dimension,
+                image_scale=image_scale,
+                icons_dir=icons_dir,
+            )
+        except Exception as exc:
+            safe_print(
+                f"[ERROR] SVG finalization failed before publish: {exc}",
+                file=sys.stderr,
+            )
+            return False
+
+        if not candidate_ready:
+            return False
+
+        try:
+            _publish_candidate_directory(candidate_dir, svg_final)
+        except (OSError, RuntimeError) as exc:
+            safe_print(
+                f"[ERROR] svg_final publish failed: {exc}",
+                file=sys.stderr,
+            )
+            return False
+    finally:
+        shutil.rmtree(candidate_dir, ignore_errors=True)
+
+    # Done
+    if not quiet:
+        print()
+        safe_print("[OK] Done!")
+        print()
+        print("Next steps:")
+        print(f"  python3 scripts/svg_to_pptx.py \"{project_dir}\"")
+
+    return True
+
+
+def main() -> None:
+    """Run the CLI entry point."""
+    parser = argparse.ArgumentParser(
+        description='PPT Master - SVG Post-processing Tool',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  %(prog)s projects/my_project           # Execute all processing (default)
+  %(prog)s projects/my_project --only embed-icons align-images
+  %(prog)s projects/my_project -q        # Quiet mode
+
+Processing options (for --only):
+  embed-icons   Expand project icons and static same-document <use>
+  align-images  Align (slice/meet) + Base64-embed all <image> (single pass)
+  flatten-text  Flatten text
+
+Aliases (still accepted):
+  crop-images, fix-aspect, embed-images  → all map to align-images
+        '''
+    )
+
+    parser.add_argument('project_dir', type=Path, help='Project directory path')
+    parser.add_argument(
+        '--only', nargs='+', metavar='OPTION',
+        choices=[
+            'embed-icons',
+            'align-images',
+            # Backwards-compatible aliases — all three map to align-images now.
+            'crop-images', 'fix-aspect', 'embed-images',
+            'flatten-text',
+        ],
+        help=('Execute only specified processing steps (default: all). '

@@ -1,0 +1,88 @@
+    """Resolve declared load scenarios and enforce their maximum budgets."""
+    findings: list[Finding] = []
+    results: list[dict[str, Any]] = []
+    resolved_cache: dict[str, list[Any]] = {}
+    covered_paths: set[str] = set()
+
+    def entry_key(entry: Any) -> str:
+        if isinstance(entry, dict):
+            return json.dumps(entry, sort_keys=True)
+        return f"path:{entry}"
+
+    def resolve_entries(name: str, stack: tuple[str, ...] = ()) -> list[Any]:
+        if name in resolved_cache:
+            return resolved_cache[name]
+        if name not in config:
+            raise AuditError(f"Load set includes unknown set: {name}")
+        if name in stack:
+            cycle = " -> ".join((*stack, name))
+            raise AuditError(f"Load-set include cycle: {cycle}")
+        load_set = config[name]
+        if not isinstance(load_set, dict):
+            raise AuditError(f"load_sets.{name} must be an object")
+        includes = load_set.get("include", [])
+        entries = load_set.get("files", [])
+        if not isinstance(includes, list) or not all(isinstance(item, str) for item in includes):
+            raise AuditError(f"load_sets.{name}.include must be a list of set names")
+        if not isinstance(entries, list):
+            raise AuditError(f"load_sets.{name}.files must be a list")
+
+        resolved: list[Any] = []
+        seen: set[str] = set()
+        for included in includes:
+            for entry in resolve_entries(included, (*stack, name)):
+                key = entry_key(entry)
+                if key not in seen:
+                    seen.add(key)
+                    resolved.append(entry)
+        for entry in entries:
+            key = entry_key(entry)
+            if key not in seen:
+                seen.add(key)
+                resolved.append(entry)
+        resolved_cache[name] = resolved
+        return resolved
+
+    for name, load_set in sorted(config.items()):
+        if not isinstance(load_set, dict):
+            raise AuditError(f"load_sets.{name} must be an object")
+        entries = resolve_entries(name)
+        budget = load_set.get("max_tokens")
+        if not isinstance(budget, int) or budget < 1:
+            raise AuditError(f"load_sets.{name} requires a positive max_tokens")
+
+        fixed: set[str] = set()
+        selectors: list[dict[str, Any]] = []
+        claimed_options: set[str] = set()
+        for entry in entries:
+            paths, select, label = _load_entry_paths(root, entry)
+            relative = [_relative_path(root, path) for path in paths]
+            covered_paths.update(relative)
+            missing_counts = [path for path in relative if path not in token_counts]
+            if missing_counts:
+                raise AuditError(
+                    f"Load set {name} references files outside documents.include: "
+                    + ", ".join(missing_counts)
+                )
+
+            if select is None:
+                overlap = (fixed | claimed_options).intersection(relative)
+                if overlap:
+                    raise AuditError(
+                        f"Load set {name} repeats fixed files: {', '.join(sorted(overlap))}"
+                    )
+                fixed.update(relative)
+                continue
+
+            registry_name = entry.get("registry") if isinstance(entry, dict) else None
+            if registry_name is not None:
+                if registry_name not in registry_members:
+                    raise AuditError(
+                        f"Load set {name} selector references unknown registry: {registry_name}"
+                    )
+                candidate_ids = {Path(path).stem for path in relative}
+                expected_ids = {str(item) for item in registry_members[registry_name]}
+                if candidate_ids != expected_ids:
+                    missing = sorted(expected_ids - candidate_ids)
+                    extra = sorted(candidate_ids - expected_ids)
+                    raise AuditError(

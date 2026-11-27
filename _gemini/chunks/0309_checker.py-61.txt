@@ -1,0 +1,102 @@
+                append_metadata_legacy_warnings(marker)
+                continue
+
+            try:
+                _validate_native_object_marker(marker, ancestors=ancestors_tuple)
+            except RuntimeError as exc:
+                result['errors'].append(
+                    f"Invalid data-pptx-replace-with marker {marker_id}: {exc}"
+                )
+                continue
+            append_metadata_legacy_warnings(marker)
+            if _native_object_marker_warnings is None:
+                continue
+            for warning in _native_object_marker_warnings(
+                marker,
+                ancestors=ancestors_tuple,
+                document_root=root,
+            ):
+                result['warnings'].append(
+                    f"data-pptx-replace-with marker {marker_id}: {warning}"
+                )
+
+    def _check_pptx_structure_metadata(
+        self,
+        root: ET.Element,
+        svg_path: Path,
+        result: Dict,
+    ) -> None:
+        """Validate the intrinsic structured Master/Layout SVG contract."""
+        has_structure_metadata = any(
+            elem.get(attr) is not None
+            for elem in root.iter()
+            for attr in _PPTX_STRUCTURE_ATTRS
+        )
+        if self.quick_generate and not has_structure_metadata:
+            return
+        if (
+            not self.quick_generate
+            and not self.template_mode
+            and svg_path.parent.name == 'svg_output'
+        ):
+            declared_mode = _declared_pptx_structure_mode(
+                self._resolve_project_path(svg_path)
+            )
+            if declared_mode == 'flat':
+                forbidden_attrs = sorted({
+                    attr
+                    for elem in root.iter()
+                    for attr in _PPTX_STRUCTURE_ATTRS
+                    if elem.get(attr) is not None
+                })
+                if forbidden_attrs:
+                    result['errors'].append(
+                        f"{svg_path.name}: pptx_structure.mode: flat forbids "
+                        "Master/Layout/layer/placeholder metadata; remove "
+                        + ', '.join(forbidden_attrs)
+                    )
+                return
+            if declared_mode != 'structured':
+                # The project-level gate emits one actionable migration error.
+                # Avoid burying it under repeated per-page structure failures.
+                return
+        require_structure = bool(
+            self.template_mode
+            or svg_path.parent.name == 'svg_output'
+        )
+        if not has_structure_metadata and not require_structure:
+            return
+        result['errors'].extend(_local_pptx_structure_errors(
+            root,
+            svg_path,
+            require_structure=require_structure,
+        ))
+        self._check_placeholder_carrier_flattening(root, svg_path, result)
+        if svg_path.parent.name == 'svg_output':
+            self._append_structure_coverage_warnings(root, result)
+        if _validate_template_structure_svg is None:
+            result['errors'].append(
+                "Structured PPTX metadata validator could not be imported; "
+                "the quality gate cannot verify this SVG"
+            )
+            return
+        result['errors'].extend(_validate_template_structure_svg(svg_path))
+        result['errors'] = list(dict.fromkeys(result['errors']))
+
+    @staticmethod
+    def _check_placeholder_carrier_flattening(
+        root: ET.Element,
+        svg_path: Path,
+        result: Dict,
+    ) -> None:
+        """Reject slot carriers that export as multiple native children.
+
+        Default export flattens non-mergeable positional ``<tspan>`` lines
+        before converting the surrounding slot group to DrawingML. Reuse that
+        exact transform here so the quality gate fails before the later
+        placeholder-unwrapping step does.
+        """
+        if _flatten_positional_tspans is None:
+            return
+
+        candidate_ids: List[str] = []

@@ -1,0 +1,120 @@
+        <textarea id="output-area" readonly></textarea>
+        <div style="text-align: right;">
+            <button class="btn" onclick="document.getElementById('output-modal').style.display='none'">Close</button>
+        </div>
+    </div>
+</div>
+
+<script>
+    const images = __IMAGES__;
+    const grid = document.getElementById('grid');
+
+    images.forEach(item => {
+        const card = document.createElement('div');
+        card.className = 'card';
+        card.setAttribute('data-rotation', 0);
+        // use stable path for the data attribute
+        card.setAttribute('data-path', item.path);
+
+        const filename = item.src.split('/').pop();
+
+        card.innerHTML = `
+            <div class="img-wrapper">
+                <img src="${item.src}" alt="${filename}" loading="lazy">
+                <div class="badge">0°</div>
+            </div>
+            <div class="info">${filename}</div>
+        `;
+
+        card.onclick = function() {
+            let rot = parseInt(this.getAttribute('data-rotation'));
+            rot = (rot + 90) % 360;
+            this.setAttribute('data-rotation', rot);
+
+            const img = this.querySelector('img');
+            img.style.transform = `rotate(${rot}deg)`;
+
+            const badge = this.querySelector('.badge');
+            badge.innerText = rot + '°';
+
+            if (rot > 0) {
+                this.classList.add('modified');
+            } else {
+                this.classList.remove('modified');
+            }
+        };
+
+        grid.appendChild(card);
+    });
+
+    function showCode() {
+        const tasks = [];
+        document.querySelectorAll('.card').forEach(card => {
+            const rot = parseInt(card.getAttribute('data-rotation'));
+            if (rot > 0) {
+                tasks.push({
+                    path: card.getAttribute('data-path'),
+                    rotation: rot
+                });
+            }
+        });
+
+        const jsonStr = JSON.stringify(tasks, null, 2);
+        const modal = document.getElementById('output-modal');
+        const area = document.getElementById('output-area');
+
+        modal.style.display = 'flex';
+        area.value = jsonStr;
+        area.select();
+        try { document.execCommand('copy'); } catch(e){}
+    }
+</script>
+</body>
+</html>
+"""
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the command-line parser."""
+    parser = argparse.ArgumentParser(
+        description="Manage image orientation and manual rotation fixes.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Examples:
+  python3 scripts/rotate_images.py sheet projects/demo/images
+  python3 scripts/rotate_images.py gen projects/demo/images
+  python3 scripts/rotate_images.py fix fixes.json
+  python3 scripts/rotate_images.py auto projects/demo/images
+""",
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    sheet = subparsers.add_parser(
+        "sheet",
+        help="Generate a static contact sheet without modifying images",
+    )
+    sheet.add_argument("images_directory", help="Images directory")
+    sheet.add_argument(
+        "-o",
+        "--output",
+        help="Output .jpg or .png path (default: sibling analysis directory)",
+    )
+
+    gen = subparsers.add_parser("gen", help="Generate the visual rotation HTML tool")
+    gen.add_argument("images_directory", help="Images directory")
+
+    fix = subparsers.add_parser("fix", help="Apply rotations from a fixes JSON file")
+    fix.add_argument("fixes_json", help="Path to fixes.json")
+
+    auto = subparsers.add_parser("auto", help="Automatically fix EXIF orientation")
+    auto.add_argument("images_directory", help="Images directory")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the CLI entry point."""
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    rotator = ImageRotator()
+
+    if args.command == 'sheet':
+        try:
+            output_path = rotator.generate_contact_sheet(

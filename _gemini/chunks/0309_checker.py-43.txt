@@ -1,0 +1,86 @@
+        return f'{label} ({"; ".join(details)})' if details else label
+
+    @staticmethod
+    def _is_hidden_element(
+        element: ET.Element,
+        parent_by_id: Dict[int, ET.Element],
+    ) -> bool:
+        """Resolve ordinary suppression and empty clips before measuring visuals."""
+        if _svg_hidden_reason is not None and _svg_hidden_reason(element, parent_by_id) is not None:
+            return True
+        if _empty_clip_path_reason is None or _project_definition_index is None:
+            return False
+        clipped = []
+        root = element
+        current = element
+        while current is not None:
+            if current.get('clip-path') is not None:
+                clipped.append(current)
+            root = current
+            current = parent_by_id.get(id(current))
+        if not clipped:
+            return False
+        definitions, _duplicates = _project_definition_index(root)
+        return any(_empty_clip_path_reason(item, definitions, parent_by_id) for item in clipped)
+
+    def _check_hidden_elements(self, root: ET.Element, result: Dict) -> None:
+        """Advise which hidden SVG objects will be omitted during native export."""
+        if _collect_hidden_visuals is None:
+            return
+        for element, reason in _collect_hidden_visuals(root):
+            result['warnings'].append(
+                f'Hidden element {_element_label(element)} will not be exported '
+                f'({reason}, including inherited state); advisory only'
+            )
+
+    def _check_shape_coordinate_ranges(self, root: ET.Element, result: Dict) -> None:
+        """Check ordinary shape frames with the exporter's OOXML range validator."""
+        if _rect_to_dml_xfrm is None or _parse_project_geometry_length is None:
+            return
+        parents = {id(child): parent for parent in root.iter() for child in parent}
+
+        def visit(element: ET.Element) -> None:
+            tag = _local_name(element)
+            if tag in {'defs', 'metadata', 'title', 'desc', 'style'}:
+                return
+            if (
+                tag in {'rect', 'image', 'circle', 'ellipse'}
+                and element.get('data-pptx-frame') is None
+                and not self._is_hidden_element(element, parents)
+            ):
+                styles = _parse_inline_style(element.get('style')) if _parse_inline_style else {}
+
+                def length(name: str) -> float:
+                    return _parse_project_geometry_length(styles.get(name, element.get(name, '0')), name)
+
+                try:
+                    if tag in {'rect', 'image'}:
+                        frame = (length('x'), length('y'), length('width'), length('height'))
+                    else:
+                        rx = length('r' if tag == 'circle' else 'rx')
+                        ry = rx if tag == 'circle' else length('ry')
+                        frame = (length('cx') - rx, length('cy') - ry, rx * 2, ry * 2)
+                    matrix = self._accumulated_transform_matrix(element, parents)
+                    if matrix is not None and frame[2] > 0 and frame[3] > 0:
+                        _rect_to_dml_xfrm(*frame, matrix)
+                except ValueError as exc:
+                    # Other geometry/transform grammar errors have their own checks.
+                    if 'OOXML' in str(exc):
+                        result['errors'].append(
+                            f'{_element_label(element)}: {exc}; reduce the shape '
+                            'coordinates or dimensions before export'
+                        )
+            for child in element:
+                visit(child)
+
+        visit(root)
+
+    @staticmethod
+    def _has_zero_opacity(
+        element: ET.Element,
+        parent_by_id: Dict[int, ET.Element],
+    ) -> bool:
+        """Return whether an element or ancestor has zero effective opacity."""
+        current: ET.Element | None = element
+        while current is not None:
+            style_values = (

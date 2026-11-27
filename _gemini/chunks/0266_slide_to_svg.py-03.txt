@@ -1,0 +1,108 @@
+          only its own shapes. Callers (e.g. /create-template's PPTX import)
+          render master/layout once each as separate SVGs and record the
+          inheritance graph in inheritance.json.
+    """
+    ctx = AssemblyContext(
+        palette=palette,
+        pkg=pkg,
+        slide_part=slide.part,
+        slide_number=pkg.first_slide_number + slide.index - 1,
+        theme_fonts=theme_fonts or {},
+        media_subdir=media_subdir,
+        embed_images=embed_images,
+        keep_hidden=keep_hidden,
+        strict=strict,
+        render_graphic_previews=(inheritance_mode == "flat"),
+        preserve_placeholder_inheritance=preserve_placeholder_inheritance,
+        asset_name_map=asset_name_map or {},
+        diagnostics=diagnostics if diagnostics is not None else [],
+        source_slide_index=slide.index,
+    )
+    ctx.bind_palette()
+
+    canvas_w, canvas_h = pkg.slide_size_px
+    canvas_w_token, canvas_h_token = (
+        format_canvas_px_from_emu(value) for value in pkg.slide_size_emu
+    )
+
+    # Background (cSld/bg) — emit as the first body element.
+    body_parts: list[str] = []
+    try:
+        bg_xml = (
+            _emit_background(slide, ctx, canvas_w, canvas_h)
+            if inheritance_mode == "flat"
+            else _emit_part_background(
+                SlideRef(index=slide.index, part=slide.part, layout=None, master=slide.master),
+                ctx, canvas_w, canvas_h,
+            )
+        )
+    except (ValueError, MediaResolutionError) as exc:
+        if strict:
+            raise
+        ctx.diagnose(
+            "background-omitted",
+            str(exc),
+            "omit the unsupported background and continue the slide",
+        )
+        bg_xml = ""
+    if bg_xml:
+        body_parts.append(bg_xml)
+
+    if inheritance_mode == "flat":
+        # Inherited layout/master shapes render behind slide-local shapes. Skip
+        # placeholders; they define editable regions, not visible background.
+        body_parts.extend(_emit_inherited_shapes(slide, ctx))
+    elif inheritance_mode != "layered":
+        raise ValueError(
+            f"inheritance_mode must be 'flat' or 'layered', got {inheritance_mode!r}"
+        )
+
+    # Walk shapes — placeholders without their own xfrm inherit geometry from
+    # layout, then master.
+    nodes = walk_sp_tree(
+        slide.part.xml,
+        layout_xml=slide.layout.xml if slide.layout else None,
+        master_xml=slide.master.xml if slide.master else None,
+    )
+    for node in nodes:
+        chunk = _convert_node(node, ctx, top_level=True)
+        if chunk:
+            body_parts.append(chunk)
+
+    # Compose final SVG
+    defs_xml = "".join(ctx.defs) if ctx.defs else ""
+    defs_block = f"<defs>{defs_xml}</defs>" if defs_xml else ""
+
+    svg = (
+        f'<svg xmlns="http://www.w3.org/2000/svg" '
+        f'xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" '
+        f'width="{canvas_w_token}" height="{canvas_h_token}" '
+        f'viewBox="0 0 {canvas_w_token} {canvas_h_token}">'
+        f"{defs_block}"
+        + "\n".join(body_parts)
+        + "</svg>"
+    )
+    return svg, ctx.media
+
+
+def assemble_part_solo(
+    pkg: OoxmlPackage,
+    part: PartRef,
+    palette: ColorPalette | None,
+    *,
+    role: str,
+    parent_master: PartRef | None = None,
+    theme_fonts: dict[str, str] | None = None,
+    media_subdir: str = "images",
+    embed_images: bool = False,
+    keep_hidden: bool = False,
+    asset_name_map: dict[str, str] | None = None,
+    strict: bool = False,
+    diagnostics: list[ImportDiagnostic] | None = None,
+) -> tuple[str, dict[str, bytes]]:
+    """Render a single slideMaster or slideLayout part as a standalone SVG.
+
+    Used by the layered export path. Skips placeholders the same way
+    `_emit_inherited_shapes` does, so the output represents the part's
+    decorative / structural shapes only — what the part *contributes* to its
+    descendants. The first ancestor's background (if any) is emitted as the

@@ -1,0 +1,105 @@
+            for error in _project_hyperlink_errors(
+                root,
+                slide_count=None if self.partial_roster else self._active_slide_count,
+            )
+        )
+
+    def _check_nested_positional_tspans(
+        self,
+        root: ET.Element,
+        result: Dict,
+    ) -> None:
+        """Reject nested baseline jumps that DrawingML runs cannot represent."""
+        if _nested_positional_tspan_errors is None:
+            return
+        result['errors'].extend(_nested_positional_tspan_errors(root))
+
+    @classmethod
+    def _single_line_text_runs(
+        cls,
+        text_el: ET.Element,
+    ) -> List[Tuple[ET.Element, str]] | None:
+        """Return normalized inline runs, or ``None`` for positioned text."""
+        raw_runs = cls._inline_text_segments(text_el, 'default')
+        if raw_runs is None:
+            return None
+        return cls._normalize_source_text_runs(raw_runs)
+
+    @classmethod
+    def _inline_text_segments(
+        cls,
+        container: ET.Element,
+        inherited_xml_space: str,
+        *,
+        include_container_dx: bool = False,
+    ) -> List[Tuple[ET.Element, str, str]] | None:
+        """Collect inline text and empty dx markers, rejecting baseline jumps."""
+        if (
+            _normalize_project_text_segments is None
+            or _resolve_project_xml_space is None
+            or _parse_svg_length is None
+        ):
+            return None
+        raw_runs: List[Tuple[ET.Element, str, str]] = []
+
+        def append_run(owner: ET.Element, raw: str, xml_space: str) -> None:
+            if raw:
+                raw_runs.append((owner, xml_space, raw))
+
+        def collect(element: ET.Element, inherited: str) -> bool:
+            try:
+                xml_space = _resolve_project_xml_space(
+                    element,
+                    inherited,
+                )
+            except ValueError:
+                return False
+            if (
+                cls._is_tspan(element)
+                and element.get('dx') is not None
+                and (element is not container or include_container_dx)
+            ):
+                try:
+                    dx = _parse_svg_length(element.get('dx'))
+                except ValueError:
+                    return False
+                if dx:
+                    raw_runs.append((element, xml_space, ''))
+            if element.text:
+                append_run(element, element.text, xml_space)
+            for child in list(element):
+                # An inline hyperlink (``<a>`` wrapping ``<tspan>`` runs, the
+                # form native-hyperlinks.md requires) is a transparent style
+                # container: its runs are measured like any other inline run.
+                if not (cls._is_tspan(child) or _local_name(child) == 'a'):
+                    return False
+                if any(child.get(name) is not None for name in ('x', 'y', 'dy')):
+                    return False
+                if child.get('dx') is not None and not cls._is_tspan(child):
+                    return False
+                if any(
+                    name.startswith('data-paragraph-')
+                    for name in child.attrib
+                ):
+                    return False
+                if not collect(child, xml_space):
+                    return False
+                if child.tail:
+                    append_run(element, child.tail, xml_space)
+            return True
+
+        if not collect(container, inherited_xml_space):
+            return None
+        return raw_runs
+
+    @staticmethod
+    def _normalize_source_text_runs(
+        raw_runs: List[Tuple[ET.Element, str, str]],
+    ) -> List[Tuple[ET.Element, str]]:
+        """Normalize collected segments while retaining their style owner."""
+        normalized = dict(_normalize_project_text_segments([
+            (xml_space, raw)
+            for _owner, xml_space, raw in raw_runs
+        ]))
+        return [
+            (owner, normalized.get(index, ''))

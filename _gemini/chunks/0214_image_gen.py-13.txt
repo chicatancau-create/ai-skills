@@ -1,0 +1,108 @@
+    parser.add_argument(
+        "--manifest", default=None, metavar="IMAGE_PROMPTS_JSON",
+        help=(
+            "Path to image_prompts.json. Runs every Pending/Failed item in "
+            "parallel; writes status back to the manifest as each completes."
+        ),
+    )
+    parser.add_argument(
+        "--concurrency", type=int, default=None,
+        help=(
+            "Max concurrent requests in --manifest mode. Defaults to "
+            f"IMAGE_CONCURRENCY env or {DEFAULT_MANIFEST_CONCURRENCY}. "
+            "Auto-halves on rate-limit; 1 is the serial fallback."
+        ),
+    )
+    parser.add_argument(
+        "--render-md", dest="render_md", default=None, metavar="IMAGE_PROMPTS_JSON",
+        help=(
+            "Render <json>'s read-only Markdown sidecar (image_prompts.md) "
+            "next to the manifest, then exit. No backend / network needed."
+        ),
+    )
+    parser.add_argument(
+        "--reference-image", dest="reference_image", default=None, metavar="PATH",
+        help=(
+            "Source image for image-to-image editing (single-image mode only). "
+            "When set, the prompt is used as the edit instruction. Only backends "
+            "that support editing accept this (currently: gemini, openai). Not "
+            "valid with --manifest / --render-md / --list-backends."
+        ),
+    )
+
+    args = parser.parse_args()
+
+    if args.filename is not None:
+        try:
+            _validate_bare_output_name(
+                args.filename,
+                field_name="--filename",
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+
+    if args.reference_image is not None:
+        # Reference editing is a single-image-only enhancement; keep it out of
+        # the manifest / sidecar / list surfaces entirely.
+        conflicting = [
+            name for name, val in (
+                ("--manifest", args.manifest),
+                ("--render-md", args.render_md),
+                ("--list-backends", args.list_backends),
+            ) if val
+        ]
+        if conflicting:
+            parser.error(
+                "--reference-image is single-image mode only and cannot be "
+                f"combined with {', '.join(conflicting)}."
+            )
+        if not args.prompt or not args.prompt.strip():
+            parser.error(
+                "--reference-image requires a prompt to use as the edit instruction."
+            )
+        if not os.path.isfile(args.reference_image):
+            parser.error(
+                f"--reference-image file not found: {args.reference_image}"
+            )
+
+    if args.list_backends:
+        _print_backend_list()
+        return
+
+    if args.render_md:
+        if not os.path.isfile(args.render_md):
+            print(f"Error: manifest file not found: {args.render_md}")
+            sys.exit(1)
+        try:
+            manifest = load_manifest(args.render_md)
+        except ValueError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+        md_path = render_manifest_md_to_file(args.render_md, manifest)
+        print(f"Rendered Markdown sidecar: {md_path}")
+        return
+
+    manifest = None
+    manifest_output_dir = None
+    if args.manifest:
+        if not os.path.isfile(args.manifest):
+            print(f"Error: manifest file not found: {args.manifest}")
+            sys.exit(1)
+        _guard_confirmed_non_api_path(args.manifest)
+        try:
+            manifest = load_manifest(args.manifest)
+        except ValueError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+        manifest_output_dir = Path(args.manifest).resolve().parent
+        if args.output and Path(args.output).resolve() != manifest_output_dir:
+            print(
+                "Error: --output cannot redirect manifest items outside the "
+                f"manifest directory ({manifest_output_dir})"
+            )
+            sys.exit(1)
+
+    try:
+        _load_image_env_file()
+        _validate_runtime_config()
+    except ValueError as e:

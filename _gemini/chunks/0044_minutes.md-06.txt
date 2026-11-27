@@ -1,0 +1,115 @@
+   > | 2 | 发言人 1（未识别） | 30% |
+   > | 3 | 发言人 2（未识别） | 20% |
+   > | 4 | 李四（已识别） | 15% |
+   >
+   > 你可以：
+   > 1. **智能匹配** — 我来帮你推断未识别的发言人身份（基于通讯录、聊天记录等）
+   > 2. **提供日程/参会人** — 告诉我这次会议对应的日程链接或参会人名单，我用成员列表来匹配
+   > 3. **手动设置** — 直接告诉我对应关系，如「发言人1:王五, 发言人2:赵六」
+   > 4. **跳过** — 暂不处理发言人识别
+
+   根据用户选择分别处理：
+   - 选 1 → 进入 `minutes-speaker-summarize` recipe 的智能推断流程（见 [10-minutes-speaker-match.md](../best_practices/10-minutes-speaker-match.md)）
+   - 选 2 → 请用户提供日程链接或参会人姓名列表：
+     - 有日程链接 → 从链接提取 eventId → `dws calendar participant list --event <eventId>` 获取参与人 → 与转写发言人数量/顺序对照匹配 → 展示匹配结果请用户确认 → 确认后逐条执行 `speaker replace`
+     - 有参会人名单（用户直接列出姓名）→ 与转写中匿名发言人做数量对照 → 结合发言内容/角色推断匹配 → 展示匹配结果请用户确认 → 确认后逐条执行 `speaker replace`
+   - 选 3 → 用户提供映射关系（如「发言人1:张三」格式）→ 按「发言人映射模式识别」流程执行（见下方"修改说话人"章节）
+   - 选 4 → 正常结束，不做发言人处理
+
+4. **引导逻辑（所有发言人均已识别时）**：
+
+   > 所有发言人均已识别。是否需要查看某位发言人的详细发言总结？请输入姓名。
+
+   用户选定 → 进入 `minutes-speaker-summarize` recipe；用户不需要 → 正常结束。
+
+> **禁止**：跳过发言人列表直接输出摘要；将匿名编号的内部格式（Speaker_X）暴露给用户；未识别发言人时不给任何引导就结束。
+
+### 获取听记 AI 摘要
+```
+Usage:
+  dws minutes get summary [flags]
+Example:
+  dws minutes get summary --id <taskUuid>
+Flags:
+      --id string   听记 taskUuid (必填)，取值逻辑参考 ## 注意事项
+```
+
+返回 Markdown 格式摘要，涵盖会议主题、核心结论、关键讨论点等
+
+### 获取听记关键字列表
+```
+Usage:
+  dws minutes get keywords [flags]
+Example:
+  dws minutes get keywords --id <taskUuid>
+Flags:
+      --id string   听记 taskUuid (必填)，取值逻辑参考 ## 注意事项
+```
+
+### 获取听记语音转写原文
+```
+Usage:
+  dws minutes get transcription [flags]
+Example:
+  dws minutes get transcription --id <taskUuid>
+  dws minutes get transcription --id <taskUuid> --direction 1
+  dws minutes get transcription --id <taskUuid> --next-token <nextToken> --format json
+Flags:
+      --direction string   排序方向: 0=正序, 1=倒序 (默认 0)
+      --id string          听记 taskUuid (必填)，取值逻辑参考 ## 注意事项
+      --next-token string 下一页的token 首次查询可空 后续查询需填写前次请求返回的nextToken
+```
+
+每条记录包含: 发言人信息、转写文本、对应时间戳
+
+**关键：转写接口每次最多返回 50 段，必须自动翻页才能拿到完整原文！**
+
+> **这是最高频的 silent failure：** `get transcription` 单次调用**最多只返回 50 段**。一篇 30 分钟会议的转写通常有 150-400 段，如果不翻页就只能看到前 1/3 甚至 1/8 的内容。
+>
+> **分页机制（必须掌握）：**
+> - 首次调用：`dws minutes get transcription --id <uuid> --format json`（不传 `--next-token`）
+> - 检查返回 JSON 中是否包含 `nextToken` 字段（非空字符串）
+> - 如果有 `nextToken`：**必须立即发起下一次调用**，传入 `--next-token <上次返回的nextToken值>`
+> - 循环直到返回中**不再包含 `nextToken`**（或 `nextToken` 为空），表示所有段落已拉取完毕
+> - **拼合所有页的段落**后，才算拿到了完整转写原文
+>
+> **自动翻页伪代码（AI 必须内化此逻辑）：**
+> ```
+> all_paragraphs = []
+> next_token = ""           # 首次为空
+> loop:
+>     if next_token == "":
+>         result = dws minutes get transcription --id <uuid> --format json
+>     else:
+>         result = dws minutes get transcription --id <uuid> --next-token <next_token> --format json
+>     all_paragraphs.append(result.paragraphs)
+>     next_token = result.nextToken   # 可能为空或不存在
+>     if next_token 为空或不存在:
+>         break   # 全部拉取完毕
+> # 此时 all_paragraphs 才是完整转写原文
+> ```
+>
+> **典型错误（导致"总结整篇听记"只看到前 50 段的 P0 bug）：**
+> - [错误] 只调用一次 `get transcription`，看到返回了内容就以为拿全了 → 实际只有前 50 段
+> - [错误] 看到返回 JSON 里有 `nextToken` 字段但不知道这是什么、不知道要传 `--next-token` → 默默丢弃了后续页
+> - [错误] 用 `--help` 查参数但在 Windows 下输出被截断，没看到 `--next-token` 参数 → 以为不支持分页
+> - [正确] **正确做法：无条件按上述循环逻辑自动翻页，直到 nextToken 为空**
+
+**重要 — 转写原文拉取策略（AI 必须严格遵守）：**
+
+转写原文数据量通常很大，**是否拉取、拉取多少**需要根据用户意图智能判断：
+
+1. **用户明确要求查看/分析转写原文时 → 默认拉取全部原文**（自动翻页，不需要用户手动说"第一页"）
+   - 示例："帮我看看转写原文"、"分析一下这篇听记的原文"、"把逐字稿给我"、"转写内容是什么"
+   - 实现：首次调用不传 `--next-token`，如果返回中包含 `nextToken`，**自动继续调用**直到拉取完所有页，最终拼合后展示给用户
+   - **字符上限保护**：在循环拉取过程中，如果已累积的转写文本总量**超过 12000 字符（1.2w）**，必须**暂停自动翻页**，向用户提示当前已处理的字符数已达到上限，并询问是否继续拉取后续分页内容。用户确认后才继续拉取，用户拒绝则停止并展示已拉取的内容
+
+**超长会议翻页优化策略（0519 P0 Golden Case 提炼 — 70min 会议翻页 15+ 次）：**
+
+> 当会议时长超过 45 分钟时，转写原文通常需要 **10-20 次翻页**（每次 50 段 ≈ 23k 字），每次 CLI 调用都消耗 LLM 上下文 token，极度浪费。
+>
+> **AI 必须遵守的翻页效率规则：**
+> 1. **翻页次数预估**：首次调用返回后，如果 `nextToken` 非空，AI 应根据已拉取段落数和会议总时长估算剩余翻页次数
+> 2. **超过 5 次翻页时**：自动启用"静默累积模式"——不在每次翻页时都向用户汇报进度，直接循环拉取并在内存中累积
+> 3. **超过 10 次翻页时**：在第 10 次翻页完成后暂停，主动告知用户：
+>    > "这篇听记较长，已拉取前 500 段（约 X 字符），预计还需 N 次翻页。是否继续拉取完整原文，还是基于已有内容先做分析？"

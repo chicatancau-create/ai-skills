@@ -1,0 +1,127 @@
+            "href": TRANSPARENT_PIXEL_DATA_URI,
+            "preserveAspectRatio": "none",
+            "data-pptx-carrier": "true",
+        },
+    )
+
+
+def _format_number(value: float) -> str:
+    return f"{value:.8f}".rstrip("0").rstrip(".") or "0"
+
+
+def _optional_float(value: str | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except ValueError:
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _slot_wrapper(
+    plan: SlotPlan,
+    source: ET.Element | None,
+    *,
+    layout_guide: ET.Element | None,
+    master_guide: ET.Element | None,
+) -> tuple[ET.Element, list[ET.Element]]:
+    wrapper = ET.Element(
+        f"{{{SVG_NS}}}g",
+        {
+            "id": plan.slot_id,
+            "data-pptx-placeholder": plan.semantic_role,
+            "data-pptx-bounds": " ".join(
+                format_coordinate(item) for item in plan.bounds
+            ),
+        },
+    )
+    if plan.idx is not None:
+        wrapper.set("data-pptx-idx", str(plan.idx))
+
+    extras: list[ET.Element] = []
+    if plan.semantic_role in {
+        "title",
+        "subtitle",
+        "body",
+        "date",
+        "footer",
+        "slide-number",
+    }:
+        carrier = _copy_text_carrier(source)
+        if carrier is None:
+            carrier = _blank_text_carrier(plan, layout_guide, master_guide)
+        extras = _resolved_placeholder_decorations(
+            source,
+            layout_guide,
+            master_guide,
+        )
+        for extra in extras:
+            extra.attrib.pop("data-pptx-carrier", None)
+        wrapper.append(carrier)
+        return wrapper, extras
+
+    if plan.semantic_role == "object":
+        proxy_source = source
+        if proxy_source is None:
+            proxy_source = layout_guide
+        if proxy_source is None:
+            proxy_source = master_guide
+        if proxy_source is None:
+            raise MirrorMaterializationError(
+                f"Object slot {plan.slot_id!r} has no visible proxy source"
+            )
+        visible = [copy.deepcopy(child) for child in proxy_source if _visible_leaf(child)]
+        if not visible:
+            raise MirrorMaterializationError(
+                f"Object slot {plan.slot_id!r} has no visible proxy content"
+            )
+        wrapper.set("data-pptx-binding", "proxy")
+        for child in visible:
+            wrapper.append(child)
+        return wrapper, extras
+
+    expected_tags = {
+        "picture": {"image", "svg"},
+        "media": {"image", "svg"},
+        "chart": {"g"},
+        "table": {"g"},
+    }[plan.semantic_role]
+    carrier_source = source or layout_guide
+    candidates = [
+        element
+        for element in (carrier_source.iter() if carrier_source is not None else [])
+        if _local_name(element.tag) in expected_tags and _visible_leaf(element)
+    ]
+    if (
+        not candidates
+        and source is None
+        and layout_guide is not None
+        and plan.semantic_role in {"picture", "media"}
+    ):
+        wrapper.append(_blank_image_carrier(plan))
+        return wrapper, extras
+    if len(candidates) != 1:
+        raise MirrorMaterializationError(
+            f"Slot {plan.slot_id!r} requires exactly one visible "
+            f"{plan.semantic_role} carrier, found {len(candidates)}"
+        )
+    carrier = copy.deepcopy(candidates[0])
+    if plan.semantic_role in {"chart", "table"}:
+        marker = carrier.get("data-pptx-replace-with")
+        if marker != plan.semantic_role:
+            raise MirrorMaterializationError(
+                f"Slot {plan.slot_id!r} {plan.semantic_role} carrier lacks native marker"
+            )
+    carrier.set("data-pptx-carrier", "true")
+    wrapper.append(carrier)
+    return wrapper, extras
+
+
+def _strip_source_refs(root: ET.Element) -> None:
+    for element in root.iter():
+        element.attrib.pop(SOURCE_REF_ATTRIBUTE, None)
+        element.attrib.pop("data-ph-type", None)
+
+
+def _is_full_canvas_rect(

@@ -1,0 +1,122 @@
+    'image/webp': 'WEBP',
+}
+_OFFICE_VECTOR_EXTENSIONS = {'.emf', '.wmf'}
+
+
+def _parse_float(val: str | None, default: float = 0.0) -> float:
+    """Best-effort float parse, tolerating trailing ``px`` etc."""
+    if val is None or val == '':
+        return default
+    try:
+        return float(re.sub(r'(px|pt|em|%|rem)$', '', val.strip()))
+    except (ValueError, AttributeError):
+        return default
+
+
+def _format_number(n: float) -> str:
+    """Format a float for compact SVG attribute output."""
+    if abs(n - round(n)) < 1e-6:
+        return str(int(round(n)))
+    s = f"{n:.2f}".rstrip('0').rstrip('.')
+    return s or '0'
+
+
+def _resolve_image_path(href: str, svg_dir: Path) -> Path | None:
+    """Resolve an <image> href to a local filesystem path.
+
+    Returns None for unresolvable references (http/https/etc.) so callers
+    can leave those refs untouched.
+    """
+    if not href:
+        return None
+    return resolve_external_image_reference(svg_dir, href)
+
+
+def _is_svg_image(img_path: Path, raw_bytes: bytes) -> bool:
+    """Return True when an image reference is an SVG document."""
+    if img_path.suffix.lower() == '.svg':
+        return True
+    head = raw_bytes.lstrip()[:512].lower()
+    return head.startswith(b'<svg') or (head.startswith(b'<?xml') and b'<svg' in head)
+
+
+def _embed_raw_image(image: ET.Element, img_path: Path, raw_bytes: bytes) -> None:
+    """Embed raw image bytes without PIL transforms."""
+    mime_type = get_mime_type(img_path.name, raw_bytes)
+    b64 = base64.b64encode(raw_bytes).decode('ascii')
+    _set_href(image, f'data:{mime_type};base64,{b64}')
+
+
+def _load_pil_image(img_path: Path) -> 'PILImage' | None:
+    """Open an image with PIL, returning None on any failure."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+    try:
+        return Image.open(img_path)
+    except (OSError, ValueError):
+        return None
+
+
+def _prepare_raster_for_geometry(img: 'PILImage') -> 'PILImage':
+    """Apply EXIF orientation and materialize palette/tRNS transparency."""
+    from PIL import ImageOps
+
+    prepared = ImageOps.exif_transpose(img)
+    if prepared.mode == 'P':
+        prepared = prepared.convert('RGBA' if _has_alpha(prepared) else 'RGB')
+    elif (
+        'transparency' in getattr(prepared, 'info', {})
+        and prepared.mode not in {'RGBA', 'LA'}
+    ):
+        prepared = prepared.convert('RGBA')
+    return prepared
+
+
+def _has_exif_geometry_transform(img: 'PILImage') -> bool:
+    """Return whether EXIF requires a physical mirror or rotation."""
+    try:
+        return int(img.getexif().get(274, 1)) in range(2, 9)
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
+def _normalize_for_save(img: 'PILImage', mime_type: str) -> 'PILImage':
+    """Coerce a PIL image into a mode that the target format can save.
+
+    JPEG cannot store alpha — flatten to white background. Other formats
+    keep alpha when present.
+    """
+    if mime_type == 'image/jpeg':
+        if img.mode in ('RGBA', 'LA'):
+            from PIL import Image
+            background = Image.new('RGB', img.size, (255, 255, 255))
+            alpha = img.getchannel('A')
+            background.paste(img.convert('RGB'), mask=alpha)
+            return background
+        if img.mode != 'RGB':
+            return img.convert('RGB')
+        return img
+    # Lossless output — preserve alpha if present.
+    if img.mode == 'P':
+        return img.convert('RGBA' if _has_alpha(img) else 'RGB')
+    if img.mode not in {'1', 'L', 'LA', 'I', 'I;16', 'RGB', 'RGBA'}:
+        return img.convert('RGBA' if _has_alpha(img) else 'RGB')
+    return img
+
+
+def _has_alpha(img: 'PILImage') -> bool:
+    """Return whether a PIL image has transparency."""
+    if img.mode in ('RGBA', 'LA'):
+        return True
+    return 'transparency' in getattr(img, 'info', {})
+
+
+def _target_size(
+    box_w: float,
+    box_h: float,
+    *,
+    max_dimension: int | None,
+    image_scale: float,
+) -> tuple[int, int]:

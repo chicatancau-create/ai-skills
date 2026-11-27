@@ -1,0 +1,165 @@
+# System Integration
+
+iOS system integration guide covering permissions, location, sharing, app lifecycle, and haptic feedback.
+
+## Permission Requests
+
+Request permissions contextually, not at launch:
+
+```swift
+import AVFoundation
+
+@objc func openCamera() {
+    AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+        DispatchQueue.main.async {
+            if granted {
+                self?.showCameraInterface()
+            } else {
+                self?.showPermissionDeniedAlert()
+            }
+        }
+    }
+}
+```
+
+### Photo Library
+
+```swift
+import Photos
+
+func requestPhotoAccess() {
+    PHPhotoLibrary.requestAuthorization(for: .readWrite) { status in
+        DispatchQueue.main.async {
+            switch status {
+            case .authorized, .limited:
+                self.showPhotoPicker()
+            case .denied, .restricted:
+                self.showSettingsAlert()
+            default:
+                break
+            }
+        }
+    }
+}
+```
+
+### Microphone
+
+```swift
+func requestMicrophoneAccess() {
+    AVAudioSession.sharedInstance().requestRecordPermission { granted in
+        DispatchQueue.main.async {
+            if granted {
+                self.startRecording()
+            }
+        }
+    }
+}
+```
+
+### Notifications
+
+```swift
+import UserNotifications
+
+func requestNotificationPermission() {
+    UNUserNotificationCenter.current().requestAuthorization(
+        options: [.alert, .badge, .sound]
+    ) { granted, error in
+        DispatchQueue.main.async {
+            if granted {
+                self.registerForRemoteNotifications()
+            }
+        }
+    }
+}
+```
+
+## Location Button
+
+For one-time location access without persistent permission:
+
+```swift
+import CoreLocationUI
+
+class StoreFinderVC: UIViewController {
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        
+        let locationBtn = CLLocationButton()
+        locationBtn.icon = .arrowFilled
+        locationBtn.label = .currentLocation
+        locationBtn.cornerRadius = 20
+        locationBtn.addTarget(self, action: #selector(findNearby), for: .touchUpInside)
+        
+        view.addSubview(locationBtn)
+        locationBtn.snp.makeConstraints { make in
+            make.centerX.equalToSuperview()
+            make.bottom.equalTo(view.safeAreaLayoutGuide).offset(-24)
+        }
+    }
+}
+```
+
+### Core Location
+
+```swift
+import CoreLocation
+
+class LocationManager: NSObject, CLLocationManagerDelegate {
+    private let manager = CLLocationManager()
+    
+    func requestLocation() {
+        manager.delegate = self
+        manager.desiredAccuracy = kCLLocationAccuracyBest
+        manager.requestWhenInUseAuthorization()
+    }
+    
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        switch manager.authorizationStatus {
+        case .authorizedWhenInUse, .authorizedAlways:
+            manager.requestLocation()
+        case .denied:
+            showLocationDeniedAlert()
+        default:
+            break
+        }
+    }
+    
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        guard let location = locations.last else { return }
+        handleLocation(location)
+    }
+}
+```
+
+## Share Sheet
+
+```swift
+@objc func shareContent() {
+    let items: [Any] = [contentURL, contentImage].compactMap { $0 }
+    let activityVC = UIActivityViewController(activityItems: items, applicationActivities: nil)
+    
+    if let popover = activityVC.popoverPresentationController {
+        popover.sourceView = shareButton
+        popover.sourceRect = shareButton.bounds
+    }
+    
+    present(activityVC, animated: true)
+}
+```
+
+### Custom Share Items
+
+```swift
+class ShareItem: NSObject, UIActivityItemSource {
+    let title: String
+    let url: URL
+    
+    init(title: String, url: URL) {
+        self.title = title
+        self.url = url
+    }
+    
+    func activityViewControllerPlaceholderItem(_ activityViewController: UIActivityViewController) -> Any {
+        return url

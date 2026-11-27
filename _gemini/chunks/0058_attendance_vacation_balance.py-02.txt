@@ -1,0 +1,125 @@
+            records.extend(recursively_collect_dicts(value))
+        return records
+    return []
+
+
+def looks_like_business_record(record: dict[str, Any]) -> bool:
+    candidate_key_groups = (
+        USER_ID_KEYS,
+        LEAVE_CODE_KEYS,
+        LEAVE_NAME_KEYS,
+        BALANCE_KEYS,
+        ENTRY_TIME_KEYS,
+        FIRST_WORK_TIME_KEYS,
+    )
+    return any(first_nonempty(record, keys) is not None for keys in candidate_key_groups)
+
+
+def is_truthy_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "y", "yes", "是", "visible"}
+    return False
+
+
+def is_falsey_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return not value
+    if isinstance(value, (int, float)):
+        return value == 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"false", "0", "n", "no", "否", "invisible", "not_visible"}
+    return False
+
+
+def is_no_balance_message(message: Any) -> bool:
+    return any(keyword in str(message) for keyword in NO_BALANCE_MESSAGES)
+
+
+def is_not_applicable_message(message: Any) -> bool:
+    return any(keyword in str(message) for keyword in NOT_APPLICABLE_MESSAGES)
+
+
+def is_external_leave_type(leave_type: dict[str, str]) -> bool:
+    return leave_type.get("source", "").strip().lower() == EXTERNAL_SOURCE
+
+
+def normalize_leave_unit(value: Any) -> str:
+    if value in (None, ""):
+        return ""
+    unit = str(value).strip()
+    if not unit:
+        return ""
+    return UNIT_LABELS.get(unit.lower(), unit)
+
+
+def format_date(value: Any) -> str:
+    if value in (None, ""):
+        return "未设置"
+    if isinstance(value, (int, float)):
+        timestamp = value / 1000 if value > 10_000_000_000 else value
+        try:
+            return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d")
+        except (OverflowError, OSError, ValueError):
+            return str(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return "未设置"
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(stripped[:19], fmt).strftime("%Y-%m-%d")
+            except ValueError:
+                continue
+        return stripped[:10] if len(stripped) >= 10 else stripped
+    return str(value)
+
+
+def format_balance_value(record: dict[str, Any]) -> Any:
+    visible = first_nonempty(record, VISIBLE_KEYS)
+    if visible is not None and is_falsey_flag(visible):
+        return "不适用"
+
+    message = first_nonempty(record, MESSAGE_KEYS)
+    if message and is_no_balance_message(message):
+        return "不限制余额"
+    if message and is_not_applicable_message(message):
+        return "不适用"
+
+    if "hideQuota" in record and is_truthy_flag(record["hideQuota"]):
+        return "不适用"
+
+    for key in UNLIMITED_KEYS:
+        if key in record and is_truthy_flag(record[key]):
+            return "不限制余额"
+    for key in NOT_APPLICABLE_KEYS:
+        if key in record and is_truthy_flag(record[key]):
+            return "不适用"
+
+    value = first_nonempty(record, BALANCE_KEYS)
+    if value in (None, ""):
+        status = first_nonempty(record, ("status", "state", "balanceStatus", *MESSAGE_KEYS))
+        return status or "不适用"
+
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped in {"UNLIMITED", "Unlimited", "不限", "不限制"}:
+            return "不限制余额"
+        if stripped in {"N/A", "NA", "NOT_APPLICABLE", "不适用"}:
+            return "不适用"
+        try:
+            value = float(stripped)
+        except ValueError:
+            return stripped
+
+    if isinstance(value, (int, float)):
+        rounded = round(float(value), 2)
+        return int(rounded) if rounded == int(rounded) else rounded
+    return value
+
+
+def normalize_leave_types(payload: Any) -> list[dict[str, str]]:
+    raw_records = recursively_collect_dicts(payload)

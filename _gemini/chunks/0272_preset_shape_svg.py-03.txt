@@ -1,0 +1,100 @@
+        print("\n".join(names))
+        return 0
+
+    if args.command == "describe":
+        if args.preset not in registry:
+            print(f"Unknown DrawingML preset: {args.preset!r}", file=sys.stderr)
+            return 1
+        definition = registry.get(args.preset)
+        adjustments = [
+            {"name": guide.name, "formula": guide.formula}
+            for guide in definition.adjustments
+        ]
+        connector_preset = definition.name in CONNECTOR_PRESET_TYPES
+        path_count = len(definition.paths)
+        connection_site_count = len(definition.connections)
+        has_text_rectangle = definition.text_rectangle is not None
+        text_rectangle = (
+            None
+            if definition.text_rectangle is None
+            else {
+                "left": definition.text_rectangle.left,
+                "top": definition.text_rectangle.top,
+                "right": definition.text_rectangle.right,
+                "bottom": definition.text_rectangle.bottom,
+            }
+        )
+        text_rectangle_px = None
+        if args.frame is not None and has_text_rectangle:
+            frame_x, frame_y, frame_w, frame_h = args.frame
+            try:
+                evaluated = registry.evaluate(
+                    args.preset,
+                    frame_w,
+                    frame_h,
+                    adjustments=_parse_adjustments(args.adjust),
+                )
+            except (ValueError, FormulaEvaluationError) as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                return 1
+            rect = evaluated.text_rectangle
+            if rect is not None:
+                text_rectangle_px = {
+                    "x": round(frame_x + rect.left, 2),
+                    "y": round(frame_y + rect.top, 2),
+                    "width": round(rect.right - rect.left, 2),
+                    "height": round(rect.bottom - rect.top, 2),
+                }
+        semantics = get_preset_shape_semantics().describe(args.preset)
+        full_payload = {
+            "preset": definition.name,
+            "connector_preset": connector_preset,
+            "adjustments": adjustments,
+            "path_count": path_count,
+            "connection_site_count": connection_site_count,
+            "has_text_rectangle": has_text_rectangle,
+            "text_rectangle": text_rectangle,
+            "text_rectangle_px": text_rectangle_px,
+            "semantics": semantics,
+        }
+        payload = (
+            {
+                "preset": definition.name,
+                "identity": semantics["intent"],
+                "office_category": semantics["office_category_label"],
+                "family": semantics["label"],
+                "scope": semantics["scope"],
+                "literal_only": semantics["literal_only"],
+                "adjustments": adjustments,
+                "adjustment_notes": semantics.get("adjustment_notes"),
+                "connector_preset": connector_preset,
+                "path_count": path_count,
+                "connection_site_count": connection_site_count,
+                "has_text_rectangle": has_text_rectangle,
+                "text_rectangle": text_rectangle,
+                "text_rectangle_px": text_rectangle_px,
+            }
+            if args.compact
+            else full_payload
+        )
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "render-batch":
+        try:
+            items = _read_batch_items(args.input)
+            fragments = _render_batch_items(items)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        print("\n".join(fragments))
+        return 0
+
+    try:
+        adjustments = _parse_adjustments(args.adjust)
+        style = _style_from_args(args)
+        fragment = render_preset_shape_fragment(
+            args.preset,
+            tuple(args.frame),
+            adjustments=adjustments,
+            object_kind=args.object_kind,

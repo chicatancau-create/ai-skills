@@ -1,0 +1,99 @@
+        and _expand_local_use_references is not None
+        and _UseExpansionError is not None
+    ):
+        expanded_root = copy.deepcopy(root)
+        try:
+            _expand_local_use_references(expanded_root)
+        except _UseExpansionError:
+            # The local-reference check owns the actionable diagnostic.
+            pass
+        else:
+            transform_errors.update(_project_transform_errors(expanded_root))
+    result['errors'].extend(
+        f'Invalid SVG transform: {error}'
+        for error in sorted(transform_errors)
+    )
+
+    recommendations: Counter[tuple[str, str]] = Counter()
+    examples: Dict[tuple[str, str], List[str]] = defaultdict(list)
+    for elem, raw in _iter_project_transforms(root):
+        try:
+            compatible_numbers = _noncanonical_transform_numbers(raw)
+        except ValueError:
+            continue
+        for number in compatible_numbers:
+            normalized = _format_project_geometry_length(float(number))
+            key = (number, normalized)
+            recommendations[key] += 1
+            label = _element_label(elem)
+            if label not in examples[key] and len(examples[key]) < 3:
+                examples[key].append(label)
+
+    for (raw, normalized), count in sorted(recommendations.items()):
+        shown_examples = ', '.join(examples[(raw, normalized)])
+        result['warnings'].append(
+            f"Recommendation: transform numeric token {raw!r} is "
+            f"converter-compatible in {count} occurrence(s) "
+            f"({shown_examples}); generated SVG should prefer the ordinary "
+            f"decimal spelling {normalized!r}. No change is required for export."
+        )
+
+
+def check_font_size_values(content: str, result: Dict) -> None:
+    """Keep supported font-size units compatible and recommend unitless px."""
+    canonical_re = re.compile(r'^(?:\d+(?:\.\d+)?|\.\d+)$')
+    values = set()
+
+    for match in re.finditer(r'\bfont-size\s*=\s*(["\'])(.*?)\1', content, re.IGNORECASE):
+        values.add(match.group(2).strip())
+
+    for match in re.finditer(r'\bfont-size\s*:\s*([^;"\']+)', content, re.IGNORECASE):
+        values.add(match.group(1).strip())
+
+    if _parse_export_length is None:
+        result['warnings'].append(
+            "Unable to import svg_to_pptx length parser; skipped font-size syntax check"
+        )
+        return
+
+    unsupported = set()
+    drawingml_out_of_range = set()
+    compatible_noncanonical = set()
+    for raw in values:
+        try:
+            parsed_px = _parse_export_length(raw, math.nan, font_size=16)
+        except (TypeError, ValueError):
+            unsupported.add(raw)
+            continue
+        if not math.isfinite(parsed_px) or parsed_px < 0:
+            unsupported.add(raw)
+            continue
+        if _font_px_to_hpt is not None:
+            try:
+                _font_px_to_hpt(parsed_px)
+            except ValueError:
+                drawingml_out_of_range.add(raw)
+                continue
+        if not canonical_re.fullmatch(raw):
+            compatible_noncanonical.add(raw)
+
+    if unsupported:
+        shown_values = sorted(unsupported)
+        shown = ', '.join(shown_values[:5])
+        more = len(shown_values) - 5
+        suffix = f" (+{more} more)" if more > 0 else ""
+        result['errors'].append(
+            f"Unsupported font-size value(s): {shown}{suffix}. Use a finite "
+            "non-negative SVG length supported by svg_to_pptx."
+        )
+
+    if drawingml_out_of_range:
+        shown_values = sorted(drawingml_out_of_range)
+        shown = ', '.join(shown_values[:5])
+        more = len(shown_values) - 5
+        suffix = f" (+{more} more)" if more > 0 else ""
+        result['errors'].append(
+            f"font-size value(s) {shown}{suffix} are outside the DrawingML "
+            f"range sz={_DRAWINGML_TEXT_FONT_SIZE_MIN}.."
+            f"{_DRAWINGML_TEXT_FONT_SIZE_MAX} (1..4000pt); PowerPoint would "
+            "repair the exported file. Do not use tiny transparent text as "

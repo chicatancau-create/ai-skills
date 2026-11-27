@@ -1,0 +1,117 @@
+    if bg_fill_index >= len(fills):
+        reject_invalid_idx(
+            f"Invalid p:bgRef@idx value {idx_raw!r}; theme background fill list "
+            f"contains {len(fills)} entries"
+        )
+        return None
+    return fills[bg_fill_index]
+
+
+def _emit_inherited_shapes(slide: SlideRef, ctx: AssemblyContext) -> list[str]:
+    parts: list[str] = []
+    show_layout_shapes, show_master_shapes = inherited_shape_visibility(slide)
+    inherited_parts = (
+        ("master-", slide.master, show_master_shapes),
+        ("layout-", slide.layout, show_layout_shapes),
+    )
+    for prefix, part, visible in inherited_parts:
+        if part is None or not visible:
+            continue
+        original_part = ctx.slide_part
+        original_prefix = ctx.group_id_prefix
+        ctx.slide_part = part
+        ctx.group_id_prefix = prefix
+        try:
+            for node in walk_sp_tree(part.xml):
+                if _is_placeholder_node(node):
+                    continue
+                chunk = _convert_node(node, ctx, top_level=True)
+                if chunk:
+                    parts.append(chunk)
+        finally:
+            ctx.slide_part = original_part
+            ctx.group_id_prefix = original_prefix
+    return parts
+
+
+def _is_placeholder_node(node: ShapeNode) -> bool:
+    if node.placeholder is not None:
+        return True
+    if node.kind == GROUP:
+        return all(_is_placeholder_node(child) for child in node.children)
+    return False
+
+
+def _convert_placeholder_guide(node: ShapeNode, ctx: AssemblyContext,
+                               *, top_level: bool) -> str:
+    """Emit the source-authored appearance of one template placeholder."""
+    return _convert_node(node, ctx, top_level=top_level)
+
+
+# ---------------------------------------------------------------------------
+# Wrap / utilities
+# ---------------------------------------------------------------------------
+
+def _wrap_shape_group(
+    inner: str,
+    node: ShapeNode,
+    ctx: AssemblyContext,
+    *,
+    top_level: bool,
+    extra_attrs: list[str] | None = None,
+) -> str:
+    """Wrap a shape's body in a <g> that carries the transform (rotation /
+    flip) and an id for animation anchoring."""
+    if not inner.strip():
+        return ""
+
+    transform = node.xfrm.to_svg_transform()
+    ctx.shape_seq[0] += 1
+    seq = ctx.shape_seq[0]
+    sid = node.spid or str(seq)
+    g_id = f"{ctx.group_id_prefix}shape-{sid}"
+
+    attrs: list[str] = [f'id="{g_id}"']
+    attrs.extend(
+        f'{key}="{_xml_escape(value)}"'
+        for key, value in _object_metadata(
+            node,
+            ctx,
+            fallback_shape_id=sid,
+        ).items()
+    )
+    if node.name:
+        attrs.append(f'data-name="{_xml_escape(node.name)}"')
+    if node.placeholder is not None and node.kind == SHAPE:
+        sp_pr = node.xml.find("p:spPr", NS)
+        if sp_pr is not None and any(
+            sp_pr.find(path, NS) is not None
+            for path in ("a:prstGeom", "a:custGeom")
+        ):
+            attrs.append('data-pptx-placeholder-local-geometry="true"')
+    if extra_attrs:
+        attrs.extend(extra_attrs)
+        if any(
+            attribute.split("=", 1)[0] == "data-pptx-replace-with"
+            for attribute in extra_attrs
+        ) and not any(
+            attribute.split("=", 1)[0] == NATIVE_FALLBACK_SHA256_ATTR
+            for attribute in extra_attrs
+        ):
+            fallback_hash = svg_native_fallback_markup_fingerprint(
+                inner,
+                root_transform=transform,
+                external_markup="".join(ctx.defs),
+            )
+            attrs.append(
+                f'{NATIVE_FALLBACK_SHA256_ATTR}="{fallback_hash}"'
+            )
+    if transform:
+        attrs.append(f'transform="{transform}"')
+    group_xml = f"<g {' '.join(attrs)}>\n{inner}\n</g>"
+    if node.hyperlink_rid or node.hyperlink_action:
+        href = _resolve_svg_hyperlink(
+            ctx,
+            node.hyperlink_rid,
+            node.hyperlink_action,
+        )

@@ -1,0 +1,128 @@
+    data, content_type = _request_bytes(render_req)
+    return _assert_png(data, "wikimedia", content_type)
+
+
+def _render_quicklatex(
+    latex: str,
+    dpi: int,
+    color: str | None,
+    background: str | None,
+    display: str,
+) -> bytes:
+    """Render one formula through QuickLaTeX."""
+    wrapped = f"${latex}$" if display == "inline" else f"$${latex}$$"
+    # QuickLaTeX uses CSS font size rather than DPI. Keep a conservative fixed
+    # size; downstream placement uses measured dimensions from the PNG.
+    params = {
+        "formula": wrapped,
+        "fsize": "24px",
+        "fcolor": color or "000000",
+        "mode": "0",
+        "out": "1",
+        "remhost": "quicklatex.com",
+    }
+    req = urllib.request.Request(
+        QUICKLATEX_ENDPOINT,
+        data=urllib.parse.urlencode(params).encode("utf-8"),
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": "PPT-Master/1.0",
+        },
+        method="POST",
+    )
+    data, _ = _request_bytes(req)
+    text = data.decode("utf-8", errors="replace").strip()
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "0":
+        raise RuntimeError(text or "QuickLaTeX returned an empty response")
+    if len(lines) < 2:
+        raise RuntimeError(f"QuickLaTeX response missing image URL: {text}")
+    image_url = lines[1].split()[0]
+    image_req = urllib.request.Request(
+        image_url,
+        headers={"User-Agent": "PPT-Master/1.0"},
+    )
+    image_data, content_type = _request_bytes(image_req)
+    return _assert_png(image_data, "quicklatex", content_type)
+
+
+def _render_mathpad(
+    latex: str,
+    dpi: int,
+    color: str | None,
+    background: str | None,
+    display: str,
+) -> bytes:
+    """Render one formula through MathPad's public LaTeX image endpoint."""
+    wrapped = f"${latex}$" if display == "inline" else f"$${latex}$$"
+    scale = "4" if dpi >= 300 else "2"
+    params = {
+        "latex": wrapped,
+        "format": "png",
+        "scale": scale,
+        "color": f"#{color or '000000'}",
+        "bg": f"#{background or 'FFFFFF'}",
+    }
+    url = MATHPAD_ENDPOINT + "?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(url, headers={"User-Agent": "PPT-Master/1.0"})
+    data, content_type = _request_bytes(req)
+    return _assert_png(data, "mathpad", content_type)
+
+
+PROVIDER_RENDERERS = {
+    "codecogs": _render_codecogs,
+    "quicklatex": _render_quicklatex,
+    "mathpad": _render_mathpad,
+    "wikimedia": _render_wikimedia,
+}
+COLOR_AWARE_PROVIDERS = {"codecogs", "quicklatex", "mathpad"}
+
+
+def _render_with_providers(
+    latex: str,
+    output_path: Path,
+    dpi: int,
+    color: str | None,
+    background: str | None,
+    display: str,
+    providers: list[str],
+) -> tuple[str, list[str]]:
+    """Try providers in order and write the first successful PNG."""
+    errors: list[str] = []
+    for provider in providers:
+        try:
+            data = PROVIDER_RENDERERS[provider](latex, dpi, color, background, display)
+            output_path.write_bytes(data)
+            return provider, errors
+        except RuntimeError as exc:
+            errors.append(f"{provider}: {exc}")
+    raise RuntimeError("; ".join(errors))
+
+
+def _image_dimensions(path: Path) -> tuple[int, int]:
+    """Read PNG dimensions."""
+    if Image is None:
+        raise RuntimeError(
+            "Pillow is required to measure formula PNGs. Run: pip install Pillow"
+        )
+    with Image.open(path) as img:
+        return img.size
+
+
+def _make_png_background_transparent(
+    path: Path,
+    *,
+    color: str | None,
+    background: str | None,
+    tolerance: int,
+) -> None:
+    """Convert the rendered formula's matte background to alpha."""
+    if Image is None:
+        raise RuntimeError(
+            "Pillow is required to post-process transparent formula PNGs. "
+            "Run: pip install Pillow"
+        )
+
+    bg_rgb = _hex_to_rgb(background or "FFFFFF")
+    fg_rgb = _hex_to_rgb(color or "000000")
+

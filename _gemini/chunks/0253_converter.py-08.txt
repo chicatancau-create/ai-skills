@@ -1,0 +1,103 @@
+        raise RuntimeError("internal animations.json slide row must be an object")
+    slide_config["groups"] = animation.groups
+
+
+def _convert_slide(
+    pkg: OoxmlPackage,
+    slide: SlideRef,
+    palette: ColorPalette,
+    options: ConvertOptions,
+    diagnostics: list[ImportDiagnostic],
+    theme_fonts: dict[str, str] | None = None,
+    *,
+    inheritance_mode: str | None = None,
+) -> SlideArtifact:
+    """Convert a single slide via the full shape pipeline.
+
+    ``inheritance_mode`` overrides ``options.inheritance_mode`` so the
+    orchestrator can render the same slide twice (once layered, once flat)
+    when the user asked for ``"both"``. Pass ``"flat"`` or ``"layered"``;
+    ``None`` falls back to ``options.inheritance_mode`` (used by direct
+    callers that want a single mode).
+    """
+    mode = inheritance_mode or options.inheritance_mode
+    if mode == "both":
+        mode = "layered"  # primary view in both-mode
+    show_inherited_shapes = part_show_master_sp(slide.part)
+    svg, media = assemble_slide(
+        pkg, slide, palette,
+        theme_fonts=theme_fonts,
+        media_subdir=options.images_subdir,
+        embed_images=options.embed_images,
+        keep_hidden=options.keep_hidden,
+        inheritance_mode=mode,
+        asset_name_map=options.asset_name_map,
+        strict=options.strict,
+        diagnostics=diagnostics,
+        preserve_placeholder_inheritance=(
+            options.roundtrip and mode == "layered"
+        ),
+    )
+    return SlideArtifact(
+        index=slide.index,
+        svg=svg,
+        media_files=media,
+        layout_part_path=slide.layout.path if slide.layout else None,
+        master_part_path=slide.master.path if slide.master else None,
+        show_inherited_shapes=show_inherited_shapes,
+    )
+
+
+def _convert_inheritance_parts(
+    pkg: OoxmlPackage,
+    default_theme: PartRef | None,
+    options: ConvertOptions,
+    result: ConvertResult,
+) -> None:
+    """Render every master and layout in the deck to its own SVG (layered mode).
+
+    We deliberately render *all* masters / layouts, not only the ones a slide
+    references. Multi-style template packages routinely ship more design
+    surfaces than the embedded sample slides exercise, and dropping unused
+    ones discards the bulk of the template's design intent.
+    """
+    # Collect unique parts in document order so output filenames are
+    # deterministic for a given .pptx.
+    seen_masters: dict[str, PartRef] = {}
+    for master in pkg.iter_all_masters():
+        if master.path not in seen_masters:
+            seen_masters[master.path] = master
+
+    layouts_with_parent: list[tuple[PartRef, PartRef]] = []
+    seen_layout_paths: set[str] = set()
+    for layout, parent_master in pkg.iter_all_layouts_with_parent():
+        if layout.path in seen_layout_paths:
+            continue
+        seen_layout_paths.add(layout.path)
+        layouts_with_parent.append((layout, parent_master))
+
+    for seq, part in enumerate(seen_masters.values(), start=1):
+        theme = pkg.resolve_theme(part) or default_theme
+        palette = _make_palette(
+            part,
+            theme,
+            options,
+            result,
+            part_path=part.path,
+        )
+        _colors, fonts = _extract_theme_info(theme, palette) if theme is not None else ({}, result.theme_fonts)
+        result.masters.append(_render_part(
+            pkg, part, palette, options, result.diagnostics, fonts,
+            role="master", seq=seq, theme_part=theme,
+        ))
+    for seq, (layout, parent_master) in enumerate(layouts_with_parent, start=1):
+        theme = pkg.resolve_theme(parent_master) or default_theme
+        palette = _make_palette(
+            parent_master,
+            theme,
+            options,
+            result,
+            part_path=layout.path,
+        )
+        _colors, fonts = _extract_theme_info(theme, palette) if theme is not None else ({}, result.theme_fonts)
+        result.layouts.append(_render_part(

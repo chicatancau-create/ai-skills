@@ -1,0 +1,74 @@
+            for part in ('ppt/slideMasters/slideMaster1.xml', 'ppt/slideLayouts/slideLayout7.xml'):
+                root = ET.fromstring(entries[part])
+                root.find('p:cSld/p:spTree', NS).append(copy.deepcopy(shape))
+                entries[part] = _xml(root)
+        self.import_source(mutate=inherited)
+        path, original = self.page()
+        for scope in ('master', 'layout'):
+            for operation in ('delete', 'edit'):
+                with self.subTest(scope=scope, operation=operation):
+                    root = copy.deepcopy(original)
+                    obj = next(node for node in root.iter() if node.get('data-pptx-source-ref') == f'{scope}:77')
+                    if operation == 'delete':
+                        next(parent for parent in root.iter() if obj in list(parent)).remove(obj)
+                    else:
+                        obj.set('opacity', '0.5')
+                    path.write_bytes(_xml(root))
+                    with self.assertRaisesRegex(RuntimeError, f'{scope}:77.*shared structure'):
+                        self.materialize()
+
+    def test_b3_ancestor_translation_changes_native_position(self) -> None:
+        self.import_source()
+        path, root = self.page()
+        obj = next(node for node in root if node.get('data-pptx-source-ref') == 'slide:2')
+        root.remove(obj)
+        wrapper = ET.SubElement(root, '{%s}g' % NS['s'], {'transform': 'translate(30 0)'})
+        wrapper.append(obj)
+        path.write_bytes(_xml(root))
+        result = self.materialize()
+        self.assertIn('slide:2', result.report['documents'][0]['edited_ref_ids'])
+        with zipfile.ZipFile(self.export()) as archive:
+            slide = ET.fromstring(archive.read('ppt/slides/slide1.xml'))
+            self.assertEqual(slide.find('.//p:sp/p:spPr/a:xfrm/a:off', NS).get('x'), str((96 + 30) * 9525))
+
+    def test_b3_root_opacity_and_inherited_font_share_checker_diff(self) -> None:
+        self.import_source()
+        path, baseline = self.page()
+        root = copy.deepcopy(baseline)
+        root.set('opacity', '0.25')
+        root.set('font-family', 'Arial')
+        path.write_bytes(_xml(root))
+        record = SimpleNamespace(source_refs={'slide:2': SimpleNamespace(representation='inline')})
+        edited, unchanged = SVGQualityChecker._roundtrip_text_diff_ids(root, record, baseline, {}, {})
+        self.assertEqual(edited, {id(node) for node in root.iter('{%s}text' % NS['s'])})
+        self.assertEqual(unchanged, set())
+        with zipfile.ZipFile(self.export()) as archive:
+            slide = ET.fromstring(archive.read('ppt/slides/slide1.xml'))
+            self.assertIsNotNone(slide.find('.//a:alpha[@val="25000"]', NS))
+            self.assertIsNotNone(slide.find('.//a:latin[@typeface="Arial"]', NS))
+
+    def test_b3_proxy_ancestor_change_is_rejected(self) -> None:
+        self.import_source(mutate=_diagram_fixture)
+        path, root = self.page()
+        root.set('opacity', '0.25')
+        path.write_bytes(_xml(root))
+        with self.assertRaisesRegex(RuntimeError, 'edits source-backed proxy.*slide:90'):
+            self.materialize()
+
+    def test_b3_root_transform_fails_instead_of_disappearing(self) -> None:
+        self.import_source()
+        path, root = self.page()
+        root.set('transform', 'translate(30 0)')
+        path.write_bytes(_xml(root))
+        with self.assertRaisesRegex(RuntimeError, 'Root <svg> transform is unsupported'):
+            self.export()
+
+    def test_b3_context_wrapper_preserves_multiple_source_owners(self) -> None:
+        def second_shape(entries):
+            root = ET.fromstring(entries['ppt/slides/slide1.xml'])
+            second = copy.deepcopy(root.find('.//p:sp', NS))
+            second.find('p:nvSpPr/p:cNvPr', NS).set('id', '33')
+            root.find('p:cSld/p:spTree', NS).append(second)
+            entries['ppt/slides/slide1.xml'] = _xml(root)
+        self.import_source(mutate=second_shape)
+        path, root = self.page()

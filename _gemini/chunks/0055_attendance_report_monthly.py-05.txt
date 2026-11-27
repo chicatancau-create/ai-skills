@@ -1,0 +1,125 @@
+        for metric_name, col in metric_cols.items():
+            raw = _value_for_column(record, col)
+            if raw in (None, ""):
+                continue
+            uid_bucket = result.setdefault(uid, {})
+            date_bucket = uid_bucket.setdefault(work_date, {})
+            date_bucket[metric_name] = str(raw)
+    return result
+
+
+def build_calendar_sheet(
+    all_records: list[dict],
+    columns: list[dict],
+    user_ids: list[str],
+    user_info_map: dict[str, "cmn.UserInfo"],
+    group_name_map: dict[str, str],
+    start: datetime,
+    end: datetime,
+) -> dict:
+    """
+    构建日历表 sheet2 的描述 dict（供 write_excel_multi_sheets 使用）。
+
+    布局（参考钉钉考勤月历）：
+      列：姓名 | 考勤组 | 部门 | 指标 | 1日 | 2日 | ... | N日
+      每个用户占 3 行（班次名称 / 考勤结果 / 工作时长）
+      基础列（前 3 列）做纵向 3 行合并
+
+    返回的 sheet dict 包含 merge_groups 配置，让 write_excel_multi_sheets
+    自动完成基础列合并。
+    """
+    all_dates = _generate_date_columns(start, end)
+
+    # 表头：基础列 + 指标列 + 日期列
+    headers = ["姓名", "考勤组", "部门", "指标"] + [
+        f"{datetime.strptime(d, cmn.DATE_FMT).day}日" for d in all_dates
+    ]
+
+    # 抽取每个 (uid, date, metric) 的值
+    value_map = _build_calendar_value_map(all_records, columns, user_ids)
+
+    rows: list[list[Any]] = []
+    merge_groups: list[tuple[int, int, int]] = []
+    attend_result_row_offsets: set[int] = set()
+    n_metrics = len(CALENDAR_METRICS)
+
+    for uid in user_ids:
+        info = user_info_map.get(uid, cmn.UserInfo(name=uid))
+        group_name = group_name_map.get(uid, "")
+        base_cells = [info.name or uid, group_name, info.dept_name]
+        block_start = len(rows)  # 当前用户首行的 row_offset
+
+        for metric_name in CALENDAR_METRICS:
+            row_cells: list[Any] = list(base_cells) + [metric_name]
+            for date_str in all_dates:
+                val = value_map.get(uid, {}).get(date_str, {}).get(metric_name, "")
+                row_cells.append(val)
+            if metric_name == "考勤结果":
+                attend_result_row_offsets.add(len(rows))
+            rows.append(row_cells)
+
+        block_end = len(rows) - 1  # 当前用户末行的 row_offset
+        if block_end > block_start:
+            # 基础列 = 前 3 列（姓名/考勤组/部门），需纵向合并
+            merge_groups.append((block_start, block_end, 3))
+
+    title = (
+        f"日历表  统计日期：{start.strftime(cmn.DATE_FMT)} "
+        f"至 {end.strftime(cmn.DATE_FMT)}"
+    )
+    subtitle = f"报表生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}"
+
+    return {
+        "name": "日历表",
+        "headers": headers,
+        "rows": rows,
+        "title": title,
+        "subtitle": subtitle,
+        "merge_groups": merge_groups,
+        "attend_result_rows": attend_result_row_offsets or None,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# main
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main() -> int:
+    args = parse_args()
+
+    raw_ids = [u.strip() for u in args.users.split(",") if u.strip()]
+    if not raw_ids:
+        cmn.error("--users 不能为空")
+        return 2
+
+    # 自动识别部门ID并展开为员工userId
+    user_ids = cmn.resolve_users_from_input(raw_ids)
+    if not user_ids:
+        cmn.error("未能解析出任何有效的员工userId")
+        return 2
+    cmn.log(f"[users] 最终用户列表：{len(user_ids)} 人")
+
+    try:
+        start = cmn.parse_datetime_arg(args.start, end_of_day=False)
+        end = cmn.parse_datetime_arg(args.end, end_of_day=True)
+    except ValueError as e:
+        cmn.error(str(e))
+        return 2
+
+    if end < start:
+        cmn.error(f"--end ({end}) 早于 --start ({start})")
+        return 2
+
+    try:
+        columns = resolve_columns(args)
+    except cmn.DwsCallError as e:
+        if e.is_permission_error:
+            cmn.error("权限错误：当前账号无管理员权限，无法获取考勤字段列表。")
+            return 2
+        cmn.error(f"获取字段列表失败：{e}")
+        return 1
+    except RuntimeError as e:
+        cmn.error(str(e))
+        return 1
+    column_ids = [c["_column_id"] for c in columns]
+    column_names = [c["_column_name"] for c in columns]

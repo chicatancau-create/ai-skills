@@ -1,0 +1,87 @@
+    def test_cjk_wrap_fits_checker_module_bounds_and_obeys_line_punctuation(self) -> None:
+        groups: list[str] = []
+        for index, paragraph in enumerate(CJK_PARAGRAPHS):
+            lines, widths, oversized = wrap_text(
+                paragraph,
+                size=24,
+                family='Microsoft YaHei',
+                max_width=540,
+            )
+
+            self.assertEqual(oversized, [])
+            self.assertTrue(all(width <= 540 for width in widths))
+            for line in lines:
+                self.assertNotIn(line[0], _CLOSING_PUNCTUATION)
+                self.assertNotIn(line[-1], _OPENING_PUNCTUATION)
+
+            top = index * 180
+            rendered = _render_wrapped_svg(
+                lines,
+                x=100,
+                y=top + 30,
+                dy=36,
+            )
+            groups.append(
+                f'<g id="module-{index}" data-pptx-bounds="100 {top} 540 160">'
+                f'{rendered}</g>'
+            )
+
+        root = ET.fromstring(
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" '
+            'font-family="Microsoft YaHei" font-size="24">'
+            + ''.join(groups)
+            + '</svg>'
+        )
+        result = {'warnings': [], 'errors': [], 'info': {}}
+        SVGQualityChecker()._check_text_bounds(root, result)
+
+        self.assertEqual(result['warnings'], [])
+        self.assertEqual(result['errors'], [])
+
+    def test_box_arithmetic_and_anchor_adjustment(self) -> None:
+        expected_x = {'start': 100.0, 'middle': 60.0, 'end': 20.0}
+        for anchor, left in expected_x.items():
+            with self.subTest(anchor=anchor):
+                bounds = text_box(
+                    x=100,
+                    baseline_y=50,
+                    size=20,
+                    lines=2,
+                    dy=24,
+                    width=80,
+                    anchor=anchor,
+                )
+                self.assertEqual(bounds['x'], left)
+                self.assertEqual(bounds['y'], 33.0)
+                self.assertEqual(bounds['width'], 80.0)
+                self.assertEqual(bounds['height'], 48.0)
+                self.assertEqual(bounds['top'], 33.0)
+                self.assertEqual(bounds['bottom'], 81.0)
+
+        result = _run_cli(
+            'box', '--x', '100', '--y', '50', '--size', '20',
+            '--lines', '2', '--dy', '24', '--width', '80', '--anchor', 'middle',
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout,
+            'data-pptx-bounds="60 33 80 48"\ttop=33\tbottom=81\n',
+        )
+
+    def test_wrapped_svg_escapes_xml_text(self) -> None:
+        rendered = _render_wrapped_svg(
+            ['A & B', '<C>'],
+            x=1.234,
+            dy=20,
+            y=10,
+        )
+
+        self.assertEqual(
+            rendered,
+            '<text x="1.23" y="10">A &amp; B'
+            '<tspan x="1.23" dy="20">&lt;C&gt;</tspan></text>',
+        )
+
+
+if __name__ == '__main__':
+    unittest.main()

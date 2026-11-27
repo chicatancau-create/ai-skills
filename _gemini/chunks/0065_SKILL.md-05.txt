@@ -1,0 +1,128 @@
+  if (res.status === 204) return undefined as T;
+  return res.json();
+}
+
+export const apiClient = {
+  get: <T>(path: string) => api<T>(path),
+  post: <T>(path: string, data: unknown) => api<T>(path, { method: 'POST', body: JSON.stringify(data) }),
+  put: <T>(path: string, data: unknown) => api<T>(path, { method: 'PUT', body: JSON.stringify(data) }),
+  patch: <T>(path: string, data: unknown) => api<T>(path, { method: 'PATCH', body: JSON.stringify(data) }),
+  delete: <T>(path: string) => api<T>(path, { method: 'DELETE' }),
+};
+```
+
+### Option B: React Query + Typed Client (Recommended for React)
+
+```typescript
+// hooks/use-orders.ts
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { apiClient } from '@/lib/api-client';
+
+interface Order { id: string; total: number; status: string; }
+interface CreateOrderInput { items: { productId: string; quantity: number }[] }
+
+export function useOrders() {
+  return useQuery({
+    queryKey: ['orders'],
+    queryFn: () => apiClient.get<{ data: Order[] }>('/api/orders'),
+    staleTime: 1000 * 60,  // 1 min
+  });
+}
+
+export function useCreateOrder() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (data: CreateOrderInput) =>
+      apiClient.post<{ data: Order }>('/api/orders', data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['orders'] });
+    },
+  });
+}
+
+// Usage in component:
+function OrdersPage() {
+  const { data, isLoading, error } = useOrders();
+  const createOrder = useCreateOrder();
+  if (isLoading) return <Skeleton />;
+  if (error) return <ErrorBanner error={error} />;
+  // ...
+}
+```
+
+### Option C: tRPC (Same Team Owns Both Sides)
+
+```typescript
+// server: trpc/router.ts
+export const appRouter = router({
+  orders: router({
+    list: publicProcedure.query(async () => {
+      return db.order.findMany({ include: { items: true } });
+    }),
+    create: protectedProcedure
+      .input(z.object({ items: z.array(orderItemSchema) }))
+      .mutation(async ({ input, ctx }) => {
+        return orderService.create(ctx.user.id, input);
+      }),
+  }),
+});
+export type AppRouter = typeof appRouter;
+
+// client: automatic type safety, no code generation
+const { data } = trpc.orders.list.useQuery();
+const createOrder = trpc.orders.create.useMutation();
+```
+
+### Option D: OpenAPI Generated Client (Public / Multi-Consumer APIs)
+
+```bash
+npx openapi-typescript-codegen \
+  --input http://localhost:3001/api/openapi.json \
+  --output src/generated/api \
+  --client axios
+```
+
+### Decision: Which API Client?
+
+| Approach | When | Type Safety | Effort |
+|----------|------|-------------|--------|
+| Typed fetch wrapper | Simple apps, small teams | Manual types | Low |
+| React Query + fetch | React apps, server state | Manual types | Medium |
+| tRPC | Same team, TypeScript both sides | Automatic | Low |
+| OpenAPI generated | Public API, multi-consumer | Automatic | Medium |
+| GraphQL codegen | GraphQL APIs | Automatic | Medium |
+
+---
+
+## 6. Authentication & Middleware (HIGH)
+
+> **Full reference:** [references/auth-flow.md](references/auth-flow.md) — JWT bearer flow, automatic token refresh, Next.js server-side auth, RBAC pattern, backend middleware order.
+
+### Standard Middleware Order
+
+```
+Request → 1.RequestID → 2.Logging → 3.CORS → 4.RateLimit → 5.BodyParse
+       → 6.Auth → 7.Authz → 8.Validation → 9.Handler → 10.ErrorHandler → Response
+```
+
+### JWT Rules
+
+```
+✅ Short expiry access token (15min) + refresh token (server-stored)
+✅ Minimal claims: userId, roles (not entire user object)
+✅ Rotate signing keys periodically
+
+❌ Never store tokens in localStorage (XSS risk)
+❌ Never pass tokens in URL query params
+```
+
+### RBAC Pattern
+
+```typescript
+function authorize(...roles: Role[]) {
+  return (req, res, next) => {
+    if (!req.user) throw new UnauthorizedError();
+    if (!roles.some(r => req.user.roles.includes(r))) throw new ForbiddenError();
+    next();
+  };
+}

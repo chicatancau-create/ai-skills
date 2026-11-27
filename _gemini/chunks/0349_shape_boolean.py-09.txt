@@ -1,0 +1,127 @@
+            fix_winding=True,
+            keep_starting_points=False,
+            clockwise=False,
+        )
+    except pathops.PathOpsError as exc:
+        raise ValueError(f"Skia path Boolean operation failed: {exc}") from exc
+
+
+def _simplify_path(path: Any, pathops: Any) -> Any:
+    """Resolve winding and self-intersections before filled-area checks."""
+    try:
+        return pathops.simplify(
+            path,
+            fix_winding=True,
+            keep_starting_points=False,
+            clockwise=False,
+        )
+    except pathops.PathOpsError as exc:
+        raise ValueError(f"Skia path simplification failed: {exc}") from exc
+
+
+def _fragment_paths(
+    operands: Sequence[Any],
+    pathops: Any,
+) -> list[Any]:
+    pieces: list[Any] = []
+    covered: Any | None = None
+    for operand in operands:
+        split_pieces: list[Any] = []
+        for piece in pieces:
+            difference = _path_op(
+                piece,
+                operand,
+                pathops.PathOp.DIFFERENCE,
+                pathops,
+            )
+            intersection = _path_op(
+                piece,
+                operand,
+                pathops.PathOp.INTERSECTION,
+                pathops,
+            )
+            if not _path_is_empty(difference):
+                split_pieces.append(difference)
+            if not _path_is_empty(intersection):
+                split_pieces.append(intersection)
+
+        unique = (
+            operand
+            if covered is None
+            else _path_op(
+                operand,
+                covered,
+                pathops.PathOp.DIFFERENCE,
+                pathops,
+            )
+        )
+        if not _path_is_empty(unique):
+            split_pieces.append(unique)
+        pieces = split_pieces
+        covered = (
+            operand
+            if covered is None
+            else _path_op(
+                covered,
+                operand,
+                pathops.PathOp.UNION,
+                pathops,
+            )
+        )
+
+    components = [
+        component
+        for piece in pieces
+        for component in _connected_components(piece, pathops)
+        if not _path_is_empty(component)
+    ]
+    if not components:
+        raise ValueError("Shape Boolean fragment produced no filled area")
+    components.sort(key=_path_sort_key)
+    return components
+
+
+def _connected_components(path: Any, pathops: Any) -> list[Any]:
+    contours = [
+        contour
+        for contour in path.contours
+        if not _path_is_empty(contour)
+    ]
+    if len(contours) <= 1:
+        return contours
+
+    parents: list[int | None] = [None] * len(contours)
+    for child_index, child in enumerate(contours):
+        child_bounds = child.bounds
+        child_points = child.firstPoints
+        if child_bounds is None or not child_points:
+            continue
+        candidates: list[tuple[float, int]] = []
+        for parent_index, candidate in enumerate(contours):
+            if child_index == parent_index:
+                continue
+            candidate_bounds = candidate.bounds
+            if candidate_bounds is None:
+                continue
+            if not _bounds_contain(candidate_bounds, child_bounds):
+                continue
+            if candidate.area <= child.area:
+                continue
+            if candidate.contains(child_points[0]):
+                candidates.append((candidate.area, parent_index))
+        if candidates:
+            parents[child_index] = min(candidates)[1]
+
+    depths = [
+        _contour_depth(index, parents)
+        for index in range(len(contours))
+    ]
+    components: list[Any] = []
+    for index, contour in enumerate(contours):
+        if depths[index] % 2:
+            continue
+        component = pathops.Path(fillType=pathops.FillType.WINDING)
+        component.addPath(contour)
+        for child_index, parent_index in enumerate(parents):
+            if parent_index == index and depths[child_index] % 2:
+                component.addPath(contours[child_index])

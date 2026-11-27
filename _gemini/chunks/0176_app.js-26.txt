@@ -1,0 +1,98 @@
+        if (candidate.icons) out.icons = STATE.icons || "";
+        if (candidate.image_strategy) {
+            out.image_strategy = comparableImageStrategy(STATE.image_strategy || {});
+        }
+        return JSON.stringify(out);
+    }
+
+    function activeDirectionAdjusted(candidate, index) {
+        return designDirectionId(candidate, index) === ACTIVE_DIRECTION_ID &&
+            directionStateSignature(candidate) !== ACTIVE_DIRECTION_BASELINE;
+    }
+
+    function customCandidateSpec(field) {
+        var candidates = REC && REC.custom_candidates;
+        var candidate = candidates && candidates[field];
+        if (typeof candidate === "string") return { behavior: candidate };
+        if (candidate && typeof candidate === "object") return candidate;
+        var legacy = REC && REC[field + "_behavior"];
+        if (legacy && typeof legacy === "object") legacy = legacy.value;
+        return legacy ? { behavior: legacy } : {};
+    }
+
+    function customCandidateBehavior(field) {
+        var candidate = customCandidateSpec(field);
+        return String(localized(candidate, "behavior") || candidate.value || candidate.custom || "");
+    }
+
+    function creativeCustomOptions(field, stateKey, placeholderKey) {
+        var candidate = customCandidateSpec(field);
+        var current = String(STATE[stateKey] || customCandidateBehavior(field) || "");
+        if (!current.trim()) return null;
+        STATE[stateKey] = current;
+        return {
+            label: localized(candidate, "name") || t("ai_custom_candidate"),
+            hint: t("ai_custom_candidate_hint"),
+            getText: function () { return STATE[stateKey] || ""; },
+            setText: function (value) { STATE[stateKey] = value; },
+            rows: 4,
+            placeholder: t(placeholderKey)
+        };
+    }
+
+    function colorRecommendationCandidates() {
+        var direct = (REC.color && REC.color.candidates) || [];
+        if (direct.length) return direct;
+        return designDirectionCandidates().map(function (candidate) {
+            return candidate && candidate.color;
+        }).filter(Boolean);
+    }
+
+    function typographyRecommendationCandidates() {
+        var direct = (REC.typography && REC.typography.candidates) || [];
+        if (direct.length) return direct;
+        return designDirectionCandidates().map(function (candidate) {
+            return candidate && candidate.typography;
+        }).filter(Boolean);
+    }
+
+    function imageStrategySpec() {
+        return (REC && REC.image_strategy) ||
+            (REC && REC.images && REC.images.strategy) ||
+            (REC && REC.images && REC.images.ai_strategy) ||
+            {};
+    }
+
+    function imageStrategyCandidates() {
+        var spec = imageStrategySpec();
+        var direct = spec.candidates || spec.options || [];
+        if (direct.length) return direct;
+        return designDirectionCandidates().map(function (candidate) {
+            return candidate && candidate.image_strategy;
+        }).filter(Boolean);
+    }
+
+    function imageStrategyRecommendationCandidates() {
+        return imageStrategyCandidates().filter(function (candidate) {
+            return candidate && candidate.rendering !== "custom";
+        }).slice(0, 3);
+    }
+
+    function imageStrategyCatalogCandidates() {
+        var items = AI_IMAGE_COMPARISON && AI_IMAGE_COMPARISON.rendering;
+        if (!Array.isArray(items)) return [];
+        return items.map(function (item) {
+            return item && item.id ? { rendering: item.id } : null;
+        }).filter(Boolean);
+    }
+
+    function imageStrategySelectableCandidates() {
+        var recommended = imageStrategyRecommendationCandidates();
+        var seen = {};
+        recommended.forEach(function (candidate) { seen[candidate.rendering] = true; });
+        return recommended.concat(imageStrategyCatalogCandidates().filter(function (candidate) {
+            return !seen[candidate.rendering];
+        }));
+    }
+
+    function imageStrategyCustomCandidate() {

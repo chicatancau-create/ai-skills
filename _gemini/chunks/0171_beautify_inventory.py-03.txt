@@ -1,0 +1,91 @@
+            for key, item in value.items()
+            if key not in _GEOMETRY_KEYS
+        }
+    if isinstance(value, list):
+        return [_without_geometry(item) for item in value]
+    return value
+
+
+def _page_view(inventory: dict, slide_index: int, with_geometry: bool) -> Optional[dict]:
+    """Project one slide by its canonical slide_index."""
+    for slide in inventory.get("slides", []):
+        if slide.get("slide_index") != slide_index:
+            continue
+        projected = slide if with_geometry else _without_geometry(slide)
+        return _view_payload(inventory, "page", [projected])
+    return None
+
+
+def _positive_int(value: str) -> int:
+    """Parse a positive slide index for argparse."""
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("page must be a positive integer")
+    return parsed
+
+
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _compact(text: str) -> str:
+    """Whitespace-free form for containment checks: layout may rewrap, never reword."""
+    return _WHITESPACE_RE.sub("", text or "")
+
+
+def _frozen_strings(slide: dict) -> list[str]:
+    """Every source string a slide must still carry: paragraphs, table cells, chart labels, SmartArt nodes."""
+    strings: list[str] = []
+    for block in slide.get("text_blocks", []):
+        strings.extend(line for line in (block.get("text") or "").split("\n") if line.strip())
+    for table in slide.get("tables", []):
+        for row in table.get("cells", []):
+            strings.extend(cell for cell in row if cell and cell.strip())
+    for chart in slide.get("charts", []):
+        strings.extend(str(c) for c in chart.get("categories", []) if str(c).strip())
+        strings.extend(str(series.get("name")) for series in chart.get("series", []) if series.get("name"))
+    for diagram in slide.get("diagrams", []):
+        strings.extend(node.get("text") for node in diagram.get("nodes", []) if node.get("text"))
+    return strings
+
+
+def _exported_text_by_slide(pptx_path: Path) -> dict[int, str]:
+    """Compact per-slide text of an exported deck, read with the same analyzer as intake."""
+    from pptx_ooxml.analyzer import analyze_pptx
+
+    library = analyze_pptx(pptx_path)
+    by_slide: dict[int, str] = {}
+    for slide in library.get("slides", []):
+        parts: list[str] = [slot.get("text", "") for slot in slide.get("slots", [])]
+        for table in slide.get("tables", []):
+            for row in table.get("rows", []):
+                parts.extend(cell.get("text", "") for cell in row.get("cells", []))
+        for chart in slide.get("charts", []):
+            parts.extend(str(c) for c in chart.get("categories", []))
+            parts.extend(str(series.get("name", "")) for series in chart.get("series", []))
+        for diagram in slide.get("diagrams", []):
+            parts.extend(str(t) for t in diagram.get("text_items", []))
+        by_slide[int(slide.get("slide_index"))] = _compact("\n".join(parts))
+    return by_slide
+
+
+def verify_against_export(inventory: dict, pptx_path: Path) -> tuple[list[dict], bool]:
+    """Per-slide containment of every frozen source string in the exported deck."""
+    exported = _exported_text_by_slide(pptx_path)
+    rows: list[dict] = []
+    clean = True
+    for slide in inventory.get("slides", []):
+        idx = int(slide.get("slide_index"))
+        page_text = exported.get(idx)
+        frozen = _frozen_strings(slide)
+        if page_text is None:
+            rows.append({"slide_index": idx, "frozen": len(frozen), "missing": frozen, "exported_page": False})
+            clean = False
+            continue
+        missing = [text for text in frozen if _compact(text) not in page_text]
+        source_chars = Counter(_compact("".join(frozen)))
+        added = Counter(page_text) - source_chars
+        rows.append({
+            "slide_index": idx,
+            "frozen": len(frozen),
+            "missing": missing,
+            "added_chars": sum(added.values()),

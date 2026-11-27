@@ -1,0 +1,97 @@
+    ) -> None:
+        """Validate the all-page structured lock and reusable contracts."""
+        if self.quick_generate:
+            if (
+                _parse_optional_layout_slides is None
+                or _TemplateStructureError is None
+            ):
+                self._pptx_structure_issues.append((
+                    'error',
+                    'Quick PPTX structure inference is unavailable because '
+                    'the template_structure module could not be imported.',
+                ))
+                return
+            try:
+                specs = _parse_optional_layout_slides(svg_files)
+            except _TemplateStructureError as exc:
+                self._pptx_structure_issues.append(('error', str(exc)))
+                return
+            if specs is None:
+                return
+            self._structured_native_slots = sorted({
+                str(item.placeholder) for spec in specs for item in spec.placeholders
+                if item.placeholder in {'chart', 'table'}
+            })
+            self._pptx_structure_issues.extend(
+                ('error', message)
+                for message in self._shared_fixed_layer_errors(specs)
+            )
+            self._pptx_structure_issues.extend(
+                ('warning', message)
+                for message in self._duplicate_layout_key_warnings(specs)
+            )
+            return
+        project_path = self._resolve_project_path(target_path)
+        standard_project = bool(
+            not self.template_mode
+            and (project_path / 'svg_output').is_dir()
+        )
+        declared_mode = (
+            _declared_pptx_structure_mode(project_path)
+            if standard_project
+            else None
+        )
+        implicit_flat = bool(standard_project) and not declared_mode
+        if implicit_flat:
+            self._pptx_structure_issues.append((
+                'warning',
+                'spec_lock.md declares no pptx_structure.mode; the project is '
+                'treated as mode: flat, matching the exporter default. Declare '
+                'mode: flat explicitly, or mode: structured for a deck/layout '
+                'template.',
+            ))
+            declared_mode = 'flat'
+        if standard_project and declared_mode in {'flat', 'structured'}:
+            self._pptx_structure_issues.extend(
+                ('error', message)
+                for message in _generated_theme_contract_errors(project_path)
+            )
+        if standard_project and declared_mode == 'flat':
+            if (
+                _load_pptx_structure_lock is None
+                or _TemplateStructureError is None
+            ):
+                self._pptx_structure_issues.append((
+                    'error',
+                    'Flat PPTX project validation is unavailable because the '
+                    'template_structure module could not be imported.',
+                ))
+                return
+            try:
+                structure_lock = _load_pptx_structure_lock(project_path)
+            except _TemplateStructureError as exc:
+                self._pptx_structure_issues.append(('error', str(exc)))
+                return
+            if structure_lock is None and implicit_flat:
+                return
+            if structure_lock is None or structure_lock.mode != 'flat':
+                self._pptx_structure_issues.append((
+                    'error',
+                    'spec_lock.md must contain one complete '
+                    'pptx_structure.mode: flat contract.',
+                ))
+            return
+        has_metadata = False
+        for svg_path in svg_files:
+            try:
+                root = ET.parse(svg_path).getroot()
+            except (OSError, ET.ParseError):
+                continue
+            if any(
+                elem.get(attr) is not None
+                for elem in root.iter()
+                for attr in _PPTX_STRUCTURE_ATTRS
+            ):
+                has_metadata = True
+                break
+

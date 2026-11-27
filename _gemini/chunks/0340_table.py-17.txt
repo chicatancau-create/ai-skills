@@ -1,0 +1,97 @@
+    header_font_size = _font_size_hpt(
+        style.get("header_font_size", style.get("font_size")),
+        18,
+    )
+
+    off_x, off_y, ext_cx, ext_cy = _bounds(elem, payload, ctx)
+
+    column_widths = payload.get("column_widths")
+    grid_widths = _weighted_lengths(
+        ext_cx,
+        col_count,
+        column_widths if isinstance(column_widths, list) else None,
+        field_name="column_widths",
+    )
+    row_heights_raw = payload.get("row_heights")
+    row_heights = _weighted_lengths(
+        ext_cy,
+        len(table_rows),
+        row_heights_raw if isinstance(row_heights_raw, list) else None,
+        field_name="row_heights",
+    )
+
+    grid_xml = "".join(f'<a:gridCol w="{width}"/>' for width in grid_widths)
+    rows_xml: list[str] = []
+    for row_idx, row in enumerate(table_rows):
+        is_header = row_idx < header_rows
+        cells_xml: list[str] = []
+        for col_idx, cell in enumerate(row):
+            cell_data = _cell_payload(cell)
+            merge_region = merge_layout.get((row_idx, col_idx))
+            merge_attrs = _table_merge_attrs(merge_region, row_idx, col_idx)
+            if merge_region is not None and (
+                row_idx != merge_region.row or col_idx != merge_region.col
+            ):
+                continuation_attrs = ""
+                continuation_border_xml = ""
+                continuation_fill_xml = ""
+                if cell_data.get("merge_continuation") is True:
+                    continuation_attrs = (
+                        _table_padding_attrs(cell_data, style)
+                        + _table_cell_extra_attrs(cell_data)
+                    )
+                    continuation_border_xml = _table_border_xml(
+                        cell_data,
+                        style,
+                        ctx.theme_color_spec,
+                    )
+                    continuation_fill = (
+                        _clean_hex(cell_data.get("fill"), "#FFFFFF")
+                        if cell_data.get("fill") is not None
+                        else None
+                    )
+                    continuation_fill_xml = _table_fill_xml(
+                        continuation_fill,
+                        _table_fill_opacity(cell_data),
+                        ctx.theme_color_spec,
+                    )
+                cells_xml.append(
+                    f'<a:tc{merge_attrs}>'
+                    '<a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody>'
+                    f'<a:tcPr{continuation_attrs}>'
+                    f'{continuation_border_xml}{continuation_fill_xml}'
+                    '</a:tcPr>'
+                    '</a:tc>'
+                )
+                continue
+
+            if preserve_source_style:
+                fill = (
+                    _clean_hex(cell_data.get("fill"), "#FFFFFF")
+                    if cell_data.get("fill") is not None else None
+                )
+                color = (
+                    _clean_hex(cell_data.get("color"), "#000000")
+                    if cell_data.get("color") is not None else None
+                )
+                align = str(cell_data.get("align") or "l")
+            else:
+                fill = _hex_or_none(cell_data.get("fill"))
+                if fill is None:
+                    banded = (
+                        band_rows_enabled
+                        and band_fill is not None
+                        and row_idx % 2 == 0
+                        and row_idx
+                    )
+                    fill = header_fill if is_header else (
+                        band_fill if banded else body_fill
+                    )
+                color = _clean_hex(
+                    cell_data.get("color"),
+                    header_text if is_header else body_text,
+                )
+                align = str(cell_data.get("align") or ("ctr" if is_header else "l"))
+            if align not in {"l", "ctr", "r", "just"}:
+                align = "l"
+            paragraphs = _table_cell_paragraphs(cell_data)

@@ -1,0 +1,123 @@
+            requested_port,
+        )
+        return 1
+    url = _server_url(port)
+    logger.info(
+        'live preview already running for this project (pid=%s), reusing: %s',
+        pid, url,
+    )
+    if open_browser and not _open_browser(url):
+        logger.info('browser did not auto-open; open %s manually', url)
+    return 0
+
+
+def _open_browser_async(url: str, delay: float = 0.4) -> None:
+    """Open the browser shortly after Flask starts binding its socket."""
+    def _open() -> None:
+        time.sleep(delay)
+        _open_browser(url)
+
+    threading.Thread(target=_open, daemon=True).start()
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description='PPT Master SVG Editor',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument('project_dir', help='Path to project directory (contains svg_output/)')
+    parser.add_argument(
+        '--port',
+        type=int,
+        default=None,
+        help=f'Exact port to listen on (default: first free port from {DEFAULT_PORT})',
+    )
+    parser.add_argument('--no-browser', action='store_true', help='Do not auto-open browser')
+    parser.add_argument(
+        '--daemon',
+        action='store_true',
+        help='Start the server in the background and return after it is reachable',
+    )
+    parser.add_argument(
+        '--live',
+        action='store_true',
+        help='Run as Executor live preview: allow empty svg_output/ and keep serving after annotation submit',
+    )
+    parser.add_argument(
+        '--timeout',
+        type=int,
+        default=None,
+        help='Idle timeout in seconds (default: 900; live mode default: 7200; 0 = disabled)',
+    )
+    parser.add_argument(
+        '--shutdown',
+        action='store_true',
+        help='Stop a live-preview server left running for this project, then exit (idempotent).',
+    )
+    return parser
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format='[%(asctime)s] [%(levelname)s] svg_editor: %(message)s',
+        datefmt='%H:%M:%S',
+    )
+
+    if args.port is not None:
+        try:
+            args.port = _validate_port(args.port)
+        except ValueError as exc:
+            logger.error('%s', exc)
+            return 2
+
+    project_path = Path(args.project_dir).resolve()
+    if args.shutdown:
+        return _shutdown_existing(project_path)
+
+    svg_output = project_path / 'svg_output'
+    if not svg_output.exists():
+        if args.live:
+            svg_output.mkdir(parents=True, exist_ok=True)
+        else:
+            logger.error('%s does not exist', svg_output)
+            return 1
+    elif not svg_output.is_dir():
+        logger.error('%s is not a directory', svg_output)
+        return 1
+
+    legacy_existing = _legacy_live_lock(project_path)
+    if legacy_existing:
+        return _reuse_running_server(
+            legacy_existing,
+            open_browser=not args.no_browser,
+            requested_port=args.port,
+        )
+
+    runtime_dir = _runtime_dir(project_path)
+    lock_file = _lock_file(project_path)
+
+    if args.daemon:
+        existing = _read_lock(lock_file)
+        if existing and _process_alive(_lock_pid(existing)):
+            return _reuse_running_server(
+                existing,
+                open_browser=not args.no_browser,
+                requested_port=args.port,
+            )
+
+        try:
+            runtime_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            logger.error('cannot create live preview runtime directory: %s (%s)', runtime_dir, exc)
+            return 1
+        log_path = runtime_dir / 'server.log'
+        try:
+            port = args.port if args.port is not None else _find_free_port(DEFAULT_PORT)
+        except RuntimeError as exc:
+            logger.error('%s', exc)
+            return 1
+        idle_timeout = args.timeout

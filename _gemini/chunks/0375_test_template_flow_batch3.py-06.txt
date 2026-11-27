@@ -1,0 +1,32 @@
+        self.assertFalse((project / 'images').exists())
+        manager.import_sources(str(project), [str(source)], copy=True)
+        self.assertTrue((project / 'images' / 'photo.png').is_file())
+
+    def test_e_registered_unused_typed_layout_is_in_checker_dependencies(self) -> None:
+        pages = self.root / 'svg_output'
+        pages.mkdir()
+        templates = self.root / 'templates'
+        templates.mkdir()
+        (pages / '01_content.svg').write_text(_structured_page('content'), encoding='utf-8')
+        (templates / '02_chart.svg').write_text(_structured_page('chart',
+            '<g id="chart" data-pptx-placeholder="chart" data-pptx-bounds="0 0 600 400">'
+            '<g data-pptx-carrier="true" data-pptx-replace-with="chart">'
+            '<rect x="0" y="0" width="600" height="400"/></g>'
+            '</g>'), encoding='utf-8')
+        lock = ('## typography\n- font_family: Arial\n- title: 40\n- body: 24\n'
+                '## colors\n- primary: #000000\n- background: #FFFFFF\n'
+                '## pptx_structure\n- mode: structured\n## pptx_masters\n- m: Master\n'
+                '## pptx_layouts\n- content: m | content | P01\n'
+                '- chart: m | chart | template:02_chart\n'
+                '## page_pptx_layouts\n- P01: content\n')
+        (self.root / 'spec_lock.md').write_text(lock, encoding='utf-8')
+        specs = parse_template_slides([pages / '01_content.svg'])
+        structure = load_pptx_structure_lock(self.root)
+        self.assertEqual(structured_layout_definition_files(specs, structure), [templates / '02_chart.svg'])
+        checker = SVGQualityChecker()
+        checker._check_pptx_structure_contract(pages, [pages / '01_content.svg'])
+        self.assertEqual(checker._structured_native_slots, ['chart'], checker._pptx_structure_issues)
+        (self.root / 'spec_lock.md').write_text(
+            lock.replace('- chart: m | chart | template:02_chart\n', ''), encoding='utf-8')
+        structure = load_pptx_structure_lock(self.root)
+        self.assertEqual(structured_layout_definition_files(specs, structure), [])

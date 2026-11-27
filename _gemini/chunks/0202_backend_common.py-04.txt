@@ -1,0 +1,121 @@
+    """Return whether retrying the unchanged backend request cannot succeed."""
+    if isinstance(exc, _RetryableBackendError):
+        return False
+    if is_global_permanent_error(exc):
+        return True
+    if isinstance(exc, (FileNotFoundError, NotImplementedError, PermissionError)):
+        return True
+
+    status_code = _error_status_code(exc)
+    if (
+        status_code is not None
+        and 400 <= status_code < 500
+        and status_code not in _TRANSIENT_CLIENT_STATUSES
+    ):
+        return True
+
+    error_name = type(exc).__name__.lower()
+    if error_name in _ITEM_PERMANENT_ERROR_TYPES:
+        return True
+
+    err_str = str(exc).lower()
+    return any(marker in err_str for marker in _ITEM_PERMANENT_ERROR_MARKERS)
+
+
+def is_rate_limit_error(exc: Exception) -> bool:
+    """Check whether the exception appears to be rate limiting."""
+    if is_permanent_error(exc):
+        return False
+
+    err_str = str(exc).lower()
+    status_code = getattr(exc, "status_code", None)
+    error_code = getattr(exc, "code", None)
+    response = getattr(exc, "response", None)
+    error_name = type(exc).__name__.lower()
+    if (
+        status_code == 429
+        or error_code == 429
+        or getattr(response, "status_code", None) == 429
+        or error_name in {"ratelimiterror", "toomanyrequestserror"}
+    ):
+        return True
+    return (
+        "429" in err_str
+        or "rate limit" in err_str
+        or "rate-limit" in err_str
+        or "rate_limit" in err_str
+        or "too many requests" in err_str
+        or "quota" in err_str
+        or "resource_exhausted" in err_str
+        or "resource exhausted" in err_str
+        or "throttl" in err_str
+    )
+
+
+def retry_delay(attempt: int, rate_limited: bool) -> int:
+    """Return the retry delay for a given attempt."""
+    if rate_limited:
+        return RETRY_BASE_DELAY * (RETRY_BACKOFF ** attempt)
+    return 5
+
+
+def download_image(url: str, path: str, headers: dict = None, timeout: int = 180) -> str:
+    """Download an image URL and save it to disk."""
+    try:
+        response = requests.get(url, headers=headers or {}, timeout=timeout)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise _RetryableBackendError(f"Image download failed: {exc}") from exc
+    return save_image_bytes(
+        response.content,
+        path,
+        content_type=response.headers.get("Content-Type"),
+    )
+
+
+def require_api_key(*candidates: str, message: str) -> str:
+    """Return the first non-empty env var from candidates or raise."""
+    for name in candidates:
+        value = os.environ.get(name)
+        if value:
+            return value
+    raise ValueError(message)
+
+
+def http_error(response: requests.Response, label: str) -> RuntimeError:
+    """Convert an HTTP response into a readable RuntimeError."""
+    body = response.text.strip()
+    if len(body) > 500:
+        body = body[:500] + "..."
+    return RuntimeError(f"{label} failed ({response.status_code}): {body}")
+
+
+def poll_json(
+    url: str,
+    headers: dict[str, str],
+    *,
+    interval_seconds: float = 2.0,
+    timeout_seconds: int = 300,
+    status_label: str = "status",
+    ready_values: list[str] | None = None,
+    failed_values: list[str] | None = None,
+) -> dict:
+    """Poll a JSON endpoint until it reports a ready or failed status."""
+    ready = {value.lower() for value in (ready_values or ["ready", "success", "succeeded"])}
+    failed = {value.lower() for value in (failed_values or ["error", "failed", "fail"])}
+
+    start = time.time()
+    while True:
+        response = requests.get(url, headers=headers, timeout=180)
+        response.raise_for_status()
+        payload = response.json()
+        raw_status = str(payload.get(status_label, "")).strip()
+        status = raw_status.lower()
+
+        if raw_status:
+            print(f"  Status:       {raw_status}")
+
+        if status in ready:
+            return payload
+
+        if status in failed:

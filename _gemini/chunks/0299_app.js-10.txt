@@ -1,0 +1,89 @@
+                // preview DOM from it so stale or missing root width/height
+                // cannot shrink the slide. View-layer only — the file on disk
+                // is never touched.
+                if (rootSvg) {
+                    var vb = (rootSvg.getAttribute("viewBox") || "").trim().split(/[\s,]+/);
+                    var vbWidth = Number(vb[2]);
+                    var vbHeight = Number(vb[3]);
+                    if (
+                        vb.length === 4 &&
+                        Number.isFinite(vbWidth) &&
+                        Number.isFinite(vbHeight) &&
+                        vbWidth > 0 &&
+                        vbHeight > 0
+                    ) {
+                        rootSvg.setAttribute("width", vb[2]);
+                        rootSvg.setAttribute("height", vb[3]);
+                    }
+                }
+                var hasContent = false;
+                if (rootSvg) {
+                    var children = rootSvg.querySelectorAll("*");
+                    for (var i = 0; i < children.length; i++) {
+                        var ctag = children[i].tagName.toLowerCase();
+                        if (ctag !== "defs" && ctag !== "style" && ctag !== "title" && ctag !== "desc") {
+                            hasContent = true;
+                            break;
+                        }
+                    }
+                }
+                if (!rootSvg || !hasContent) {
+                    showError(t("err_empty_svg"));
+                    svgPlaceholder.style.display = "block";
+                    svgPlaceholder.textContent = t("err_empty_svg");
+                    svgContent.style.display = "none";
+                    return;
+                }
+
+                // Non-fatal warnings (e.g. icon inline failures): surface as a
+                // single combined toast so users know why something looks off.
+                if (data.warnings && data.warnings.length > 0) {
+                    var names = data.warnings.map(function (w) {
+                        return w.icon || "(unknown)";
+                    }).join(", ");
+                    showWarning(t("warn_icon_inline", {
+                        count: data.warnings.length,
+                        names: names,
+                    }));
+                }
+
+                // Record the mtime so the next poll can detect on-disk drift.
+                if (data.mtime !== undefined) {
+                    slideMtimes[name] = data.mtime;
+                }
+
+                // Build annotations map from response
+                (data.annotations || []).forEach(function (a) {
+                    slideAnnotations[a.element_id] = a.annotation;
+                });
+
+                editStackCount[name] = data.undo_depth || 0;
+                setupSvgInteraction();
+                refreshAnnotationVisuals();
+                updateAnnotationList();
+                updateUndoButton();
+                updatePendingStatus();
+            })
+            .catch(function (err) {
+                if (name !== currentSlide) return;
+                console.error("selectSlide:", err);
+                showError(t("err_load_slide") + err.message);
+                waitForSlideRewrite(name);
+            });
+    }
+
+    // ================================================================
+    //  3.  setupSvgInteraction
+    // ================================================================
+    var SKIP_TAGS = ["defs", "style", "title", "desc"];
+
+    function setupSvgInteraction() {
+        var svg = svgContent.querySelector("svg");
+        if (!svg) return;
+
+        // Visual class only — selectability is handled by the delegated handler below.
+        // Skipping the per-element addEventListener brings listener-registration time
+        // from O(n) to O(1), which matters on decks with hundreds of elements per slide.
+        var allEls = svg.querySelectorAll("*");
+        allEls.forEach(function (el) {
+            var tag = el.tagName.toLowerCase();

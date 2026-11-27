@@ -1,0 +1,126 @@
+  - 用户：「西湖厅有空吗」 → `--room-name 西湖厅`（本身就是专名，不删即可）
+  - 用户：「预定贡嘎山大会议室」 → `--room-name 贡嘎山`
+
+**优先路径**：当用户给了会议室中文名时，**优先用 `room search --room-name <核心专名> --start <开始时间> --end <结束时间>`**代替「先走 `list-groups`再遍历」的旧流程。`--room-name` 可与 `--group-id` 同时使用，表示「在指定分组内按名称过滤」。若返回空列表，再降级使用 `list-groups` 定位分组再查。
+
+**`roomId` 与用户说的话不是一回事**：用户说的「C6-4-06-N 贡嘎山」等是**展示名/编号文案**，**绝不能**直接填进 `room add --rooms`。`--rooms` 只接受上一步 `room search`（或同类接口）返回 JSON 里的 **`rooms[].roomId`**。形态上多为**小写十六进制串**（长度以接口为准，例如 `e6b7b65b8b30fb707afcf6c3b699f028003e6834fdd7fee7`）。含**中文、空格、连字符拼接的楼层编号**、或凭空调 UUID/纯数字「试格式」——一律视为非法，必须先搜房再取返回字段。
+
+> 如果知道roomId，想查该会议室的预订记录，直接用dws calendar busy search 指令
+
+--- 
+
+### 预定会议室
+```
+Usage:
+  dws calendar room add [flags]
+Example:
+  dws calendar room add --event <EVENT_ID> --rooms <ROOM_ID>
+Flags:
+      --event string   日程 ID (必填)
+      --rooms string   会议室 ID 列表 (必填)
+```
+> room是会议室，用于线下开会场景。将room加入到日程完成预订
+> 重复性日程，预订会议室时，必须设置 循环结束时间（recurrence-end-date），noEnd 或者 指定循环次数 都无法完成预定。
+
+
+### 移除会议室
+
+> **CAUTION:** 写操作 — 执行前须用户确认。
+
+```
+Usage:
+  dws calendar room delete [flags]
+Example:
+  dws calendar room delete --event <EVENT_ID> --rooms <ROOM_ID> --yes
+Flags:
+      --event string   日程 ID (必填)
+      --rooms string   会议室 ID 列表 (必填)
+```
+
+### 会议室分组列表
+```
+Usage:
+  dws calendar room list-groups [flags]
+Example:
+  dws calendar room list-groups
+  dws calendar room list-groups --limit 20 --page 0
+Flags:
+      --limit string       页大小 (可选，不填默认 100，超过 100 按 100 处理)
+      --page string        分页起始位置 (可选，不填默认 0)
+```
+
+### 添加日程附件
+```
+Usage:
+  dws calendar attachment add [flags]
+Example:
+  dws calendar attachment add --event <EVENT_ID> --files <FILE_ID>:report.pdf,<FILE_ID2>:slides.pptx
+Flags:
+      --event string   日程 ID (必填)
+      --files string   附件列表，格式 <fileId>:<name>，多项逗号分隔 (必填)
+```
+
+> 上传文件得到 `fileId` 需配合钉盘相关流程；本命令只负责把已上传的文件挂载到日程上。
+
+### 查询用户日历列表
+```
+Usage:
+  dws calendar book list [flags]
+Example:
+  dws calendar book list
+```
+> 通过此接口可查询当前用户的日历列表，包含 主日历本、他人共享的日历、订阅的公共/团队日历。
+> 共享日历本中有来自 xxx 的，且权限大于reader，那么通过 `event list --calendar-id <xxx的日历本id> `可查到xxx完整的日程安排
+> 主日历 `id` 固定为 `primary`，绝大多数日程操作都默认走主日历，只有当用户明确要求查/写其他日历本时才需要带 `--calendar-id`。
+
+### 查询用户 / 会议室闲忙状态
+```
+Usage:
+  dws calendar busy search [flags]
+Example:
+  # 查用户闲忙
+  dws calendar busy search --users <USER_ID_1>,<USER_ID_2> \
+    --start "2026-03-10T14:00:00+08:00" --end "2026-03-10T18:00:00+08:00"
+  # 查会议室闲忙
+  dws calendar busy search --rooms <ROOM_ID_1>,<ROOM_ID_2> \
+    --start "2026-03-10T14:00:00+08:00" --end "2026-03-10T18:00:00+08:00"
+  # 同时查用户 + 会议室
+  dws calendar busy search --users <USER_ID> --rooms <ROOM_ID> \
+    --start "2026-03-10T14:00:00+08:00" --end "2026-03-10T18:00:00+08:00"
+Flags:
+      --end string     结束时间 ISO-8601 (必填)
+      --start string   开始时间 ISO-8601 (必填)
+      --users string   用户 ID 列表，逗号分隔 (与 --rooms 至少其一)
+      --rooms string   会议室 ID 列表，逗号分隔 (与 --users 至少其一)
+```
+
+> **说明**：
+> - `--users` 与 `--rooms` 必须至少指定其一，可以同时指定；CLI 会做前置校验，两者都为空会直接报错。
+> - 查询会议室闲忙前，可先用 `dws calendar room search` 或 `dws calendar room list-groups` 拿到 roomId。
+> - 返回结果中的忙碌时段仅包含粗粒度的时间信息，不包含日程内容细节（如标题、参会人、地点），以保护隐私。
+
+### 建议日程时间
+```
+Usage:
+  dws calendar event suggest [flags]
+Example:
+  dws calendar event suggest --users userId1,userId2 --duration 60
+  dws calendar event suggest --start "2026-03-10T09:00:00+08:00" --end "2026-03-10T18:00:00+08:00" --users userId1
+  dws calendar event suggest --users userId1 --duration 30 --timezone Asia/Tokyo
+Flags:
+      --start string      推荐时间范围开始 ISO-8601 (默认当前时间)
+      --end string        推荐时间范围结束 ISO-8601 (默认次日18点)
+      --timezone string   时区 IANA 格式 (默认 Asia/Shanghai)
+      --users string      参会人 userId 列表，逗号分隔
+      --duration string   日程持续时间，单位分钟 (默认30)
+
+> 对于非明确时间或一段时间范围的约会场景，可基于所有参会人的忙闲状态，推荐多个可用的时间块方案，用于解决会议时间协调问题。
+```
+
+### 响应日程
+```
+Usage:
+  dws calendar event respond [flags]
+Example:
+  dws calendar event respond --id <EVENT_ID> --status accepted
+  dws calendar event respond --id <EVENT_ID> --status declined

@@ -1,0 +1,87 @@
+                f"spec_lock typography sizes must be positive finite unitless px values; "
+                f"found {shown}{suffix}."
+            )
+
+        # Font families: default `font_family` plus any per-role `*_family`
+        # override (title_family / body_family / emphasis_family / code_family,
+        # per templates/schemas/spec_lock.schema.json). Any of these is a legitimate declared
+        # value; an SVG that uses any one of them is not drifting.
+        allowed_fonts = set()
+        if typo:
+            default_font = typo.get('font_family', '').strip()
+            if default_font:
+                allowed_fonts.add(self._normalize_font_stack(default_font))
+            for k, v in typo.items():
+                if k == 'font_family' or not k.endswith('_family'):
+                    continue
+                v_clean = v.strip()
+                # Skip placeholder text like "same as body (omit if identical)"
+                if not v_clean or v_clean.lower().startswith('same as'):
+                    continue
+                allowed_fonts.add(self._normalize_font_stack(v_clean))
+        locked_fonts = set(allowed_fonts)
+        allowed_fonts.update(prototype_fonts)
+
+        # Sizes: declared slots are anchors. Checker cannot infer which role a
+        # text node carries, so it uses the union of their ±2px bands as a cheap
+        # numeric safety net; prompt rules own semantic role mapping.
+        # Scan SVG for used values
+        color_drifts = set()
+        inherited_colors = set()
+        for attr in _PAINT_PROPERTIES or ():
+            for raw_value in self._svg_property_values(content, attr):
+                normalized = raw_value.strip()
+                if normalized.lower() in {'none', 'transparent'} or re.fullmatch(
+                    r'url\(#[^)]+\)', normalized
+                ):
+                    continue
+                if _BARE_HEX_VALUE_RE.fullmatch(normalized):
+                    continue
+                if _parse_export_color is not None:
+                    val, _alpha = _parse_export_color(normalized)
+                    if val is None:
+                        continue
+                else:
+                    val = _normalize_hex_rgb(normalized)
+                    if val is None:
+                        continue
+                if val not in allowed_colors:
+                    color_drifts.add(f'#{val}')
+                elif val in prototype_colors and val not in locked_colors:
+                    inherited_colors.add(f'#{val}')
+
+        font_drifts = set()
+        inherited_fonts = set()
+        for val in self._font_family_values(content):
+            normalized_font = self._normalize_font_stack(val)
+            if allowed_fonts and normalized_font not in allowed_fonts:
+                font_drifts.add(val)
+            elif (
+                normalized_font in prototype_fonts
+                and normalized_font not in locked_fonts
+            ):
+                inherited_fonts.add(val)
+
+        size_drift_counts = self._count_undeclared_size_occurrences(
+            root,
+            locked_sizes=locked_sizes,
+            anchor_sizes=anchor_sizes,
+            prototype_sizes=prototype_sizes,
+        )
+        size_drifts = set(size_drift_counts)
+        inherited_sizes = set()
+        for val in self._effective_text_size_counts(root):
+            if val in prototype_sizes and val not in locked_sizes:
+                inherited_sizes.add(val)
+
+        # Record in run-wide aggregation. Colors/fonts beyond the anchor set are
+        # contextual values, not release issues. Generated-page sizes enforce
+        # role-anchor ownership; other spec-backed locations retain review.
+        fname = svg_path.name
+        for v in color_drifts:
+            self._anchor_value_summary['colors'][v].add(fname)
+        for v in font_drifts:
+            self._anchor_value_summary['fonts'][v].add(fname)
+        for v in size_drifts:
+            self._anchor_value_summary['sizes'][v].add(fname)
+

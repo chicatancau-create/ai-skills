@@ -1,0 +1,119 @@
+        if tag != "*"
+    }
+    if selector_tags and not selector_tags.issubset(
+        {tag.lower() for tag in tags}
+    ):
+        return False
+    return True
+
+
+def _css_asset_signature(value: str, svg_path: Path) -> str:
+    """Replace CSS URL assets with byte identities while retaining fragments."""
+    def replace(match: re.Match[str]) -> str:
+        target = match.group(2).strip()
+        if target.startswith("#"):
+            return f"url({target})"
+        identity = _signature_attr_value(
+            "href",
+            target,
+            svg_path=svg_path,
+            asset_identity=True,
+        )
+        return f"url({identity})"
+
+    return _CSS_URL_RE.sub(replace, value)
+
+
+def _normalize_css_declarations(raw: str, svg_path: Path) -> str:
+    """Normalize formatting-only CSS differences without changing cascade order."""
+    declarations: list[str] = []
+    for raw_declaration in raw.split(";"):
+        declaration = raw_declaration.strip()
+        if not declaration:
+            continue
+        if ":" not in declaration:
+            declarations.append(" ".join(declaration.split()))
+            continue
+        name, value = declaration.split(":", 1)
+        normalized_value = " ".join(
+            _css_asset_signature(value.strip(), svg_path).split()
+        )
+        declarations.append(f"{name.strip().lower()}:{normalized_value}")
+    return ";".join(declarations)
+
+
+def _scope_css_signature(
+    root: ET.Element,
+    elements: tuple[ET.Element, ...],
+    svg_path: Path,
+) -> tuple[tuple[str, str], ...]:
+    """Return only stylesheet rules that can affect the selected visual scope."""
+    ids, classes, tags, attributes, font_families = _scope_selector_tokens(
+        root,
+        elements,
+    )
+    parsed_rules: list[tuple[str, str]] = []
+    for style in root.iter():
+        if _local_tag(style) != "style":
+            continue
+        css = _CSS_COMMENT_RE.sub("", style.text or "")
+        for match in _CSS_RULE_RE.finditer(css):
+            parsed_rules.append((match.group(1).strip(), match.group(2)))
+
+    matched_selectors: dict[int, tuple[str, ...]] = {}
+    for index, (raw_selector, body) in enumerate(parsed_rules):
+        if raw_selector.startswith("@"):
+            continue
+        selectors = tuple(
+            " ".join(selector.split())
+            for selector in raw_selector.split(",")
+            if _css_selector_matches_scope(
+                selector,
+                ids=ids,
+                classes=classes,
+                tags=tags,
+                attributes=attributes,
+            )
+        )
+        if selectors:
+            matched_selectors[index] = selectors
+            font_families.update(_font_families_from_declarations(body))
+
+    rules: list[tuple[str, str]] = []
+    for index, (raw_selector, body) in enumerate(parsed_rules):
+        selectors = matched_selectors.get(index)
+        if selectors is None:
+            if not raw_selector.lower().startswith("@font-face"):
+                continue
+            declared_families = _font_families_from_declarations(body)
+            if not declared_families.intersection(font_families):
+                continue
+            selectors = ("@font-face",)
+        rules.append((
+            ",".join(selectors),
+            _normalize_css_declarations(body, svg_path),
+        ))
+    return tuple(rules)
+
+
+def _scope_visual_resources_signature(
+    root: ET.Element,
+    elements: tuple[ET.Element, ...],
+    svg_path: Path,
+    *,
+    ignore_json_native_preview: bool = False,
+) -> tuple[object, ...]:
+    """Capture root inheritance, relevant CSS, and the referenced defs closure."""
+    if not elements:
+        return ()
+    comparison_elements = (
+        tuple(_mirror_resource_projection(element) for element in elements)
+        if ignore_json_native_preview
+        else elements
+    )
+    root_attrs = tuple(sorted(
+        (
+            name,
+            _signature_attr_value(
+                name,
+                value,

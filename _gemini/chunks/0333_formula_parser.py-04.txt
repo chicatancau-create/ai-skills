@@ -1,0 +1,114 @@
+def _strip_outer_delimiters(source: str) -> str:
+    pairs = (("$$", "$$"), ("$", "$"), ("\\(", "\\)"), ("\\[", "\\]"))
+    for opener, closer in pairs:
+        if source.startswith(opener):
+            if not source.endswith(closer) or len(source) <= len(opener) + len(closer):
+                raise FormulaCompileError(f"Unclosed outer LaTeX delimiter {opener!r}")
+            return source[len(opener):-len(closer)].strip()
+    return source
+
+
+def _normalize_big_delimiters(source: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        direction = match.group(1)
+        delimiter = match.group(2)
+        if direction:
+            command = {
+                "l": _BIG_LEFT_COMMAND,
+                "r": _BIG_RIGHT_COMMAND,
+                "m": _BIG_MIDDLE_COMMAND,
+            }[direction]
+            return f"\\{command}{delimiter}"
+        openers = {
+            "(", "[", "{", ".", r"\{", r"\lbrace", r"\langle", r"\lfloor",
+            r"\lceil", r"\lvert", r"\lVert", r"\lbrack",
+        }
+        closers = {
+            ")", "]", "}", r"\}", r"\rbrace", r"\rangle", r"\rfloor",
+            r"\rceil", r"\rvert", r"\rVert", r"\rbrack",
+        }
+        symmetric = {"|", r"\|", r"\vert", r"\Vert"}
+        if delimiter in openers:
+            return f"\\{_BIG_LEFT_COMMAND}{delimiter}"
+        if delimiter in closers:
+            return f"\\{_BIG_RIGHT_COMMAND}{delimiter}"
+        if delimiter in symmetric:
+            return f"\\{_BIG_SYMMETRIC_COMMAND}{delimiter}"
+        return delimiter
+
+    return _BIG_DELIMITER_RE.sub(replace, source)
+
+
+def _normalize_white_brackets(source: str) -> str:
+    source = _WHITE_OPEN_RE.sub(r"\\left⟦", source)
+    return _WHITE_CLOSE_RE.sub(r"\\right⟧", source)
+
+
+def _prepare_source(source: str) -> str:
+    source = _strip_outer_delimiters(source.strip())
+    if "%" in source:
+        position = 0
+        while position < len(source):
+            if source[position] == "%" and (position == 0 or source[position - 1] != "\\"):
+                raise FormulaCompileError("Unescaped % comments are outside the Office profile")
+            position += 1
+    without_definitions, macros = _collect_macros(source)
+    expanded = _expand_macros(without_definitions, macros)
+    return _normalize_white_brackets(_normalize_big_delimiters(expanded)).strip()
+
+
+def _space_from_length(raw: str) -> str:
+    match = _LENGTH_RE.fullmatch(raw.strip())
+    if match is None:
+        raise FormulaCompileError(f"Unsupported math spacing length: {raw!r}")
+    amount = float(match.group(1))
+    unit = match.group(2).lower()
+    multiplier = {"mu": 1.0, "em": 18.0, "ex": 9.0, "pt": 1.8}[unit]
+    mu = min(2160.0, amount * multiplier)
+    if mu <= 0:
+        return "\u200b"
+    whole_em = int(mu // 18)
+    remainder = mu - whole_em * 18
+    output = "\u2003" * whole_em
+    if remainder >= 14:
+        output += "\u2003"
+    elif remainder >= 9:
+        output += "\u2002"
+    elif remainder >= 4.5:
+        output += "\u2004"
+    elif remainder >= 3.5:
+        output += "\u205f"
+    elif remainder >= 2:
+        output += "\u2009"
+    elif remainder > 0:
+        output += "\u200b"
+    return output or "\u200b"
+
+
+class _LatexParser:
+    """Parse one prepared formula source under the Office import profile."""
+
+    def __init__(
+        self,
+        source: str,
+        *,
+        display: bool,
+        text_mode: bool = False,
+        inherited_style: RunStyle | None = None,
+    ) -> None:
+        self.source = source
+        self.position = 0
+        self.depth = 0
+        self.display = display
+        self.text_mode_depth = 1 if text_mode else 0
+        self.current_style = inherited_style
+        self.environment_stack: list[str] = []
+
+    def parse(self) -> Sequence:
+        result = self._parse_sequence()
+        if self.position != len(self.source):
+            self._fail("Unexpected trailing formula source")
+        if is_empty(result):
+            self._fail("Formula is empty")
+        return result
+

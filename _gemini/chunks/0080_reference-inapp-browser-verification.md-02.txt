@@ -1,0 +1,26 @@
+- Node harnesses holding a CDP WebSocket + HTTP server never exit on their own; call `process.exit()` explicitly after cleanup (`taskkill /PID <child> /T /F` for the browser tree).
+- Mock an unreachable third-party API at the network layer instead of skipping the test: `Fetch.enable` + `Fetch.fulfillRequest` on the *service worker* session intercepts its `fetch` calls.
+- **`--window-size=390,844` does NOT give a 390px viewport.** Headless Edge clamps the window to a ~496px layout width and then crops the PNG to the requested size, so the image looks like mobile but is a clipped desktop render (elements appear "cut off at the right edge" although nothing is overflowing). To prove a narrow layout, screenshot a harness page containing `<iframe width="390" height="844" src="…">` at a legal window size. Verify with `innerWidth` (dump it into the DOM and read it back with `--dump-dom`) before believing any "overflow" you see.
+- `--virtual-time-budget=Nms` advances timers deterministically, so one instrumented copy of a page can yield several states (e.g. budget 400 → in-flight/loading frame, budget 1600 → settled/error frame) without a CDP harness.
+- **Responsive widths: use `Emulation.setDeviceMetricsOverride`, not `--window-size`.** The window-size trap above only applies to the CLI `--screenshot` path; with a CDP session, overriding device metrics gives honest 1280 / 860 / 375 layouts (re-confirmed 2026-09-24: three widths measured with zero horizontal overflow off a `file://` page).
+- **No Playwright needed — `ws` alone drives CDP.** The existing harnesses on this box are plain Node + a ~25-line CDP class over the `ws` WebSocket (JSON-RPC `id`/`sessionId` map, plus an `on(method, fn, sessionId)` hook list for `Fetch.requestPaused` / `Runtime.exceptionThrown`), reusing the already-installed `ws` from the translator project's `test-lab/node_modules`. Prefer copying an existing harness over installing packages — this machine's network to external CDNs/registries is unreliable.
+- **本机系统主题是深色**, so a headless browser reports `prefers-color-scheme: dark` by default and screenshots silently differ run-to-run; pin it with `Emulation.setEmulatedMedia` (features `prefers-color-scheme`) before any visual comparison, and measure both themes when asserting contrast.
+- Poll for readiness rather than sleeping a fixed time, and expect nulls mid-navigation: right after `Page.navigate` `document.documentElement` can be `null` (return a sentinel like -1 and keep polling), and the MV3 service-worker target only shows up in `/json/list` after the first navigation wakes it.
+
+## 2026-10-08 更新（无 ws 依赖、裁切判据、以及"让用户手点"的场景）
+
+- **不需要 `ws` 包了**：本机 `node_modules/ws` 找不到，而 **Node 24 有全局 `WebSocket`**（undici），25 行 CDP 类直接 `new WebSocket(url)` 即可。旧记录里指向 `E:\插件（ai）\test-lab\…` 的现成 harness **随工作区迁移已不存在**，别再去找。
+- **`scrollWidth == clientWidth` 证明不了"没被裁"**：SPA 根节点常带 `overflow-hidden`，超宽元素是被**静默剪掉**而不是产生滚动条，于是"无横向溢出"的断言会假绿。要逐个元素量 `getBoundingClientRect().right > clientWidth`，并区分"处在 `overflow-x:auto/scroll` 容器里"（可滚到 = 可达，不算缺陷）与"在 overflow-hidden 里"（真丢失）。
+- 断言的测量目标写歪比不测更糟：一次 selector 停留在旧类名（`.text-lg` 已改 `.text-xl`）表现为"该控件=无元素"，看着像通过其实没量。凡是"缺席/无元素"都要当成探针故障去查，不是当成通过。
+- **需要人在可见窗口里操作（扫码、发消息、撤回、翻页）时，别用连接器那个浏览器**：它是独立上下文，与项目自己的 Chrome profile 不共享 cookie，用户在那边登录对脚本毫无用处。正确做法是用项目那个 profile 起**可见** Chrome（`--user-data-dir=<profile>`），并先释放 profile 独占。。
+- 长跑脚本用 `node x.js > log 2>&1` 或 `python -u`，别 `| tail`——管道会缓冲到你什么都看不到（与 [[reference-powershell-through-bash-and-recyclebin]] 同一族坑）。
+
+## 2026-11-04 又踩一次同一条：按像素"数元素"会造出假故障
+
+上面第 29 行那条 `--window-size` 陷阱我又中招并**据此报了错结论**：uni-app 的 tabBar 明明有 3 个 tab，
+我用 `--window-size=390,844` 截图后**目视 + 像素列簇都只数出 2 个**，差点交付"第三个 tab 没渲染"。
+实际 CSS 视口是 **496×751**，第三个条目 `x=331..496` 被切在 390 px 画面之外。
+
+- **数元素只能用 DOM + `getBoundingClientRect`**：`document.querySelectorAll('.uni-tabbar__item').length`
+  + 每项 `x/width` + `img.complete && naturalWidth>0` + `getComputedStyle` 的色值，才是可交付判据。
+- **像素列簇连"计数"都做不了**：整条底栏有背景/边框时，非白列会连成一片（实测 `runs=[(0,389)]`），

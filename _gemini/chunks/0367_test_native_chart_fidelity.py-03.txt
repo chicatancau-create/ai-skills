@@ -1,0 +1,90 @@
+        self.assertIn('<c:orientation val="maxMin"/>', cat_ax)
+        self.assertIn('<c:crosses val="autoZero"/>', cat_ax)
+        self.assertIn('<c:axPos val="b"/>', val_ax)
+        self.assertIn('<c:crosses val="max"/>', val_ax)
+
+    def test_bar_reverse_false_restores_bottom_up_order(self) -> None:
+        xml = _render(_bar_payload(axes={"category": {"reverse": False}}))
+        cat_ax = xml[xml.index("<c:catAx>"):xml.index("</c:catAx>")]
+        val_ax = xml[xml.index("<c:valAx>"):xml.index("</c:valAx>")]
+        self.assertIn('<c:orientation val="minMax"/>', cat_ax)
+        self.assertIn('<c:crosses val="autoZero"/>', val_ax)
+
+    def test_column_value_axis_on_the_right_crosses_at_the_last_category(self) -> None:
+        payload = _bar_payload(type="column", axes={"value": {"position": "right"}})
+        xml = _render(payload)
+        val_ax = xml[xml.index("<c:valAx>"):xml.index("</c:valAx>")]
+        self.assertIn('<c:axPos val="r"/>', val_ax)
+        self.assertIn('<c:crosses val="max"/>', val_ax)
+
+    def test_combo_secondary_axes_keep_their_crossing(self) -> None:
+        payload = {
+            "type": "combo",
+            "categories": ["A", "B"],
+            "plots": [
+                {"type": "column", "series": [{"name": "C", "values": [1, 2]}]},
+                {"type": "line", "axis": "secondary", "series": [{"name": "L", "values": [3, 4]}]},
+            ],
+        }
+        xml = _render(payload)
+        crossings = [
+            xml[idx:idx + 60]
+            for idx in range(len(xml))
+            if xml.startswith("<c:crosses", idx)
+        ]
+        self.assertEqual(len(crossings), 4)
+        self.assertIn("autoZero", crossings[2])
+        self.assertIn("max", crossings[3])
+
+    def test_fallback_order_warning_names_the_expected_reverse(self) -> None:
+        payload = _bar_payload(axes={"category": {"reverse": False}})
+        fallback = (
+            '<text x="10" y="20">A</text><text x="10" y="80">C</text>'
+        )
+        warnings = _native_chart_chrome_warnings(_marker(fallback), payload)
+        self.assertTrue(any("axes.category.reverse: true" in item for item in warnings))
+        self.assertEqual(_native_chart_chrome_warnings(_marker(fallback), _bar_payload()), [])
+
+
+class LineMarkerTests(unittest.TestCase):
+    def test_line_marker_style_writes_sized_coloured_markers(self) -> None:
+        payload = {
+            "type": "line",
+            "line_style": "lineMarker",
+            "marker_size": 10,
+            "categories": ["A", "B"],
+            "series": [{"name": "S", "values": [1, 2]}],
+            "style": {"colors": ["#111111"]},
+        }
+        xml = _render(payload)
+        self.assertIn('<c:marker><c:symbol val="circle"/><c:size val="8"/>', xml)
+        self.assertIn('<a:srgbClr val="111111"/></a:solidFill><a:ln>', xml)
+
+    def test_point_colors_mark_single_points_and_leave_null_bare(self) -> None:
+        payload = {
+            "type": "line",
+            "categories": ["A", "B", "C"],
+            "series": [{
+                "name": "S",
+                "values": [1, 2, 3],
+                "point_colors": [None, None, "#C8102E"],
+            }],
+        }
+        xml = _render(payload)
+        self.assertEqual(xml.count("<c:dPt>"), 3)
+        self.assertIn(
+            '<c:dPt><c:idx val="2"/><c:marker><c:symbol val="circle"/>'
+            '<c:spPr><a:solidFill><a:srgbClr val="C8102E"/>',
+            xml,
+        )
+        self.assertIn('<c:dPt><c:idx val="0"/><c:marker><c:symbol val="none"/>', xml)
+
+    def test_bar_point_colors_still_require_colours(self) -> None:
+        payload = _bar_payload(series=[{"name": "S", "values": [1, 2, 3], "point_colors": [None, "#111111", "#222222"]}])
+        with self.assertRaises(RuntimeError):
+            _chart_data(payload)
+
+    def test_marker_warning_fires_only_without_markers(self) -> None:
+        fallback = '<circle cx="10" cy="10" r="5" fill="#C8102E"/>'
+        payload = {
+            "type": "line",

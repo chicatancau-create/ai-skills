@@ -1,0 +1,115 @@
+    def flush_stream(self, stream_name: str) -> None:
+        """Flush a partial logical line when the owning stream flushes."""
+        with self.lock:
+            if not self.enabled:
+                self.pending[stream_name] = ""
+                return
+            pending = self.pending[stream_name]
+            if pending:
+                self._record_line(stream_name, pending)
+                self.pending[stream_name] = ""
+
+    def close(self) -> None:
+        """Flush pending output and close the command envelope."""
+        with self.lock:
+            if not self.enabled:
+                return
+            self.flush_stream("stdout")
+            self.flush_stream("stderr")
+            if self.stderr_tail:
+                self._write("stderr-tail:\n")
+                for line in self.stderr_tail:
+                    self._write(f"  {line}\n")
+                self.retained_lines += len(self.stderr_tail)
+                self.omitted_lines -= len(self.stderr_tail)
+            elapsed_ms = int((time.monotonic() - self.started_clock) * 1000)
+            self._write(
+                f"=== {_utc_timestamp()} END run={self.run_id} "
+                f"elapsed_ms={elapsed_ms} output_lines={self.observed_lines} "
+                f"retained={self.retained_lines} omitted={self.omitted_lines} ===\n"
+            )
+            self.enabled = False
+            try:
+                self.handle.close()
+            except (OSError, ValueError) as exc:
+                self._disable(exc)
+
+
+class _TeeTextIO:
+    """Forward text writes while offering them to the audit recorder."""
+
+    def __init__(
+        self,
+        primary: TextIO,
+        transcript: _AutomaticTranscript,
+        stream_name: str,
+    ) -> None:
+        self.primary = primary
+        self.transcript = transcript
+        self.stream_name = stream_name
+        self.lock = threading.RLock()
+
+    def write(self, text: str) -> int:
+        """Write to the original stream, then mirror the same text."""
+        with self.lock:
+            written = self.primary.write(text)
+            self.transcript.write_stream(self.stream_name, text)
+        return written
+
+    def writelines(self, lines: Iterable[str]) -> None:
+        """Forward a sequence through the ordinary write path."""
+        for line in lines:
+            self.write(line)
+
+    def flush(self) -> None:
+        """Flush the original stream without splitting a logical log line."""
+        with self.lock:
+            self.primary.flush()
+
+    def __getattr__(self, name: str) -> object:
+        """Delegate the remaining text-stream interface."""
+        return getattr(self.primary, name)
+
+
+def install_auto_transcript(argv: list[str] | None = None) -> Path | None:
+    """Record a project-scoped Python command when its project log exists."""
+    global _ACTIVE_TRANSCRIPT
+
+    effective_argv = list(sys.argv if argv is None else argv)
+    if _ACTIVE_TRANSCRIPT is not None:
+        return None
+    if os.environ.get(DISABLE_TRANSCRIPT_ENV):
+        return None
+    if Path(effective_argv[0]).name in _EXCLUDED_ENTRYPOINTS:
+        return None
+
+    project_root = _find_project_root(effective_argv)
+    if project_root is None:
+        return None
+    log_path = project_root / WORKFLOW_LOG_RELATIVE_PATH
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    try:
+        handle = log_path.open(
+            "a",
+            encoding="utf-8",
+            errors="replace",
+            newline="",
+        )
+    except OSError as exc:
+        try:
+            original_stderr.write(
+                f"[WARN] Workflow audit unavailable ({log_path}): {exc}\n"
+            )
+            original_stderr.flush()
+        except (OSError, ValueError):
+            pass
+        return None
+
+    transcript = _AutomaticTranscript(
+        handle,
+        original_stderr,
+        [sys.executable, *effective_argv],
+    )
+    transcript.start()
+    _ACTIVE_TRANSCRIPT = transcript

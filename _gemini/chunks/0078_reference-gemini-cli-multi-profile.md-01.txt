@@ -1,0 +1,77 @@
+---
+name: reference-gemini-cli-multi-profile
+description: Gemini CLI 个人档已被 Google 停发（改用 Antigravity CLI `agy`）；本机 agy 的登录入口、只存一号的凭据落点、换号壳子 go.cmd/switch.cmd、必须注入 7897 代理，以及权益死因实为 Google 手机验证(VALIDATION_REQUIRED) 而非地区。
+metadata:
+  type: reference
+---
+
+> **⚠️ 2026-10-09 收尾：本机这套已全部删除。** 用户决定弃用 Google 的 AI（"磨太长时间了，算了吧"）。
+> `D:\agy`、`D:\npm-global`、`D:\gemini-profiles`、`~\.gemini`、凭据 `gemini:antigravity`、
+> PATH 里的 `D:\agy\bin` 与 `D:\npm-global` 均已清除并复核干净。下面记录的是当时的机制，供重装参考。
+
+# Gemini CLI 多账号（本机 2026-10-08 实测）
+
+**装法**：`npm config set prefix D:\npm-global` + 把 `D:\npm-global` 追加进 `HKCU\Environment\Path`，
+再 `npm i -g @google/gemini-cli`。装完版本 0.63.0，实体在 `D:\npm-global\node_modules\@google\gemini-cli`。
+`node_modules` 里**没有 `@github/keytar`** → OAuth 凭据走 `FileKeychain` 文件回退（`<profile>\.gemini\gemini-credentials.json`），
+所以按目录隔离账号是可行的。
+
+**一个账号一个目录**：0.63.0 的 `homedir()` 第一行就是
+`const envHome = process.env["GEMINI_CLI_HOME"]; if (envHome) return envHome;`
+→ 设 `GEMINI_CLI_HOME=D:\gemini-profiles\accN` 即整份隔离（实测跑一次只生成 `accN\.gemini\*.tmp`，不碰真的 `~\.gemini`）。
+**注意官方自己的歧义**：另一处读 settings 的代码是 `baseDir = process.env.GEMINI_CLI_HOME || join(homedir(), ".gemini")`
+再 `join(baseDir,"settings.json")` —— 即 settings 落在 `<profile>\settings.json`，而 storage 落在 `<profile>\.gemini\...`。
+两处都写一份 `{"security":{"auth":{"selectedType":"oauth-personal"}}}` 才不会踩空。
+
+**`Authentication consent could not be obtained.` 的真因（0.63.0 源码定位，2026-10-08）**
+在 `packages/core/src/utils/authConsent.ts`：
+
+```js
+if (isHeadlessMode()) return getOauthConsentNonInteractive(...)
+else if (coreEvents.listenerCount("consent-request") > 0) return getOauthConsentInteractive(...)
+throw new FatalAuthenticationError("Authentication consent could not be obtained...")
+```
+
+首次登录发生在主 UI 挂载前 → `listenerCount` 为 0 → 真 TTY 下必抛。**跟网络无关。**
+`isHeadlessMode()` 除了「stdin/stdout 不是 TTY」，还把 **`options?.prompt` 为真也算 headless** ——
+所以正解是**带 `--prompt=` 跑一次来触发登录**：
+
+```
+D:\gemini-profiles\g.cmd acc1 --prompt=hi
+```
+
+终端会问 `Opening authentication page in your browser. Do you want to continue? [Y/n]:` → 答 `y`
+→ 浏览器开 Google 授权页 → 授权后凭据落进该 profile。（实测已走到这步：答 y 后进程挂在等回调，无人点则超时。）
+
+**`CI=true` 是错招，别再用**：`shouldAttemptBrowserLaunch()` 里有
+`if (process.env["CI"] || DEBIAN_FRONTEND === "noninteractive") return false` ——
+设 CI 虽绕过 consent，却同时**禁止启动浏览器**，于是改抛
+`Manual authorization is required but the current session is non-interactive.`（两个判断共用 CI，方向相反互相拆台。）
+
+**cmd 的 `%*` 不受 `SHIFT` 影响**：切换器里 `shift` 后 `call gemini.cmd %*` 会把账号名一起当位置参数传下去，
+报 `Cannot use both a positional prompt and the --prompt flag together`。已改为显式 `%2 %3 ... %9`。
+
+**已排除的两个假因**（别再查）：
+- 代理：`HTTPS_PROXY/HTTP_PROXY` 对这一步无关；且实测 Node `fetch` 与裸 `https` 设了这俩变量**照样超时**
+  （只有 gaxios/https-proxy-agent 那条路认 env），所以 env 代理不是万能补丁。
+- DNS/回调：`accounts.google.com` 解析到真 Google 段；`ProxyOverride` 已含 `localhost;127.*;<local>`，
+  回调不会被系统代理吃掉。（`www.google.com` 仍被污染成 31.13.92.37 = Facebook 段，与本问题无关。）
+  本机没开 TUN（适配器只有 Radmin VPN / VMware / WLAN / 蓝牙 / 以太网），7897 由 PID 54760 在听。
+
+**切换器**：`D:\gemini-profiles\g.cmd <acc1..acc4> [gemini 参数]`，内部设 `GEMINI_CLI_HOME` + 上面那组代理 env。
+非交互调用用 `g.cmd acc2 -p "..." -o json`。
+
+**CC Switch 管不了这件事**（实测其二进制）：它只**读** `~/.gemini/oauth_creds.json`
+（读不到提示 "Refresh ~/.gemini/oauth_creds.json via the gemini CLI"），写的是 `settings.json` 的
+`env` / `security.auth.selectedType`；「应用配置 → Gemini CLI 配置目录」只能指**一个**目录，
+「路由」页要先把凭据喂给它才有意义。所以 4 账号轮换只能靠 `GEMINI_CLI_HOME`，CC Switch 不参与。
+
+## 后续：Gemini CLI 个人档已死，改用 Antigravity CLI（2026-10-08 实测）
+
+Google 服务端停发「Gemini Code Assist for individuals」：`0.63.0`、`0.64.0-preview.0`、`0.65.0-nightly.20261008`
+**三个版本一律返回** `IneligibleTierError`，诊断里 `tierId: 'free-tier'`。官方公告 2026-05-19 迁移到 Antigravity CLI，
+弃用页更新 2026-09-02；论坛 2026-09-26 有活跃 Google AI Pro 账号仍被判 not eligible 的报告。
+**但本机实测相反**：用户这 4 个 Google 账号都开了 PRO，登进 Antigravity 后 `agy models` 能列出真模型表
+（`gemini-3.8-flash-high/medium/low`、`gemini-3.1-pro-high/low`、`claude-sonnet-4-6`、`claude-opus-4-6-thinking`、`gpt-oss-120b`）
+→ 权益在 Antigravity 侧是活的，Gemini CLI 那条死路不用再救。
+

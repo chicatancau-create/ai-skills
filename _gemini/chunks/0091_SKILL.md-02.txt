@@ -1,0 +1,83 @@
+### 4. 最小 CDP 客户端
+
+```js
+class CDP {
+  constructor(url) { this.url = url; this.id = 0; this.pending = new Map(); this.handlers = []; }
+  connect() { return new Promise((res, rej) => {
+    this.ws = new WebSocket(this.url, { perMessageDeflate: false });
+    this.ws.on('open', res); this.ws.on('error', rej);
+    this.ws.on('message', raw => {
+      const m = JSON.parse(raw.toString());
+      if (m.id && this.pending.has(m.id)) {
+        const { resolve, reject } = this.pending.get(m.id); this.pending.delete(m.id);
+        m.error ? reject(new Error(m.error.message)) : resolve(m.result);
+      } else if (m.method) for (const h of this.handlers)
+        if (h.method === m.method && (!h.sessionId || h.sessionId === m.sessionId)) h.fn(m.params);
+    });
+  }); }
+  send(method, params = {}, sessionId) { const id = ++this.id; const p = { id, method, params };
+    if (sessionId) p.sessionId = sessionId;
+    return new Promise((res, rej) => { this.pending.set(id, { resolve: res, reject: rej }); this.ws.send(JSON.stringify(p)); }); }
+  on(method, fn, sessionId) { this.handlers.push({ method, fn, sessionId }); }
+}
+```
+
+挂页面：`Target.createTarget`(或从 `/json/list` 找 `type==='page'`) → `Target.attachToTarget {flatten:true}` 拿 `sessionId` → `Page.enable` + `Runtime.enable`。之后所有 `Runtime.evaluate` 都带这个 sessionId，并固定 `returnByValue: true, awaitPromise: true`；`r.exceptionDetails` 存在就抛，否则页面里的异常会被静默吞成 `undefined`，你会误判成「选择器没匹配到」。
+
+注册 `cdp.on('Runtime.exceptionThrown', ...)`：页内异步脚本的错误不会进 evaluate 的返回值。
+
+### 5. 页面取证断言
+
+用 `Emulation.setDeviceMetricsOverride` 换视口(比 `--window-size` 可靠)，用 `Page.captureScreenshot {captureBeyondViewport:true}` 出整页图。典型测量：
+
+- 溢出：`scrollWidth - clientWidth <= 0`
+- 对比度：读 `getComputedStyle` 的前景色与有效背景色，本地按 WCAG 公式算，两套主题各量一遍
+- 焦点顺序：真发 `Input.dispatchKeyEvent` 或直接读 `document.activeElement` 链，并量 `outlineStyle/outlineWidth`
+- 状态：`requestSubmit()` 触发，再轮询 DOM 计数
+
+**把断言改成量真实控件。** 曾有一条「焦点环可见」量到 `none 3px` 却靠别的元素蒙过——测量目标写歪了比不测更糟。
+
+### 6. MV3 扩展 + 网络层 mock
+
+```js
+await cdp.send('Page.navigate', { url: `${BASE}/` }, PG);   // 先导航一次唤醒后台 SW
+let swTarget;
+for (let i = 0; i < 40; i++) {
+  const targets = await getJSON(`http://127.0.0.1:${CDP_PORT}/json/list`);
+  swTarget = targets.find(t => t.type === 'service_worker' && /\/background\.js$/.test(t.url));
+  if (swTarget) break;
+  await sleep(500);
+}
+if (!swTarget) throw new Error('NO_SW');                    // 上层据此换下一个候选浏览器
+const SW = (await cdp.send('Target.attachToTarget', { targetId: swTarget.id, flatten: true })).sessionId;
+const requestLog = [];
+cdp.on('Fetch.requestPaused', async p => {
+  requestLog.push(new URL(p.request.url).searchParams.getAll('q'));
+  await cdp.send('Fetch.fulfillRequest', { requestId: p.requestId, responseCode: 200,
+    responseHeaders: [{ name: 'Content-Type', value: 'application/json' }], body: mockBody(p.request.url)
+  }, SW);
+}, SW);
+await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*translate.googleapis.com/*' }] }, SW);
+await cdp.send('Page.reload', {}, PG);
+```
+
+要点：拦截挂在 **SW session** 上，不是页面 session；`Fetch.enable` 要在被拦请求发出前(所以先导航唤醒、装好拦截、再 reload)。计数 `mocked` 并在结尾打印——**为 0 说明走了真实网络**，测试绿了也是假绿。
+
+### 7. 证明断言有牙齿
+
+每条关键断言过一遍：临时回滚对应修复 → 跑 → 确认它变红 → 恢复 → 再跑确认全绿。回滚改动单独 `git stash` 或用 sed 临时反转，跑完 `git diff` 确认干净。没做这一步的断言，在报告里标「未证明会失败」。
+
+**结论单位要和实现单位对齐。** 断言「首批请求不含远端段落」时，先确认后台是不是把内容批次再按固定字符数(实测 1800 字符)拆成多个网络包——按包下结论会连红两次，而代码其实没问题。这类粒度写进注释，别只留在对话里。
+
+### 8. 收尾清理
+
+```js
+} finally {
+  try { if (cdp && cdp.ws) cdp.ws.close(); } catch (e) {}
+  try { execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' }); } catch (e) {}
+  try { fs.rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 }); } catch (e) {}
+}
+console.log(failed ? `\n${failed} 项失败` : '\nVERIFIED');
+process.exit(failed ? 1 : 0);   // ws / server 会让事件循环挂住, 必须显式退出
+```
+

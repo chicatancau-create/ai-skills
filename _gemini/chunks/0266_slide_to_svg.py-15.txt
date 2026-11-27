@@ -1,0 +1,117 @@
+            "object-replaced",
+            str(exc),
+            "replace only this picture with a visible placeholder",
+        )
+        return _fallback_node_svg(node, ctx, top_level=top_level)
+    if not result.svg:
+        return ""
+    _diagnose_picture_result(ctx, result)
+    ctx.media.update(result.media)
+    effect = convert_effects(
+        sp_pr,
+        ctx.palette,
+        id_prefix="fx",
+        id_seq=ctx.filter_seq,
+        target_rotation_degrees=node.effective_rotation,
+    )
+    ctx.defs.extend(effect.defs)
+    effect_metadata = dict(effect.metadata)
+    _diagnose_unsupported_effect(ctx, effect_metadata)
+    clipped_svg = _clip_blip_image(result.svg, geom, ctx)
+    picture_attrs = {**_object_metadata(node, ctx), **effect_metadata}
+    group_attrs = _metadata_group_attrs(effect_metadata)
+    if result.external_linked:
+        group_attrs.append(
+            f'{_SOURCE_PROXY_ATTRIBUTE}="{_SOURCE_PROXY_KIND}"'
+        )
+        group_attrs.append(
+            f'{_EXTERNAL_LINKED_IMAGE_PROXY_ATTRIBUTE}="true"'
+        )
+    if effect.filter_id is not None:
+        filter_attr = f"url(#{effect.filter_id})"
+        if (
+            clipped_svg.startswith("<svg")
+            or clipped_svg.startswith("<image clip-path=")
+        ):
+            # Keep the effect outside the crop viewport so shadows and glows
+            # remain visible beyond the picture geometry in SVG previews.
+            group_attrs.append(f'filter="{filter_attr}"')
+        else:
+            picture_attrs["filter"] = filter_attr
+    picture_svg = _inject_root_svg_attrs(
+        clipped_svg,
+        picture_attrs,
+    )
+    return _wrap_shape_group(
+        picture_svg,
+        node,
+        ctx,
+        top_level=top_level,
+        extra_attrs=group_attrs,
+    )
+
+
+def _inject_root_svg_attrs(markup: str, attrs: dict[str, str]) -> str:
+    """Attach source-object identity to a picture's root SVG element."""
+    attrs_xml = _attrs_to_xml(attrs)
+    for tag in ("image", "svg"):
+        prefix = f"<{tag}"
+        if markup.startswith(prefix):
+            return markup.replace(prefix, f"{prefix}{attrs_xml}", 1)
+    return markup
+
+
+# ---------------------------------------------------------------------------
+# Connector (<p:cxnSp>)
+# ---------------------------------------------------------------------------
+
+def _convert_connector(node: ShapeNode, ctx: AssemblyContext, *, top_level: bool) -> str:
+    sp_pr = node.xml.find("p:spPr", NS)
+    geom = _resolve_geometry(node, sp_pr)
+    geom_xml = _build_geometry_xml(node, sp_pr, ctx, geom=geom)
+    return _wrap_shape_group(
+        geom_xml,
+        node,
+        ctx,
+        top_level=top_level,
+        extra_attrs=_geometry_group_attrs(geom),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Group (<p:grpSp>)
+# ---------------------------------------------------------------------------
+
+def _convert_group(node: ShapeNode, ctx: AssemblyContext, *, top_level: bool) -> str:
+    """Render group contents flat (children already remapped to slide space)."""
+    parent_fill = ctx.group_fills[-1] if ctx.group_fills else None
+    group_properties = node.xml.find("p:grpSpPr", NS)
+    try:
+        resolved_fill = resolve_fill(
+            group_properties,
+            ctx.palette,
+            id_prefix="g",
+            id_seq=ctx.grad_seq,
+            group_fill=parent_fill,
+        )
+    except ValueError as exc:
+        if ctx.strict:
+            raise
+        ctx.diagnose(
+            "group-fill-omitted",
+            str(exc),
+            "inherit the nearest resolved ancestor group fill when available",
+        )
+        group_fill = parent_fill
+    else:
+        ctx.defs.extend(resolved_fill.defs)
+        group_fill = (
+            FillResult(attrs=dict(resolved_fill.attrs))
+            if resolved_fill.attrs
+            else parent_fill
+        )
+
+    inner_parts: list[str] = []
+    ctx.group_fills.append(group_fill)
+    try:
+        for child in node.children:

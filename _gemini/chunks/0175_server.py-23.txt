@@ -1,0 +1,112 @@
+        if not re.fullmatch(r'[A-Za-z0-9_.-]+\.png', filename):
+            continue
+        if not (_AI_IMAGE_COMPARISON_DIR / kind / filename).exists():
+            continue
+        item_id = Path(filename).stem
+        items.append({
+            'id': item_id,
+            'label': item.get('type') or item_id,
+            'filename': filename,
+            'purpose': item.get('purpose') or '',
+            'alt_text': item.get('alt_text') or '',
+        })
+    return items
+
+
+def _ai_rendering_ids() -> set[str]:
+    """Return the rendering presets exposed by the confirmation UI."""
+    return {item['id'] for item in _ai_comparison_items('rendering')}
+
+
+def _build_ai_image_comparison() -> dict:
+    return {
+        'rendering': _ai_comparison_items('rendering'),
+    }
+
+
+# --- app --------------------------------------------------------------------
+
+def create_app(
+    project_dir: str,
+    idle_timeout: int = 900,
+    lock_file: Optional[Path] = None,
+    server_port: Optional[int] = None,
+) -> Flask:
+    """Create and configure the Flask app for a given project directory."""
+    project_path = Path(project_dir).resolve()
+    confirm_dir = project_path / CONFIRM_DIR_NAME
+
+    app = Flask(__name__, static_folder='static', static_url_path='/static')
+    app.config['PROJECT_PATH'] = project_path
+    app.config['CONFIRM_DIR'] = confirm_dir
+    app.config['LOCK_FILE'] = lock_file
+    app.config['SERVER_PORT'] = server_port
+    app.config['LAST_REQUEST_TIME'] = time.time()
+
+    @app.before_request
+    def _update_activity():
+        allowed_hosts = {PUBLIC_HOST, 'localhost', '::1', '[::1]'}
+        host = request.headers.get('Host', '').lower()
+        if host.startswith('[') or host.count(':') == 1:
+            host = re.sub(r':\d+$', '', host)
+        if host not in allowed_hosts:
+            return jsonify({'error': 'Forbidden Host header'}), 403
+        origin = request.headers.get('Origin')
+        if origin is not None:
+            try:
+                origin_host = urllib.parse.urlsplit(origin).hostname
+            except ValueError:
+                origin_host = None
+            if origin_host not in allowed_hosts:
+                return jsonify({'error': 'Forbidden Origin header'}), 403
+        app.config['LAST_REQUEST_TIME'] = time.time()
+
+    def _exit_with_lock_release(code: int = 0) -> None:
+        lf = app.config.get('LOCK_FILE')
+        if lf is not None:
+            _release_lock(lf)
+        os._exit(code)
+
+    def _idle_watchdog():
+        if idle_timeout <= 0:
+            return
+        while True:
+            time.sleep(10)
+            elapsed = time.time() - app.config['LAST_REQUEST_TIME']
+            if elapsed > idle_timeout:
+                logger.info('idle for %ds, shutting down', idle_timeout)
+                _exit_with_lock_release(0)
+
+    watchdog = threading.Thread(target=_idle_watchdog, daemon=True)
+    watchdog.start()
+
+    @app.route('/api/shutdown', methods=['POST'])
+    def shutdown():
+        data = request.get_json(silent=True) or {}
+        reason = data.get('reason') or 'shutdown'
+
+        def _stop():
+            time.sleep(0.5)  # let HTTP response flush before killing the process
+            logger.info('shutting down (%s)', reason)
+            _exit_with_lock_release(0)
+        threading.Thread(target=_stop, daemon=True).start()
+        return jsonify({'status': 'ok'})
+
+    @app.route('/')
+    def index():
+        return send_from_directory(app.static_folder, 'index.html')
+
+    @app.route('/api/health')
+    def health():
+        """Expose a cheap readiness probe for the daemon launcher."""
+        rec_file = _active_recommendations_path(confirm_dir)
+        rec_ok = False
+        stage = None
+        if rec_file.exists():
+            try:
+                rec_file, rec_data = _read_active_recommendations(
+                    confirm_dir,
+                    retries=0,
+                )
+                rec_ok = True
+                stage = _recommendation_stage(rec_data)

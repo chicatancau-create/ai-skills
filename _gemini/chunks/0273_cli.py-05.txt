@@ -1,0 +1,110 @@
+        if move:
+            shutil.move(str(source), str(destination))
+        else:
+            shutil.copytree(source, destination)
+        return destination
+
+    def _run_tool(self, args: list[str]) -> None:
+        child_env = os.environ.copy()
+        child_env["PYTHONUTF8"] = "1"
+        child_env["PYTHONIOENCODING"] = "utf-8:replace"
+        try:
+            result = subprocess.run(
+                args,
+                cwd=REPO_ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=child_env,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(f"Missing executable: {args[0]}") from exc
+        except subprocess.CalledProcessError as exc:
+            details = (exc.stderr or exc.stdout or "").strip()
+            raise RuntimeError(details or "tool execution failed") from exc
+
+        if result.stdout.strip():
+            print(result.stdout.strip())
+
+    def _import_pdf(self, pdf_path: Path, markdown_path: Path) -> None:
+        route = build_conversion_command(
+            str(pdf_path),
+            markdown_path,
+            forced_type="pdf",
+        )
+        self._run_tool(route.command)
+
+    def _import_doc(self, doc_path: Path, markdown_path: Path) -> None:
+        route = build_conversion_command(
+            str(doc_path),
+            markdown_path,
+            forced_type="doc",
+        )
+        self._run_tool(route.command)
+
+    def _import_presentation(self, presentation_path: Path, markdown_path: Path) -> None:
+        route = build_conversion_command(
+            str(presentation_path),
+            markdown_path,
+            forced_type="pptx",
+        )
+        self._run_tool(route.command)
+
+    def _import_pptx_intake(self, presentation_path: Path, project_dir: Path) -> Path:
+        # Multi-deck intake: each PPTX writes its own `<stem>.identity.json` /
+        # `<stem>.slide_library.json` and is merged into the single multi-deck
+        # index `analysis/source_profile.json` (one entry per source deck).
+        analysis_dir = self._analysis_dir(project_dir)
+        self._run_tool(
+            [
+                sys.executable,
+                str(TOOLS_DIR / "pptx_intake.py"),
+                str(presentation_path),
+                "-o",
+                str(analysis_dir),
+            ]
+        )
+        return analysis_dir
+
+    def _import_excel(self, excel_path: Path, markdown_path: Path) -> None:
+        route = build_conversion_command(
+            str(excel_path),
+            markdown_path,
+            forced_type="excel",
+        )
+        self._run_tool(route.command)
+
+    def _import_url(
+        self,
+        url: str,
+        markdown_path: Path,
+    ) -> None:
+        route = build_conversion_command(
+            url,
+            markdown_path,
+            forced_type="web",
+        )
+        self._run_tool(route.command)
+
+    def _is_valid_imported_url_markdown(self, markdown_path: Path) -> bool:
+        """Return whether web_to_md produced a usable Markdown source."""
+        if not markdown_path.is_file():
+            return False
+        content = markdown_path.read_text(encoding="utf-8", errors="replace")
+        if "[Failed URLs]:" in content:
+            return False
+        return bool(content.strip())
+
+    def _archive_url_record(self, sources_dir: Path, url: str) -> Path:
+        file_path = self._ensure_unique_path(sources_dir / f"{derive_url_basename(url)}.url.txt")
+        file_path.write_text(
+            f"URL: {url}\nImported: {datetime.now().isoformat(timespec='seconds')}\n",
+            encoding="utf-8",
+        )
+        return file_path
+
+    def _normalize_text_source(self, source_path: Path, sources_dir: Path) -> Path:
+        target = self._ensure_unique_path(sources_dir / f"{source_path.stem}.md")
+        content = source_path.read_text(encoding="utf-8", errors="replace")

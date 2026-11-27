@@ -1,0 +1,107 @@
+            ext = _normalize_ext(mimetypes.guess_extension(image.content_type))
+
+        original_filename = f"image_{index:03d}{ext}"
+        original_path = media_dir / original_filename
+        original_path.write_bytes(image_bytes)
+
+        filename = original_filename
+        output_path = original_path
+        asset_kind = "office_vector" if _is_office_vector(ext) else "bitmap"
+        svg_renderable = asset_kind != "office_vector"
+        pptx_native_supported = True
+
+        manifest.append(_manifest_entry(
+            index,
+            filename,
+            meta,
+            output_path,
+            original_filename=original_filename,
+            asset_kind=asset_kind,
+            svg_renderable=svg_renderable,
+            pptx_native_supported=pptx_native_supported,
+        ))
+        return {"src": f"{rel_media_dir}/{filename}"}
+
+    # Rewrite OMML equations to LaTeX placeholders before mammoth (which would
+    # otherwise drop them); the placeholders are swapped back below.
+    math_injection = _docx_inject_math_latex(input_file)
+    if math_injection is not None:
+        math_file, math_replacements = math_injection
+    else:
+        math_file, math_replacements = None, {}
+    table_file = None
+    table_replacements: dict[str, str] = {}
+    mammoth_source = math_file or input_file
+    table_injection = _docx_inject_tables_markdown(mammoth_source)
+    if table_injection is not None:
+        table_file, table_replacements = table_injection
+        mammoth_source = table_file
+    chart_file = None
+    chart_replacements: dict[str, str] = {}
+    chart_injection = _docx_inject_charts_markdown(mammoth_source)
+    if chart_injection is not None:
+        chart_file, chart_replacements, chart_warnings = chart_injection
+        mammoth_source = chart_file
+        if warnings is not None:
+            warnings.extend(chart_warnings)
+    try:
+        with mammoth_source.open("rb") as f:
+            result = mammoth.convert_to_markdown(
+                f,
+                convert_image=mammoth.images.img_element(_save_image),
+                style_map=DOCX_STYLE_MAP,
+            )
+    finally:
+        if chart_file is not None:
+            try:
+                chart_file.unlink()
+            except OSError:
+                pass
+        if table_file is not None:
+            try:
+                table_file.unlink()
+            except OSError:
+                pass
+        if math_file is not None:
+            try:
+                math_file.unlink()
+            except OSError:
+                pass
+
+    markdown = result.value
+    for token, table_markdown in table_replacements.items():
+        markdown = markdown.replace(token, table_markdown)
+    for token, chart_markdown in chart_replacements.items():
+        markdown = markdown.replace(token, chart_markdown)
+    for token, latex in math_replacements.items():
+        markdown = markdown.replace(token, latex)
+    markdown = _html_img_to_md(markdown)
+    markdown = _clean_mammoth_markdown(markdown)
+    # A logo set in a heading style is an image, not a heading.
+    markdown = re.sub(r"^#{1,6} (!\[[^\]]*\]\([^)]*\))[ \t]*$", r"\1", markdown, flags=re.M)
+    out_file.write_text(markdown, encoding="utf-8")
+
+    if manifest:
+        (media_dir / "image_manifest.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    if not any(media_dir.iterdir()):
+        media_dir.rmdir()
+        media_dir = None  # type: ignore[assignment]
+
+    if chart_replacements:
+        print(f"   Charts: {len(chart_replacements)} rendered from their cached data")
+    for msg in result.messages:
+        if msg.type == "warning":
+            print(f"   [warn] {msg.message}")
+            if warnings is not None:
+                warnings.append(msg.message)
+
+    _report_result(out_file, media_dir)
+    return markdown
+
+
+# ─────────────────────────────────────────────────────────────
+# HTML → Markdown (markdownify + BeautifulSoup)

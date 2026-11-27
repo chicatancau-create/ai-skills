@@ -1,0 +1,68 @@
+    ("dsh",           os.path.join(H, ".dsh", "skills"),                    "inject"),
+    ("codex",         os.path.join(H, ".codex", "skills"),                  "inject"),
+    ("cc-switch",     os.path.join(H, ".cc-switch", "skills"),              "inject"),
+]
+
+say("\n=== C2. rewire agent skill roots ===")
+for label, root, mode in ROOTS:
+    say(f"\n-- {label} [{mode}] {root}")
+    if not os.path.exists(root):
+        say("   (absent) -> create junction")
+        parent = os.path.dirname(root)
+        if APPLY: os.makedirs(parent, exist_ok=True)
+        mkjunction(root, ACTIVE)
+        continue
+
+    if is_link(root):
+        say(f"   whole-dir junction -> {target(root)}")
+        if mode == "replace":
+            rmjunction(root)
+            mkjunction(root, ACTIVE)
+        else:
+            say("   !! inject mode but root is a junction; skipping (needs manual look)")
+        continue
+
+    # real directory
+    kids = sorted(os.listdir(root))
+    say(f"   real dir, {len(kids)} entries: {kids[:40]}")
+    # drop per-skill junctions that point into the library / old toolkit
+    stale = []
+    for n in kids:
+        p = os.path.join(root, n)
+        if is_link(p):
+            t = target(p)
+            if t and (LIB.lower() in t.lower() or "qodertoolkit" in t.lower()
+                      or "\\Skills\\" in t or t.rstrip("\\").endswith("\\Skills")):
+                stale.append(p)
+    if stale:
+        say(f"   {len(stale)} stale per-skill junction(s) to remove")
+        for p in stale: rmjunction(p)
+
+    if mode == "replace":
+        # Only whole-dir junctions use "replace". A real dir here means the
+        # layout changed under us -- do not guess, fall back to inject.
+        say("   !! replace requested but root is a real dir -> falling back to inject")
+        for n in ALWAYS:
+            p = os.path.join(root, n)
+            if os.path.exists(p):
+                say(f"   exists {n}"); continue
+            mkjunction(p, os.path.join(LIB, n))
+    else:
+        for n in ALWAYS:
+            p = os.path.join(root, n)
+            if os.path.exists(p):
+                say(f"   exists {n}"); continue
+            mkjunction(p, os.path.join(LIB, n))
+
+# ------------------------------------------------------------------ C3 verify
+say("\n=== C3. verify: what each agent will actually load ===")
+for label, root, mode in ROOTS:
+    if not os.path.isdir(root):
+        say(f"  {label:14s} MISSING {root}"); continue
+    kids = [n for n in sorted(os.listdir(root)) if os.path.isdir(os.path.join(root, n))]
+    ok = [n for n in kids if os.path.isfile(os.path.join(root, n, "SKILL.md"))]
+    say(f"  {label:14s} {len(ok):3d} readable / {len(kids):3d} dirs   {ok if len(ok)<=6 else str(ok[:6])+' ...'}")
+
+with open(r"G:\AIrenwu\05_取证扫描\_scan\phaseC_plan.txt", "w", encoding="utf-8") as f:
+    f.write("\n".join(log))
+say(f"\n=== {'APPLIED' if APPLY else 'DRY RUN'} === -> G:\\AIrenwu\\_scan\\phaseC_plan.txt")

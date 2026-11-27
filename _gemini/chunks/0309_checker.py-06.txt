@@ -1,0 +1,113 @@
+    """Return the explicitly locked SVG structure mode without a fallback."""
+    lock_path = project_path / 'spec_lock.md'
+    try:
+        content = lock_path.read_text(encoding='utf-8')
+    except OSError:
+        return None
+    section_match = _PPTX_STRUCTURE_SECTION_RE.search(content)
+    if section_match is None:
+        return None
+    mode_match = _PPTX_STRUCTURE_MODE_RE.search(section_match.group(1))
+    return mode_match.group(1).strip().lower() if mode_match else None
+
+
+def _generated_theme_contract_errors(project_path: Path) -> List[str]:
+    """Validate the current-project theme contract required by release export."""
+    if (
+        _ThemeColorError is None
+        or _ThemeFontError is None
+        or _load_theme_color_spec is None
+        or _load_master_text_style_spec is None
+        or _load_theme_font_spec is None
+    ):
+        return [
+            "PowerPoint theme contract validation is unavailable because the "
+            "theme loader modules could not be imported."
+        ]
+    try:
+        theme_font_spec = _load_theme_font_spec(project_path)
+        _load_master_text_style_spec(project_path)
+        theme_color_spec = _load_theme_color_spec(project_path)
+    except (_ThemeFontError, _ThemeColorError) as exc:
+        return [str(exc)]
+
+    missing: List[str] = []
+    if theme_font_spec is None:
+        missing.append("typography font_family/title_family/body_family")
+    if theme_color_spec is None:
+        missing.append("colors")
+    if not missing:
+        return []
+    return [
+        "spec_lock.md generated PowerPoint theme contract is missing: "
+        + ", ".join(missing)
+    ]
+
+
+def _parse_positive_bounds(
+    value: str,
+) -> Tuple[float, float, float, float]:
+    """Parse one positive x/y/width/height boundary."""
+    raw_values = [item for item in re.split(r"[\s,]+", value.strip()) if item]
+    if len(raw_values) != 4:
+        raise ValueError("must contain exactly four numbers: x y width height")
+    try:
+        values = tuple(float(item) for item in raw_values)
+    except ValueError as exc:
+        raise ValueError("must contain only numeric values") from exc
+    if not all(math.isfinite(item) for item in values):
+        raise ValueError("must contain only finite values")
+    if values[2] <= 0 or values[3] <= 0:
+        raise ValueError("must use positive width and height")
+    return values
+
+
+def _placeholder_bounds_error(value: str) -> str | None:
+    """Return a concise error for invalid design-zone bounds."""
+    try:
+        _parse_positive_bounds(value)
+    except ValueError as exc:
+        return str(exc)
+    return None
+
+
+def _local_pptx_structure_errors(
+    root: ET.Element,
+    svg_path: Path,
+    *,
+    require_structure: bool,
+) -> List[str]:
+    """Validate the authoring shape of the structured SVG contract."""
+    errors: List[str] = []
+    root_values = {
+        attr: (root.get(attr) or '').strip()
+        for attr in _PPTX_ROOT_STRUCTURE_ATTRS
+    }
+    has_root_structure = any(root_values.values())
+    if require_structure or has_root_structure:
+        missing = [attr for attr, value in root_values.items() if not value]
+        if missing:
+            errors.append(
+                f"{svg_path.name}: structured SVG root is missing "
+                + ', '.join(missing)
+            )
+    for attr in _PPTX_ROOT_VISIBILITY_ATTRS:
+        raw = root.get(attr)
+        if raw is not None and raw not in {'true', 'false'}:
+            errors.append(
+                f"{svg_path.name}: root {attr} must be exactly 'true' or 'false'"
+            )
+
+    parent_by_id = {
+        id(child): parent
+        for parent in root.iter()
+        for child in list(parent)
+    }
+    for elem in root.iter():
+        tag = elem.tag.rsplit('}', 1)[-1]
+        element_id = elem.get('id') or f"<{tag}>"
+        parent = parent_by_id.get(id(elem))
+
+        if elem is not root:
+            nested_root_attrs = [
+                attr for attr in (

@@ -1,0 +1,100 @@
+            "Layout or Deck owner: "
+            + ", ".join(f"{page}.svg" for page in pages)
+        )
+
+    # The one-file packaging rule describes a workspace whose templates/ Style
+    # owns alone. A project root shares that directory with other kinds, so the
+    # rule there is only that Style itself contributes nothing but its spec.
+    if (template_dir / "design_spec.md").is_file():
+        unexpected_source_entries = sorted(
+            path.relative_to(template_dir).as_posix()
+            + ("/" if path.is_dir() else "")
+            for path in template_dir.rglob("*")
+            if path.relative_to(template_dir).as_posix() != "design_spec.md"
+        )
+        if unexpected_source_entries:
+            errors.append(
+                "style workspaces must contain only templates/design_spec.md; "
+                "unexpected template entry(s): "
+                + ", ".join(unexpected_source_entries)
+            )
+
+    if expected_template_id is not None:
+        unexpected_workspace_entries = sorted(
+            path.relative_to(template_root).as_posix()
+            + ("/" if path.is_dir() else "")
+            for path in template_root.rglob("*")
+            if path.relative_to(template_root).as_posix()
+            not in {"templates", "templates/design_spec.md"}
+        )
+        if unexpected_workspace_entries:
+            errors.append(
+                "library Style workspaces must contain only "
+                "templates/design_spec.md; unexpected workspace entry(s): "
+                + ", ".join(unexpected_workspace_entries)
+            )
+
+    h1_headings = re.findall(r"^#\s+(.+?)\s*$", body, re.MULTILINE)
+    if len(h1_headings) != 1:
+        errors.append(
+            "style body must contain exactly one document-title H1; got "
+            f"{len(h1_headings)}"
+        )
+
+    expected_headings = [
+        f"{numeral}. {title}" for numeral, title in _STYLE_REQUIRED_SECTIONS
+    ]
+    actual_headings = re.findall(r"^##\s+(.+?)\s*$", body, re.MULTILINE)
+    if actual_headings != expected_headings:
+        errors.append(
+            "style body must contain exactly the required I-VII sections in "
+            "order; got: " + (", ".join(actual_headings) or "none")
+        )
+
+    nested_headings = re.findall(
+        r"^(#{3,6})\s+(.+?)\s*$",
+        body,
+        re.MULTILINE,
+    )
+    unexpected_nested_headings = [
+        f"{marks} {title}"
+        for marks, title in nested_headings
+        if len(marks) != 3
+        or title not in {"Fallback Color Scheme", "Fallback Typography"}
+    ]
+    if unexpected_nested_headings:
+        errors.append(
+            "style body contains unsupported nested heading(s): "
+            + ", ".join(unexpected_nested_headings)
+        )
+    allowed_h3 = [title for marks, title in nested_headings if len(marks) == 3]
+    if len(allowed_h3) != len(set(allowed_h3)):
+        errors.append("style fallback subsections must not be repeated")
+
+    for title in _STYLE_FORBIDDEN_SECTIONS:
+        if re.search(
+            rf"^#{{1,6}}\s+(?:[IVX]+\.\s+)?{re.escape(title)}\s*$",
+            body,
+            re.MULTILINE,
+        ):
+            errors.append(f"style scope must not declare section: {title}")
+
+    for section_title, labels in _STYLE_REQUIRED_FIELDS.items():
+        section_name = section_title.split(". ", 1)[1]
+        if _numbered_section(body, section_name) is None:
+            continue
+        for label in labels:
+            value = _extract_section_field(body, section_title, [label])
+            if not _style_value_is_substantive(value):
+                errors.append(
+                    f"{section_title} must declare a non-empty {label} field"
+                )
+
+    role_section = _numbered_section(body, "Page Role Vocabulary") or ""
+    role_rows = [
+        row
+        for row in _markdown_table_rows(role_section)
+        if row and row[0].casefold() != "role"
+    ]
+    if not any(
+        len(row) >= 4

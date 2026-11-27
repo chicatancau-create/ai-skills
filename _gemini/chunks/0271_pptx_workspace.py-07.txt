@@ -1,0 +1,103 @@
+                            "Round-trip source package part is missing: "
+                            f"{spec.package_part}"
+                        )
+                    suffix = (
+                        PurePosixPath(spec.package_part).suffix.lstrip(".").lower()
+                    )
+                    content_type = overrides.get(spec.package_part) or defaults.get(
+                        suffix,
+                    )
+                    if not content_type:
+                        raise RuntimeError(
+                            "Round-trip source package part has no Content-Type: "
+                            f"{spec.package_part}"
+                        )
+                    _validate_changed_resource_format(
+                        spec=spec,
+                        payload=payload,
+                        source_payload=package.read(spec.package_part),
+                        content_type=content_type,
+                    )
+        except zipfile.BadZipFile as exc:
+            raise RuntimeError(
+                f"Round-trip source PPTX is not a valid ZIP package: {source_path}"
+            ) from exc
+    return tuple(specs)
+
+
+def _is_semantic_owner_part(package_part: str) -> bool:
+    return any(
+        package_part.startswith(prefix)
+        for prefix in (
+            "ppt/slides/slide",
+            "ppt/slideLayouts/slideLayout",
+            "ppt/slideMasters/slideMaster",
+            "ppt/notesSlides/notesSlide",
+        )
+    ) and package_part.endswith(".xml")
+
+
+def _resource_owner_parts(
+    package_part: str,
+    parents_by_target: dict[str, set[str]],
+) -> tuple[str, ...]:
+    """Resolve Slide/Layout/Master/Notes owners through relationship chains."""
+    owners: set[str] = set()
+    visited = {package_part}
+    pending = [package_part]
+    while pending:
+        current = pending.pop()
+        for parent in parents_by_target.get(current, set()):
+            if parent in visited:
+                continue
+            visited.add(parent)
+            if _is_semantic_owner_part(parent):
+                owners.add(parent)
+            else:
+                pending.append(parent)
+    return tuple(sorted(owners))
+
+
+def _classify_resource(
+    package_part: str,
+    relationship_types: set[str],
+    *,
+    transition_only: bool,
+) -> tuple[str, Path]:
+    suffix = PurePosixPath(package_part).suffix.lower()
+    if suffix in IMAGE_EXTENSIONS:
+        return "image", Path("images")
+    if (
+        suffix in VIDEO_EXTENSIONS
+        or any(rel_type.endswith("/video") for rel_type in relationship_types)
+    ):
+        return "video", Path("video")
+    if suffix in AUDIO_EXTENSIONS:
+        if transition_only:
+            return "sound", Path("sounds")
+        return "audio", Path("audio")
+    if package_part.startswith("ppt/embeddings/"):
+        return "native-payload", Path("native-payloads/embeddings")
+    if package_part.startswith("ppt/model3d/"):
+        return "native-payload", Path("native-payloads/model3d")
+    return "native-payload", Path("native-payloads/media")
+
+
+def inventory_package_resources(
+    package: zipfile.ZipFile,
+) -> PackageResourceInventory:
+    """Classify reusable and opaque PPTX payloads into semantic directories."""
+    references: dict[str, list[dict[str, object]]] = defaultdict(list)
+    parents_by_target: dict[str, set[str]] = defaultdict(set)
+    names = set(package.namelist())
+    for rels_path in sorted(name for name in names if name.endswith(".rels")):
+        source_part = _source_part_for_relationships(rels_path)
+        transition_ids = _transition_relationship_ids(package, source_part)
+        try:
+            root = ET.fromstring(package.read(rels_path))
+        except (KeyError, ET.ParseError):
+            continue
+        for relationship in root.findall(f"{{{_REL_NS}}}Relationship"):
+            if relationship.attrib.get("TargetMode") == "External":
+                continue
+            rel_id = relationship.attrib.get("Id", "")

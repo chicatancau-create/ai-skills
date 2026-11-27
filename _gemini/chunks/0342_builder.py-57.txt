@@ -1,0 +1,115 @@
+        rel_entries,
+        audio_exts_used,
+        packaged_by_source,
+        label='transition',
+        media_prefix='transition_sound',
+        require_project_relative_wav=True,
+    )
+
+
+def _materialize_animation_sounds(
+    project_path: Path,
+    targets: list[dict[str, Any]],
+    media_files: dict[str, bytes],
+    rel_entries: list[dict[str, str]],
+    audio_exts_used: set[str],
+    packaged_by_source: dict[Path, tuple[str, str]] | None = None,
+) -> list[dict[str, Any]]:
+    """Package sidecar sound files and replace paths with OOXML relationships."""
+    materialized: list[dict[str, Any]] = []
+    packaged_by_source = packaged_by_source if packaged_by_source is not None else {}
+    for index, raw_target in enumerate(targets, 1):
+        target = dict(raw_target)
+        raw_sound = target.pop('_sound_path', None)
+        if raw_sound is None:
+            materialized.append(target)
+            continue
+        target['sound'] = _materialize_slide_sound(
+            project_path,
+            raw_sound,
+            media_files,
+            rel_entries,
+            audio_exts_used,
+            packaged_by_source,
+            label=f'animation target {index}',
+            media_prefix='animation_sound',
+            require_project_relative_wav=False,
+        )
+        materialized.append(target)
+    return materialized
+
+
+def _prerender_legacy_pngs(
+    svg_files: list[Path],
+    media_dir: Path,
+    pixel_width: int,
+    pixel_height: int,
+    cache_dir: Path | None,
+    workers: int,
+    verbose: bool,
+) -> dict[int, bool]:
+    """Render every SVG→PNG into media_dir in parallel.
+
+    Returns {1-based slide index: success}. Falls back to sequential when
+    workers<=1 or len(svg_files)<=2.
+    """
+    results: dict[int, bool] = {}
+    targets: list[tuple[int, Path, Path]] = [
+        (i, svg, media_dir / f'image{i}.png')
+        for i, svg in enumerate(svg_files, 1)
+    ]
+
+    if workers <= 1 or len(targets) <= 2:
+        for i, svg, png in targets:
+            ok = convert_svg_to_png_cached(svg, png, pixel_width, pixel_height, cache_dir)
+            results[i] = ok
+            if verbose:
+                tag = 'cached/ok' if ok else 'failed'
+                print(f"  [PNG {i}/{len(targets)}] {svg.name} - {tag}")
+        return results
+
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        future_map = {
+            pool.submit(
+                convert_svg_to_png_cached,
+                svg, png, pixel_width, pixel_height, cache_dir,
+            ): (i, svg)
+            for i, svg, png in targets
+        }
+        done = 0
+        for future in as_completed(future_map):
+            i, svg = future_map[future]
+            try:
+                ok = future.result()
+            except Exception as exc:
+                ok = False
+                if verbose:
+                    print(f"  [PNG] {svg.name} - worker error: {exc}")
+            results[i] = ok
+            done += 1
+            if verbose:
+                tag = 'cached/ok' if ok else 'failed'
+                print(f"  [PNG {done}/{len(targets)}] {svg.name} - {tag}")
+
+    return results
+
+
+def _rtl_text_levels(xml: str) -> str:
+    """Flip template text-level defaults (``rtl="0"``) to right-to-left."""
+    def flip(match: re.Match[str]) -> str:
+        tag = match.group(0).replace('rtl="0"', 'rtl="1"')
+        return tag.replace('algn="l"', 'algn="r"')
+
+    return re.sub(r'<a:(?:lvl\dpPr|pPr)\b[^>]*\brtl="0"[^>]*>', flip, xml)
+
+
+def _apply_template_text_language(extract_dir: Path, language: str) -> None:
+    """Tag template defaults with the deck language and authored runs by script.
+
+    Covers the presentation default text style (new text boxes) and master and
+    layout placeholders, so proofing follows the deck rather than en-US; a
+    right-to-left deck also gets right-to-left, right-aligned default levels.
+    """
+    rtl = language_uses_rtl(language)
+    ppt_dir = extract_dir / "ppt"
+    parts = [ppt_dir / "presentation.xml"]

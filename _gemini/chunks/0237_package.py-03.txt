@@ -1,0 +1,30 @@
+        path.relative_to(package_root).as_posix(): path.read_bytes()
+        for path in package_root.rglob("*")
+        if path.is_file()
+    }
+    content_types = entries.get("[Content_Types].xml")
+    if content_types is None:
+        raise RuntimeError("Extracted PPTX package has no [Content_Types].xml")
+    content_root = _content_type_root(ET.fromstring(content_types))
+    for part in sorted(edited_slide_parts):
+        rels_name = _rels_name_for_part(part)
+        if part not in entries or rels_name not in entries:
+            continue
+        relationships = ET.fromstring(entries[rels_name])
+        unused = unreferenced_slide_relationships(
+            ET.fromstring(entries[part]), relationships, owner_part=part, read_part=entries.__getitem__,
+        )
+        if unused:
+            for rel in unused:
+                relationships.remove(rel)
+            entries[rels_name] = _xml_bytes(relationships)
+            (package_root / rels_name).write_bytes(entries[rels_name])
+    before = set(entries)
+    _prune_unreferenced_parts(entries, content_root)
+    removed = before - set(entries)
+    for part_name in sorted(removed):
+        target = package_root.joinpath(*part_name.split("/"))
+        if target.is_file():
+            target.unlink()
+    (package_root / "[Content_Types].xml").write_bytes(_xml_bytes(content_root))
+    return len(removed)

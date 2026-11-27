@@ -1,0 +1,99 @@
+                    _suggest_icon_name(icon_name, icons_dir)
+                    if _suggest_icon_name is not None else None
+                )
+                hint = (
+                    f"; identifiers are case-sensitive; use '{suggestion}'"
+                    if suggestion else ""
+                )
+                result['errors'].append(
+                    f"Project-local icon not found: {icon_name} "
+                    f"(expected under {icons_dir}){hint}"
+                )
+                continue
+            try:
+                icon_root = ET.parse(icon_path).getroot()
+                hydrated = hydrate_native_payload_refs(icon_root, icon_path)
+            except (OSError, ET.ParseError, NativePayloadError) as exc:
+                result['errors'].append(
+                    f"Icon {icon_name} has invalid native payload metadata: {exc}"
+                )
+                continue
+            if _project_mask_errors is not None:
+                result['errors'].extend(
+                    f'Icon {icon_name}: {error}'
+                    for error in _project_mask_errors(icon_root)
+                )
+            if hydrated:
+                result['info']['native_icon_payload_refs'] = (
+                    result['info'].get('native_icon_payload_refs', 0) + hydrated
+                )
+
+    def _check_unsupported_visual_elements(
+        self,
+        root: ET.Element,
+        result: Dict,
+    ) -> None:
+        """Reject authored visual elements with no native converter dispatch."""
+        if _collect_unsupported_visuals is None:
+            result['errors'].append(
+                "Unable to import native visual-element preflight; "
+                "cannot verify SVG element support"
+            )
+            return
+        if _expand_local_use_references is None or _UseExpansionError is None:
+            result['errors'].append(
+                "Unable to import local <use> expansion; "
+                "cannot verify SVG element support"
+            )
+            return
+
+        expanded_root = copy.deepcopy(root)
+        try:
+            _expand_local_use_references(expanded_root)
+        except _UseExpansionError:
+            # _check_forbidden_elements already reports the actionable
+            # local-reference validation error.
+            return
+
+        unsupported = _collect_unsupported_visuals(
+            expanded_root,
+            allow_data_icon_use=True,
+        )
+        if not unsupported:
+            return
+
+        preview = '; '.join(unsupported[:8])
+        suffix = '' if len(unsupported) <= 8 else f'; +{len(unsupported) - 8} more'
+        result['errors'].append(
+            f"Unsupported visual SVG element(s) for native PPTX export: "
+            f"{preview}{suffix}"
+        )
+
+    def _check_preset_geometry_metadata(
+        self,
+        root: ET.Element,
+        result: Dict,
+    ) -> None:
+        """Validate round-trip preset metadata with the exporter's parser."""
+        marked = [
+            elem
+            for elem in root.iter()
+            if (
+                elem.get('data-pptx-prst') is not None
+                or elem.get('data-pptx-frame') is not None
+                or elem.get('data-pptx-geometry-status') is not None
+                or elem.get('data-pptx-geometry-reason') is not None
+                or elem.get('data-pptx-geometry-kind') is not None
+                or elem.get('data-pptx-custgeom') is not None
+                or elem.get('data-pptx-preview-sha256') is not None
+                or elem.get('data-pptx-shape-id') is not None
+                or elem.get('data-pptx-shape-scope') is not None
+                or elem.get('data-pptx-shape-style') is not None
+                or elem.get(_AUTHORING_ATTR) is not None
+                or any(attr.startswith('data-pptx-av-') for attr in elem.attrib)
+            )
+        ]
+        if not marked:
+            return
+        if _validate_preset_geometry_metadata is None:
+            result['errors'].append(

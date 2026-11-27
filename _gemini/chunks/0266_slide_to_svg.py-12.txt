@@ -1,0 +1,109 @@
+            raise
+        ctx.diagnose(
+            "effect-omitted",
+            str(exc),
+            "omit only the unsupported visual effect",
+        )
+        effect = EffectResult()
+
+    ctx.defs.extend(fill.defs)
+    ctx.defs.extend(stroke.defs)
+    ctx.defs.extend(effect.defs)
+    effect_attrs = dict(effect.metadata)
+    effect_reason = effect_attrs.get(EFFECT_REASON_ATTR)
+    existing_reason = geom.attrs.get(EFFECT_REASON_ATTR)
+    if effect_reason is not None and existing_reason is not None:
+        effect_attrs.update(unsupported_effect_metadata(
+            existing_reason,
+            effect_reason,
+        ))
+    geom.attrs.update(effect_attrs)
+    _diagnose_unsupported_effect(ctx, geom.attrs)
+
+    attrs = {**fill.attrs, **stroke.attrs}
+    for key, value in style_defaults.items():
+        attrs.setdefault(key, value)
+    if effect.filter_id is not None:
+        attrs["filter"] = f"url(#{effect.filter_id})"
+
+    # Default fill / stroke when not specified by spPr (matches PowerPoint
+    # behavior: a:noFill on shape-level fill if there's a txBody, else any
+    # explicit fill present in spPr should already have been captured).
+    if "fill" not in attrs:
+        attrs["fill"] = "none"
+    if "stroke" not in attrs:
+        # Spec default for shapes is no stroke unless ln says otherwise.
+        # Skip emitting stroke="none" to keep markup tight.
+        pass
+
+    semantic_attrs = {
+        **geom.attrs,
+        **_object_metadata(node, ctx),
+    }
+    shape_style = node.xml.find("p:style", NS)
+    if shape_style is not None:
+        semantic_attrs["data-pptx-shape-style"] = base64.b64encode(
+            ET.tostring(shape_style, encoding="utf-8")
+        ).decode("ascii")
+    if geom.layers:
+        return _preset_layers_to_svg(geom, semantic_attrs, attrs)
+    return _geom_to_svg(
+        geom,
+        _attrs_to_xml({**semantic_attrs, **attrs}),
+    )
+
+
+def _resolve_shape_style_defaults(node: ShapeNode, ctx: AssemblyContext) -> dict[str, str]:
+    """Resolve minimal p:style defaults used when spPr omits explicit style.
+
+    Full theme style matrix reproduction is intentionally out of scope here;
+    this only prevents common theme-styled placeholders/shapes from becoming
+    transparent or unstroked when their visible color lives in p:style.
+    """
+    style = node.xml.find("p:style", NS)
+    if style is None:
+        return {}
+
+    defaults: dict[str, str] = {}
+
+    fill_ref = style.find("a:fillRef", NS)
+    if fill_ref is not None and fill_ref.attrib.get("idx", "").strip() != "0":
+        fill_color = _resolve_ref_color(fill_ref, ctx)
+        if fill_color:
+            defaults["fill"] = fill_color
+
+    ln_ref = style.find("a:lnRef", NS)
+    if ln_ref is not None and ln_ref.attrib.get("idx", "").strip() != "0":
+        line_color = _resolve_ref_color(ln_ref, ctx)
+        if line_color:
+            defaults["stroke"] = line_color
+            defaults.setdefault("stroke-width", "1")
+
+    return defaults
+
+
+def _resolve_text_style_default(node: ShapeNode, ctx: AssemblyContext) -> str:
+    """Resolve p:style fontRef color used by runs without explicit fill."""
+    style = node.xml.find("p:style", NS)
+    if style is None:
+        return "#000000"
+    font_ref = style.find("a:fontRef", NS)
+    font_color = _resolve_ref_color(font_ref, ctx)
+    return font_color or "#000000"
+
+
+def _resolve_ref_color(ref_elem: ET.Element | None, ctx: AssemblyContext) -> str | None:
+    color_elem = find_color_elem(ref_elem)
+    hex_, _alpha = resolve_color(color_elem, ctx.palette)
+    return hex_
+
+
+def _geom_to_svg(geom: GeomResult, attrs_xml: str | None = None) -> str:
+    """Serialize a resolved geometry with optional SVG attributes."""
+    if attrs_xml is None:
+        attrs_xml = _attrs_to_xml(geom.attrs)
+    if geom.tag == "path":
+        return f'<path d="{geom.path_d}"{attrs_xml}/>'
+    if geom.tag in ("polygon", "polyline"):
+        return f'<{geom.tag} points="{geom.points}"{attrs_xml}/>'
+    return f"<{geom.tag}{attrs_xml}/>"

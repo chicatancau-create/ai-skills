@@ -1,0 +1,108 @@
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / args.filename
+
+    print(f"Searching providers: {', '.join(providers)}", file=sys.stderr)
+    result = search_and_download(
+        providers,
+        request,
+        output_path=output_path,
+        strict_no_attribution=args.strict_no_attribution,
+        save_candidates=args.save_candidates,
+        max_candidates=args.max_candidates,
+        candidate_page=args.candidate_page,
+        provider_is_explicit=bool(args.provider),
+    )
+
+    if result.selection_required:
+        continuation = (
+            f" Next page: --candidate-page {result.candidate_page + 1}."
+            if result.has_more_candidates
+            else " Candidate pool exhausted."
+        )
+        print(
+            f"  [REVIEW] {result.candidate_count}/{result.candidate_total} "
+            f"thumbnail candidate(s), page {result.candidate_page}: "
+            f"{result.review_sheet}.{continuation}",
+            file=sys.stderr,
+        )
+        print(
+            "  No original image or provenance record was written. "
+            "Select one with --promote, or change the query and shortlist again.",
+            file=sys.stderr,
+        )
+        return 0
+
+    if result.candidate is None:
+        print(
+            f"{result.error or 'Image search failed'}. "
+            "Try a shorter query, use default attribution mode if strict mode "
+            "is enabled, or set an API key for a keyed provider.",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(
+        f"  picked: {result.candidate.title!r} from {result.provider_name} "
+        f"({result.candidate.license_name or 'no license string'}, "
+        f"{result.candidate.license_tier})",
+        file=sys.stderr,
+    )
+
+    # The staged file has already been measured; upstream metadata can still be
+    # off (e.g. Openverse aggregates rawpixel which only exposes previews).
+    actual_dimensions = result.actual_dimensions
+    if (
+        actual_dimensions is not None
+        and result.candidate.width
+        and result.candidate.height
+        and actual_dimensions[0] * actual_dimensions[1]
+        < 0.5 * result.candidate.width * result.candidate.height
+    ):
+        print(
+            f"\n[!] Downloaded image is much smaller than upstream metadata "
+            f"({actual_dimensions[0]}x{actual_dimensions[1]} vs "
+            f"{result.candidate.width}x{result.candidate.height}). The provider "
+            f"likely only exposes a preview here. Layout based on the manifest's "
+            f"width/height will be accurate; the metadata_dimensions field "
+            f"is preserved for reference.",
+            file=sys.stderr,
+        )
+
+    if result.staged_path is None or result.output_path is None:
+        print("Error: image search returned no staged output.", file=sys.stderr)
+        if result.staged_path is not None:
+            try:
+                result.staged_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return 1
+    try:
+        item = _candidate_to_manifest_item(
+            result.candidate,
+            args,
+            provider_name=result.provider_name or "",
+            stage=result.stage or "",
+            actual_dimensions=actual_dimensions,
+        )
+        written = _commit_staged_image(
+            result.staged_path,
+            result.output_path,
+            lambda: write_sources_manifest(manifest_path, item),
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        try:
+            result.staged_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    print(f"  manifest: {written}", file=sys.stderr)
+    review = _write_review_copy(
+        result.output_path,
+        result.output_path.parent / ".review",
+        result.output_path.name,
+    )

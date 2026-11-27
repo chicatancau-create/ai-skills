@@ -1,0 +1,104 @@
+                path
+                for paths in owner_refs.values()
+                for path in paths
+            }
+            if patch.authoring_visual_changed:
+                affected_paths.update(set(dependencies) - mapped_paths)
+            if affected_paths:
+                blocked_dependencies[page.output_index] = (
+                    page.source_slide,
+                    sorted(affected_paths),
+                )
+        if blocked_dependencies:
+            print(
+                "Error: round-trip page export would drop source video, audio, "
+                "or opaque native payload relationships:",
+                file=sys.stderr,
+            )
+            for index, (source_slide, paths) in sorted(
+                blocked_dependencies.items()
+            ):
+                print(
+                    f"  output page {index} (source slide {source_slide}): "
+                    + ", ".join(paths),
+                    file=sys.stderr,
+                )
+            print(
+                "Keep each listed source slide in page_plan.json, or remove the "
+                "opaque relationship from the source deck before importing.",
+                file=sys.stderr,
+            )
+            return 1
+
+        direct_passthrough_count = (
+            0
+            if roundtrip_page_plan_present
+            else len(roundtrip_passthrough_slides)
+        )
+        cloned_passthrough_count = (
+            len(roundtrip_passthrough_slides)
+            if roundtrip_page_plan_present
+            else 0
+        )
+        patched_count = sum(
+            not patch.visual_changed
+            for patch in roundtrip_slide_patches.values()
+        )
+        rebuilt_count = sum(
+            patch.visual_changed
+            for patch in roundtrip_slide_patches.values()
+        )
+        classified_pages = (
+            direct_passthrough_count
+            + cloned_passthrough_count
+            + patched_count
+            + rebuilt_count
+        )
+        if classified_pages != len(roundtrip_pages):
+            print(
+                "Error: round-trip export summary could not classify every "
+                "output page",
+                file=sys.stderr,
+            )
+            return 1
+        # Printed only after the package is written: a failed export must not
+        # leave a receipt that reads like a delivery.
+        roundtrip_summary_line = (
+            "  Round-trip export summary: "
+            f"output_pages={len(roundtrip_pages)} "
+            f"passthrough={direct_passthrough_count} "
+            f"cloned_passthrough={cloned_passthrough_count} "
+            f"patched={patched_count} "
+            f"rebuilt={rebuilt_count}"
+        )
+        if authoring_roundtrip_report is not None:
+            authoring_roundtrip_report["export_summary"] = {
+                "output_pages": len(roundtrip_pages),
+                "passthrough": direct_passthrough_count,
+                "cloned_passthrough": cloned_passthrough_count,
+                "patched": patched_count,
+                "rebuilt": rebuilt_count,
+            }
+
+    release_quality_gate = (
+        args.quick_generate
+        or args.source in {None, 'output'}
+    ) and not compatibility_export
+    if release_quality_gate:
+        source_fingerprint = _svg_source_fingerprint(native_files)
+        quality = _quality_report_context(project_path, source_fingerprint)
+        quality_gate, _ = _quality_gate_status(quality)
+        if quality_gate != 'passed':
+            export_mode = (
+                '--quick-generate'
+                if args.quick_generate
+                else 'default release export'
+            )
+            print(
+                f"Error: {export_mode} requires a passing final SVG quality "
+                f"report for the current {native_source_dir}/; found "
+                f"{quality_gate}.",
+                file=sys.stderr,
+            )
+            quick_flag = ' --quick-generate' if args.quick_generate else ''
+            print(

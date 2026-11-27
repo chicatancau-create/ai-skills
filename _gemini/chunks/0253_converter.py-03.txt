@@ -1,0 +1,115 @@
+    sound_subdir: str = "sounds"
+    embed_images: bool = False
+    keep_hidden: bool = False
+    inheritance_mode: str = "both"
+    asset_name_map: dict[str, str] = field(default_factory=dict)
+    strict: bool = False
+    roundtrip: bool = False
+
+
+@dataclass
+class PartArtifact:
+    """Result of converting a master or layout part to SVG (layered mode only)."""
+
+    role: str  # "master" | "layout"
+    part_path: str  # OOXML part path, e.g. "ppt/slideLayouts/slideLayout3.xml"
+    filename: str  # output svg filename, e.g. "layout_03_title.xml.svg"
+    svg: str
+    media_files: dict[str, bytes] = field(default_factory=dict)
+    parent_master_part_path: str | None = None
+    theme_part_path: str | None = None
+    show_master_shapes: bool = True
+
+
+@dataclass
+class SlideArtifact:
+    """Result of converting a single slide."""
+
+    index: int  # 1-based
+    svg: str
+    media_files: dict[str, bytes] = field(default_factory=dict)
+    layout_part_path: str | None = None
+    master_part_path: str | None = None
+    show_inherited_shapes: bool = True
+
+
+@dataclass
+class ConvertResult:
+    """Result of converting an entire .pptx.
+
+    ``slides`` holds the layered/primary view (or, in pure flat mode, the flat
+    view). ``flat_slides`` is populated only in ``"both"`` mode and contains
+    self-contained renderings of every slide; callers that don't care about
+    the flat view can ignore it.
+    """
+
+    slides: list[SlideArtifact] = field(default_factory=list)
+    canvas_px: tuple[float, float] = (1280.0, 720.0)
+    theme_colors: dict[str, str] = field(default_factory=dict)
+    theme_fonts: dict[str, str] = field(default_factory=dict)
+    theme_xml: bytes | None = None
+    embedded_fonts: EmbeddedFontBundle | None = None
+    resource_inventory: PackageResourceInventory = field(
+        default_factory=PackageResourceInventory
+    )
+    speaker_notes: tuple[ImportedSpeakerNote, ...] = ()
+    native_structure: dict[str, object] | None = None
+    source_pptx_path: Path | None = None
+    layouts: list[PartArtifact] = field(default_factory=list)
+    masters: list[PartArtifact] = field(default_factory=list)
+    flat_slides: list[SlideArtifact] = field(default_factory=list)
+    master_themes: dict[str, dict[str, object]] = field(default_factory=dict)
+    diagnostics: list[ImportDiagnostic] = field(default_factory=list)
+    animation_config: dict[str, object] = field(
+        default_factory=lambda: {
+            "version": 1,
+            "defaults": {
+                "transition": {
+                    "effect": "none",
+                    "duration": 0.0,
+                },
+            },
+            "slides": {},
+        }
+    )
+    animation_media_files: dict[str, bytes] = field(default_factory=dict)
+    source_file: str = ""
+    strict: bool = False
+
+
+def _palette_diagnostic_sink(
+    result: ConvertResult,
+    *,
+    part_path: str,
+    slide_index: int | None = None,
+) -> Callable[[str, str, str], None]:
+    """Build a package-level diagnostic sink for palette initialization."""
+    def _record(code: str, message: str, fallback: str) -> None:
+        append_diagnostic(
+            result.diagnostics,
+            ImportDiagnostic(
+                code=code,
+                message=message,
+                fallback=fallback,
+                part_path=part_path,
+                slide_index=slide_index,
+            ),
+        )
+
+    return _record
+
+
+def _roundtrip_native_structure(
+    pkg: OoxmlPackage,
+    pptx_path: Path,
+) -> dict[str, object]:
+    """Build the existing validated source-structure contract without assets."""
+    masters = list(pkg.iter_all_masters())
+    layouts_with_parents = list(pkg.iter_all_layouts_with_parent())
+    slides = list(pkg.iter_slides())
+    used_layouts: dict[str, list[int]] = {}
+    used_masters: dict[str, list[int]] = {}
+    for slide in slides:
+        if slide.layout is not None:
+            used_layouts.setdefault(slide.layout.path, []).append(slide.index)
+        if slide.master is not None:

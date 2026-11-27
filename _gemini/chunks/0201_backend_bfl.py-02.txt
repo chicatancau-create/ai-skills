@@ -1,0 +1,76 @@
+    print(f"  Model:        {normalized_model}")
+    print(f"  Prompt:       {prompt[:120]}{'...' if len(prompt) > 120 else ''}")
+    print(f"  Aspect Ratio: {aspect_ratio}")
+    print()
+    print("  [..] Submitting request...", end="", flush=True)
+    start = time.time()
+    request_payload = _submit_request(url, headers, payload)
+    elapsed = time.time() - start
+    print(f"\n  [DONE] Request accepted ({elapsed:.1f}s)")
+
+    polling_url = request_payload.get("polling_url")
+    if not polling_url:
+        raise RuntimeError(f"BFL response missing polling_url: {request_payload}")
+
+    print("  [..] Polling result...")
+    result_payload = poll_json(
+        polling_url,
+        {"x-key": api_key, "accept": "application/json"},
+        status_label="status",
+        ready_values=["Ready"],
+        failed_values=[
+            "Error",
+            "Failed",
+            "Task not found",
+            "Request Moderated",
+            "Content Moderated",
+        ],
+    )
+
+    image_url = ((result_payload.get("result") or {}).get("sample"))
+    if not image_url:
+        raise RuntimeError(f"BFL result missing sample URL: {result_payload}")
+
+    path = resolve_output_path(prompt, output_dir, filename, ".png")
+    return download_image(image_url, path)
+
+
+def generate(prompt: str,
+             aspect_ratio: str = "1:1", image_size: str = "1K",
+             output_dir: str = None, filename: str = None,
+             model: str = None, max_retries: int = MAX_RETRIES) -> str:
+    """Generate an image with retries using the BFL backend."""
+    resolved_model = model or os.environ.get("BFL_MODEL") or DEFAULT_MODEL
+    _resolve_request_options(aspect_ratio, image_size, resolved_model)
+    api_key = require_api_key(
+        "BFL_API_KEY",
+        message="No API key found. Set BFL_API_KEY in the current environment or a .env file.",
+    )
+    base_url = os.environ.get("BFL_BASE_URL") or DEFAULT_BASE_URL
+
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            return _generate_image(
+                api_key=api_key,
+                prompt=prompt,
+                aspect_ratio=aspect_ratio,
+                image_size=image_size,
+                output_dir=output_dir,
+                filename=filename,
+                model=resolved_model,
+                base_url=base_url,
+            )
+        except Exception as exc:
+            last_error = exc
+            if is_permanent_error(exc):
+                raise
+            if attempt >= max_retries:
+                break
+            limited = is_rate_limit_error(exc)
+            delay = retry_delay(attempt, rate_limited=limited)
+            label = "Rate limit hit" if limited else f"Error: {exc}"
+            print(f"\n  [WARN] {label}. Retrying in {delay}s...")
+            time.sleep(delay)
+
+    raise RuntimeError(f"Failed after {max_retries + 1} attempts. Last error: {last_error}")

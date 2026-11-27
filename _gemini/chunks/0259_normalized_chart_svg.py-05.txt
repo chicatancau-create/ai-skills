@@ -1,0 +1,94 @@
+        positive = [sum(max(row[idx], 0.0) for row in raw) for idx in range(count)]
+        negative = [sum(abs(min(row[idx], 0.0)) for row in raw) for idx in range(count)]
+        for row in raw:
+            for idx, value in enumerate(row):
+                denominator = positive[idx] if value >= 0 else negative[idx]
+                row[idx] = value / denominator if denominator else 0.0
+    if grouping not in {"stacked", "percentStacked"}:
+        return [[(0.0, value) for value in row] for row in raw], percent
+
+    positive_base = [0.0] * count
+    negative_base = [0.0] * count
+    result: list[list[tuple[float, float]]] = []
+    for row in raw:
+        segments: list[tuple[float, float]] = []
+        for idx, value in enumerate(row):
+            if value >= 0:
+                start = positive_base[idx]
+                positive_base[idx] += value
+                end = positive_base[idx]
+            else:
+                start = negative_base[idx]
+                negative_base[idx] += value
+                end = negative_base[idx]
+            segments.append((start, end))
+        result.append(segments)
+    return result, percent
+
+
+def _render_bars(
+    payload: dict[str, Any],
+    categories: list[str],
+    series: list[dict[str, Any]],
+    styles: list[SeriesVisualStyle],
+    segments: list[list[tuple[float, float]]],
+    plot: _Rect,
+    lo: float,
+    hi: float,
+    grouping: str,
+    *,
+    horizontal: bool,
+    label_size: float,
+    percent: bool,
+) -> list[str]:
+    parts: list[str] = []
+    stacked = grouping in {"stacked", "percentStacked"}
+    category_span = (plot.h if horizontal else plot.w) / max(len(categories), 1)
+    cluster = category_span * 0.72
+    bar_span = cluster if stacked else cluster / max(len(series), 1)
+    for series_index, (item, style, row) in enumerate(zip(series, styles, segments)):
+        fill = style.fill or "none"
+        stroke = style.stroke or "none"
+        for category_index, (start, end) in enumerate(row):
+            if item["values"][category_index] is None:
+                continue
+            offset = 0.0 if stacked else series_index * bar_span
+            display_index = (
+                len(categories) - 1 - category_index
+                if horizontal else category_index
+            )
+            cluster_start = display_index * category_span + (category_span - cluster) / 2
+            if horizontal:
+                x1 = _map(end, lo, hi, plot.x, plot.x + plot.w)
+                x0 = _map(start, lo, hi, plot.x, plot.x + plot.w)
+                x = min(x0, x1)
+                y = plot.y + cluster_start + offset
+                w = max(abs(x1 - x0), 0.35)
+                h = max(bar_span * 0.9, 0.5)
+            else:
+                y1 = _map(end, lo, hi, plot.y + plot.h, plot.y)
+                y0 = _map(start, lo, hi, plot.y + plot.h, plot.y)
+                x = plot.x + cluster_start + offset
+                y = min(y0, y1)
+                w = max(bar_span * 0.9, 0.5)
+                h = max(abs(y1 - y0), 0.35)
+            parts.append(
+                f'<rect x="{_fmt(x)}" y="{_fmt(y)}" width="{_fmt(w)}" '
+                f'height="{_fmt(h)}" fill="{fill}" fill-opacity="{_fmt(style.fill_opacity)}" '
+                f'stroke="{stroke}" stroke-opacity="{_fmt(style.stroke_opacity)}" '
+                f'stroke-width="{_fmt(max(0.4, style.stroke_width))}"/>'
+            )
+            labels = _point_data_labels(payload, item, category_index)
+            if labels:
+                value = float(item["values"][category_index])
+                normalized_percent = end - start if percent else None
+                label = _data_label(
+                    labels,
+                    str(item.get("name") or ""),
+                    categories[category_index],
+                    value,
+                    percent_value=normalized_percent,
+                )
+                if label:
+                    if horizontal:
+                        tx = x1 + (4.0 if end >= start else -4.0)

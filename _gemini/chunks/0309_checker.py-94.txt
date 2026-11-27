@@ -1,0 +1,98 @@
+            self._template_issues.append((
+                'error',
+                'spec_missing',
+                "one Layout or Deck Design Spec is required for every SVG roster",
+            ))
+
+        # Per-file placeholder coverage. Variants reuse the parent type's set
+        # (e.g. 03a_content_two_col.svg ↔ 03_content rules) unless the spec
+        # frontmatter overrides that page (custom_contract takes precedence).
+        for svg_file in svg_files:
+            expected = self._lookup_template_contract(
+                svg_file.stem, overrides=custom_contract,
+            )
+            if expected is None:
+                continue  # extension pages or stems with no convention
+            try:
+                content = svg_file.read_text(encoding='utf-8')
+            except OSError:
+                continue
+            for placeholder in expected:
+                if placeholder not in content:
+                    self._template_issues.append((
+                        'warning',
+                        'placeholder_hint',
+                        f"{svg_file.name}: missing conventional placeholder {placeholder} "
+                        "(declare 'placeholders:' frontmatter in design_spec.md to silence)",
+                    ))
+
+    @staticmethod
+    def _extract_frontmatter_placeholders(spec_text: str) -> Dict[str, Tuple[str, ...]]:
+        """Read the optional ``placeholders:`` map from design_spec.md frontmatter.
+
+        Shape:
+
+        .. code-block:: yaml
+
+            placeholders:
+              01_cover: ["{{TITLE}}", "{{BRAND_LOGO}}"]
+              03_content: []        # explicitly assert "no expectation"
+              03a_content_two_col:  # variant-specific override
+                - "{{LEFT_TITLE}}"
+                - "{{RIGHT_TITLE}}"
+
+        Each key is a stem (full filename without ``.svg``) or page-type prefix
+        (``01_cover``). An empty list silences the default convention for that
+        stem; a populated list replaces the default. Stems / prefixes not
+        listed fall back to ``DEFAULT_PLACEHOLDER_CONVENTION``.
+
+        We parse with PyYAML when available; otherwise we fall back to a
+        minimal regex that handles the documented shape.
+        """
+        if not spec_text.startswith("---\n"):
+            return {}
+        end = spec_text.find("\n---\n", 4)
+        if end == -1:
+            return {}
+        block = spec_text[4:end]
+
+        try:
+            import yaml  # type: ignore
+        except ImportError:
+            return _parse_placeholders_fallback(block)
+
+        try:
+            data = yaml.safe_load(block) or {}
+        except yaml.YAMLError:
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        raw = data.get("placeholders")
+        if not isinstance(raw, dict):
+            return {}
+
+        out: Dict[str, Tuple[str, ...]] = {}
+        for stem, value in raw.items():
+            if not isinstance(stem, str):
+                continue
+            if isinstance(value, list):
+                out[stem] = tuple(str(v) for v in value)
+            elif value is None:
+                out[stem] = ()
+        return out
+
+    @staticmethod
+    def _extract_spec_roster(spec_text: str) -> List[str]:
+        """Best-effort: extract the page roster from design_spec.md.
+
+        Templates do not share a uniform section index for the roster — the
+        personality-only skeleton puts it at §V "Page Roster"; legacy specs use
+        §VI "Page Roster" or bury filenames under §VII "Page Types" as
+        ``### N. Cover Page (01_cover.svg)``. We match by title (any roman
+        index), then fall back to scanning the whole document for any
+        backtick-wrapped ``<stem>.svg`` reference.
+
+        Returns the deduplicated stem list in document order. Empty result
+        means we can't determine the roster confidently — caller should treat
+        that as "skip orphan/missing checks", not as "no pages declared".
+        """

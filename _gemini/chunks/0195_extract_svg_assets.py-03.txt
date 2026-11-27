@@ -1,0 +1,104 @@
+                mapping[elem_id] = f"{asset_id}_{elem_id}"
+    return mapping
+
+
+def _rewrite_references(elem: ET.Element, id_mapping: dict[str, str]) -> None:
+    _rewrite_reference_values(elem, id_mapping)
+
+    for item in elem.iter():
+        elem_id = item.get("id")
+        if elem_id in id_mapping:
+            item.set("id", id_mapping[elem_id])
+
+
+def _rebase_external_hrefs(
+    elem: ET.Element,
+    source_dir: Path,
+    target_dir: Path,
+) -> int:
+    """Keep relative image/use references valid after moving a subtree."""
+    rewritten_count = 0
+    for item in elem.iter():
+        for attr_name, value in list(item.attrib.items()):
+            if _local(attr_name) != "href" or value.startswith(("#", "/")):
+                continue
+            parsed = urlsplit(value)
+            if parsed.scheme or parsed.netloc or not parsed.path:
+                continue
+            source_target = (source_dir / parsed.path).resolve()
+            relative = Path(os.path.relpath(source_target, target_dir)).as_posix()
+            rewritten = urlunsplit(("", "", relative, parsed.query, parsed.fragment))
+            if rewritten != value:
+                item.set(attr_name, rewritten)
+                rewritten_count += 1
+    return rewritten_count
+
+
+def _rewrite_reference_values(
+    elem: ET.Element,
+    id_mapping: dict[str, str],
+) -> None:
+    """Rewrite local URL/href references without renaming definition ids."""
+    def rewrite_url(match: re.Match[str]) -> str:
+        quote, ref_id = match.group(1), match.group(2)
+        new_id = id_mapping.get(ref_id, ref_id)
+        return f"url({quote}#{new_id}{quote})"
+
+    for item in elem.iter():
+        for attr_name, value in list(item.attrib.items()):
+            rewritten = URL_REF_RE.sub(rewrite_url, value)
+            if _local(attr_name) == "href" and value.startswith("#") and value[1:] in id_mapping:
+                rewritten = f"#{id_mapping[value[1:]]}"
+            if rewritten != value:
+                item.set(attr_name, rewritten)
+
+
+def _definition_signature(elem: ET.Element) -> bytes:
+    """Return definition semantics without its document-local id."""
+    normalized = copy.deepcopy(elem)
+    normalized.attrib.pop("id", None)
+    ET.register_namespace("", SVG_NS)
+    ET.register_namespace("xlink", XLINK_NS)
+    return ET.tostring(normalized, encoding="utf-8")
+
+
+def _optimize_definitions(root: ET.Element) -> tuple[int, int]:
+    """Deduplicate equivalent defs and remove definitions with no live refs."""
+    deduplicated = 0
+    pruned = 0
+    definition_containers = [
+        child for child in root
+        if _local(child.tag) in DEFINITION_CONTAINERS
+    ]
+
+    for definitions in definition_containers:
+        canonical_by_signature: dict[bytes, str] = {}
+        duplicate_ids: dict[str, str] = {}
+        duplicate_elements: list[ET.Element] = []
+        for definition in list(definitions):
+            definition_id = definition.get("id")
+            if not definition_id:
+                continue
+            signature = _definition_signature(definition)
+            canonical_id = canonical_by_signature.get(signature)
+            if canonical_id is None:
+                canonical_by_signature[signature] = definition_id
+                continue
+            duplicate_ids[definition_id] = canonical_id
+            duplicate_elements.append(definition)
+
+        if duplicate_ids:
+            _rewrite_reference_values(root, duplicate_ids)
+            for definition in duplicate_elements:
+                definitions.remove(definition)
+            deduplicated += len(duplicate_elements)
+
+        owner_by_id: dict[str, ET.Element] = {}
+        for definition in definitions:
+            for item in definition.iter():
+                if item_id := item.get("id"):
+                    owner_by_id[item_id] = definition
+
+        live_refs: set[str] = set()
+        for attr_name, value in root.attrib.items():
+            live_refs.update(match.group(2) for match in URL_REF_RE.finditer(value))

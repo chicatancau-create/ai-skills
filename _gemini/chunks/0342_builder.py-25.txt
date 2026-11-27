@@ -1,0 +1,113 @@
+            structure.slide_master_part(slide_num),
+            role,
+            show_master_shapes,
+        )
+        families.setdefault(key, []).append(slide_num)
+        base_layouts.setdefault(key, layout_part)
+
+    created = 0
+    lifted_backgrounds = 0
+    role_counts: dict[tuple[str, str], int] = {}
+    for key, slide_nums in families.items():
+        master_part, role, show_master_shapes = key
+        role_key = (master_part, role)
+        role_counts[role_key] = role_counts.get(role_key, 0) + 1
+        variant = role_counts[role_key]
+        layout_name = role if variant == 1 else f"{role} {variant}"
+        layout_target, layout_part = _create_custom_layout(
+            extract_dir,
+            master_part,
+            base_layouts[key],
+            layout_name,
+            show_master_shapes=show_master_shapes,
+        )
+
+        background_xml = _shared_explicit_slide_background(
+            extract_dir, slide_nums
+        )
+        if background_xml is not None:
+            layout_path = extract_dir / layout_part
+            layout_xml = layout_path.read_text(encoding="utf-8")
+            updated_layout_xml = _put_background_on_part(layout_xml, background_xml)
+            if updated_layout_xml is not None:
+                layout_path.write_text(updated_layout_xml, encoding="utf-8")
+                for slide_num in slide_nums:
+                    slide_path = (
+                        extract_dir / "ppt" / "slides" / f"slide{slide_num}.xml"
+                    )
+                    slide_path.write_text(
+                        _remove_slide_background_xml(
+                            slide_path.read_text(encoding="utf-8")
+                        ),
+                        encoding="utf-8",
+                    )
+                lifted_backgrounds += len(slide_nums)
+
+        for slide_num in slide_nums:
+            rels_path = (
+                extract_dir
+                / "ppt"
+                / "slides"
+                / "_rels"
+                / f"slide{slide_num}.xml.rels"
+            )
+            _set_slide_layout_target(rels_path, layout_target)
+        created += 1
+
+    if verbose and created:
+        print(
+            "  Baseline layout families: "
+            f"created {created} reusable layout(s), "
+            f"lifted {lifted_backgrounds} slide background(s)"
+        )
+    return created
+
+
+def _promote_common_chrome_shapes_to_layouts(
+    extract_dir: Path,
+    slide_count: int,
+    conversion_traces: list[dict[str, Any]] | None,
+    *,
+    verbose: bool = False,
+) -> int:
+    """Promote exact leading chrome shared by every slide in one layout."""
+    if not conversion_traces:
+        return 0
+    trace_by_slide = {
+        int(trace.get("slide_num", 0)): trace
+        for trace in conversion_traces
+        if trace.get("slide_num") is not None
+    }
+    if len(trace_by_slide) < slide_count:
+        return 0
+
+    slides_by_layout: dict[str, list[int]] = {}
+    for slide_num in range(1, slide_count + 1):
+        rels_path = (
+            extract_dir
+            / "ppt"
+            / "slides"
+            / "_rels"
+            / f"slide{slide_num}.xml.rels"
+        )
+        layout_target = _find_relationship_target(rels_path, SLIDE_LAYOUT_REL_TYPE)
+        if not layout_target:
+            raise RuntimeError(f"Slide {slide_num} has no slide layout relationship")
+        layout_part = _resolve_package_target(
+            f"ppt/slides/slide{slide_num}.xml",
+            layout_target,
+        )
+        slides_by_layout.setdefault(layout_part, []).append(slide_num)
+
+    promoted = 0
+    promoted_roles = 0
+    for layout_part, slide_nums in slides_by_layout.items():
+        if len(slide_nums) < 2:
+            continue
+        slide_state: dict[int, dict[str, Any]] = {}
+        for slide_num in slide_nums:
+            slide_path = extract_dir / "ppt" / "slides" / f"slide{slide_num}.xml"
+            rels_path = (
+                extract_dir
+                / "ppt"
+                / "slides"

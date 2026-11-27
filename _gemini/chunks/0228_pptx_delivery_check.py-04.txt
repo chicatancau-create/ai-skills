@@ -1,0 +1,122 @@
+            ).strip().lower()
+            kind = _relationship_kind(relationship_type)
+            if target_mode == "external":
+                if kind and target:
+                    external_counts[(kind, target, relationship_type)] += 1
+                continue
+            resolved = resolve_internal_opc_target(rels_name, target)
+            if resolved is None:
+                continue
+            reference_counts[resolved] += 1
+            if relationship_type:
+                relationship_types[resolved].add(relationship_type)
+
+    external = [
+        {
+            "target": target,
+            "kind": kind,
+            "relationship_type": relationship_type,
+            "bytes": None,
+            "compressed_bytes": None,
+            "reference_count": count,
+        }
+        for (kind, target, relationship_type), count in sorted(
+            external_counts.items()
+        )
+    ]
+    return reference_counts, relationship_types, external
+
+
+def _embedded_part_record(
+    info: zipfile.ZipInfo,
+    *,
+    content_type: str,
+    reference_counts: Counter[str],
+    relationship_types: dict[str, set[str]],
+) -> dict[str, object]:
+    kind = content_type.split("/", 1)[0]
+    if kind not in {"audio", "image", "video"}:
+        kind = "media"
+    part_key = canonical_opc_part_path(info.filename)
+    return {
+        "part": info.filename,
+        "kind": kind,
+        "content_type": content_type,
+        "bytes": info.file_size,
+        "compressed_bytes": info.compress_size,
+        "reference_count": (
+            reference_counts.get(part_key, 0)
+            if part_key is not None
+            else 0
+        ),
+        "relationship_types": sorted(
+            relationship_types.get(part_key, set())
+            if part_key is not None
+            else set()
+        ),
+    }
+
+
+def _archive_member_problems(
+    infos: list[zipfile.ZipInfo],
+) -> list[str]:
+    problems: list[str] = []
+    for info in infos:
+        name = info.filename
+        path = PurePosixPath(name)
+        if (
+            name.startswith("/")
+            or "\\" in name
+            or ".." in path.parts
+        ):
+            problems.append(name)
+    return sorted(set(problems))
+
+
+def _relationship_problem_code(problem: str) -> str:
+    if "unreferenced relationship" in problem:
+        return "unreferenced_slide_relationship"
+    if "<invalid relationships XML:" in problem:
+        return "invalid_relationship_xml"
+    if " -> <" in problem:
+        return "invalid_internal_relationship"
+    return "dangling_internal_relationship"
+
+
+def _font_faces_for_advisory(
+    theme_fonts: object,
+    declared_fonts: object,
+) -> list[str]:
+    faces: set[str] = set()
+    if isinstance(theme_fonts, dict):
+        for role in ("title", "body"):
+            value = theme_fonts.get(role)
+            if not isinstance(value, dict):
+                continue
+            for field in ("latin", "ea", "cs"):
+                face = value.get(field)
+                if isinstance(face, str) and face.strip():
+                    faces.add(face.strip())
+            scripts = value.get("scripts")
+            if isinstance(scripts, dict):
+                for face in scripts.values():
+                    if isinstance(face, str) and face.strip():
+                        faces.add(face.strip())
+    if isinstance(declared_fonts, dict):
+        for role in ("latin", "ea", "cs"):
+            values = declared_fonts.get(role)
+            if not isinstance(values, list):
+                continue
+            for value in values:
+                if not isinstance(value, dict):
+                    continue
+                face = value.get("value")
+                if isinstance(face, str) and face.strip():
+                    faces.add(face.strip())
+    return sorted(faces, key=str.casefold)
+
+
+def _unsafe_font_faces(faces: list[str]) -> list[str]:
+    unsafe: list[str] = []
+    for face in faces:
+        normalized = unicodedata.normalize("NFKC", face).strip().casefold()

@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""
+PPT Master - SVG Authoring View
+
+Create a lightweight, non-destructive editable IR from PPTX-imported SVG
+files. The source SVG remains the native-payload authority; the authoring copy
+translates recognized shapes and tables into compact semantic components,
+keeps stable source references, and omits bulky import-only/render-duplicate
+payloads.
+
+Usage:
+    python3 scripts/svg_authoring_view.py <svg-file-or-directory> \
+        -o <output-dir> --projection-kind <kind>
+
+Examples:
+    python3 scripts/svg_authoring_view.py analysis/source_svg_import/svg \
+        -o analysis/authoring-svg --projection-kind layered
+    python3 scripts/svg_authoring_view.py imported/slide_06.svg \
+        -o /tmp/slide-authoring-view --projection-kind generic
+
+Dependencies:
+    None (standard library only).
+
+The output directory is an authoring bundle: editable SVGs plus one
+model-readable `authoring_summary.json` and one tool-only
+`authoring_manifest.json` provenance sidecar. Layered IR remains the
+template-creation input; final templates are materialized from it. A flat
+authoring bundle at ``authoring-svg-flat/`` is the sole editable source for
+``svg_to_pptx.py --roundtrip``. Directory runs prepare and stage the
+complete batch before publishing it, so a failed page leaves the existing
+destination set unchanged.
+"""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import hashlib
+import json
+import math
+import os
+import re
+import shutil
+import sys
+import tempfile
+from collections import Counter
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional
+from urllib.parse import urlsplit, urlunsplit
+from xml.etree import ElementTree as ET
+
+from compact_svg_coordinates import compact_svg_tree
+from console_encoding import configure_utf8_stdio
+from hyperlink_contract import ADOPTED_SOURCE_LINK_ATTR, SOURCE_HREF_ATTR
+from native_payloads import (
+    CUSTOM_GEOMETRY_ATTRIBUTE,
+    CUSTOM_GEOMETRY_REF_ATTRIBUTE,
+    NATIVE_RECORD_REF_ATTRIBUTE,
+    SHAPE_STYLE_ATTRIBUTE,
+    SHAPE_STYLE_REF_ATTRIBUTE,
+    TXBODY_REF_ATTRIBUTE,
+)
+from pptx_shapes import (
+    NATIVE_FALLBACK_SHA256_ATTR,
+    svg_native_fallback_fingerprint,
+)
+from svg_compatibility import normalize_single_child_group_filters
+from svg_authoring_contract import (
+    canonical_authoring_errors,
+    normalize_compact_authoring_tree,
+)
+from svg_to_pptx.drawingml.context import IDENTITY_MATRIX
+from svg_to_pptx.drawingml.utils import (
+    INHERITABLE_ATTRS,
+    matrix_multiply,
+    parse_inline_style,
+    parse_opacity,
+    parse_transform_matrix,
+)
+
+configure_utf8_stdio()
+
+SVG_NS = "http://www.w3.org/2000/svg"
+XLINK_NS = "http://www.w3.org/1999/xlink"
+AUTHORING_MANIFEST_NAME = "authoring_manifest.json"
+AUTHORING_SUMMARY_NAME = "authoring_summary.json"
+AUTHORING_SCHEMA = "ppt-master.svg-authoring-ir.v1"
+AUTHORING_SUMMARY_SCHEMA = "ppt-master.svg-authoring-summary.v1"
+SOURCE_REF_ATTRIBUTE = "data-pptx-source-ref"
+SOURCE_PROXY_ATTRIBUTE = "data-pptx-source-proxy"
+SOURCE_PROXY_KIND = "native-restore"
+EXTERNAL_LINKED_IMAGE_PROXY_ATTRIBUTE = (
+    "data-pptx-external-linked-image-proxy"
+)
+SEMANTIC_OBJECT_ATTRIBUTE = "data-pptx-semantic-object"
+SEMANTIC_SHAPE_KIND = "shape"
+SEMANTIC_TABLE_KIND = "table"
+# Keep ordinary text and vectors inline. Large semantic/native payload objects
+# that cannot move to an editable vector asset become atomic source proxies.
+SOURCE_PROXY_MIN_BYTES = 4096
+_SEMANTIC_CONTENT_TAGS = frozenset({"foreignObject", "text", "tspan"})
+_SEMANTIC_AUTHORING_ATTRIBUTES = frozenset({
+    "data-pptx-inline-formula",
+    "data-pptx-page-role",
+    "data-pptx-placeholder",
+    "data-pptx-replace-with",
+    "data-pptx-role",
+    "data-pptx-shape-hyperlink",
+    SEMANTIC_OBJECT_ATTRIBUTE,
+})
+_DRAWABLE_TAGS = frozenset({
+    "circle",
+    "ellipse",
+    "line",
+    "path",
+    "polygon",
+    "polyline",
+    "rect",
+})
+_SEMANTIC_CARRIER_OWNER_ATTRIBUTES = frozenset({
+    "data-pptx-frame",

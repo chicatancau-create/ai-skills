@@ -1,0 +1,117 @@
+                    'text': child.tail,
+                    '_xml_space': xml_space,
+                })
+
+    return _normalize_text_run_whitespace(runs)
+
+
+def _build_text_fill_xml(
+    fill: str,
+    fill_raw: str,
+    opacity: float | None,
+    ctx: ConvertContext | None,
+) -> str:
+    """Build DrawingML fill XML for a text run."""
+    if fill_raw.strip().lower() in ('none', 'transparent'):
+        return '<a:noFill/>'
+
+    paint_id = resolve_url_id(fill_raw)
+    if paint_id and ctx and paint_id in ctx.defs:
+        paint = ctx.defs[paint_id]
+        paint_tag = paint.tag.rsplit('}', 1)[-1]
+        if paint_tag in {'linearGradient', 'radialGradient'}:
+            return build_gradient_fill(
+                paint,
+                opacity,
+                ctx.theme_color_spec,
+                "text",
+            )
+        if paint_tag == 'pattern':
+            mode, image = resolve_project_text_image_fill(paint)
+            source = load_project_image_source(
+                image,
+                ctx.svg_dir,
+                ctx.resource_root,
+            )
+            r_id = _register_image_media(
+                ctx,
+                source.img_format,
+                source.img_data,
+                reuse_text_fill=True,
+            )
+            blip_xml = _build_image_blip_xml(r_id, opacity)
+            if mode == 'stretch':
+                fill_mode_xml = '<a:stretch><a:fillRect/></a:stretch>'
+            else:
+                fill_mode_xml = '<a:tile/>'
+            return f'<a:blipFill>{blip_xml}{fill_mode_xml}</a:blipFill>'
+
+    parsed_color, color_alpha = parse_svg_color(fill_raw)
+    fill = parsed_color or fill
+    opacity = combine_opacity(opacity, color_alpha)
+    alpha_xml = ''
+    if opacity is not None:
+        alpha_xml = f'<a:alphaMod val="{quantize_ooxml_alpha(opacity)}"/>'
+    theme_spec = ctx.theme_color_spec if ctx is not None else None
+    return (
+        '<a:solidFill>'
+        f'{color_node_xml(fill, theme_spec, "text", alpha_xml)}'
+        '</a:solidFill>'
+    )
+
+
+def _build_text_outline_xml(
+    run: dict[str, Any],
+    ctx: ConvertContext | None,
+) -> str:
+    """Build DrawingML outline XML for a text run from SVG stroke attributes."""
+    stroke_raw = run.get('stroke_raw')
+    if not stroke_raw or stroke_raw.strip().lower() in ('none', 'transparent'):
+        return ''
+
+    color, color_alpha = parse_svg_color(stroke_raw)
+    if not color:
+        return ''
+
+    stroke_width = _f(str(run.get('stroke_width', 1.0)), 1.0)
+    stroke_opacity = combine_opacity(run.get('stroke_opacity'), color_alpha)
+    alpha_xml = ''
+    if stroke_opacity is not None:
+        alpha_xml = (
+            f'<a:alphaMod val="{quantize_ooxml_alpha(stroke_opacity)}"/>'
+        )
+
+    theme_spec = ctx.theme_color_spec if ctx is not None else None
+    return (
+        f'<a:ln w="{px_to_emu(stroke_width)}">'
+        '<a:solidFill>'
+        f'{color_node_xml(color, theme_spec, "stroke", alpha_xml)}'
+        '</a:solidFill>'
+        '</a:ln>'
+    )
+
+
+def _build_run_properties_xml(
+    run: dict[str, Any],
+    default_fonts: dict[str, str],
+    ctx: ConvertContext | None = None,
+    effect_xml: str = '',
+    fixed_font_family: str | None = None,
+) -> str:
+    """Build the final ``a:rPr`` used to compare and emit one text run."""
+    text = str(run['text'])
+    fill = run.get('fill', '000000')
+    fill_raw = run.get('fill_raw', '')
+    fw = run.get('font_weight', '400')
+    fs_px = run.get('font_size', 16)
+    fstyle = run.get('font_style', '')
+    ff = run.get('font_family', '')
+    letter_spacing_px = float(run.get('letter_spacing', 0.0) or 0.0)
+    baseline_shift = int(run.get('baseline_shift', 0) or 0)
+    opacity = run.get('opacity')
+
+    text_dec = run.get('text_decoration', '')
+
+    # Exported font size = fs_px * FONT_PX_TO_HUNDREDTHS_PT hundredths-of-pt,
+    # rounded to **one decimal place of pt** (the nearest 10 hundredths). No 0.5pt
+    # / integer snapping — whatever the px works out to is the size, e.g.

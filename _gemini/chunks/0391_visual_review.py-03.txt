@@ -1,0 +1,100 @@
+                    pg.wait_for_timeout(100)
+                    png_bytes = pg.screenshot(type='png', full_page=False)
+
+                    out_path.write_bytes(png_bytes)
+                    rec['path'] = str(out_path)
+                    rec['bytes'] = len(png_bytes)
+                    rec['all_background'] = is_all_background(png_bytes)
+                    rec['ok'] = True
+                except Exception as e:  # noqa: BLE001 — best-effort per-page
+                    rec['error'] = f'{type(e).__name__}: {e}'
+                finally:
+                    if pg is not None:
+                        try:
+                            pg.close()
+                        except Exception:  # noqa: BLE001 — cleanup is best-effort
+                            pass
+                records.append(rec)
+        finally:
+            browser.close()
+
+    return records
+
+
+def discover_pages(project_path: Path, requested: list[str] | None) -> list[str]:
+    svg_dir = project_path / 'svg_output'
+    if not svg_dir.is_dir():
+        raise FileNotFoundError(f'no svg_output/ in {project_path}')
+    all_svgs = [path.name for path in discover_slide_svgs(svg_dir)]
+    if not requested:
+        return all_svgs
+    selected: list[str] = []
+    tokens = [part for item in requested for part in item.split(',') if part]
+    for token in tokens:
+        match = next((n for n in all_svgs if n.startswith(token) or n == token), None)
+        if match is None:
+            raise ValueError(f'no SVG matches token {token!r} in {svg_dir}')
+        selected.append(match)
+    return selected
+
+
+def discover_server_url(project_path: Path) -> str:
+    """Return the live-preview URL recorded for one project."""
+    lock_paths = (
+        project_path / 'live_preview' / 'lock.json',
+        project_path / '.live_preview.lock',
+    )
+    for lock_path in lock_paths:
+        lock = read_lock(lock_path)
+        if not lock or not process_alive(lock_pid(lock)):
+            continue
+        try:
+            port = int(lock.get('port', 0) or 0)
+        except (TypeError, ValueError):
+            port = 0
+        if 1 <= port <= 65535:
+            return f'http://127.0.0.1:{port}'
+    raise RuntimeError(
+        f'no running live-preview server recorded for project: {project_path}'
+    )
+
+
+def check_server(server_url: str, project_path: Path) -> None:
+    """Require a live-preview server that belongs to the target project."""
+    url = f"{server_url.rstrip('/')}/api/health"
+    try:
+        with urllib.request.urlopen(url, timeout=3.0) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f'{url} returned HTTP {resp.status}')
+            data = json.load(resp)
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        raise RuntimeError(f'live-preview server not reachable at {server_url}: {e}')
+    expected_project = str(project_path)
+    expected_svg_output = str((project_path / 'svg_output').resolve())
+    service = data.get('service') if isinstance(data, dict) else None
+    legacy_live_preview = (
+        service is None
+        and isinstance(data, dict)
+        and data.get('svg_output') == expected_svg_output
+    )
+    if (
+        not isinstance(data, dict)
+        or data.get('project') != expected_project
+        or (service != 'live_preview' and not legacy_live_preview)
+    ):
+        raise RuntimeError(
+            f'URL does not belong to this project live preview: {server_url}'
+        )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description='Render project SVGs to PNGs for visual review.',
+    )
+    parser.add_argument('project_path', help='Path to project directory (contains svg_output/)')
+    parser.add_argument(
+        '--pages', nargs='+', default=None,
+        help='Page tokens to render (default: all SVGs in svg_output/). '
+             "Accepts '02', '02_three_steps', or '02_three_steps.svg'; several "
+             "pages are space- or comma-separated (--pages 02 04 or --pages 02,04).",
+    )

@@ -1,0 +1,75 @@
+    text_elements = [element for element in root.iter() if element.tag.rsplit('}', 1)[-1] == 'text']
+    by_selector = {
+        selector: element
+        for slot, element in zip(analyze_template_text_slots(root), text_elements)
+        for selector in (slot.selector, slot.legacy_selector)
+    }
+    sidecar_data = json.loads(sidecar.read_text(encoding='utf-8'))
+    if not isinstance(sidecar_data, dict) or not isinstance(sidecar_data.get('text_slots'), list):
+        raise ValueError(f'{sidecar}: expected a text_slots array')
+    for slot in sidecar_data['text_slots']:
+        if not isinstance(slot, dict) or not isinstance(slot.get('selector'), str):
+            raise ValueError(f'{sidecar}: each text slot requires a selector string')
+        selector = slot['selector']
+        carrier = by_selector.get(selector)
+        row = {'file': str(path), 'slot_id': selector, 'selector': selector,
+               'source': 'mirror-text-slot', 'placeholder': None, 'bounds': None}
+        if carrier is None:
+            yield {**row, 'unavailable': 'selector does not resolve to a text element'}, None
+            continue
+        row['bounds'], row['bounds_source'] = _mirror_text_bounds(carrier, parents, font_sizes, spacings)
+        yield row, carrier
+
+
+def slot_capacity_report(svg_files: list[Path]) -> dict:
+    """Read placeholder and mirror text targets without changing files or gates."""
+    slots = []
+    for path in svg_files:
+        root = ET.parse(path).getroot()
+        parents = {id(child): parent for parent in root.iter() for child in parent}
+        font_sizes = resolve_project_font_sizes(root)
+        spacings = resolve_project_letter_spacings(root, font_sizes)
+        for row, carrier in _text_targets(path, root, parents, font_sizes, spacings):
+            bounds = row['bounds']
+            if bounds is None:
+                row.setdefault('unavailable', 'missing or invalid slot bounds')
+                slots.append(row)
+                continue
+            # Imported paragraphs can put all visible text and typography on
+            # tspans. Use the first visible run, and expose mixed-run conditions.
+            runs = [node for node in carrier.iter() if (node.text or '').strip()]
+            first_run = runs[0] if runs else carrier
+            def value(name: str) -> str | None:
+                return _effective_presentation_value(first_run, name, parents)
+
+            size = font_sizes[id(first_run)]
+            family = value('font-family') or 'Calibri'
+            weight = value('font-weight') or 'normal'
+            spacing = spacings[id(first_run)]
+            raw_line_height = value('line-height')
+            line_height = size * 1.2
+            line_height_source = 'estimated 1.2em'
+            if raw_line_height and raw_line_height != 'normal':
+                if raw_line_height.endswith('%'):
+                    line_height = size * _number(raw_line_height[:-1], 120) / 100
+                elif raw_line_height.endswith('em'):
+                    line_height = size * _number(raw_line_height[:-2], 1.2)
+                elif raw_line_height.endswith('px'):
+                    line_height = _number(raw_line_height, line_height)
+                else:
+                    line_height = size * _number(raw_line_height, 1.2)
+                line_height_source = 'declared'
+            else:
+                # Explicit tspan baselines are the actual authored line pitch.
+                baseline_values = set()
+                for tspan in carrier:
+                    try:
+                        y = float(tspan.get('y', '').removesuffix('px'))
+                    except ValueError:
+                        continue
+                    if math.isfinite(y):
+                        baseline_values.add(y)
+                ys = sorted(baseline_values)
+                pitches = [b - a for a, b in zip(ys, ys[1:]) if b > a]
+                if pitches:
+                    line_height = min(pitches)

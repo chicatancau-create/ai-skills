@@ -1,0 +1,133 @@
+"""Top-level orchestrator for PPTX -> SVG conversion.
+
+Public API: convert_pptx_to_svg(pptx_path, output_dir, options).
+
+Composes the per-slide pipeline:
+    OoxmlPackage -> shape_walker.walk_sp_tree
+                 -> per-shape dispatch (prstgeom / txbody / pic / ...)
+                 -> assembled SVG text + extracted media files
+
+Stages B-F will fill in the per-shape dispatch. For Stage A this entry just
+loads the package and reports basic per-slide structure to verify wiring.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import os
+import posixpath
+import re
+import shutil
+import tempfile
+import zipfile
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
+from html import unescape
+from pathlib import Path, PurePosixPath
+from urllib.parse import unquote, urlsplit, urlunsplit
+from xml.etree import ElementTree as ET
+from xml.sax.saxutils import quoteattr
+
+from extract_svg_assets import extract_directory
+from pptx_embedded_fonts import (
+    FONT_BUNDLE_DIR,
+    EmbeddedFontBundle,
+    EmbeddedFontError,
+    capture_embedded_fonts,
+    write_embedded_font_bundle,
+)
+from pptx_workspace import (
+    AUTHORING_SVG_DIR,
+    AUTHORING_SVG_FLAT_DIR,
+    CONVERSION_REPORT_PATH,
+    NATIVE_STRUCTURE_PATH,
+    ROUNDTRIP_FLAT_SVG_DIR,
+    ROUNDTRIP_LAYERED_SVG_DIR,
+    ROUNDTRIP_MANIFEST_PATH,
+    SOURCE_PPTX_PATH,
+    PackageResourceInventory,
+    conversion_report_path,
+    inventory_package_resources,
+    reject_removed_workspace_layout,
+    slide_animation_config_sha256,
+    write_workspace_resources,
+)
+from svg_authoring_view import project_svg_batch
+from svg_to_pptx.animation_config import (
+    validate_animation_config_errors,
+    validate_transition_config,
+)
+from svg_to_pptx.pptx_package.narration import narration_audio_parts
+from template_import.manifest import (
+    count_drawable_shapes,
+    extract_placeholders,
+    part_display_name,
+)
+from template_import.native_structure import (
+    CONTRACT_NAME as NATIVE_STRUCTURE_NAME,
+    SOURCE_TEMPLATE_NAME,
+    build_native_structure,
+)
+
+from .animation_import import (
+    AnimationImportError,
+    import_slide_animation,
+)
+from .color_resolver import ColorPalette
+from .emu_units import NS
+from .import_diagnostics import ImportDiagnostic, append_diagnostic
+from .ooxml_loader import (
+    OoxmlPackage,
+    PartRef,
+    SlideRef,
+    part_show_master_sp,
+)
+from .notes_import import ImportedSpeakerNote, import_speaker_notes
+from .slide_to_svg import assemble_part_solo, assemble_slide
+from .transition_import import (
+    TransitionImportError,
+    import_slide_transition,
+)
+
+
+_CJK_THEME_SCRIPTS = frozenset({"Hans", "Hant", "Jpan", "Hang"})
+_MANAGED_PRIMARY_SVG_RE = re.compile(
+    r"(?:slide_\d+|master_\d+_[A-Za-z0-9_-]+|layout_\d+_[A-Za-z0-9_-]+)\.svg"
+)
+_MANAGED_FLAT_SVG_RE = re.compile(r"slide_\d+\.svg")
+_MANAGED_TRANSITION_SOUND_RE = re.compile(
+    r"transition_sound_[0-9a-f]{16}\.wav"
+)
+_ROUNDTRIP_VECTOR_MIN_DRAWABLES = 2
+_ROUNDTRIP_VECTOR_MIN_BYTES = 512
+_ROUNDTRIP_VECTOR_MIN_DECORATION_BYTES = 512
+_SVG_HREF_RE = re.compile(
+    r"\b(?:href|xlink:href)\s*=\s*[\"']([^\"']+)[\"']"
+)
+_SVG_HREF_ATTRIBUTE_RE = re.compile(
+    r"(?P<prefix>\b(?:href|xlink:href)\s*=\s*)"
+    r"(?P<quote>[\"'])(?P<value>[^\"']+)(?P=quote)"
+)
+
+
+def _validate_resource_subdir(value: str) -> None:
+    """Reject media output paths that can escape the conversion workspace."""
+    path = Path(value)
+    if path.drive or path.anchor or path.is_absolute() or ".." in path.parts:
+        raise ValueError(
+            f"resource subdirectory must stay within the output workspace: {value!r}"
+        )
+
+
+def _validate_media_filename(filename: str) -> None:
+    """Require one media basename so asset maps cannot redirect writes."""
+    path = Path(filename)
+    if (
+        not filename
+        or filename in {".", ".."}
+        or path.drive
+        or path.anchor
+        or path.name != filename
+        or "/" in filename

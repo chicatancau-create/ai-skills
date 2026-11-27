@@ -1,0 +1,106 @@
+        return f'{shape_tag} geometry for nested crop is invalid: {exc}'
+
+    if fits:
+        return None
+    return (
+        f'{shape_tag} geometry must cover the nested crop viewBox and use '
+        'equal physical corner radii after viewport scaling'
+    )
+
+
+def _visible_clip_shapes(
+    clip: ET.Element,
+    parent_by_id: dict[int, ET.Element],
+) -> list[ET.Element]:
+    """Resolve clip children with the same inherited visibility as visuals."""
+    return [
+        child for child in clip
+        if child.tag not in _CLIP_NON_VISUAL_ELEMENTS
+        and svg_hidden_reason(child, parent_by_id) is None
+    ]
+
+
+def empty_clip_path_reason(
+    element: ET.Element,
+    definitions: dict[str, ET.Element],
+    parent_by_id: dict[int, ET.Element],
+) -> str | None:
+    """Identify a valid clip reference whose children are all hidden."""
+    clip_id = resolve_url_id(element.get('clip-path', ''))
+    clip = definitions.get(clip_id)
+    if clip is not None and clip.tag == f'{{{SVG_NS}}}clipPath':
+        if (
+            any(child.tag not in _CLIP_NON_VISUAL_ELEMENTS for child in clip)
+            and not _visible_clip_shapes(clip, parent_by_id)
+        ):
+            return f'empty clip: url(#{clip_id})'
+    return None
+
+
+def project_clip_path_errors(root: ET.Element) -> list[str]:
+    """Return clip-path errors that would otherwise degrade picture geometry."""
+    definitions, duplicates = project_definition_index(root)
+    parent_by_id = {
+        id(child): parent
+        for parent in root.iter()
+        for child in list(parent)
+    }
+    errors: set[str] = set()
+    for elem in root.iter():
+        raw_ref = elem.get('clip-path')
+        if raw_ref is None or raw_ref.strip().lower() == 'none':
+            continue
+        label = _element_contract_label(elem)
+        is_svg_image = elem.tag == f'{{{SVG_NS}}}image'
+        parent = parent_by_id.get(id(elem))
+        is_nested_crop_image = (
+            is_svg_image
+            and parent is not None
+            and parent.tag == f'{{{SVG_NS}}}svg'
+            and parent is not root
+            and parent.get('data-pptx-crop') == '1'
+        )
+        is_imported_crop = (
+            elem.tag == f'{{{SVG_NS}}}svg'
+            and elem.get('data-pptx-crop') == '1'
+        )
+        if not is_svg_image and not is_imported_crop:
+            errors.add(
+                f'{label} clip-path is allowed only on <image> or an imported '
+                'data-pptx-crop="1" wrapper'
+            )
+        match = re.fullmatch(r'url\(#([^)]+)\)', raw_ref.strip())
+        if match is None:
+            errors.add(
+                f'{label} clip-path must be an exact local url(#id) '
+                f'reference; got {raw_ref!r}'
+            )
+            continue
+        clip_id = match.group(1)
+        if clip_id in duplicates:
+            errors.add(
+                f'{label} clip-path=url(#{clip_id}) is ambiguous because the '
+                'definition id is duplicated'
+            )
+            continue
+        clip = definitions.get(clip_id)
+        if clip is None or clip.tag != f'{{{SVG_NS}}}clipPath':
+            errors.add(
+                f'{label} clip-path=url(#{clip_id}) has no matching direct '
+                f'<defs><clipPath id="{clip_id}"> definition'
+            )
+            continue
+        clip_label = f'<clipPath id="{clip_id}">'
+        clip_units = clip.get('clipPathUnits', 'userSpaceOnUse')
+        if clip_units not in {'userSpaceOnUse', 'objectBoundingBox'}:
+            errors.add(
+                f'{clip_label} has unsupported clipPathUnits={clip_units!r}'
+            )
+        if clip.get('transform'):
+            errors.add(f'{clip_label} cannot use transform')
+        clip_rules = _unsupported_clip_rule_properties(clip)
+        if clip_rules:
+            errors.add(
+                f'{clip_label} cannot use {", ".join(clip_rules)}; native '
+                'picture geometry has no equivalent winding-rule control'
+            )

@@ -1,0 +1,110 @@
+            lines.append((child, line_x, line_y, runs, font_size))
+        return lines or None
+
+    @classmethod
+    def _estimated_text_line_bounds(
+        cls,
+        line_el: ET.Element,
+        x: float,
+        y: float,
+        runs: List[Dict],
+        font_size: float,
+        parent_by_id: Dict[int, ET.Element],
+        *,
+        include_headroom: bool = True,
+    ) -> Tuple[float, float, float, float] | None:
+        """Estimate one line's transformed visible bounds in SVG coordinates."""
+        if any(helper is None for helper in (
+            _estimate_single_line_text_frame_width,
+            _IDENTITY_MATRIX,
+            _matrix_multiply,
+            _parse_project_text_anchor,
+            _parse_transform_matrix,
+            _transform_point,
+        )):
+            return None
+        try:
+            width = float(_estimate_single_line_text_frame_width(
+                runs,
+                include_headroom=include_headroom,
+            ))
+            raw_anchor = (
+                _effective_presentation_value(
+                    line_el,
+                    'text-anchor',
+                    parent_by_id,
+                )
+                or 'start'
+            ).strip().lower()
+            anchor = _parse_project_text_anchor(raw_anchor).value
+        except (TypeError, ValueError):
+            return None
+        if not all(math.isfinite(value) for value in (x, y, width, font_size)):
+            return None
+        if width <= 0 or font_size <= 0:
+            return None
+
+        if anchor == 'middle':
+            left = x - width / 2
+            right = x + width / 2
+        elif anchor == 'end':
+            left = x - width
+            right = x
+        elif anchor == 'start':
+            left = x
+            right = x + width
+        else:
+            return None
+        ascent, descent = cls._text_line_vertical_extent(runs, font_size)
+        top = y - ascent
+        bottom = y + descent
+
+        return cls._transformed_rect_bounds(
+            line_el,
+            (left, top, right - left, bottom - top),
+            parent_by_id,
+        )
+
+    @classmethod
+    def _imported_model_text_lines(
+        cls,
+        text_el: ET.Element,
+        parent_by_id: Dict[int, ET.Element],
+        font_sizes: Dict[int, float],
+        letter_spacings: Dict[int, float],
+    ) -> List[Tuple[ET.Element, float, float, List[Dict], float]] | None:
+        """Measure an imported ``lines`` / ``paragraphs`` text one row per tspan.
+
+        ``pptx_to_svg.py --roundtrip`` projects multi-line source text as
+        nested ``<tspan>`` rows without ``x`` / ``dy`` and records the row
+        advance in ``data-paragraph-line-height``; the exporter reads that
+        model, so the estimator must not measure the rows as one line.
+        """
+        if text_el.get('data-pptx-text-model') not in {'lines', 'paragraphs'}:
+            return None
+        if _parse_project_geometry_length is None:
+            return None
+        try:
+            base_x = _parse_project_geometry_length(text_el.get('x') or '0', 'x')
+            base_y = _parse_project_geometry_length(text_el.get('y') or '0', 'y')
+        except ValueError:
+            return None
+        source_runs: List[Tuple[ET.Element, str]] = []
+
+        def collect(element: ET.Element) -> None:
+            if element.text and element.text.strip():
+                source_runs.append((element, re.sub(r'\s+', ' ', element.text)))
+            for child in list(element):
+                if _local_name(child) not in {'tspan', 'a'}:
+                    continue
+                collect(child)
+                if child.tail and child.tail.strip():
+                    source_runs.append((element, re.sub(r'\s+', ' ', child.tail)))
+
+        collect(text_el)
+        if not source_runs:
+            return None
+
+        def row_of(owner: ET.Element) -> ET.Element | None:
+            current: ET.Element | None = owner
+            while current is not None and current is not text_el:

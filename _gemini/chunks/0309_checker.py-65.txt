@@ -1,0 +1,112 @@
+            if value in prototype_sizes and value not in locked_sizes:
+                continue
+            if value in locked_sizes:
+                continue
+            try:
+                used_px = float(value)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(used_px) or used_px < 0:
+                continue
+            if any(
+                abs(used_px - anchor_px) <= FONT_SIZE_ANCHOR_TOLERANCE_PX
+                for anchor_px in anchor_sizes
+            ):
+                continue
+            counts[value] += occurrence_count
+        return counts
+
+    def _effective_text_size_counts(self, root: ET.Element) -> Counter[str]:
+        """Count each effective size once per non-empty SVG text object."""
+        counts: Counter[str] = Counter()
+        if _resolve_project_font_sizes is None:
+            return counts
+        working_root = root
+        if (
+            _expand_local_use_references is not None
+            and _UseExpansionError is not None
+        ):
+            expanded_root = copy.deepcopy(root)
+            try:
+                _expand_local_use_references(expanded_root)
+            except _UseExpansionError:
+                pass
+            else:
+                working_root = expanded_root
+        try:
+            effective_sizes = _resolve_project_font_sizes(working_root)
+        except ValueError:
+            return counts
+
+        def collect_text_object_sizes(element: ET.Element) -> set[str]:
+            values: set[str] = set()
+
+            def visit(node: ET.Element) -> None:
+                if (node.text or '').strip():
+                    values.add(
+                        self._canonical_font_size_key(effective_sizes[id(node)])
+                    )
+                for child in node:
+                    visit(child)
+                    if (child.tail or '').strip():
+                        values.add(
+                            self._canonical_font_size_key(
+                                effective_sizes[id(node)]
+                            )
+                        )
+
+            visit(element)
+            return values
+
+        definition_containers = {
+            'clippath',
+            'defs',
+            'marker',
+            'mask',
+            'pattern',
+            'symbol',
+        }
+
+        def visit_visible(element: ET.Element) -> None:
+            local_name = _local_name(element).casefold()
+            if local_name in definition_containers:
+                return
+            if local_name == 'text':
+                if element.get('data-pptx-layer') in {'master', 'layout'}:
+                    return
+                counts.update(collect_text_object_sizes(element))
+                return
+            for child in element:
+                visit_visible(child)
+
+        visit_visible(working_root)
+        return counts
+
+    @staticmethod
+    def _canonical_font_size_key(value: float) -> str:
+        """Canonicalize equivalent numeric spellings for deck-wide counting."""
+        return format(value, '.12g')
+
+    def _prepare_undeclared_size_occurrences(
+        self,
+        svg_files: List[Path],
+    ) -> None:
+        """Pre-count sparse undeclared sizes before per-file diagnostics."""
+        previous_prototype = self._active_prototype_path
+        try:
+            for svg_path in svg_files:
+                lock = self._get_spec_lock(svg_path)
+                if lock is None:
+                    continue
+                _typography, locked_sizes, anchor_sizes, _invalid = (
+                    self._declared_typography_size_anchors(lock)
+                )
+                self._active_prototype_path = self._prototype_by_output.get(
+                    svg_path.resolve()
+                )
+                _colors, _fonts, prototype_sizes = (
+                    self._prototype_drift_allowances()
+                )
+                try:
+                    content = svg_path.read_text(encoding='utf-8')
+                except OSError:

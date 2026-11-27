@@ -1,0 +1,37 @@
+   （`content` / `darkrow`），看到 `mode='darkrow'` 就要怀疑标定。
+
+## 硬约束与已知坑（每条都踩过）
+
+| 约束 | 后果 |
+|---|---|
+| `mimetype` 必须是 ZIP **第一个**成员、`STORED` 不压缩、内容恰好 `application/vnd.adobe.sparkler.project+dcxucf` | XD 认不出文件/直接打不开 |
+| `resources/graphics/graphicContent.agc` 的 `artboards` 必须写成**字典**（键=各画板 `ref`） | 写成 `{"href":…}` → 报 `Artboard with ref <guid> not found`，画布全白 |
+| 组内后代的 `transform` 必须是**相对直属父组**的坐标，且**不写** `meta.ux.localTransform`；只有画板顶层节点写「画板原点+局部」并写 `localTransform` | 写成绝对坐标 → XD 再叠一次父组偏移，内容被推到 2 倍位置、底栏被挤出画板裁掉 |
+| 定位文本（`frame.type=positioned`）的 `ty` 是**首行基线**，字形向上长（真实文件：10px 标签 `ty=40` 在 628.5 的组里 → 基线 668、字形 658..668） | 按「顶边」理解会把标签压到图标上，文字被图标盖住 |
+| 底栏放「图标 + 文字」时：图标 20x20 @y=6，文字 10px 基线 @y=38（底栏高 49） | 图标 y=8..32 + 文字顶边 y=30 → 文字和图标重叠 |
+| 每个节点 `id` 是全档唯一的 36 位小写 uuid | XD 丢节点或崩溃 |
+| `text.paragraphs[].lines` 是「列表的列表」，`\n` 不属于任何段落 | 文字错位/丢行 |
+| symbol 实例（`meta.ux.symbolId`）内部子层**不能**挂交互 | 只能给整个实例挂，否则点哪都跳同一条 |
+| 本机 pwsh 是 5.1：`.ps1` 带中文必须 UTF-8 **带 BOM** + CRLF；命令里有 `$` 或反斜杠先落文件 | 中文模式串变乱码 → 「对话框永远不出现」这类假故障 |
+| `ImageGrab`/全屏截图抓不到 XD 预览窗（UWP 合成） | 截图纯灰，误判成「点击无效」 |
+| 预览窗标定：内容宽度/黑边/标题栏高度才是标定依据，别用「中心列第一个暗行」 | 顶部为白的设计会标出 `k=1.03`（真值 1.248），点击偏 ~30px 却报「成功」 |
+| 自己点击也会重置 `GetLastInputInfo`（idle 归零） | 粗糙 busy gate 会把自己刚点的当成「用户回来了」，第一步就 abort；判据要加「前台是否我们的窗口 + 距上次点击 <8s」 |
+
+## 现在的验证状态（诚实标注）
+
+| 能力 | 状态 |
+|---|---|
+| 给已有 .xd 加交互，其余字节不动 | ✅ 实测：用 `specs\交互式原型.json` 复现了交付物 11 条交互，节点→目的地逐条一致，`validate_proto.py` 19 passed |
+| 给已有 .xd 加拖移跳转（drag + auto-animate） | ✅ 2026-11-16 实测：轮播底稿追加 6 条 drag + home，四校验全 PASS（validate 20/0、validate_proto 25/0、geom_check 0 fail、inter_probe 0 fail）；与用户自己在 XD 里另存的 drag 条目格式逐字段同构（`provenance\drag_format_evidence_user.json`）；原生 `autoAnimate:true` 复现逐键一致。真机预览未跑（当时用户活跃，不抢前台） |
+| 从零生成 3 画板课件（分组 + 6 条交互） | ✅ 结构四校验 PASS（`validate.py` 18/0/1 skipped、`validate_proto.py` 14 passed、`geom_check.py` 0 fails、`inter_probe.py` 0 fail／0 warn）、**真机打开渲染正确**（2026-11-11 23:17：3 画板、卡片 y=104/212/320、底栏完整在画板内、`←` 与三个 tab 图标/标签都正常）、**6 条交互全部在预览里点通 6/6**（见下一行） |
+| 生成器的通用性（非内置模板） | ✅ 另起 414x736 两板设计、含换行段落/四角不同圆角/半透明椭圆/内嵌图片/两层嵌套组 → 四校验全 PASS |
+| 从零生成文件的交互在预览里点通 | ✅ **2026-11-12 10:22 实跑 `tpl_check.py '示例-课件模板' specs\课件模板点测.json` → `done 6/6`**：card1→详情、详情顶栏→previous、tab3→列表、列表顶栏→previous、tab1→首页(自身不跳)、`time` 5s 自动→列表，六个签名/截图全部符合预期。证据 `E:\XD\证据\模板点测\`（6 张 PNG，`03` 与 `06` 字节相同、`02`/`04`/`05` 字节相同，状态稳定无残留）。 |
+| 生成器复刻老师底稿的美术（符号/重复网格） | ❌ 不支持，需要底稿就直接走 xdpatch 路线，别重画 |
+
+## 反模式
+
+- ❌ 手写 ZIP / 自己拼 AGC（用 xdgen.py / xdpatch.py，格式坑太多）
+- ❌ 为了看一眼界面去抢用户前台（先 `useridle.py`）
+- ❌ 用 `ImageGrab` 判 XD 界面变化（抓不到，永远「没变化」）
+- ❌ 校验只看「没报错」就交付（必须两条 `RESULT: PASS`；有 NOTE 要读懂）
+- ❌ 把 `.xd` 当二进制改字节（它是 ZIP，改成员内容即可）

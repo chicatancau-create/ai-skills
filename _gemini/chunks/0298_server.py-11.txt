@@ -1,0 +1,118 @@
+        return 0
+
+    pid = _lock_pid(existing)
+    try:
+        port = int(existing.get('port', 0) or 0)
+    except (TypeError, ValueError):
+        port = 0
+    if not _process_alive(pid):
+        _clear_lock(lock_file)
+        logger.info('live preview already stopped; cleared stale lock')
+        return 0
+
+    if port:
+        try:
+            req = urllib.request.Request(
+                _server_url(port, '/api/shutdown'),
+                data=b'{"reason": "cli-shutdown"}',
+                headers={'Content-Type': 'application/json'},
+                method='POST',
+            )
+            urllib.request.urlopen(req, timeout=3)
+        except OSError:
+            pass
+
+    for _ in range(20):
+        if not _process_alive(pid):
+            break
+        time.sleep(0.1)
+    if _process_alive(pid):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    _clear_lock(lock_file)
+    logger.info('live preview server stopped (pid=%s)', pid)
+    return 0
+
+
+def _wait_for_ready(
+    port: int,
+    proc: subprocess.Popen,
+    project_path: Path,
+    timeout: int = STARTUP_TIMEOUT,
+) -> int:
+    """Wait until this project's detached live-preview server responds.
+
+    Returns the server pid recorded in the project lock, or 0 on timeout.
+    ``proc.pid`` is not used for identity: on Windows a venv ``python.exe``
+    may be a launcher whose child is the real interpreter.
+    """
+    deadline = time.time() + timeout
+    health_url = _server_url(port, '/api/health')
+    last_error = ''
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            logger.error('live preview exited during startup (code=%s)', proc.returncode)
+            return 0
+        try:
+            with urllib.request.urlopen(health_url, timeout=1) as response:
+                data = json.load(response)
+                lock = _read_lock(_lock_file(project_path))
+                server_pid = _lock_pid(lock)
+                if (
+                    response.status == 200
+                    and isinstance(data, dict)
+                    and data.get('service') == 'live_preview'
+                    and data.get('project') == str(project_path)
+                    and lock is not None
+                    and lock.get('port') == port
+                    and data.get('pid') == server_pid
+                ):
+                    return server_pid
+                last_error = 'health response belongs to another service or project'
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+            last_error = str(exc)
+        time.sleep(0.25)
+    logger.error(
+        'live preview did not become ready at %s within %ss%s',
+        health_url,
+        timeout,
+        f' (last error: {last_error})' if last_error else '',
+    )
+    return 0
+
+
+def _open_browser(url: str) -> bool:
+    return open_preview_browser(url, logger=logger)
+
+
+def _reuse_running_server(
+    existing: dict,
+    *,
+    open_browser: bool,
+    requested_port: Optional[int] = None,
+) -> int:
+    """Idempotent relaunch: point at the already-running preview instead of failing.
+
+    A relaunch while the server is alive is the normal second-preview flow
+    (the first server keeps serving after the browser tab is closed), so it
+    must re-open the browser and exit 0 — not error out.
+    """
+    pid = existing.get('pid', '?')
+    try:
+        port = int(existing.get('port', 0) or 0)
+    except (TypeError, ValueError):
+        port = 0
+    if not port:
+        logger.error(
+            'live preview is already running for this project (pid=%s) but its '
+            'lock records no usable port; run --shutdown, then start again',
+            pid,
+        )
+        return 1
+    if requested_port is not None and port != requested_port:
+        logger.error(
+            'live preview is already running for this project on port %s; '
+            'explicit --port %s cannot reuse it. Run --shutdown, then start again',
+            port,

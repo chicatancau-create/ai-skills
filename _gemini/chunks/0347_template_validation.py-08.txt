@@ -1,0 +1,94 @@
+    presentation_part = "ppt/presentation.xml"
+    presentation_root = reader.xml(presentation_part)
+    if presentation_root is None:
+        return
+    slide_id_entries = presentation_root.findall(
+        f"{{{PML_NS}}}sldIdLst/{{{PML_NS}}}sldId"
+    )
+    _validate_registered_part_roster(
+        reader,
+        presentation_part,
+        SLIDE_REL_TYPE,
+        slide_id_entries,
+        slide_parts,
+        "Presentation p:sldIdLst",
+        min_id=PRESENTATION_SLIDE_ID_MIN,
+    )
+
+
+def validate_pptx_template_package(
+    pptx_path: str | Path,
+    specs: list[TemplateSlideSpec],
+    *,
+    layout_specs: list[TemplateSlideSpec] | None = None,
+    expected_layout_parts: dict[str, str] | None = None,
+    expected_master_parts: dict[str, str] | None = None,
+    expected_backgrounds: dict[str, str | None] | None = None,
+    expected_shape_rosters: dict[str, tuple[str, ...]] | None = None,
+) -> None:
+    """Validate a finished structured PPTX against its explicit SVG contract.
+
+    ``specs`` describes published slides. ``layout_specs`` may additionally
+    include internal prototypes for unused Layouts. Export supplies exact part,
+    background, and shape expectations for deterministic serialization
+    read-back. Callers with only published-slide specs retain the original
+    portable relationship checks.
+    """
+    if not specs:
+        raise ValueError("structured package validation requires at least one slide spec")
+
+    structure_specs = layout_specs or specs
+    specs_by_layout: dict[str, list[TemplateSlideSpec]] = {}
+    public_specs_by_layout: dict[str, list[TemplateSlideSpec]] = {}
+    bindings_by_layout: dict[str, tuple[TemplatePlaceholderBinding, ...]] = {}
+    try:
+        for spec in structure_specs:
+            specs_by_layout.setdefault(spec.layout_key, []).append(spec)
+        for spec in specs:
+            public_specs_by_layout.setdefault(spec.layout_key, []).append(spec)
+        for layout_key, layout_specs in specs_by_layout.items():
+            bindings_by_layout[layout_key] = template_placeholder_bindings(
+                layout_specs[0]
+            )
+    except TemplateStructureError as exc:
+        raise ValueError(str(exc)) from exc
+
+    errors: list[str] = []
+    path = Path(pptx_path)
+    try:
+        with zipfile.ZipFile(path) as package:
+            reader = _PackageReader(package, errors)
+            overrides = _content_type_overrides(reader)
+            if expected_backgrounds is not None:
+                for part, background_xml in sorted(expected_backgrounds.items()):
+                    root = reader.xml(part)
+                    if root is None:
+                        continue
+                    if background_xml is None:
+                        expected_signatures: tuple[tuple[object, ...], ...] = ()
+                    else:
+                        try:
+                            expected_signatures = (
+                                _expected_background_signature(background_xml),
+                            )
+                        except ValueError as exc:
+                            errors.append(f"{part} {exc}")
+                            continue
+                    actual_signatures = _background_payload_signatures(root)
+                    if actual_signatures != expected_signatures:
+                        errors.append(
+                            f"{part} p:bg count/payload differs from the exact "
+                            "structured-export expectation"
+                        )
+            if expected_shape_rosters is not None:
+                for part, roster in sorted(expected_shape_rosters.items()):
+                    root = reader.xml(part)
+                    if root is None:
+                        continue
+                    _validate_named_shape_roster(
+                        root,
+                        roster,
+                        part,
+                        errors,
+                        exact=True,
+                        ordered=True,

@@ -1,0 +1,102 @@
+    if hsl_match:
+        channels, alpha_raw = _functional_color_parts(hsl_match.group(1))
+        if len(channels) == 3:
+            try:
+                hue = (_parse_hue_degrees(channels[0]) % 360.0) / 360.0
+                saturation = _parse_percentage(channels[1])
+                lightness = _parse_percentage(channels[2])
+                red, green, blue = colorsys.hls_to_rgb(hue, lightness, saturation)
+                alpha = _parse_alpha_channel(alpha_raw) if alpha_raw is not None else 1.0
+                return (
+                    f'{round(red * 255):02X}{round(green * 255):02X}{round(blue * 255):02X}',
+                    alpha,
+                )
+            except ValueError:
+                return None, 1.0
+
+    if color_str.startswith('#'):
+        color_str = color_str[1:]
+    if len(color_str) == 3:
+        color_str = ''.join(c * 2 for c in color_str)
+    elif len(color_str) == 4:
+        color_str = ''.join(c * 2 for c in color_str)
+    if len(color_str) == 8 and all(c in '0123456789abcdefABCDEF' for c in color_str):
+        return color_str[:6].upper(), int(color_str[6:], 16) / 255.0
+    if len(color_str) == 6 and all(c in '0123456789abcdefABCDEF' for c in color_str):
+        return color_str.upper(), 1.0
+    return None, 1.0
+
+
+def parse_project_paint(
+    raw: str,
+    property_name: str,
+) -> tuple[str, str | None, float]:
+    """Parse one paint value from the closed project grammar.
+
+    Returns ``(kind, value, alpha)`` where ``kind`` is ``color``, ``none``,
+    or ``reference``. Color values are normalized to ``RRGGBB``; reference
+    values contain the local definition id.
+    """
+    if property_name not in PROJECT_PAINT_PROPERTIES:
+        raise ValueError(f'unknown project paint property {property_name!r}')
+
+    value = raw.strip()
+    if property_name in PROJECT_REFERENCE_PAINT_PROPERTIES:
+        if value.lower() == 'none':
+            return 'none', None, 1.0
+        reference = re.fullmatch(r'url\(#([^)]+)\)', value)
+        if reference is not None:
+            return 'reference', reference.group(1), 1.0
+
+    color, alpha = parse_svg_color(value)
+    if color is not None:
+        return 'color', color, alpha
+
+    accepted = (
+        'a supported color, none, or an exact local url(#id) reference'
+        if property_name in PROJECT_REFERENCE_PAINT_PROPERTIES
+        else 'a supported color'
+    )
+    raise ValueError(f'must be {accepted}')
+
+
+def is_project_paint_default_form(raw: str, property_name: str) -> bool:
+    """Return whether paint uses the generated project spelling."""
+    value = raw.strip()
+    if property_name in PROJECT_REFERENCE_PAINT_PROPERTIES:
+        if value == 'none':
+            return True
+        if re.fullmatch(r'url\(#[^)]+\)', value) is not None:
+            return True
+    return re.fullmatch(r'#[0-9A-F]{6}', value) is not None
+
+
+def iter_project_paints(
+    root: ET.Element,
+) -> Iterator[tuple[ET.Element, str, str, str]]:
+    """Yield project paint values as element, property, raw value, source."""
+    for elem in root.iter():
+        for property_name in PROJECT_PAINT_PROPERTIES:
+            raw = elem.get(property_name)
+            if raw is not None:
+                yield elem, property_name, raw, 'attribute'
+
+        for fragment in (elem.get('style') or '').split(';'):
+            fragment = fragment.strip()
+            if not fragment:
+                continue
+            if ':' in fragment:
+                name, raw = fragment.split(':', 1)
+                name = name.strip().lower()
+                raw = raw.strip()
+            else:
+                name = fragment.lower()
+                raw = ''
+            if name in PROJECT_PAINT_PROPERTIES:
+                yield elem, name, raw, 'inline style'
+
+
+def project_paint_errors(root: ET.Element) -> list[str]:
+    """Return blocking project paint errors for converter preflight."""
+    errors: list[str] = []
+    for elem, property_name, raw, source in iter_project_paints(root):

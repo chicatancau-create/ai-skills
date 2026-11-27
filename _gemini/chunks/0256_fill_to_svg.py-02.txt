@@ -1,0 +1,120 @@
+        return FillResult(attrs=dict(group_fill.attrs))
+    return handlers[fill_name](
+        fill_elem,
+        palette,
+        id_prefix,
+        id_seq,
+        placeholder_hex,
+    )
+
+
+def _drawingml_fill_name(elem: ET.Element) -> str | None:
+    """Return one exact DrawingML fill tag name or reject a namespace alias."""
+    name = _DRAWINGML_FILL_TAGS.get(elem.tag)
+    if name is not None:
+        return name
+    local_name = (
+        elem.tag.rsplit("}", 1)[-1]
+        if isinstance(elem.tag, str)
+        else ""
+    )
+    if local_name in _DRAWINGML_FILL_NAMES:
+        raise ValueError(
+            f"Invalid DrawingML fill element namespace: {local_name}"
+        )
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Per-fill handlers
+# ---------------------------------------------------------------------------
+
+def _resolve_no_fill(elem, _palette, _prefix, _seq, _placeholder_hex) -> FillResult:
+    validate_no_fill(elem)
+    return FillResult.none_fill()
+
+
+def _resolve_solid_fill(elem: ET.Element, palette: ColorPalette | None,
+                        _prefix: str, _seq, placeholder_hex: str | None) -> FillResult:
+    hex_, alpha = resolve_solid_fill_color(
+        elem,
+        palette,
+        placeholder_hex=placeholder_hex,
+    )
+    attrs: dict[str, str] = {"fill": hex_}
+    if alpha < 1.0:
+        attrs["fill-opacity"] = format_ooxml_alpha(alpha)
+    return FillResult(attrs=attrs)
+
+
+def _resolve_grad_fill(elem: ET.Element, palette: ColorPalette | None,
+                       prefix: str, seq, placeholder_hex: str | None) -> FillResult:
+    """Convert <a:gradFill> to an SVG linearGradient or radialGradient."""
+    _validate_gradient_attributes(elem)
+    _validate_gradient_rotation(elem, palette)
+    _validate_gradient_flip(elem)
+    _validate_or_normalize_gradient_tile_rect(elem, palette)
+    if seq is None:
+        seq = [0]
+    seq[0] += 1
+    grad_id = f"{prefix}grad{seq[0]}"
+
+    # Stops
+    gs_lists = elem.findall("a:gsLst", NS)
+    if len(gs_lists) != 1:
+        raise ValueError(
+            "DrawingML gradient fill requires exactly one gsLst"
+        )
+    gradient_stops = [
+        (gs, _gradient_stop_position(gs))
+        for gs in _gradient_stop_list(gs_lists[0])
+    ]
+    if any(
+        current < previous
+        for (_, previous), (_, current) in zip(
+            gradient_stops,
+            gradient_stops[1:],
+        )
+    ):
+        message = "DrawingML gradient stop positions must be nondecreasing"
+        if palette is None or palette.strict:
+            raise ValueError(message)
+        palette._diagnose(
+            "gradient-stop-order-normalized",
+            message,
+            "sort gradient stops by position while preserving equal positions",
+        )
+        gradient_stops.sort(key=lambda item: item[1])
+    stops_xml = []
+    for gs, pos_pct in gradient_stops:
+        color_elem = _gradient_stop_color(gs)
+        hex_, alpha = resolve_color(
+            color_elem,
+            palette,
+            placeholder_hex=placeholder_hex,
+        )
+        if hex_ is None:
+            raise ValueError(
+                "DrawingML gradient stop color cannot be resolved"
+            )
+        opacity_attr = (
+            f' stop-opacity="{format_ooxml_alpha(alpha)}"'
+            if alpha < 1.0
+            else ""
+        )
+        stops_xml.append(
+            f'<stop offset="{format_ooxml_unit_ratio(pos_pct)}" '
+            f'stop-color="{hex_}"{opacity_attr}/>'
+        )
+    # Linear vs radial vs path
+    linear_directions = elem.findall("a:lin", NS)
+    path_directions = elem.findall("a:path", NS)
+    if len(linear_directions) + len(path_directions) > 1:
+        raise ValueError(
+            "DrawingML gradient fill must contain at most one lin/path "
+            "direction"
+        )
+    _validate_gradient_child_structure(elem)
+    lin = linear_directions[0] if linear_directions else None
+    rad = path_directions[0] if path_directions else None
+

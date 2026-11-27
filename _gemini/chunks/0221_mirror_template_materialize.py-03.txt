@@ -1,0 +1,92 @@
+    files: list[MaterializedFile] = []
+    for relative_path, root in sorted(
+        materialized_roots,
+        key=lambda item: item[0].as_posix(),
+    ):
+        prototype = relative_path.name
+        try:
+            analyzed_slots = analyze_template_text_slots(root)
+        except ValueError as exc:
+            raise MirrorMaterializationError(
+                f"Cannot project text slots for {prototype}: {exc}"
+            ) from exc
+        text_slots = [slot.model_payload() for slot in analyzed_slots]
+        editable_text_slot_count = sum(slot.editable for slot in analyzed_slots)
+        text_slots_path = (
+            Path("templates")
+            / TEMPLATE_TEXT_SLOTS_DIR
+            / f"{relative_path.stem}.text-slots.json"
+        )
+        files.append(MaterializedFile(
+            text_slots_path,
+            _compact_json_bytes({
+                "schema": TEMPLATE_TEXT_SLOTS_SCHEMA,
+                "prototype": prototype,
+                "text_slot_count": len(text_slots),
+                "tool_integrity_sha256": text_slot_integrity_sha256(analyzed_slots),
+                "text_slots": text_slots,
+            }),
+        ))
+        templates.append({
+            "prototype": prototype,
+            "source_svg_sha256": _sha256_bytes(_serialize_svg(root)),
+            "page_type": relative_path.stem.split("_", 1)[-1],
+            "viewBox": root.get("viewBox"),
+            "master": root.get("data-pptx-master"),
+            "layout": root.get("data-pptx-layout"),
+            "layout_name": root.get("data-pptx-layout-name"),
+            "text_slot_count": len(text_slots),
+            "editable_text_slot_count": editable_text_slot_count,
+            "text_slots_path": text_slots_path.relative_to(
+                Path("templates")
+            ).as_posix(),
+        })
+    payload = {
+        "schema": TEMPLATE_EXECUTION_MANIFEST_SCHEMA,
+        "replication_mode": "mirror",
+        "template_root": ".",
+        "template_count": len(templates),
+        "text_slots_schema": TEMPLATE_TEXT_SLOTS_SCHEMA,
+        "execution_policy": (
+            "This manifest and its text_slots_path records are derived tool "
+            "metadata, not page-authoring inputs. Retain the complete project "
+            "Design Spec and lock once per valid uncompacted execution context; "
+            "use page-context only for on-demand diagnostics or telemetry. "
+            "Read the selected complete prototype once per valid context and "
+            "again only after a known change or context invalidation. Choose "
+            "semantic replacements and edit only existing "
+            "visible text values; structured export validates text/tspan "
+            "topology and attributes against the prototype."
+        ),
+        "source_import": source_import or {
+            "warning_count": 0,
+            "by_code": {},
+        },
+        "source_themes": SOURCE_THEMES_FILENAME,
+        "source_package_sha256": source_package_sha256,
+        "source_geometry_unchanged": source_geometry_unchanged,
+        "templates": templates,
+    }
+    files.append(MaterializedFile(
+        Path("templates") / TEMPLATE_EXECUTION_MANIFEST_NAME,
+        _json_bytes(payload),
+    ))
+    return files
+
+
+def _source_import_summary(import_workspace: Path) -> dict[str, object] | None:
+    """Summarize source-owned tolerant-import diagnostics by stable code."""
+    report_path = conversion_report_path(import_workspace)
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError) as exc:
+        raise MirrorMaterializationError(
+            f"Cannot read source conversion report {report_path}: {exc}"
+        ) from exc
+    diagnostics = report.get("diagnostics")
+    if not isinstance(diagnostics, list):
+        raise MirrorMaterializationError(
+            f"Source conversion report has no diagnostics array: {report_path}"
+        )

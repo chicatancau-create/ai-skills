@@ -1,0 +1,112 @@
+def _animation_effect_error(effect: object, label: str) -> str | None:
+    if not isinstance(effect, str):
+        return f'animations.json {label} animation effect must be a string'
+    try:
+        normalize_animation_effect(effect)
+    except ValueError:
+        valid = ', '.join((*ANIMATIONS, *ANIMATION_MODES, 'none'))
+        return (
+            f'animations.json {label} has unknown animation effect: {effect}; '
+            f'valid effects: {valid}'
+        )
+    return None
+
+
+def resolve_slide_animation_config(
+    default_animation: dict[str, Any],
+    slide_animation: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge one slide animation over defaults using writer inheritance rules."""
+    resolved = dict(default_animation)
+    if 'effect' in slide_animation and 'effect_options' not in slide_animation:
+        resolved.pop('effect_options', None)
+    resolved.update(slide_animation)
+    return resolved
+
+
+def animation_group_effect_entries(
+    group_cfg: dict[str, Any],
+    *,
+    path: str,
+) -> tuple[tuple[str, dict[str, Any]], ...]:
+    """Expand one legacy group block or one ordered multi-effect envelope."""
+    if 'effects' not in group_cfg:
+        return ((path, group_cfg),)
+
+    extra_fields = sorted(set(group_cfg) - {'effects'})
+    if extra_fields:
+        rendered = ', '.join(repr(field) for field in extra_fields)
+        raise ValueError(
+            f'animations.json {path} cannot combine "effects" with '
+            f'other group-level field(s): {rendered}'
+        )
+    effects = group_cfg['effects']
+    if not isinstance(effects, list):
+        raise ValueError(f'animations.json {path}.effects must be an array')
+    if not effects:
+        raise ValueError(
+            f'animations.json {path}.effects must contain at least one effect'
+        )
+
+    entries: list[tuple[str, dict[str, Any]]] = []
+    for index, effect_cfg in enumerate(effects):
+        effect_path = f'{path}.effects[{index}]'
+        if not isinstance(effect_cfg, dict):
+            raise ValueError(
+                f'animations.json {effect_path} must be an object'
+            )
+        if 'effect' not in effect_cfg:
+            raise ValueError(
+                f'animations.json {effect_path}.effect is required'
+            )
+        entries.append((effect_path, effect_cfg))
+    return tuple(entries)
+
+
+def _animation_parameter_errors(
+    value: dict[str, Any],
+    label: str,
+    *,
+    inherited_effect: object,
+    sound_is_path: bool = True,
+) -> list[str]:
+    """Validate PowerPoint effect/timing parameters shared by all scopes."""
+    errors: list[str] = []
+    effect = value.get('effect', inherited_effect)
+    effect_options = value.get('effect_options')
+    if effect_options is not None and 'effect' not in value:
+        errors.append(
+            f'animations.json {label} effect_options requires an explicit effect'
+        )
+    else:
+        try:
+            normalize_animation_effect_request(
+                effect,
+                effect_options,
+                allow_none=True,
+                allow_modes=True,
+            )
+        except ValueError as exc:
+            errors.append(f'animations.json {label}: {exc}')
+
+    repeat_count = value.get('repeat_count')
+    repeat_duration = value.get('repeat_duration')
+    if repeat_count is not None:
+        if (
+            isinstance(repeat_count, bool)
+            or not isinstance(repeat_count, (int, float))
+            or not math.isfinite(float(repeat_count))
+            or float(repeat_count) <= 0
+            or float(repeat_count) * 1000 > 4_294_967_295
+        ):
+            errors.append(
+                f'animations.json {label} repeat_count must be a positive number: '
+                f'{repeat_count!r}'
+            )
+    if repeat_duration is not None:
+        try:
+            animation_seconds_to_milliseconds(
+                repeat_duration,
+                f'animations.json {label} repeat_duration',
+                allow_zero=False,
+            )

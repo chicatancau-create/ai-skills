@@ -1,0 +1,117 @@
+def _line_font_size(p: TextParagraph, line: list[TextRun]) -> float:
+    visible_sizes = [
+        run.font_size_px
+        for run in line
+        if not run.is_break and run.text
+    ]
+    if visible_sizes:
+        return max(visible_sizes)
+    break_sizes = [run.font_size_px for run in line if run.is_break]
+    return max(break_sizes, default=p.empty_line_font_size_px)
+
+
+def _clip_lines_to_bottom(
+    para: TextParagraph,
+    lines: list[list[TextRun]],
+    top_y: float,
+    bottom_y: float,
+) -> list[list[TextRun]]:
+    """Return the leading display lines whose line boxes fit in the text frame."""
+    visible: list[list[TextRun]] = []
+    cursor_y = top_y
+    for line in lines:
+        line_h = _line_height(para, line)
+        # PowerPoint lets the first line that starts within the box render even
+        # when it slightly exceeds the bottom — only suppress lines whose top
+        # is already at/below the bottom edge.
+        if cursor_y >= bottom_y:
+            break
+        visible.append(line)
+        cursor_y += line_h
+    return visible
+
+
+def _paragraph_height(p: TextParagraph) -> float:
+    """Legacy helper kept for callers that don't pre-wrap (currently unused)."""
+    lines = _wrap_paragraph_into_lines(p, float("inf"))
+    return _paragraph_height_from_lines(p, lines)
+
+
+def _emit_paragraph(
+    para: TextParagraph,
+    lines: list[list[TextRun]],
+    inner_x: float, inner_w: float,
+    top_y: float,
+) -> str:
+    """Render a paragraph (already split into lines) as one <text> element.
+
+    Each pre-wrapped display line becomes a sequence of <tspan>s: the first
+    tspan on a line carries the explicit x and dy (line-height advance);
+    subsequent tspans on the same line inherit x.
+    """
+    align = para.align
+    if align == "ctr":
+        anchor_x = inner_x + inner_w / 2.0
+        text_anchor = "middle"
+    elif align == "r":
+        anchor_x = inner_x + inner_w
+        text_anchor = "end"
+    else:  # 'l' / 'just' / 'dist' / unknown
+        anchor_x = inner_x + para.indent_px + para.margin_left_px
+        text_anchor = "start"
+
+    if not lines:
+        return ""
+
+    visible_lines = [
+        [run for run in line if not run.is_break and run.text]
+        for line in lines
+    ]
+    first_line_idx = next(
+        (index for index, line in enumerate(visible_lines) if line),
+        None,
+    )
+    if first_line_idx is None:
+        return ""
+
+    first_run = visible_lines[first_line_idx][0]
+    first_baseline = top_y + 0.85 * first_run.font_size_px
+
+    spans: list[str] = []
+    for line_idx, line in enumerate(visible_lines):
+        line_advance = None
+        if line_idx > 0:
+            height_line = (
+                lines[line_idx - 1]
+                if line_idx <= first_line_idx else lines[line_idx]
+            )
+            line_advance = _line_height(para, height_line)
+        if not line:
+            if line_advance is not None:
+                spans.append(
+                    f'<tspan x="{fmt_num(anchor_x)}" '
+                    f'dy="{fmt_num(line_advance)}"></tspan>'
+                )
+            continue
+        line_has_hyperlink = any(run.hyperlink_href for run in line)
+        if line_has_hyperlink:
+            run_spans = ''.join(
+                _wrap_run_hyperlink(
+                    _run_tspan_markup(run),
+                    run,
+                )
+                for run in line
+            )
+            position_attrs = (
+                f' x="{fmt_num(anchor_x)}" dy="{fmt_num(line_advance)}"'
+                if line_advance is not None
+                else ''
+            )
+            spans.append(f'<tspan{position_attrs}>{run_spans}</tspan>')
+            continue
+        for run_idx, run in enumerate(line):
+            attrs = _run_tspan_attrs(run)
+            if run_idx == 0 and line_advance is not None:
+                if run.formula_latex is not None:
+                    spans.append(
+                        f'<tspan x="{fmt_num(anchor_x)}" '

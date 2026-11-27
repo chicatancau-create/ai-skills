@@ -1,0 +1,134 @@
+            carriers.append(child)
+    return carriers
+
+
+def _primary_and_fallback(carrier: Any) -> tuple[Any | None, Any | None]:
+    if carrier.tag == _qn(PML_NS, "transition"):
+        return carrier, None
+
+    primary = None
+    fallback = None
+    for child in list(carrier):
+        transitions = _transition_elements(child)
+        if not transitions:
+            continue
+        if child.tag == _qn(MC_NS, "Choice") and primary is None:
+            primary = transitions[0]
+        elif child.tag == _qn(MC_NS, "Fallback") and fallback is None:
+            fallback = transitions[0]
+    if primary is None:
+        transitions = _transition_elements(carrier)
+        primary = transitions[0] if transitions else None
+    return primary, fallback
+
+
+def _effect_identity(
+    transition: Any | None,
+) -> tuple[str | None, str | None, dict[str, str]]:
+    if transition is None:
+        return None, None, {}
+    for child in list(transition):
+        if child.tag == _qn(PML_NS, "sndAc"):
+            continue
+        return (
+            _local_name(child.tag),
+            _namespace_name(child.tag),
+            {str(name): str(value) for name, value in child.attrib.items()},
+        )
+    return None, None, {}
+
+
+def _sound_identity(
+    transition: Any | None,
+) -> tuple[str | None, str | None]:
+    """Return one embedded transition sound relationship and display name."""
+    if transition is None:
+        return None, None
+    sound_action = next(
+        (
+            child
+            for child in list(transition)
+            if child.tag == _qn(PML_NS, "sndAc")
+        ),
+        None,
+    )
+    if sound_action is None:
+        return None, None
+    start_sound = next(
+        (
+            child
+            for child in list(sound_action)
+            if child.tag == _qn(PML_NS, "stSnd")
+        ),
+        None,
+    )
+    if start_sound is None:
+        return None, None
+    sound = next(
+        (
+            child
+            for child in list(start_sound)
+            if child.tag == _qn(PML_NS, "snd")
+        ),
+        None,
+    )
+    if sound is None:
+        return None, None
+    return sound.get(_qn(RELATIONSHIPS_NS, "embed")), sound.get("name")
+
+
+def _effective_transition_options(
+    effect: str,
+    options: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    effective = {
+        name: spec["default"]
+        for name, spec in NATIVE_TRANSITIONS[effect]["effectOptions"].items()
+    }
+    effective.update(normalize_transition_effect_options(effect, options))
+    return effective
+
+
+def _transition_option_combinations(effect: str) -> list[dict[str, object]]:
+    combinations: list[dict[str, object]] = [{}]
+    for name, spec in NATIVE_TRANSITIONS[effect]["effectOptions"].items():
+        combinations = [
+            {**combination, name: value}
+            for combination in combinations
+            for value in spec["values"]
+        ]
+    return combinations
+
+
+def _identify_native_transition(
+    element: str | None,
+    namespace: str | None,
+    attributes: Mapping[str, str],
+) -> tuple[str | None, dict[str, object]]:
+    if element is None or namespace is None:
+        return None, {}
+    for effect in NATIVE_TRANSITION_KEYS:
+        for options in _transition_option_combinations(effect):
+            _prefix, expected_namespace, expected_element, expected_attrs, _fallback = (
+                _effect_spec(effect, options)
+            )
+            if (
+                namespace == expected_namespace
+                and element == expected_element
+                and dict(attributes) == {
+                    str(name): str(value)
+                    for name, value in expected_attrs.items()
+                }
+            ):
+                return effect, options
+    return None, {}
+
+
+def _int_attribute(element: Any | None, *names: str) -> int | None:
+    if element is None:
+        return None
+    for name in names:
+        raw = element.get(name)
+        if raw is None:
+            continue
+        try:

@@ -1,0 +1,90 @@
+        )
+    store_path = _resolve_store_path(
+        svg_path,
+        PurePosixPath(PAYLOAD_STORE_RELATIVE_PATH.as_posix()),
+    )
+    record = _load_store(store_path).native_records.get(value)
+    if record is None:
+        raise NativePayloadError(
+            f"Native metadata record {value} is missing from {store_path}"
+        )
+    return record
+
+
+def hydrate_native_payload_refs(root: ET.Element, svg_path: Path) -> int:
+    """Restore compact native records and payloads as legacy inline metadata.
+
+    The operation preflights every reference before mutating the tree, so an
+    invalid store leaves the caller's parsed SVG unchanged.
+    """
+    record_operations: list[tuple[ET.Element, dict[str, str]]] = []
+    payload_operations: list[tuple[str, ET.Element, bytes]] = []
+    for element in root.iter():
+        effective_attributes = dict(element.attrib)
+        has_native_record = NATIVE_RECORD_REF_ATTRIBUTE in element.attrib
+        native_record_ref = element.get(NATIVE_RECORD_REF_ATTRIBUTE) or ""
+        if has_native_record:
+            if not native_record_ref:
+                raise NativePayloadError(
+                    "native metadata has an empty record reference"
+                )
+            record = _native_record_for_reference(native_record_ref, svg_path)
+            conflicts = sorted(set(record) & set(element.attrib))
+            if conflicts:
+                raise NativePayloadError(
+                    "native metadata cannot carry both inline fields and a record: "
+                    + ", ".join(conflicts)
+                )
+            effective_attributes.update(record)
+            record_operations.append((element, record))
+
+        if (
+            _local_name(element.tag) == "metadata"
+            and effective_attributes.get("data-pptx-part") == "txbody"
+        ):
+            has_reference = TXBODY_REF_ATTRIBUTE in effective_attributes
+            reference = effective_attributes.get(TXBODY_REF_ATTRIBUTE) or ""
+            if has_reference:
+                if not reference:
+                    raise NativePayloadError(
+                        "txbody metadata has an empty payload reference"
+                    )
+                if (element.text or "").strip() or element.get("data-pptx-encoding"):
+                    raise NativePayloadError(
+                        "txbody metadata cannot carry both inline data and a reference"
+                    )
+                payload_operations.append(
+                    ("txbody", element, _payload_for_reference(reference, svg_path))
+                )
+
+        has_shape_reference = SHAPE_STYLE_REF_ATTRIBUTE in effective_attributes
+        shape_reference = effective_attributes.get(SHAPE_STYLE_REF_ATTRIBUTE) or ""
+        if has_shape_reference:
+            if not shape_reference:
+                raise NativePayloadError(
+                    "shape-style metadata has an empty payload reference"
+                )
+            if effective_attributes.get(SHAPE_STYLE_ATTRIBUTE):
+                raise NativePayloadError(
+                    "shape-style metadata cannot carry both inline data and a reference"
+                )
+            payload_operations.append(
+                (
+                    "shape-style",
+                    element,
+                    _payload_for_reference(shape_reference, svg_path),
+                )
+            )
+
+        has_geometry_reference = CUSTOM_GEOMETRY_REF_ATTRIBUTE in effective_attributes
+        geometry_reference = (
+            effective_attributes.get(CUSTOM_GEOMETRY_REF_ATTRIBUTE) or ""
+        )
+        if has_geometry_reference:
+            if not geometry_reference:
+                raise NativePayloadError(
+                    "custom-geometry metadata has an empty payload reference"
+                )
+            if effective_attributes.get(CUSTOM_GEOMETRY_ATTRIBUTE):
+                raise NativePayloadError(
+                    "custom-geometry metadata cannot carry both inline data and a reference"

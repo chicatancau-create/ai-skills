@@ -1,0 +1,86 @@
+    for slide in slide_library.get("slides", []):
+        slide_index = slide.get("slide_index")
+        for diagram in slide.get("diagrams", []):
+            node_count = int(diagram.get("node_count") or 0)
+            text_count = int(diagram.get("text_count") or 0)
+            text_item_count += text_count
+            if not diagram.get("text_extracted"):
+                unreadable_count += 1
+            if diagram.get("status") != "ok" or diagram.get("warnings"):
+                warning_count += 1
+            if isinstance(slide_index, int):
+                slides_with_diagrams.add(slide_index)
+            diagrams.append(
+                {
+                    "slide_index": slide_index,
+                    "diagram_id": diagram.get("diagram_id"),
+                    "layout": diagram.get("layout", {}),
+                    "node_count": node_count,
+                    "text_count": text_count,
+                    "connection_count": int(diagram.get("connection_count") or 0),
+                    "max_depth": int(diagram.get("max_depth") or 0),
+                    "text_extracted": bool(diagram.get("text_extracted")),
+                    "has_persisted_drawing": bool(diagram.get("has_persisted_drawing")),
+                    "status": diagram.get("status"),
+                    "warnings": diagram.get("warnings", []),
+                }
+            )
+    return {
+        "diagram_count": len(diagrams),
+        "text_item_count": text_item_count,
+        "unreadable_count": unreadable_count,
+        "warning_count": warning_count,
+        "slides_with_diagrams": sorted(slides_with_diagrams),
+        "diagrams": diagrams,
+    }
+
+
+def build_source_profile(
+    pptx_path: Path,
+    identity: dict[str, Any],
+    slide_library: dict[str, Any],
+    stem: str | None = None,
+) -> dict[str, Any]:
+    """Build the Strategist-facing per-deck digest over the raw intake artifacts.
+
+    `stem` is the source-file stem used to prefix the per-deck artifact files so
+    several decks can coexist in one `analysis/` folder. Defaults to the pptx stem.
+    """
+    stem = stem or pptx_path.stem
+    return {
+        "schema": "pptx_intake_profile.v1",
+        "stem": stem,
+        "source_pptx": str(pptx_path),
+        "slide_count": slide_library.get("slide_count", identity.get("slide_count", 0)),
+        "usage_contract": {
+            "standard_generation": (
+                "Use identity and slide-library fields as source facts and recommendation "
+                "candidates only; do not preserve original page count, order, or coordinates "
+                "unless the user selected the beautify profile."
+            ),
+            "beautify": (
+                "Promote source text, page order, page count, colors, fonts, and font sizes "
+                "into locked constraints after user confirmation."
+            ),
+        },
+        "artifacts": {
+            "identity": f"{stem}.identity.json",
+            "slide_library": f"{stem}.slide_library.json",
+        },
+        "canvas": identity.get("canvas", {}),
+        "identity": {
+            "theme_palette": (identity.get("theme") or {}).get("palette", {}),
+            "theme_fonts": (identity.get("theme") or {}).get("fonts", {}),
+            "theme_sizes": (identity.get("theme") or {}).get("sizes", {}),
+            "observed_colors": (identity.get("observed") or {}).get("colors", []),
+            "observed_fonts": (identity.get("observed") or {}).get("fonts", {}),
+            "observed_sizes_pt": (identity.get("observed") or {}).get("sizes_pt", []),
+            "layout_sizes_pt": identity.get("layout_sizes_pt", []),
+        },
+        "structure": {
+            "canvas_px": slide_library.get("canvas_px", {}),
+            "page_types": [
+                {
+                    "slide_index": slide.get("slide_index"),
+                    "page_type": slide.get("page_type"),
+                    "slot_count": len(slide.get("slots", [])),

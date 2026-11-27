@@ -1,0 +1,102 @@
+            )
+        payload_metadata = _replacement_payload_metadata(payload)
+        replacement_attrs.append('data-pptx-replace-with="chart"')
+        replacement_attrs.append('data-pptx-native-authority="json"')
+        if not result.native_payload:
+            replacement_attrs.append(f'{_SOURCE_PROXY_ATTRIBUTE}="native-restore"')
+    elif result.native_status:
+        replacement_attrs.append(
+            'data-pptx-replacement-status="'
+            f'{_xml_escape(result.native_status)}"'
+        )
+
+    rendered = preview_svg
+    if rendered:
+        replacement_attrs.append('data-pptx-fallback-kind="source-preview"')
+    elif result.normalized_svg:
+        rendered = result.normalized_svg
+        replacement_attrs.append('data-pptx-fallback-kind="normalized"')
+    else:
+        replacement_attrs.append('data-pptx-fallback-kind="placeholder"')
+    return rendered, replacement_attrs, payload_metadata
+
+
+def _render_graphic_preview(node: ShapeNode, ctx: AssemblyContext) -> str:
+    """Render a graphicFrame's baked fallback preview bitmap when present.
+
+    PowerPoint stores a static raster preview for many embedded graphics
+    inside ``mc:AlternateContent``. The Fallback branch is normally a plain
+    ``p:pic`` (sometimes nested), so any conformant viewer that can't speak
+    the richer object paints the preview. We do the same for flat preview SVGs.
+
+    Falls back to '' when the deck has no Fallback pic (very old or
+    third-party authoring tools sometimes omit it). Caller then emits the
+    dashed placeholder.
+    """
+    ac = node.xml.find("a:graphic/a:graphicData/mc:AlternateContent", NS)
+    if ac is None:
+        return ""
+    pic = ac.find("mc:Fallback//p:pic", NS)
+    if pic is None:
+        # Some authoring tools put the preview directly in mc:Choice.
+        pic = ac.find("mc:Choice//p:pic", NS)
+        if pic is None:
+            return ""
+
+    # The inner pic carries its own absolute xfrm in this deck (and in every
+    # well-formed PPTX I've seen — PowerPoint copies the graphicFrame xfrm
+    # there during save). If it's missing, fall back to the graphicFrame's
+    # xfrm so the preview at least lands somewhere visible.
+    inner_xfrm = node.xfrm
+    pic_xfrm_elem = pic.find("p:spPr/a:xfrm", NS)
+    if pic_xfrm_elem is not None:
+        from .emu_units import parse_xfrm
+        parsed = parse_xfrm(pic_xfrm_elem)
+        if parsed.w > 0 and parsed.h > 0:
+            inner_xfrm = parsed
+
+    result = convert_picture(
+        pic, inner_xfrm, ctx.slide_part, ctx.pkg,
+        media_subdir=ctx.media_subdir,
+        embed_inline=ctx.embed_images,
+        asset_name_map=ctx.asset_name_map,
+        strict=ctx.strict,
+    )
+    if not result.svg:
+        return ""
+    _diagnose_picture_result(ctx, result)
+    ctx.media.update(result.media)
+    return result.svg
+
+
+# ---------------------------------------------------------------------------
+# Background
+# ---------------------------------------------------------------------------
+
+def _emit_background(slide: SlideRef, ctx: AssemblyContext,
+                     w: float, h: float) -> str:
+    """Inspect <p:bg> on slide / layout / master in inheritance order."""
+    for part in (slide.part, slide.layout, slide.master):
+        if part is None:
+            continue
+        bg = get_background(part.xml)
+        if bg is None:
+            continue
+        bg_pr = bg.find("p:bgPr", NS)
+        bg_ref = bg.find("p:bgRef", NS)
+        placeholder_hex = None
+
+        if bg_pr is None and bg_ref is not None:
+            bg_pr = _theme_background_fill(slide, ctx, bg_ref)
+            color_elem = find_color_elem(bg_ref)
+            placeholder_hex, _ = resolve_color(color_elem, ctx.palette)
+        if bg_pr is None:
+            continue
+
+        bg_image = _emit_background_image(bg_pr, part, ctx, w, h)
+        if bg_image:
+            return bg_image
+
+        fill = resolve_fill(
+            bg_pr, ctx.palette,
+            id_prefix="bg", id_seq=ctx.grad_seq,

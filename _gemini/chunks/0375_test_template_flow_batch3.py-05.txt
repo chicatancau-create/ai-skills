@@ -1,0 +1,71 @@
+            for propagate in (True, False):
+                project = self.root / f'{existing}-{propagate}'
+                project.mkdir()
+                if existing:
+                    convert(source, project / 'sources' / 'reference.md')
+                with patch.object(manager, '_import_pptx_intake', return_value=project / 'analysis'), \
+                        patch.object(manager, '_import_presentation', side_effect=convert):
+                    manager.import_sources(str(project), [str(source)], copy=True,
+                                           propagate_images=propagate)
+                self.assertEqual((project / 'images' / 'photo.png').exists(), propagate)
+                self.assertTrue((project / 'sources' / 'reference_files' / 'photo.png').exists())
+
+    def test_e_quick_ignores_installed_unused_prototypes(self) -> None:
+        pages = self.root / 'svg_output'
+        pages.mkdir()
+        templates = self.root / 'templates'
+        templates.mkdir()
+        page = pages / '01_body.svg'
+        page.write_text(_structured_page('body'), encoding='utf-8')
+        (templates / 'unused.svg').write_text('invalid unused prototype', encoding='utf-8')
+        checker = SVGQualityChecker(quick_generate=True)
+        checker._check_pptx_structure_contract(pages, [page])
+        self.assertEqual(checker._pptx_structure_issues, [])
+        self.assertEqual(checker._structured_native_slots, [])
+
+    def test_c_capacity_is_font_sensitive_and_read_only(self) -> None:
+        from svg_quality.slot_capacity import slot_capacity_report
+
+        path = self.root / 'title.svg'
+        path.write_text(_structured_page('title',
+            '<g id="title" data-pptx-placeholder="title" data-pptx-bounds="0 0 320 100" '
+            'font-family="Arial" font-size="40"><text data-pptx-carrier="true" '
+            'x="0" y="40">{{TITLE}}</text></g>'), encoding='utf-8')
+        before = path.read_bytes()
+        report = slot_capacity_report([path])
+        slot = report['slots'][0]
+        self.assertEqual(slot['font_size'], 40)
+        self.assertGreater(slot['latin']['characters_per_line'], slot['cjk']['characters_per_line'])
+        self.assertGreater(slot['cjk']['lines'], 0)
+        self.assertNotIn('errors', report)
+        self.assertNotIn('warnings', report)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_c_capacity_reads_tspan_fonts_and_zero_baseline(self) -> None:
+        from svg_quality.slot_capacity import slot_capacity_report
+
+        path = self.root / 'mixed.svg'
+        path.write_text(_structured_page('mixed',
+            '<g id="mixed" data-pptx-placeholder="body" data-pptx-bounds="0 0 320 100">'
+            '<text data-pptx-carrier="true" font-family="Arial" font-size="16">'
+            '<tspan x="0" y="0" font-size="40">Large</tspan>'
+            '<tspan x="0" y="48" font-size="24">Small</tspan></text></g>'), encoding='utf-8')
+        slot = slot_capacity_report([path])['slots'][0]
+        self.assertEqual(slot['font_size'], 40)
+        self.assertEqual(slot['line_height'], 48)
+        self.assertEqual(slot['line_height_source'], 'tspan baselines')
+        self.assertEqual(len(slot['typography_variants']), 2)
+        self.assertIn('first visible run', slot['estimate_scope'])
+
+    def test_d_source_images_can_stay_out_of_runtime_pool(self) -> None:
+        source = self.root / 'reference.md'
+        source.write_text('![image](reference_files/photo.png)', encoding='utf-8')
+        assets = self.root / 'reference_files'
+        assets.mkdir()
+        (assets / 'photo.png').write_bytes(b'bitmap')
+        _write_json(assets / 'image_manifest.json', [{'filename': 'photo.png'}])
+        project = self.root / 'project'
+        project.mkdir()
+        manager = ProjectManager()
+        manager.import_sources(str(project), [str(source)], copy=True, propagate_images=False)
+        self.assertTrue((project / 'sources' / 'reference_files' / 'photo.png').is_file())

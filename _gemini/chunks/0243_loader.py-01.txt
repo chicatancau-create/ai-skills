@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""
+PPT Master - Preset Shape Data Loader
+
+Load and validate the bundled DrawingML preset geometry catalog.
+
+Usage:
+    Import load_preset_shape_definitions from pptx_shapes.loader.
+
+Examples:
+    definitions = load_preset_shape_definitions()
+
+Dependencies:
+    None (only uses standard library)
+"""
+
+from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+from xml.etree import ElementTree as ET
+
+from .errors import PresetShapeDataError
+from .models import (
+    AdjustHandleDefinition,
+    ConnectionSiteDefinition,
+    GuideDefinition,
+    PathCommandDefinition,
+    PointExpression,
+    PresetShapeDefinition,
+    ShapePathDefinition,
+    TextRectangleDefinition,
+)
+
+
+DRAWINGML_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+EXPECTED_SHAPE_COUNT = 187
+BUNDLED_DEFINITIONS_SHA256 = (
+    "4a762444d8d85876881c02a5b1dedf6f73006fcd8acb7b4e393435615b37c780"
+)
+BUNDLED_SHAPE_TYPES_SHA256 = (
+    "f2c3bdcda8569b358ce3196cfeb183849e33bfc7955fac961dc85fceb6b3b587"
+)
+
+_PACKAGE_DIR = Path(__file__).resolve().parent
+BUNDLED_DEFINITIONS_PATH = _PACKAGE_DIR / "data" / "presetShapeDefinitions.xml"
+BUNDLED_SHAPE_TYPES_PATH = _PACKAGE_DIR / "data" / "shape_type_values.txt"
+_EXPECTED_ROOT_TAG = "presetShapeDefinitons"
+_PATH_COMMAND_ARITY = {
+    "moveTo": 1,
+    "lnTo": 1,
+    "quadBezTo": 2,
+    "cubicBezTo": 3,
+    "arcTo": 0,
+    "close": 0,
+}
+
+
+def load_shape_type_values(path: Path | None = None) -> tuple[str, ...]:
+    """Load the independent Open XML ``ShapeTypeValues`` coverage list."""
+
+    source = path or BUNDLED_SHAPE_TYPES_PATH
+    try:
+        raw = source.read_bytes()
+        names = tuple(
+            line.strip()
+            for line in raw.decode("utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        )
+    except (OSError, UnicodeDecodeError) as exc:
+        raise PresetShapeDataError(
+            f"Cannot read preset shape type catalog {source}: {exc}"
+        ) from exc
+    if path is None:
+        actual = hashlib.sha256(_normalized_lf_bytes(raw)).hexdigest()
+        if actual != BUNDLED_SHAPE_TYPES_SHA256:
+            raise PresetShapeDataError(
+                f"ShapeTypeValues checksum mismatch for {source}: "
+                f"expected {BUNDLED_SHAPE_TYPES_SHA256}, found {actual}"
+            )
+    if len(names) != len(set(names)):
+        raise PresetShapeDataError(f"Duplicate names in shape type catalog: {source}")
+    if len(names) != EXPECTED_SHAPE_COUNT:
+        raise PresetShapeDataError(
+            f"Expected {EXPECTED_SHAPE_COUNT} ShapeTypeValues, found {len(names)}"
+        )
+    return names
+
+
+def load_preset_shape_definitions(
+    path: Path | None = None,
+    *,
+    expected_sha256: str | None = None,
+    expected_names: tuple[str, ...] | None = None,
+) -> tuple[PresetShapeDefinition, ...]:
+    """Load one preset XML catalog and enforce uniqueness and coverage.
+
+    The bundled catalog is hash-locked automatically. External catalogs are
+    validated structurally and can opt into a caller-provided hash.
+    """
+
+    source = path or BUNDLED_DEFINITIONS_PATH
+    locked_hash = (
+        BUNDLED_DEFINITIONS_SHA256
+        if path is None and expected_sha256 is None
+        else expected_sha256
+    )
+    raw = _read_verified_bytes(source, locked_hash)
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError as exc:
+        raise PresetShapeDataError(f"Invalid preset geometry XML {source}: {exc}") from exc
+    if _local_name(root.tag) != _EXPECTED_ROOT_TAG:
+        raise PresetShapeDataError(
+            f"Unexpected preset geometry root {_local_name(root.tag)!r} in {source}"
+        )
+
+    definitions = tuple(_parse_shape(element) for element in root)
+    names = tuple(definition.name for definition in definitions)
+    if len(names) != len(set(names)):
+        raise PresetShapeDataError(f"Duplicate preset geometry names in {source}")
+
+    catalog_names = expected_names

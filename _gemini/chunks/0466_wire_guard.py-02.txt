@@ -1,0 +1,100 @@
+    global _last_start
+    now = time.time()
+    if now - _last_start < START_COOLDOWN:
+        return
+    _last_start = now
+    log("headroom unhealthy -> asking the supervisor to start it")
+    try:
+        subprocess.run([HR, "install", "start"], capture_output=True, text=True, timeout=180,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except Exception as e:
+        log("start attempt failed: %s" % e)
+
+
+# ---- proxy-guard 看门狗（2026-11-26 对抗式审查 M6 后新增） ----
+# 守卫每 60 秒写一次 state.json 心跳；心跳文件超过 180 秒没更新就经启动 vbs 重拉。
+# 守卫自带单实例互斥，活着时多拉一次会立即退出，不会双跑。
+# 已知边界：进程活着但卡死时互斥仍被占用，重拉无效（守卫主循环全异常捕获，极难卡死）。
+PROXY_GUARD_STATE = r"D:\AI-Tool-State\proxy-guard\state.json"
+PROXY_GUARD_VBS = os.path.join(
+    os.environ.get("APPDATA", r"C:\Users\Admin\AppData\Roaming"),
+    r"Microsoft\Windows\Start Menu\Programs\Startup\proxy-guard-autostart.vbs")
+_pg_last_launch = 0.0
+
+
+def proxy_guard_watchdog():
+    global _pg_last_launch
+    now = time.time()
+    try:
+        age = now - os.path.getmtime(PROXY_GUARD_STATE)
+    except OSError:
+        age = 1e9  # 心跳文件还不存在（刚开机）也视为需要拉起
+    if age <= 180 or now - _pg_last_launch < 300:
+        return None
+    _pg_last_launch = now
+    try:
+        subprocess.Popen(["wscript.exe", PROXY_GUARD_VBS],
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        log("proxy-guard watchdog: heartbeat stale %.0fs -> relaunched via vbs" % min(age, 99999))
+        return "proxy-guard: heartbeat stale -> relaunched"
+    except Exception as e:
+        log("proxy-guard watchdog: relaunch failed: %s" % e)
+        return "proxy-guard: relaunch failed %s" % e
+
+
+def check_claude(apply_):
+    mode, attached = cc_mode("claude")
+    J = read_json(CLAUDE)
+    if J is None:
+        return "claude: settings.json unreadable/unparseable"
+    env = J.get("env") or {}
+    cur = env.get("ANTHROPIC_BASE_URL", "")
+    if mode != "proxy" or not attached:
+        return "claude: cc-switch mode=%s attached=%s -> leave alone (user chose direct)" % (mode, attached)
+    if cur == WANT_CLAUDE:
+        return "claude: OK (%s)" % cur
+    if CC_CLAUDE not in cur:
+        return "claude: unexpected BASE_URL %r -> leave alone (not a cc-switch rewrite)" % cur
+    if not apply_:
+        return "claude: NEEDS FIX %s -> %s" % (cur, WANT_CLAUDE)
+    if not healthy():
+        maybe_start_headroom()
+        return "claude: headroom not healthy -> NOT wiring (would black-hole the agent)"
+    b = backup(CLAUDE, "claude")
+    env["ANTHROPIC_BASE_URL"] = WANT_CLAUDE
+    J["env"] = env
+    if write_text(CLAUDE, json.dumps(J, ensure_ascii=False, indent=2) + "\n"):
+        log("claude: rewired %s -> %s (backup %s)" % (cur, WANT_CLAUDE, b))
+        return "claude: FIXED -> %s" % WANT_CLAUDE
+    return "claude: write FAILED (file locked?)"
+
+
+def check_codex(apply_):
+    mode, attached = cc_mode("codex")
+    try:
+        with open(CODEX, encoding="utf-8") as f:
+            txt = f.read()
+    except OSError as e:
+        return "codex: config.toml unreadable: %s" % e
+    m = re.search(r'base_url\s*=\s*"([^"]+)"', txt)
+    cur = m.group(1) if m else ""
+    if mode != "proxy" or not attached:
+        return "codex: cc-switch mode=%s attached=%s -> leave alone (user chose direct)" % (mode, attached)
+    if cur == WANT_CODEX:
+        return "codex: OK (%s)" % cur
+    if CC_CODEX not in cur:
+        return "codex: unexpected base_url %r -> leave alone (not a cc-switch rewrite)" % cur
+    if not apply_:
+        return "codex: NEEDS FIX %s -> %s" % (cur, WANT_CODEX)
+    if not healthy():
+        maybe_start_headroom()
+        return "codex: headroom not healthy -> NOT wiring (would black-hole the agent)"
+    b = backup(CODEX, "codex")
+    new = txt[:m.start(1)] + WANT_CODEX + txt[m.end(1):]
+    if write_text(CODEX, new):
+        log("codex: rewired %s -> %s (backup %s)" % (cur, WANT_CODEX, b))
+        return "codex: FIXED -> %s" % WANT_CODEX
+    return "codex: write FAILED (file locked?)"
+
+
+def tick(apply_):

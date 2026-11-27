@@ -1,0 +1,101 @@
+def _publish_outputs(replacements: list[tuple[Path, Path]]) -> None:
+    """Publish verified outputs together, restoring prior files on failure."""
+    backups: dict[Path, Path] = {}
+    published: list[Path] = []
+    try:
+        for _temporary, destination in replacements:
+            if not destination.exists():
+                continue
+            backup = _temporary_output(destination, f".backup{destination.suffix}")
+            os.replace(destination, backup)
+            backups[destination] = backup
+        for temporary, destination in replacements:
+            os.replace(temporary, destination)
+            published.append(destination)
+    except OSError as exc:
+        rollback_errors: list[str] = []
+        for destination in reversed(published):
+            backup = backups.pop(destination, None)
+            try:
+                if backup is None:
+                    destination.unlink(missing_ok=True)
+                else:
+                    os.replace(backup, destination)
+            except OSError as rollback_exc:
+                rollback_errors.append(f"{destination}: {rollback_exc}")
+        for destination, backup in backups.items():
+            try:
+                os.replace(backup, destination)
+            except OSError as rollback_exc:
+                rollback_errors.append(f"{destination}: {rollback_exc}")
+        if rollback_errors:
+            raise RuntimeError(
+                "Output publication failed and rollback was incomplete: "
+                + "; ".join(rollback_errors)
+            ) from exc
+        raise
+    else:
+        for backup in backups.values():
+            backup.unlink(missing_ok=True)
+
+
+def _cue_report(cue: SoundCue) -> dict[str, Any]:
+    return {
+        "kind": cue.kind,
+        "slide_num": cue.slide_num,
+        "slide_name": cue.slide_name,
+        "row_index": cue.row_index,
+        "shape_id": cue.shape_id,
+        "group_id": cue.group_id,
+        "relationship_id": cue.relationship_id,
+        "sound_name": cue.sound_name,
+        "package_part": cue.package_part,
+        "media_sha256": cue.media_sha256,
+        "source_duration_ms": cue.source_duration_ms,
+        "powerpoint_time_ms": cue.powerpoint_time_ms,
+        "video_time_ms": cue.video_time_ms,
+        "gain_db": cue.gain_db,
+    }
+
+
+def mix_video_sounds(
+    project_path: Path,
+    *,
+    pptx_path: Path,
+    trace_path: Path,
+    video_path: Path,
+    audio_dir: Path,
+    subtitle_dir: Path | None,
+    output_path: Path,
+    stem_path: Path,
+    report_path: Path,
+    transition_gain_db: float = _DEFAULT_TRANSITION_GAIN_DB,
+    animation_gain_db: float = _DEFAULT_ANIMATION_GAIN_DB,
+    limiter_dbfs: float = _DEFAULT_LIMITER_DBFS,
+    force: bool = False,
+) -> SoundMixResult:
+    """Render and publish one calibrated animation-sound video mix."""
+    project_path = project_path.resolve()
+    pptx_path = pptx_path.resolve()
+    trace_path = trace_path.resolve()
+    video_path = video_path.resolve()
+    audio_dir = audio_dir.resolve()
+    subtitle_dir = subtitle_dir.resolve() if subtitle_dir is not None else None
+    output_path = output_path.resolve()
+    stem_path = stem_path.resolve()
+    report_path = report_path.resolve()
+    if not project_path.is_dir():
+        raise FileNotFoundError(f"Project path does not exist: {project_path}")
+    for label, path in (
+        ("Final narrated PPTX", pptx_path),
+        ("Final narrated conversion trace", trace_path),
+        ("Raw PowerPoint video", video_path),
+    ):
+        if not path.is_file():
+            raise FileNotFoundError(f"{label} does not exist: {path}")
+    if pptx_path.suffix.lower() != ".pptx":
+        raise ValueError(f"Final narrated PPTX must use .pptx: {pptx_path}")
+    if video_path.suffix.lower() != ".mp4":
+        raise ValueError(f"Raw PowerPoint video must use .mp4: {video_path}")
+    if output_path.suffix.lower() != ".mp4":
+        raise ValueError(f"Mixed video output must use .mp4: {output_path}")

@@ -1,0 +1,112 @@
+                print(f"[ERROR] {target_file.name}: {e}")
+                stats['failed'] += 1
+
+        return stats
+
+    def _fix_single_exif(self, file_path: Path) -> bool:
+        """Check and fix EXIF orientation for a single image"""
+        try:
+            fixed_img: Optional[Image.Image] = None
+            exif_bytes: Optional[bytes] = None
+            icc_profile: Optional[bytes] = None
+            src_format: Optional[str] = None
+
+            with Image.open(file_path) as img:
+                exif = img.getexif()
+                orientation = exif.get(ORIENTATION_TAG_ID, 1) if exif else None
+
+                if not orientation or orientation == 1:
+                    return False
+
+                print(f"  [EXIF] Fixing: {file_path.name} (Orientation={orientation})")
+
+                # Apply rotation
+                fixed_img = self._apply_exif_orientation(img, orientation)
+                fixed_img.load()
+
+                # Remove the specific Orientation tag, keep other EXIF data
+                if exif:
+                    exif[ORIENTATION_TAG_ID] = 1
+                    exif_bytes = exif.tobytes()
+
+                icc_profile = img.info.get('icc_profile')
+                src_format = img.format
+
+            # Must save after the original file is closed (Windows requirement)
+            if fixed_img is None:
+                return False
+
+            self._save_in_place(
+                fixed_img,
+                file_path,
+                src_format,
+                exif_bytes=exif_bytes,
+                icc_profile=icc_profile,
+            )
+            return True
+        except Exception as e:
+            raise RuntimeError(f"Failed to fix EXIF for {file_path.name}: {e}") from e
+
+    def _get_exif_orientation(self, img: Image.Image) -> Optional[int]:
+        """Get the Orientation value"""
+        try:
+            exif = img._getexif()
+            if exif:
+                for tag, value in exif.items():
+                    if ExifTags.TAGS.get(tag) == 'Orientation':
+                        return value
+        except Exception:
+            pass
+        return None
+
+    def _apply_exif_orientation(self, img: Image.Image, orientation: int) -> Image.Image:
+        """Rotate image according to the Orientation value"""
+        T = getattr(Image, "Transpose", Image)
+        if orientation == 2:
+            return img.transpose(T.FLIP_LEFT_RIGHT)
+        if orientation == 3:
+            return img.transpose(T.ROTATE_180)
+        if orientation == 4:
+            return img.transpose(T.FLIP_TOP_BOTTOM)
+        if orientation == 5:
+            return img.transpose(T.TRANSPOSE)
+        if orientation == 6:
+            return img.transpose(T.ROTATE_270)
+        if orientation == 7:
+            return img.transpose(T.TRANSVERSE)
+        if orientation == 8:
+            return img.transpose(T.ROTATE_90)
+        return img
+
+    def _rotate_single_image(self, file_path: Path, rotation_deg: int):
+        """Manually rotate a single image"""
+        T = getattr(Image, "Transpose", Image)
+        with Image.open(file_path) as img:
+            ccw_angle = (360 - int(rotation_deg)) % 360
+            if ccw_angle == 0:
+                return
+
+            prepared = ImageOps.exif_transpose(img)
+            if ccw_angle == 90:
+                rotated = prepared.transpose(T.ROTATE_90)
+            elif ccw_angle == 180:
+                rotated = prepared.transpose(T.ROTATE_180)
+            elif ccw_angle == 270:
+                rotated = prepared.transpose(T.ROTATE_270)
+            else:
+                rotated = prepared.rotate(ccw_angle, expand=True)
+
+            rotated.load()
+
+            exif = img.getexif()
+            exif_bytes: Optional[bytes] = None
+            if exif:
+                exif[ORIENTATION_TAG_ID] = 1
+                exif_bytes = exif.tobytes()
+
+            icc_profile = img.info.get('icc_profile')
+            src_format = img.format
+
+        self._save_in_place(
+            rotated,
+            file_path,

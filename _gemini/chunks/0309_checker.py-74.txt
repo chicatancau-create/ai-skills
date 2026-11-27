@@ -1,0 +1,92 @@
+                if self.template_mode
+                else self._get_spec_lock(svg_files[0])
+            )
+            if lock is not None:
+                if 'canvas' in lock:
+                    directory_lock_has_canvas = True
+                    locked_viewbox = lock.get('canvas', {}).get('viewBox')
+                    if locked_viewbox:
+                        directory_expected_viewbox = locked_viewbox
+                        directory_expected_label = "spec_lock canvas"
+                else:
+                    directory_expected_viewbox = ""
+                    directory_expected_label = "spec_lock canvas"
+            if (
+                directory_expected_viewbox is None
+                and not directory_lock_has_canvas
+            ):
+                for svg_file in svg_files:
+                    try:
+                        root = ET.parse(svg_file).getroot()
+                        first_canvas = parse_project_viewbox(
+                            root.get('viewBox'),
+                            context=f"{svg_file.name} root viewBox",
+                        )
+                    except (OSError, ET.ParseError, CanvasContractError):
+                        continue
+                    directory_expected_viewbox = first_canvas.canonical
+                    directory_expected_label = f"first SVG {svg_file.name}"
+                    break
+
+        if self.scan_banner:
+            print(f"\n[SCAN] Checking {len(svg_files)} SVG file(s)...\n")
+
+        for svg_file in svg_files:
+            self._active_prototype_path = self._prototype_by_output.get(
+                svg_file.resolve()
+            )
+            result = self.check_file(
+                str(svg_file),
+                expected_format,
+                expected_viewbox=directory_expected_viewbox,
+                expected_viewbox_label=directory_expected_label,
+            )
+            self._print_result(result)
+
+        if self.template_mode:
+            check_structure = _template_structure_checks_enabled(dir_path)
+            if check_structure:
+                self._check_pptx_structure_contract(dir_path, svg_files)
+            if dir_path.is_dir():
+                self._check_template_contract(
+                    dir_path,
+                    svg_files,
+                    check_structure=check_structure,
+                )
+        elif _CHECK_PPTX_STRUCTURED_PROJECT:
+            self._check_pptx_structure_contract(dir_path, svg_files)
+        if (
+            not self.template_mode
+            and not self.quick_generate
+            and dir_path.is_dir()
+        ):
+            self._check_animation_config_contract(dir_path)
+            self._check_illustration_resource_contract(dir_path)
+        if (
+            not self.template_mode
+            and not self.quick_generate
+            and validate_communication_trace is not None
+        ):
+            project_path = self._resolve_project_path(dir_path)
+            if project_path not in self._communication_traced_projects:
+                self._communication_traced_projects.add(project_path)
+                self._communication_trace_issues.extend(
+                    ('error', message)
+                    for message in validate_communication_trace(project_path)
+                )
+                if not self.partial_roster and validate_outline_roster is not None:
+                    self._communication_trace_issues.extend(
+                        ('error', message)
+                        for message in validate_outline_roster(project_path)
+                    )
+                if not self.partial_roster and validate_outline_hyperlinks is not None:
+                    self._communication_trace_issues.extend(
+                        ('error', message)
+                        for message in validate_outline_hyperlinks(project_path)
+                    )
+        return self.results
+
+    def _check_pptx_structure_contract(
+        self,
+        target_path: Path,
+        svg_files: List[Path],

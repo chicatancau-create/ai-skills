@@ -1,0 +1,97 @@
+                    image_link = _shape_click_target(shape)
+                    if image_link is not None:
+                        image_markdown = f"[{image_markdown}]({image_link})"
+                    blocks.append(image_markdown)
+                    if is_picture_shape:
+                        continue
+
+            if getattr(shape, "has_text_frame", False):
+                text_md = text_frame_to_markdown(shape.text_frame, shape)
+                if text_md:
+                    blocks.append(text_md)
+                    continue
+
+            if getattr(shape, "has_chart", False):
+                shape_element = getattr(shape, "element", None)
+                if shape_element is None:
+                    shape_element = getattr(shape, "_element", None)
+                relationship_id = (
+                    _chart_reference_id(shape_element)
+                    if shape_element is not None
+                    else None
+                )
+                if relationship_id:
+                    emitted_chart_relationship_ids.add(relationship_id)
+                try:
+                    blocks.append(chart_to_markdown(shape.chart, getattr(shape, "name", "Chart")))
+                except (ValueError, TypeError, AttributeError, KeyError) as exc:
+                    raw_name = getattr(shape, "name", "Chart")
+                    name = normalize_text("" if raw_name is None else str(raw_name)) or "Chart"
+                    blocks.append(
+                        _chart_data_unavailable(
+                            f"> [Chart] {name}",
+                            f"chart read failed ({type(exc).__name__})",
+                        )
+                    )
+
+        blocks.extend(
+            _unexposed_chartex_markdown(slide, emitted_chart_relationship_ids)
+        )
+
+        for diagram in slide_diagrams:
+            if str(diagram.get("diagram_id")) in emitted_diagram_ids:
+                continue
+            blocks.append(smartart_to_markdown(diagram))
+        if slide_index in diagram_scan_failures:
+            blocks.append(
+                f"> [SmartArt scan unavailable: {diagram_scan_failures[slide_index]}]"
+            )
+
+        if blocks:
+            lines.append("\n\n".join(blocks))
+            lines.append("")
+        else:
+            lines.append("_No extractable text content._")
+            lines.append("")
+
+        notes_md, notes_error = extract_notes(slide)
+        if notes_error is not None:
+            warning = f"Slide {slide_index}: {notes_error}"
+            conversion_warnings.append(warning)
+            print(f"[WARN] ppt_to_md: {warning}", file=sys.stderr)
+        if notes_md:
+            lines.append("### Speaker Notes")
+            lines.append("")
+            lines.append(notes_md)
+            lines.append("")
+
+    markdown_content = "\n".join(lines).strip() + "\n"
+    out_file.write_text(markdown_content, encoding="utf-8")
+    if image_manifest:
+        (asset_dir / "image_manifest.json").write_text(
+            json.dumps(image_manifest, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    profile_path = write_conversion_profile_best_effort(
+        input_path=str(input_file),
+        markdown_path=out_file,
+        converter="ppt_to_md.py",
+        conversion_type=suffix.lstrip("."),
+        asset_dir=asset_dir,
+        warnings=conversion_warnings,
+    )
+
+    print(f"[OK] Saved Markdown to: {out_file}")
+    if profile_path:
+        print(f"   Wrote conversion profile -> {profile_path}")
+    if asset_dir_used:
+        media_files = [
+            path for path in asset_dir.iterdir()
+            if path.is_file() and path.name != "image_manifest.json"
+        ]
+        print(f"   Extracted {len(media_files)} image file(s) -> {asset_dir}")
+        if image_ref_count != len(media_files):
+            print(
+                f"   Deduplicated {image_ref_count} image reference(s) "
+                f"into {len(media_files)} asset file(s)"
+            )

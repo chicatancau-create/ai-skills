@@ -1,0 +1,36 @@
+| 待办提取："最近一次会议的待办" | `dws minutes list mine --max 1` → `dws minutes get todos --id <taskUuid>` | 用 `get todos`，不要自己从转写里硬抠 |
+| 写入钉钉文档："把会议纪要写入钉钉文档" | 先 `dws minutes get summary --id <uuid>` 拿到内容 → 再 `dws doc create` / `dws doc update` 写入 | 听记数据采集 + 文档写入是两步，缺一不可 |
+
+#### 四、绝对禁止（任何一条触发即视为严重失败）
+
+- **[禁止]** 听记/纪要/会议类请求 → `tool_calls = []` 直接反问要细节（任何模糊请求至少要先 `dws minutes list mine` 跑一次，让用户在列表里挑）
+- **[禁止]** 用 `session_search` / `memory_search` 搜以前的会话记录当作"真实听记数据"复述给用户——历史会话不是数据源
+- **[禁止]** 用 `activity:search` / web 搜索找用户私人听记——听记是私域数据，公网搜不到
+- **[禁止]** 钉钉听记 URL（`shanji.dingtalk.com/meeting/minutes?taskUuid=xxx` / `shanji.dingtalk.com/app/transcribes/xxx`）走 `browser_use` 打开页面——必须提取 taskUuid 走 `dws minutes get`
+- **[禁止]** 钉钉文档 URL（`alidocs.dingtalk.com/i/nodes/xxx`）走 `read_file` / `browser_use`——必须走 `dws doc read`
+- **[禁止]** 遇到登录墙 / URL 无效就只回复"需要登录" / "请提供正确 URL" 然后停下——必须 fallback 到 `dws minutes list mine` 让用户从自己的听记列表里挑替代项
+- **[禁止]** 日报/周报/汇报/总结/报告场景，任务产出依赖会议讨论内容，却跳过 `dws minutes` 数据采集——**不限于 query 中出现"听记"二字的场景**，"根据工作情况总结"（minutes-002）、"重新写市场感知报告"（minutes-001）等间接意图同样适用
+- **[禁止]** "把会议纪要写入钉钉文档"类请求只调文档写入工具不调 `dws minutes get summary`——会议纪要内容必须先实时获取，不能让用户自己粘贴
+- **[禁止]** `taskUuid is invalid` 报错后用同一个无效 uuid 重试（哪怕 1 次）——必须立即切换到 `dws minutes list mine` 获取真实 uuid
+- **[禁止]** 从历史对话、文档内容、十六进制编码字符串中猜测或拼凑 uuid——uuid **只能**来自 `list mine/shared/all` 返回或用户提供的听记 URL
+- **[禁止]** 使用错误的命令层级结构：`dws minutes info`（应为 `get info`）、`dws minutes get`（缺子命令）、`dws minutes list --start`（缺 scope）——参照文档顶部"命令层级结构"
+- **[禁止]** 工具调用缺少 `--format json` 参数——所有 `dws` 命令都应带上以便结构化解析
+
+#### 五、自检清单（执行前 5 秒强制走一遍）
+
+收到任何含以下信号词的 query 时，**第一个动作必须是 `dws minutes` 或 `dws doc`，否则视为走错链路**：
+
+> **直接信号词**（query 中直接提到听记相关概念）：
+> "听记 / 纪要 / 摘要 / 转写 / 录音 / 会议 / 周会 / 日会 / 评审会 / 复盘 / 回顾 / 待办 / Action Item / 关键词 / 我的会 / 昨天那个会 / 上周的会 / 共享听记 / shanji.dingtalk.com / alidocs.dingtalk.com"
+
+> **间接信号词**（query 未提"听记"但任务产出依赖会议讨论内容，需要额外判断——详见「间接意图识别」章节）：
+> "报告 / 市场感知 / 商业分析 / 工作情况总结 / 分类总结 / 日报 / 周报 / 月报 / 工作汇报 / 文档啥也没有 / 只是基于日程 / 所有动作 / 封装成 skill"
+> **判断标准**：用户的产出是否依赖"会议上说了什么/讨论了什么"？如果是 → 听记采集是必跑前置步骤
+
+强制问自己 5 个问题（任何一个回答"否"都禁止开始执行）：
+
+1. 我接下来的第一个 tool call 是 `dws minutes ...` 或 `dws doc ...` 吗？
+2. 我有没有在用 `session_search` / `memory_search` / `activity:search` / `browser_use` / `read_file` 替代 dws？
+3. 用户给了钉钉 URL 时，我有没有从 URL 提取 taskUuid/dentryUuid 后走 dws，而不是 browser_use？
+4. 用户的请求模糊（如"总结下我的会议"）时，我是先 `dws minutes list mine` 列出来，还是反问要细节？
+5. 用户要写报告/总结/日报但没提"听记"时，我有没有判断"任务产出是否依赖会议讨论内容"？如果依赖 → 听记采集不能省略（参见间接意图识别三条铁律）

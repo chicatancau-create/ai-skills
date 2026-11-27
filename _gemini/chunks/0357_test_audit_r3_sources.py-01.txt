@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+"""PPT Master - Third-Round Source Regression Tests
+
+Exercise HTTP boundaries, archived source imports, and DOCX conversion offline.
+
+Usage:
+    python3 -m unittest discover -s skills/ppt-master/scripts/tests -p test_audit_r3_sources.py
+
+Dependencies:
+    requests, beautifulsoup4, mammoth, PyMuPDF
+"""
+
+from __future__ import annotations
+
+import contextlib
+import io
+import json
+import socket
+import sys
+import tempfile
+import unittest
+import zipfile
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
+import requests
+
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+BACKEND_DIR = SCRIPTS_DIR / "source_to_md"
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
+import doc_to_md  # noqa: E402
+import web_to_md  # noqa: E402
+from _conversion_profile import profile_path_for  # noqa: E402
+from project_management import cli as project_cli  # noqa: E402
+
+
+@contextlib.contextmanager
+def _memory_transport(routes):
+    """Keep requests' redirect engine and replace only adapter transmission."""
+    visited = []
+    responses = []
+
+    def send(adapter, request, **kwargs):
+        visited.append(request)
+        status, headers, content = routes[request.url]
+        response = requests.Response()
+        response.request = request
+        response.url = request.url
+        response.status_code = status
+        response.headers.update(headers)
+        response.raw = io.BytesIO(content)
+        response._content = content
+        responses.append(response)
+        return response
+
+    with patch.object(requests.adapters.HTTPAdapter, "send", send):
+        yield visited, responses
+
+
+class SourceHttpSecurityTests(unittest.TestCase):
+    START = "http://8.8.8.8/start"
+    PRIVATE = "http://127.0.0.1/side-effect"
+    FINAL = "http://8.8.8.8/finished"
+    NON_PUBLIC = (
+        "127.0.0.1", "10.0.0.1", "100.64.0.0", "100.64.0.1",
+        "100.127.255.254", "100.127.255.255", "224.0.0.0", "239.255.255.255",
+        "0.0.0.1", "0.255.255.255", "240.0.0.0", "255.255.255.255",
+        "[ff00::]", "[ff02::1]", "[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]",
+        "[fc00::1]", "[fdff:ffff::1]", "[fe80::1]", "[::]", "[::1]",
+        "[::ffff:100.64.0.1]", "[::ffff:224.0.0.1]", "[::ffff:240.0.0.1]",
+    )
+
+    def setUp(self) -> None:
+        for guard in (
+            patch.dict(web_to_md.CONFIG, allow_private_hosts=False),
+            patch.object(web_to_md, "curl_requests", None),
+            patch.object(socket, "getaddrinfo", side_effect=AssertionError("Unexpected DNS")),
+            patch.object(socket.socket, "connect", side_effect=AssertionError("Unexpected network")),
+        ):
+            guard.start()
+            self.addCleanup(guard.stop)
+
+    def test_a01_private_redirect_never_enters_requests_transport(self) -> None:
+        for return_public in (False, True):
+            routes = {
+                self.START: (302, {"Location": self.PRIVATE}, b""),
+                self.PRIVATE: (302, {"Location": self.FINAL}, b"") if return_public else (200, {}, b""),
+                self.FINAL: (200, {}, b"ok"),
+            }
+            with self.subTest(return_public=return_public), _memory_transport(routes) as (visited, responses):
+                with self.assertRaisesRegex(ValueError, "Refusing non-public URL target"):
+                    web_to_md._http_get(self.START)
+                self.assertEqual([request.url for request in visited], [self.START])
+                self.assertTrue(responses[0].raw.closed)
+
+    def test_a01_public_redirects_keep_relative_targets_and_response_history(self) -> None:
+        for status in (301, 302, 303, 307, 308):
+            routes = {
+                self.START: (status, {"Location": "/finished"}, b""),
+                self.FINAL: (200, {}, b"ok"),
+            }

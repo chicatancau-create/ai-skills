@@ -1,0 +1,103 @@
+            for local_name in ("latin", "ea", "cs"):
+                ET.SubElement(
+                    drawing_properties,
+                    f"{{{DRAWING_NS}}}{local_name}",
+                    {"typeface": style.typeface},
+                )
+    text = _math_element(run, "t")
+    if value != value.strip() or "  " in value:
+        text.set(f"{{{XML_NS}}}space", "preserve")
+    text.text = value
+
+
+def _append_sequence(
+    parent: ET.Element,
+    sequence: Sequence,
+    inherited_style: RunStyle | None,
+    *,
+    display: bool,
+) -> None:
+    for child in sequence.children:
+        _append_node(parent, child, inherited_style, display=display)
+
+
+def _append_node(
+    parent: ET.Element,
+    node: Node,
+    inherited_style: RunStyle | None = None,
+    *,
+    display: bool,
+) -> None:
+    if isinstance(node, Text):
+        _append_run(
+            parent,
+            node.value,
+            _effective_style(inherited_style, node.style),
+            literal=node.literal,
+        )
+        return
+    if isinstance(node, Sequence):
+        _append_sequence(parent, node, inherited_style, display=display)
+        return
+    if isinstance(node, Styled):
+        _append_sequence(
+            parent,
+            node.body,
+            _effective_style(inherited_style, node.style),
+            display=display,
+        )
+        return
+    if isinstance(node, Fraction):
+        fraction = _math_element(parent, "f")
+        properties = _math_element(fraction, "fPr")
+        _math_element(properties, "type", val=node.kind)
+        _append_control_style(properties, inherited_style)
+        numerator = _math_element(fraction, "num")
+        _append_sequence(numerator, node.numerator, inherited_style, display=display)
+        denominator = _math_element(fraction, "den")
+        _append_sequence(denominator, node.denominator, inherited_style, display=display)
+        return
+    if isinstance(node, Radical):
+        radical = _math_element(parent, "rad")
+        properties = _math_element(radical, "radPr")
+        _math_element(properties, "degHide", val="off" if node.degree else "on")
+        _append_control_style(properties, inherited_style)
+        degree = _math_element(radical, "deg")
+        if node.degree is not None:
+            _append_sequence(degree, node.degree, inherited_style, display=display)
+        body = _math_element(radical, "e")
+        _append_sequence(body, node.body, inherited_style, display=display)
+        return
+    if isinstance(node, Script):
+        _append_script(parent, node, inherited_style, display=display)
+        return
+    if isinstance(node, Prescript):
+        _append_prescript(parent, node, inherited_style, display=display)
+        return
+    if isinstance(node, Nary):
+        _append_nary(parent, node, inherited_style, display=display)
+        return
+    if isinstance(node, Delimiter):
+        delimiter = _math_element(parent, "d")
+        properties = _math_element(delimiter, "dPr")
+        _math_element(properties, "begChr", val=node.left)
+        _math_element(properties, "sepChr", val=node.separator)
+        _math_element(properties, "endChr", val=node.right)
+        _math_element(properties, "grow", val="on")
+        _append_control_style(properties, inherited_style)
+        for segment in node.segments:
+            body = _math_element(delimiter, "e")
+            _append_sequence(body, segment, inherited_style, display=display)
+        return
+    if isinstance(node, Matrix):
+        _append_matrix(parent, node, inherited_style, display=display)
+        return
+    if isinstance(node, AlignmentPoint):
+        _append_run(parent, "&", inherited_style)
+        return
+    if isinstance(node, EquationArray):
+        equation_array = _math_element(parent, "eqArr")
+        properties = _math_element(equation_array, "eqArrPr")
+        _math_element(properties, "baseJc", val="center")
+        for row in node.rows:
+            body = _math_element(equation_array, "e")

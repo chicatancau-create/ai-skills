@@ -1,0 +1,87 @@
+                mode = f'parallel x{resolved_workers}' if resolved_workers > 1 else 'sequential'
+                print(f"  Pre-rendering PNGs ({mode}, cache: {cache_label})")
+            prerender_results = _prerender_legacy_pngs(
+                svg_files, media_dir, pixel_width, pixel_height,
+                cache_dir, resolved_workers, verbose,
+            )
+            if verbose:
+                print()
+
+        success_count = 0
+        has_any_image = False
+        media_cache: dict[tuple[str, str], str] = {}
+        image_exts_used: set[str] = set()
+        package_exts_used: set[str] = set()
+        package_content_overrides: dict[str, str] = {}
+        notes_slides_created: set[int] = set()
+        notes_master_parts_used: set[str] = set()
+        notes_master_theme_parts_created: set[str] = set()
+        narration_slides_created: set[int] = set()
+        replaced_narration_parts: set[str] = set()
+        audio_exts_used: set[str] = set()
+        package_uses_timings = False
+        mixed_animation_offset = 0
+        config_defaults = _as_dict(_as_dict(animation_config).get('defaults'))
+        transition_defaults_value = config_defaults.get('transition', {})
+        if not isinstance(transition_defaults_value, dict):
+            raise ValueError(
+                'animations.json defaults transition must be an object'
+            )
+        default_transition_cfg = transition_defaults_value
+        animation_defaults_value = config_defaults.get('animation', {})
+        if not isinstance(animation_defaults_value, dict):
+            raise ValueError(
+                'animations.json defaults animation must be an object'
+            )
+        default_animation_cfg = animation_defaults_value
+        animation_seed = json.dumps(
+            {
+                'animation': animation,
+                'config': animation_config,
+                'slides': [path.name for path in svg_files],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(',', ':'),
+        )
+        animation_rng = random.Random(animation_seed)
+        conversion_trace: list[dict[str, Any]] | None = [] if conversion_trace_path else None
+        structure_trace: list[dict[str, Any]] | None = (
+            []
+            if use_native_shapes and pptx_structure in {"baseline", "structured", "preserve"}
+            else None
+        )
+
+        for i, svg_path in enumerate(svg_files, 1):
+            slide_num = i
+            is_layout_definition = slide_num > public_slide_count
+            progress_label = (
+                f"[Layout carrier {slide_num - public_slide_count}/"
+                f"{len(definition_svg_files)}]"
+                if is_layout_definition
+                else f"[Slide {slide_num}/{public_slide_count}]"
+            )
+            expected_animation_targets: list[dict[str, Any]] = []
+            expected_animation_duration = animation_duration
+            expected_animation_trigger = normalize_animation_trigger(animation_trigger)
+            expected_transition_sound: dict[str, str] | None = None
+
+            try:
+                slide_xml_path = (
+                    extract_dir / 'ppt' / 'slides' / f'slide{slide_num}.xml'
+                )
+                rels_path = (
+                    extract_dir / 'ppt' / 'slides' / '_rels'
+                    / f'slide{slide_num}.xml.rels'
+                )
+                slide_patch = slide_patches.get(slide_num)
+                source_slide_bytes: bytes | None = None
+                source_rels_bytes: bytes | None = None
+                if slide_patch is not None:
+                    if is_layout_definition:
+                        raise TemplateStructureError(
+                            "Internal Layout definitions cannot use round-trip overlays"
+                        )
+                    try:
+                        source_slide_bytes = slide_xml_path.read_bytes()
+                        source_rels_bytes = rels_path.read_bytes()

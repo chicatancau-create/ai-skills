@@ -1,0 +1,106 @@
+        return FlattenTextResult.UNCHANGED
+    except Exception as exc:
+        safe_print(
+            f"   [ERROR] {svg_file.name}: text flattening failed: {exc}",
+            file=sys.stderr,
+        )
+        return FlattenTextResult.ERROR
+
+
+def _path_lexists(path: Path) -> bool:
+    """Return whether a path or dangling symlink occupies the target name."""
+    return os.path.lexists(path)
+
+
+def _publish_candidate_directory(candidate_dir: Path, output_dir: Path) -> None:
+    """Publish one staged directory and restore the previous output on failure."""
+    if output_dir.is_symlink() or (
+        _path_lexists(output_dir) and not output_dir.is_dir()
+    ):
+        raise RuntimeError(f"Output path must be a real directory: {output_dir}")
+
+    transaction_dir = Path(
+        tempfile.mkdtemp(
+            prefix=f".{output_dir.name}.publish-",
+            dir=output_dir.parent,
+        )
+    )
+    backup_dir = transaction_dir / "previous"
+    preserve_backup = False
+
+    try:
+        if output_dir.is_dir():
+            try:
+                os.replace(output_dir, backup_dir)
+                os.replace(candidate_dir, output_dir)
+            except BaseException as publish_error:
+                try:
+                    if _path_lexists(backup_dir):
+                        if _path_lexists(output_dir):
+                            failed_output = transaction_dir / "failed-publish"
+                            os.replace(output_dir, failed_output)
+                        os.replace(backup_dir, output_dir)
+                except BaseException as restore_error:
+                    if (
+                        not _path_lexists(backup_dir)
+                        and _path_lexists(output_dir)
+                    ):
+                        raise publish_error
+                    preserve_backup = _path_lexists(backup_dir)
+                    raise RuntimeError(
+                        "Failed to publish svg_final and restore the previous "
+                        "directory; recovery directory: "
+                        f"{transaction_dir}"
+                    ) from restore_error
+                raise
+        else:
+            os.replace(candidate_dir, output_dir)
+    finally:
+        if not preserve_backup:
+            shutil.rmtree(transaction_dir, ignore_errors=True)
+
+
+def _process_candidate_directory(
+    candidate_dir: Path,
+    *,
+    options: dict[str, bool],
+    quiet: bool,
+    compress: bool,
+    max_dimension: int | None,
+    image_scale: float,
+    icons_dir: Path,
+) -> bool:
+    """Run every selected finalization pass against one unpublished candidate."""
+    # Core normalization: downstream image/rect processors read XML geometry.
+    geometry_count = 0
+    for svg_file in candidate_dir.glob('*.svg'):
+        try:
+            geometry_count += materialize_inline_geometry_in_file(svg_file)
+        except (OSError, ET.ParseError, GeometryStyleError) as exc:
+            safe_print(
+                f"[ERROR] {svg_file.name}: inline geometry materialization failed: {exc}"
+            )
+            return False
+
+    # Step 1: Expand project icons, then standard same-document use references.
+    if options.get('embed_icons'):
+        if not quiet:
+            safe_print("[1/3] Expanding icons + local use references...")
+        icons_count = 0
+        for svg_file in candidate_dir.glob('*.svg'):
+            count = embed_icons_in_file(
+                svg_file,
+                icons_dir,
+                dry_run=False,
+                verbose=False,
+            )
+            icons_count += count
+        for svg_file in candidate_dir.glob('*.svg'):
+            try:
+                geometry_count += materialize_inline_geometry_in_file(svg_file)
+            except (OSError, ET.ParseError, GeometryStyleError) as exc:
+                safe_print(
+                    f"[ERROR] {svg_file.name}: expanded icon geometry "
+                    f"materialization failed: {exc}"
+                )
+                return False

@@ -1,0 +1,100 @@
+    """Run the CLI entry point."""
+    require_skill_integrity()
+    if len(sys.argv) < 2:
+        print_usage()
+        sys.exit(0)
+
+    if sys.argv[1] in {"-h", "--help", "help"}:
+        print_usage()
+        sys.exit(0)
+
+    if sys.argv[1].startswith("--") and sys.argv[1] not in {"--all"}:
+        print(f"[ERROR] Missing target before option: {sys.argv[1]}")
+        print_usage()
+        sys.exit(1)
+
+    template_mode = "--template-mode" in sys.argv
+    if "--slot-capacity-report" in sys.argv:
+        if not template_mode:
+            print("[ERROR] --slot-capacity-report requires --template-mode", file=sys.stderr)
+            sys.exit(1)
+        from .slot_capacity import slot_capacity_report
+
+        target = Path(sys.argv[1])
+        source = target / "templates" if (target / "templates").is_dir() else target
+        files = [source] if source.is_file() else sorted(source.glob("*.svg"))
+        if not files:
+            print(f"[ERROR] No template SVG files found: {source}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            print(json.dumps(slot_capacity_report(files), ensure_ascii=False, indent=2))
+        except (OSError, ValueError, KeyError, TypeError, ET.ParseError) as exc:
+            print(f"[ERROR] Cannot read template slots: {exc}", file=sys.stderr)
+            sys.exit(1)
+        sys.exit(0)
+    quick_generate = "--quick-generate" in sys.argv
+    canonical_authoring = "--canonical-authoring" in sys.argv
+    roundtrip = "--roundtrip" in sys.argv
+    if template_mode and quick_generate:
+        print("[ERROR] --template-mode cannot be combined with --quick-generate")
+        sys.exit(1)
+    if roundtrip and (template_mode or quick_generate or canonical_authoring):
+        print(
+            "[ERROR] --roundtrip cannot be combined with --template-mode, "
+            "--quick-generate, or --canonical-authoring"
+        )
+        sys.exit(1)
+    checker = SVGQualityChecker(
+        template_mode=template_mode,
+        quick_generate=quick_generate,
+        canonical_authoring=canonical_authoring,
+    )
+
+    target = sys.argv[1]
+    expected_format = None
+    stage = "final"
+    page = None
+
+    if "--format" in sys.argv:
+        idx = sys.argv.index("--format")
+        if idx + 1 < len(sys.argv):
+            expected_format = sys.argv[idx + 1]
+    if "--stage" in sys.argv:
+        idx = sys.argv.index("--stage")
+        if idx + 1 >= len(sys.argv) or sys.argv[idx + 1].startswith("--"):
+            print("[ERROR] --stage requires early, first-page, page, or final")
+            sys.exit(1)
+        stage = sys.argv[idx + 1]
+        if stage not in {"early", "first-page", "page", "final"}:
+            print(f"[ERROR] Unsupported quality-check stage: {stage}")
+            sys.exit(1)
+    if "--page" in sys.argv:
+        idx = sys.argv.index("--page")
+        if idx + 1 >= len(sys.argv) or sys.argv[idx + 1].startswith("--"):
+            print("[ERROR] --page requires a basename or path under svg_output/")
+            sys.exit(1)
+        page = sys.argv[idx + 1]
+    if stage == "page" and page is None:
+        print("[ERROR] --stage page requires --page <basename or path under svg_output/>")
+        sys.exit(1)
+    if stage != "page" and page is not None:
+        print("[ERROR] --page is supported only with --stage page")
+        sys.exit(1)
+    if roundtrip and any(
+        option in sys.argv
+        for option in ("--format", "--stage", "--page")
+    ):
+        print("[ERROR] --roundtrip does not support --format, --stage, or --page")
+        sys.exit(1)
+
+    if target == "--all":
+        if roundtrip:
+            print("[ERROR] --roundtrip does not support --all")
+            sys.exit(1)
+        if quick_generate:
+            print("[ERROR] --quick-generate does not support --all")
+            sys.exit(1)
+        if stage != "final":
+            print(f"[ERROR] --stage {stage} does not support --all")
+            sys.exit(1)
+        base_dir = sys.argv[2] if len(sys.argv) > 2 else "projects"

@@ -1,0 +1,109 @@
+            run_span = f"<tspan{tspan_attrs}>{_xml_escape(char)}</tspan>"
+            linked_span = _wrap_run_hyperlink(run_span, run)
+            spans.append(
+                f'<tspan x="{fmt_num(center_x)}" dy="{fmt_num(dy)}">'
+                f"{linked_span}</tspan>"
+            )
+        previous_baseline = baseline_y
+        cursor_y += advance
+
+    if first_run is None or first_baseline is None:
+        return TextResult()
+
+    attrs = _text_base_attrs(first_run, center_x, first_baseline, "middle")
+    return TextResult(
+        svg=f"<text{attrs}>{''.join(spans)}</text>",
+        defs=_collect_text_defs(paragraphs),
+        contains_inline_formula=False,
+    )
+
+
+def _convert_east_asian_vertical(
+    paragraphs: list[TextParagraph],
+    xfrm: Xfrm,
+    body_pr: ET.Element,
+) -> TextResult:
+    """Render eaVert columns with upright CJK and sideways Latin runs."""
+    columns: list[list[tuple[bool, str, TextRun]]] = []
+    for paragraph in paragraphs:
+        column: list[tuple[bool, str, TextRun]] = []
+        for run in paragraph.runs:
+            if run.is_break:
+                if column:
+                    columns.append(column)
+                    column = []
+                continue
+            start = 0
+            while start < len(run.text):
+                upright = _is_east_asian_vertical_upright(run.text[start])
+                end = start + 1
+                while (
+                    end < len(run.text)
+                    and _is_east_asian_vertical_upright(run.text[end]) == upright
+                ):
+                    end += 1
+                column.append((upright, run.text[start:end], run))
+                start = end
+        if column:
+            columns.append(column)
+
+    if not columns:
+        return TextResult()
+
+    box_x, box_y, box_w, box_h = _rotated_bbox(xfrm)
+    lins = _read_emu_attr(body_pr, "lIns", DEFAULT_INSETS_EMU["l"])
+    tins = _read_emu_attr(body_pr, "tIns", DEFAULT_INSETS_EMU["t"])
+    rins = _read_emu_attr(body_pr, "rIns", DEFAULT_INSETS_EMU["r"])
+    bins = _read_emu_attr(body_pr, "bIns", DEFAULT_INSETS_EMU["b"])
+    inner_x = box_x + lins
+    inner_y = box_y + tins
+    inner_w = max(box_w - lins - rins, 1.0)
+    inner_h = max(box_h - tins - bins, 1.0)
+
+    column_widths = [
+        max(run.font_size_px * 1.05 for _upright, _text, run in column)
+        for column in columns
+    ]
+    total_width = sum(column_widths)
+    right_x = inner_x + min(inner_w, (inner_w + total_width) / 2.0)
+    column_centers: list[float] = []
+    for width in column_widths:
+        column_centers.append(right_x - width / 2.0)
+        right_x -= width
+
+    anchor = body_pr.attrib.get("anchor", "t")
+    bottom_y = inner_y + inner_h
+    text_blocks: list[str] = []
+    for column, center_x in zip(columns, column_centers):
+        content_height = sum(
+            _east_asian_vertical_segment_height(upright, text, run)
+            for upright, text, run in column
+        )
+        if anchor == "ctr":
+            cursor_y = inner_y + max(0.0, (inner_h - content_height) / 2.0)
+        elif anchor == "b":
+            cursor_y = inner_y + max(0.0, inner_h - content_height)
+        else:
+            cursor_y = inner_y
+
+        for upright, text, run in column:
+            available = bottom_y - cursor_y
+            if available <= 0:
+                break
+            if upright:
+                advance = run.font_size_px * 1.05
+                visible_count = min(len(text), int(available // advance))
+                visible = text[:visible_count]
+                if not visible:
+                    break
+                text_blocks.append(
+                    _emit_upright_vertical_segment(
+                        visible,
+                        run,
+                        center_x,
+                        cursor_y,
+                        advance,
+                    )
+                )
+                cursor_y += advance * visible_count
+                if visible_count < len(text):

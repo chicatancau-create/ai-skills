@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""
+PPT Master - Authored Preset Shape Contract
+
+Build and validate compact canonical SVG groups for newly authored PowerPoint
+preset shapes while retaining expanded authored input compatibility.
+
+Usage:
+    Import render_preset_shape_fragment or validate_authored_preset_group.
+
+Examples:
+    fragment = render_preset_shape_fragment(
+        "rightArrow",
+        (80, 120, 240, 96),
+        element_id="next-step",
+        style={"fill": "#2563EB", "stroke": "none"},
+    )
+
+Dependencies:
+    None (only uses standard library and local PPT Master modules)
+"""
+
+from __future__ import annotations
+
+import math
+import re
+from typing import Mapping
+from xml.etree import ElementTree as ET
+
+from pptx_shapes import (
+    CONNECTOR_PRESET_TYPES,
+    OOXML_COORDINATE_MAX,
+    OOXML_COORDINATE_MIN,
+    SUPPORTED_OPERATORS,
+    get_preset_registry,
+    resolve_preset_preview_hash,
+    svg_preset_preview_fingerprint,
+    validate_ooxml_line_width,
+    validate_ooxml_xfrm,
+)
+
+from .emu_units import EMU_PER_PX, Xfrm, fmt_num
+from .preset_registry_to_svg import render_preset_geometry
+from .preset_svg_markup import (
+    attrs_to_xml,
+    serialize_compact_preset_layers,
+    serialize_preset_layers,
+)
+
+
+AUTHORING_ATTR = "data-pptx-authoring"
+AUTHORING_VALUE = "preset"
+_SVG_NAMESPACE = "http://www.w3.org/2000/svg"
+_ID_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.:-]*")
+_PAINT_RE = re.compile(r"(?:none|#[0-9A-Fa-f]{6})")
+_INTEGER_RE = re.compile(r"[+-]?\d+")
+_ADJUSTMENT_PREFIX = "data-pptx-av-"
+_STYLE_ATTRS = (
+    "fill",
+    "fill-opacity",
+    "stroke",
+    "stroke-linecap",
+    "stroke-linejoin",
+    "stroke-opacity",
+    "stroke-width",
+)
+_EFFECT_ATTRS = ("filter",)
+_PRESENTATION_ATTRS = (*_STYLE_ATTRS, *_EFFECT_ATTRS)
+_SEMANTIC_ATTRS = (
+    AUTHORING_ATTR,
+    "data-pptx-object",
+    "data-pptx-prst",
+    "data-pptx-frame",
+)
+_TEMPLATE_ATOM_ATTRS = (
+    "data-pptx-layer",
+    "data-pptx-editable",
+    "data-pptx-carrier",
+    "data-pptx-role",
+)
+
+
+def render_preset_shape_fragment(
+    preset: str,
+    frame: tuple[float, float, float, float],
+    *,
+    adjustments: Mapping[str, str | int | float] | None = None,
+    object_kind: str = "shape",
+    element_id: str,
+    name: str | None = None,
+    style: Mapping[str, str] | None = None,
+    filter_id: str | None = None,
+) -> str:
+    """Render one compact authored preset fragment for SVG insertion."""
+    registry = get_preset_registry()
+    if preset not in registry:
+        raise ValueError(f"Unknown DrawingML preset shape: {preset!r}")
+    if _ID_RE.fullmatch(element_id) is None:
+        raise ValueError(f"Invalid SVG element id: {element_id!r}")
+    if object_kind not in {"shape", "connector"}:
+        raise ValueError("object_kind must be 'shape' or 'connector'")
+    if preset in CONNECTOR_PRESET_TYPES and object_kind != "connector":
+        raise ValueError(
+            f"Connector preset {preset!r} requires object_kind='connector'"
+        )
+    if object_kind == "connector" and preset not in CONNECTOR_PRESET_TYPES:
+        raise ValueError(
+            f"Authored connector requires a connector preset, got {preset!r}"
+        )
+    filter_ref: str | None = None
+    if filter_id is not None:
+        normalized_filter_id = str(filter_id).strip()
+        if _ID_RE.fullmatch(normalized_filter_id) is None:
+            raise ValueError(f"Invalid SVG filter id: {filter_id!r}")
+        filter_ref = _validate_filter_reference(
+            f"url(#{normalized_filter_id})",
+            object_kind,
+        )
+
+    x, y, width, height = _validate_frame(frame, object_kind)
+    adjustment_values = _normalize_adjustments(adjustments or {})
+    _validate_adjustments(preset, adjustment_values)
+    registry.evaluate(
+        preset,
+        width,
+        height,
+        adjustments=adjustment_values,
+    )
+    rendered = render_preset_geometry(
+        preset,
+        Xfrm(x=x, y=y, w=width, h=height),
+        adjustment_values,
+    )
+    if not rendered.paths:

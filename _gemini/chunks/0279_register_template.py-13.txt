@@ -1,0 +1,102 @@
+    print(f"**Summary**: {entry.get('summary') or '—'}")
+    print("**Index Registration**: Done")
+    print()
+    if KIND_CONFIG[kind]["needs_svg_roster"]:
+        pages = extras.get("pages") or []
+        page_prefix = extras.get("page_prefix") or ""
+        preview = extras.get("preview") or ""
+        if preview:
+            print(f"**Review PPTX**: `{preview}`")
+            print()
+        if pages:
+            print("### Files Included")
+            print()
+            print("| File | Status |")
+            print("|------|--------|")
+            for page in pages:
+                print(f"| `{page_prefix}{page}.svg` | Done |")
+            if preview:
+                print(f"| `{preview}` | Verified |")
+            print()
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> int:
+    require_skill_integrity()
+    parser = argparse.ArgumentParser(
+        description=(
+            "Register / refresh templates (brand / style / layout / deck) "
+            "in the index."
+        )
+    )
+    parser.add_argument(
+        "template_id", nargs="?",
+        help="Template directory id (under templates/<kind_dir>/). Omit with --rebuild-all.",
+    )
+    parser.add_argument(
+        "--kind", choices=list(KIND_CONFIG.keys()), default="deck",
+        help="Template kind (default: deck).",
+    )
+    parser.add_argument("--rebuild-all", action="store_true",
+                        help="Rebuild every index entry within the chosen kind.")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Show what would be written without modifying any files.")
+    args = parser.parse_args()
+
+    if not args.template_id and not args.rebuild_all:
+        parser.error("provide a template_id or use --rebuild-all")
+
+    cfg = KIND_CONFIG[args.kind]
+    base = cfg["dir"]
+
+    if args.rebuild_all:
+        ids = _enumerate_ids(args.kind)
+        if not ids:
+            print(f"[OK] No {args.kind} directories found; index left empty.")
+            _write_index(cfg["index"], OrderedDict(), dry_run=args.dry_run)
+            return 0
+    else:
+        ids = [args.template_id]
+        spec_dir = base / args.template_id
+        if not spec_dir.is_dir():
+            print(f"Error: {args.kind} directory not found: {spec_dir}", file=sys.stderr)
+            return 1
+
+    extracted: dict[str, dict] = {}
+    for tid in ids:
+        try:
+            extracted[tid] = _extract_entry(args.kind, tid, base / tid)
+        except SpecParseError as exc:
+            print(f"Error: {tid}: {exc}", file=sys.stderr)
+            return 1
+
+    if args.rebuild_all:
+        index = OrderedDict((tid, extracted[tid]["entry"]) for tid in sorted(extracted))
+    else:
+        index = _load_index(cfg["index"])
+        for tid, payload in extracted.items():
+            index[tid] = payload["entry"]
+        index = OrderedDict(sorted(index.items()))
+
+    _write_index(cfg["index"], index, dry_run=args.dry_run)
+
+    if not args.dry_run and not args.rebuild_all:
+        tid = args.template_id
+        _print_completion_card(
+            args.kind, tid, extracted[tid]["entry"], extracted[tid]["extras"]
+        )
+        return 0
+
+    print()
+    print(
+        f"[OK] {'Dry-run preview' if args.dry_run else 'Updated'}: "
+        f"{len(extracted)} {args.kind}(s) processed; index now lists {len(index)} entries."
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,107 @@
+    for relationship in generated_root:
+        attrs = _relationship_attrs(relationship)
+        generated_id = attrs.get("Id")
+        if not generated_id:
+            raise TemplateStructureError(
+                "Generated round-trip relationship has no Id"
+            )
+        if generated_id not in required_generated_ids:
+            continue
+        existing_id = source_by_key.get(_relationship_key(attrs))
+        if existing_id is not None:
+            id_map[generated_id] = existing_id
+            continue
+
+        assigned_id = generated_id
+        if assigned_id in used_ids:
+            while f"rId{next_id}" in used_ids:
+                next_id += 1
+            assigned_id = f"rId{next_id}"
+            next_id += 1
+        clone = ET.fromstring(ET.tostring(relationship, encoding="utf-8"))
+        clone.set("Id", assigned_id)
+        source_root.append(clone)
+        added_relationship = True
+        used_ids.add(assigned_id)
+        source_by_key[_relationship_key(attrs)] = assigned_id
+        id_map[generated_id] = assigned_id
+
+    missing_relationships = required_generated_ids - set(id_map)
+    if missing_relationships:
+        raise TemplateStructureError(
+            "Generated round-trip slide references missing relationship(s): "
+            + ", ".join(sorted(missing_relationships))
+        )
+
+    for node in generated_slide_root.iter():
+        for attr_name, value in list(node.attrib.items()):
+            if attr_name in _REL_ATTRS and value in id_map:
+                node.set(attr_name, id_map[value])
+    if added_relationship:
+        _write_xml_tree(generated_rels_path, ET.ElementTree(source_root))
+    else:
+        generated_rels_path.write_bytes(source_rels)
+
+
+def _replace_roundtrip_motion(
+    source_root: ET.Element,
+    generated_root: ET.Element,
+    *,
+    transition_changed: bool,
+    transition_replaced: bool,
+    animation_changed: bool,
+    advance_changed: bool = True,
+) -> None:
+    """Replace only explicitly changed transition and animation state."""
+    if transition_changed and transition_replaced:
+        if not advance_changed:
+            _replace_roundtrip_transition_advance(generated_root, source_root)
+        generated_carriers = transition_carriers(generated_root)
+        if len(generated_carriers) > 1:
+            raise TemplateStructureError(
+                "Generated round-trip slide has multiple transition carriers"
+            )
+        for carrier in transition_carriers(source_root):
+            source_root.remove(carrier)
+        if generated_carriers:
+            clone = ET.fromstring(
+                ET.tostring(generated_carriers[0], encoding="utf-8")
+            )
+            children = list(source_root)
+            insert_at = next(
+                (
+                    index
+                    for index, child in enumerate(children)
+                    if child.tag in {
+                        f"{{{PML_NS}}}timing",
+                        f"{{{PML_NS}}}extLst",
+                    }
+                ),
+                len(children),
+            )
+            source_root.insert(insert_at, clone)
+    elif transition_changed:
+        _replace_roundtrip_transition_advance(source_root, generated_root)
+
+    if animation_changed:
+        timing_tag = f"{{{PML_NS}}}timing"
+        existing_timing = source_root.find(timing_tag)
+        generated_timing = generated_root.find(timing_tag)
+        if existing_timing is not None:
+            source_root.remove(existing_timing)
+        if generated_timing is None:
+            return
+        clone = ET.fromstring(ET.tostring(generated_timing, encoding="utf-8"))
+        children = list(source_root)
+        insert_at = next(
+            (
+                index
+                for index, child in enumerate(children)
+                if child.tag == f"{{{PML_NS}}}extLst"
+            ),
+            len(children),
+        )
+        source_root.insert(insert_at, clone)
+
+
+def _replace_roundtrip_transition_advance(

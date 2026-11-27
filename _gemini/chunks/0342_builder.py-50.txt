@@ -1,0 +1,108 @@
+                'oem', errors='replace',
+            ).strip()
+            details = f": {message}" if message else ''
+            warnings.append(f"icacls failed for {output_path}{details}")
+
+    return warnings
+
+
+_NOTES_MASTER_REL_TYPE = (
+    'http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster'
+)
+_NOTES_MASTER_CONTENT_TYPE = (
+    'application/vnd.openxmlformats-officedocument.presentationml.notesMaster+xml'
+)
+
+
+def _content_type_overrides(extract_dir: Path) -> dict[str, str]:
+    """Return package part content-type overrides keyed without a leading slash."""
+    content_types_path = extract_dir / '[Content_Types].xml'
+    try:
+        root = ET.parse(content_types_path).getroot()
+    except (OSError, ET.ParseError) as exc:
+        raise RuntimeError(
+            f'Cannot read package content types: {content_types_path}'
+        ) from exc
+    overrides: dict[str, str] = {}
+    for child in root:
+        if child.tag.rsplit('}', 1)[-1] != 'Override':
+            continue
+        part_name = child.get('PartName', '').lstrip('/')
+        content_type = child.get('ContentType', '')
+        if part_name:
+            overrides[part_name] = content_type
+    return overrides
+
+
+def _notes_master_part_from_target(target: str) -> str | None:
+    """Resolve one presentation relationship target to a notes-master part."""
+    part_name = _resolve_package_target(
+        'ppt/presentation.xml',
+        target,
+    ).lstrip('/')
+    prefix = 'ppt/notesMasters/'
+    if not part_name.startswith(prefix) or part_name == prefix:
+        return None
+    return part_name
+
+
+def _validate_notes_master_part(
+    extract_dir: Path,
+    part_name: str,
+    content_types: dict[str, str],
+) -> str:
+    """Validate one existing notes-master package part and return its name."""
+    normalized = posixpath.normpath(part_name.lstrip('/'))
+    if not normalized.startswith('ppt/notesMasters/'):
+        raise RuntimeError(
+            f'Notes master resolves outside ppt/notesMasters: {part_name}'
+        )
+    part_path = extract_dir / PurePosixPath(normalized)
+    if not part_path.is_file():
+        raise RuntimeError(f'Notes master part is missing: {normalized}')
+    try:
+        root = ET.parse(part_path).getroot()
+    except (OSError, ET.ParseError) as exc:
+        raise RuntimeError(f'Cannot parse notes master part: {normalized}') from exc
+    if root.tag != f'{{{PML_NS}}}notesMaster':
+        raise RuntimeError(f'Notes master part has an invalid root: {normalized}')
+    declared_type = content_types.get(normalized)
+    if declared_type is not None and declared_type != _NOTES_MASTER_CONTENT_TYPE:
+        raise RuntimeError(
+            'Notes master content type mismatch for '
+            f'{normalized}: {declared_type}'
+        )
+    return normalized
+
+
+def _register_notes_master_id(
+    presentation_path: Path,
+    relationship_id: str,
+) -> None:
+    """Register a notes-master relationship in presentation.xml by XML identity."""
+    try:
+        tree = ET.parse(presentation_path)
+    except (OSError, ET.ParseError) as exc:
+        raise RuntimeError(
+            f'Cannot parse presentation package part: {presentation_path}'
+        ) from exc
+    root = tree.getroot()
+    list_tag = f'{{{PML_NS}}}notesMasterIdLst'
+    id_tag = f'{{{PML_NS}}}notesMasterId'
+    relationship_attr = f'{{{REL_NS}}}id'
+    notes_master_list = root.find(list_tag)
+    if notes_master_list is not None:
+        if any(
+            child.tag == id_tag
+            and child.get(relationship_attr) == relationship_id
+            for child in notes_master_list
+        ):
+            return
+    else:
+        slide_master_list = root.find(f'{{{PML_NS}}}sldMasterIdLst')
+        if slide_master_list is None:
+            raise RuntimeError(
+                'presentation.xml is missing p:sldMasterIdLst'
+            )
+        notes_master_list = ET.Element(list_tag)
+        insert_at = list(root).index(slide_master_list) + 1

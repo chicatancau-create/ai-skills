@@ -1,0 +1,122 @@
+class AnimationBuildResult:
+    """Summary of one narration animation derivation."""
+
+    slide_count: int
+    group_count: int
+    anchored_count: int
+    fallback_count: int
+    ignored_cue_count: int
+    svg_fallback_slide_count: int
+    timing_plan_written: bool
+
+
+@dataclass(frozen=True)
+class SubtitleMergeResult:
+    """Summary of one page-local SRT merge."""
+
+    slide_count: int
+    cue_count: int
+    powerpoint_timeline_ms: int
+    minimum_video_adjustment_ms: int | None = None
+    maximum_video_adjustment_ms: int | None = None
+    minimum_video_correlation: float | None = None
+
+
+@dataclass(frozen=True)
+class PowerPointTiming:
+    """One slide's transition, narration, and advance timing in milliseconds."""
+
+    transition_ms: int
+    narration_delay_ms: int
+    advance_ms: int
+
+
+@dataclass(frozen=True)
+class VideoSlideTiming:
+    """One slide mapped from the PPTX clock to an exported-video clock."""
+
+    slide_name: str
+    transition_ms: int
+    narration_delay_ms: int
+    advance_ms: int
+    powerpoint_slide_start_ms: int
+    powerpoint_narration_start_ms: int
+    video_slide_start_ms: int
+    video_narration_start_ms: int
+    adjustment_ms: int
+    correlation: float
+    audio_path: Path
+
+
+@dataclass(frozen=True)
+class VideoTimelineCalibration:
+    """Page-level calibration between one narrated PPTX and exported video."""
+
+    slides: tuple[VideoSlideTiming, ...]
+    powerpoint_timeline_ms: int
+
+
+def _timestamp_to_ms(value: str) -> int:
+    hours_text, minutes_text, remainder = value.split(":")
+    seconds_text, milliseconds_text = remainder.split(",")
+    hours = int(hours_text)
+    minutes = int(minutes_text)
+    seconds = int(seconds_text)
+    milliseconds = int(milliseconds_text)
+    if minutes >= 60 or seconds >= 60:
+        raise ValueError(f"Invalid SRT timestamp: {value}")
+    return (((hours * 60) + minutes) * 60 + seconds) * 1000 + milliseconds
+
+
+def _ms_to_timestamp(value: int) -> str:
+    if value < 0:
+        raise ValueError(f"SRT timestamp cannot be negative: {value}")
+    hours, remainder = divmod(value, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    seconds, milliseconds = divmod(remainder, 1000)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d},{milliseconds:03d}"
+
+
+def _parse_srt(path: Path) -> list[SubtitleCue]:
+    text = path.read_text(encoding="utf-8-sig")
+    blocks = re.split(r"\r?\n\s*\r?\n", text.strip())
+    cues: list[SubtitleCue] = []
+    previous_end = -1
+
+    for block_number, block in enumerate(blocks, 1):
+        lines = block.splitlines()
+        if len(lines) < 3:
+            raise ValueError(f"{path}: malformed SRT block {block_number}")
+        try:
+            cue_number = int(lines[0].strip())
+        except ValueError as exc:
+            raise ValueError(
+                f"{path}: invalid cue number in block {block_number}"
+            ) from exc
+        if cue_number != block_number:
+            raise ValueError(
+                f"{path}: cue numbers must be consecutive from 1; "
+                f"block {block_number} is numbered {cue_number}"
+            )
+        timing_match = _TIMING_RE.match(lines[1].strip())
+        if timing_match is None:
+            raise ValueError(
+                f"{path}: invalid cue timing in block {block_number}"
+            )
+        start_ms = _timestamp_to_ms(timing_match.group("start"))
+        end_ms = _timestamp_to_ms(timing_match.group("end"))
+        cue_text = "\n".join(lines[2:]).strip()
+        if not cue_text:
+            raise ValueError(f"{path}: empty cue text in block {block_number}")
+        if end_ms <= start_ms:
+            raise ValueError(
+                f"{path}: cue {block_number} must end after it starts"
+            )
+        if start_ms < previous_end:
+            raise ValueError(
+                f"{path}: cue {block_number} overlaps the preceding cue"
+            )
+        cues.append(SubtitleCue(start_ms, end_ms, cue_text))
+        previous_end = end_ms
+
+    if not cues:

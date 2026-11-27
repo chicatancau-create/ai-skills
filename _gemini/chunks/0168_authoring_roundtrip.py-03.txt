@@ -1,0 +1,105 @@
+        and manifest.get("authoring_root") == "."
+        and manifest.get("source_ref_attribute") == SOURCE_REF_ATTRIBUTE
+    )
+
+
+def _roundtrip_source_svg_names(
+    manifest: dict[str, Any],
+) -> dict[int, str]:
+    """Map every source slide index to its canonical flat SVG basename."""
+    raw_slides = manifest.get("slides")
+    if not isinstance(raw_slides, list) or not raw_slides:
+        raise AuthoringRoundtripError(
+            "Round-trip workspace manifest slides must be a non-empty array"
+        )
+    names: dict[int, str] = {}
+    for offset, raw in enumerate(raw_slides):
+        context = f"round-trip slides[{offset}]"
+        if not isinstance(raw, dict):
+            raise AuthoringRoundtripError(f"{context} must be an object")
+        index = raw.get("index")
+        flat_svg = raw.get("flatSvg")
+        if (
+            not isinstance(index, int)
+            or isinstance(index, bool)
+            or index < 1
+        ):
+            raise AuthoringRoundtripError(
+                f"{context}.index must be a positive integer"
+            )
+        if not isinstance(flat_svg, str) or not flat_svg:
+            raise AuthoringRoundtripError(
+                f"{context}.flatSvg must be a non-empty string"
+            )
+        name = Path(flat_svg).name
+        if Path(name).suffix.lower() != ".svg":
+            raise AuthoringRoundtripError(
+                f"{context}.flatSvg must name an SVG file"
+            )
+        if index in names:
+            raise AuthoringRoundtripError(
+                f"Round-trip workspace repeats source slide {index}"
+            )
+        names[index] = name
+    expected = set(range(1, len(names) + 1))
+    if set(names) != expected:
+        raise AuthoringRoundtripError(
+            "Round-trip source slide indices must be contiguous from 1"
+        )
+    return names
+
+
+def _load_documents(
+    project_path: Path,
+    authoring_dir: Path,
+) -> tuple[
+    Path,
+    Path,
+    dict[str, AuthoringDocument],
+    dict[str, Any],
+    dict[str, Any],
+]:
+    manifest_path = authoring_dir / AUTHORING_MANIFEST_NAME
+    manifest = _load_json(manifest_path, context="flat authoring manifest")
+    if manifest.get("schema") != AUTHORING_SCHEMA:
+        raise AuthoringRoundtripError(
+            f"Unsupported authoring manifest schema: {manifest.get('schema')!r}"
+        )
+    if manifest.get("projection_kind") != "flat":
+        raise AuthoringRoundtripError(
+            "Authoring round-trip requires projection_kind='flat'"
+        )
+    if manifest.get("authoring_root") != ".":
+        raise AuthoringRoundtripError(
+            "authoring_manifest.json authoring_root must be '.'"
+        )
+    if manifest.get("source_ref_attribute") != SOURCE_REF_ATTRIBUTE:
+        raise AuthoringRoundtripError(
+            "authoring_manifest.json uses an unsupported source-ref attribute"
+        )
+    source_root_raw = manifest.get("source_root")
+    if not isinstance(source_root_raw, str) or not source_root_raw.strip():
+        raise AuthoringRoundtripError(
+            "authoring_manifest.json source_root must be a non-empty string"
+        )
+    source_root = (authoring_dir / source_root_raw).resolve()
+    try:
+        source_root.relative_to(project_path)
+    except ValueError as exc:
+        raise AuthoringRoundtripError(
+            "Flat authoring source_root must stay inside the import workspace"
+        ) from exc
+    if not source_root.is_dir():
+        raise AuthoringRoundtripError(
+            f"Flat authoring backing SVG directory is missing: {source_root}"
+        )
+
+    roundtrip_manifest = _load_json(
+        project_path / ROUNDTRIP_MANIFEST_PATH,
+        context="round-trip workspace manifest",
+    )
+    if roundtrip_manifest.get("schema") != "ppt-master.roundtrip-workspace.v1":
+        raise AuthoringRoundtripError(
+            "Unsupported round-trip workspace manifest schema: "
+            f"{roundtrip_manifest.get('schema')!r}"
+        )

@@ -1,0 +1,95 @@
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body)
+        }).then(jsonOrThrow).then(function (data) {
+            if (data && data.undo_depth !== undefined) {
+                editStackCount[slide] = data.undo_depth;
+                if (slide === currentSlide) updateUndoButton();
+                updatePendingStatus();
+            }
+            if (payloadHasMatrixTransform(payload)) {
+                markMatrixTransformEdit(slide);
+            }
+            maybeShowSavedHint();
+            return data;
+        });
+        inFlightEdits.add(p);
+        var done = function () { inFlightEdits.delete(p); };
+        p.then(done, done);
+        return p;
+    }
+
+    function renderMultiSelectSummary(ids) {
+        var moveEls = topLevelSelectedElements(ids);
+        var summary = '<div class="prop-caption">' + escapeHtml(t("label_batch_edit")) + '</div>';
+
+        if (moveEls.length > 0) {
+            try {
+                var rb = computeElementsBox(moveEls);
+                summary += '<div class="prop-section">' + escapeHtml(t("section_geometry")) + '</div>';
+                summary += '<table class="prop-table"><tr><td class="prop-key">x / y</td>' +
+                    '<td class="prop-val geo-cell">' +
+                    '<input type="number" class="prop-edit prop-edit-multi-geo" data-geo="x" value="' +
+                    Math.round(rb.x) + '">' +
+                    '<input type="number" class="prop-edit prop-edit-multi-geo" data-geo="y" value="' +
+                    Math.round(rb.y) + '">' +
+                    '</td></tr></table>';
+            } catch (e) { /* no multi geometry */ }
+        }
+        summary += '<div class="prop-section">' + escapeHtml(t("section_style")) + '</div>';
+        summary += '<table class="prop-table">';
+        batchEditSpecs(moveEls).forEach(function (spec) {
+            summary += '<tr><td class="prop-key">' + escapeHtml(spec.key) + '</td><td class="prop-val">';
+            summary += renderBatchControl(spec);
+            summary += '</td></tr>';
+        });
+        summary += '</table>';
+        return summary;
+    }
+
+    function batchEditSpecs(elements) {
+        var keys = [
+            { key: "fill", type: "color" },
+            { key: "stroke", type: "color" },
+            { key: "opacity", type: "number", min: "0", max: "1", step: "0.05" }
+        ];
+        if (elements.length > 0 && elements.every(isTextElement)) {
+            keys = keys.concat([
+                { key: "font-size", type: "text" },
+                { key: "font-family", type: "text" },
+                { key: "font-weight", type: "select",
+                  options: ["", "normal", "bold", "300", "400", "500", "600", "700", "800"] },
+                { key: "text-anchor", type: "select", options: ["", "start", "middle", "end"] }
+            ]);
+        }
+        return keys.map(function (spec) {
+            var value = commonAttrValue(elements, spec.key);
+            var copy = Object.assign({}, spec);
+            copy.value = value === null ? "" : value;
+            copy.mixed = value === null;
+            return copy;
+        });
+    }
+
+    function isTextElement(el) {
+        var tag = el.tagName.toLowerCase();
+        return tag === "text" || tag === "tspan";
+    }
+
+    function commonAttrValue(elements, key) {
+        if (elements.length === 0) return "";
+        var first = attrOrComputedValue(elements[0], key);
+        for (var i = 1; i < elements.length; i++) {
+            if (attrOrComputedValue(elements[i], key) !== first) return null;
+        }
+        return first;
+    }
+
+    function attrOrComputedValue(el, key) {
+        var value = el.getAttribute(key);
+        if (value !== null && value !== "") return normalizeSvgLengthValue(key, value);
+        var style = window.getComputedStyle(el);
+        var map = {
+            "fill": "fill",
+            "stroke": "stroke",
+            "opacity": "opacity",
+            "font-size": "fontSize",

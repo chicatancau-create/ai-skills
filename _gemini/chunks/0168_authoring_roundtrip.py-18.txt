@@ -1,0 +1,91 @@
+        for source_ref in deleted_refs & manifest_proxy_refs
+        if baseline_occurrences[source_ref][0].element.get(
+            EXTERNAL_LINKED_IMAGE_PROXY_ATTRIBUTE
+        ) == "true"
+    )
+    if deleted_external_linked_image_refs:
+        raise AuthoringRoundtripError(
+            f"{document.name} deletes externally linked image proxy object(s): "
+            + ", ".join(deleted_external_linked_image_refs)
+            + "; keep each proxy unchanged to restore its original external "
+            "picture relationship"
+        )
+
+    def restore_nodes(
+        element: ET.Element,
+        source_dir: Path | None = None,
+    ) -> list[ET.Element]:
+        source_dir = source_dir or document.authoring_path.parent
+        source_ref = element.get(SOURCE_REF_ATTRIBUTE)
+        if source_ref in unchanged_refs:
+            scope = source_ref.split(":", 1)[0]
+            if scope != "slide":
+                return []
+            source = layered_index.get(source_ref)
+            if source is None:
+                raise AuthoringRoundtripError(
+                    f"{document.name} cannot find {source_ref!r} in layered source"
+                )
+            return [_native_restore_placeholder(source, source_ref)]
+
+        if _local_name(element.tag) == "use":
+            icon = (element.get("data-icon") or "").strip()
+            referenced = current_referenced_assets.get(icon)
+            if referenced is not None:
+                record, asset_root = referenced
+                outer_refs = _outer_source_ref_elements(asset_root)
+                if outer_refs:
+                    restored: list[ET.Element] = []
+                    for outer in outer_refs:
+                        restored.extend(
+                            restore_nodes(outer, record.asset_path.parent)
+                        )
+                    context_attrs = {
+                        name: value for name, value in element.attrib.items()
+                        if name in {*INHERITABLE_ATTRS, "style", "opacity", "transform"}
+                    }
+                    if context_attrs:
+                        wrapper = ET.Element(f"{{{SVG_NS}}}g", context_attrs)
+                        wrapper.extend(restored)
+                        return [wrapper]
+                    return restored
+
+        clone = copy.deepcopy(element)
+        for child in list(clone):
+            clone.remove(child)
+        for original_child in element:
+            replacements = restore_nodes(original_child, source_dir)
+            if replacements:
+                replacements[-1].tail = original_child.tail
+            for replacement in replacements:
+                clone.append(replacement)
+        if _local_name(clone.tag) == "a" and not len(clone) and any(
+            item.get(SOURCE_REF_ATTRIBUTE) in unchanged_refs for item in element.iter()
+        ):
+            return []  # Its inherited native objects stay on the Master/Layout.
+        clone.attrib.pop(SOURCE_REF_ATTRIBUTE, None)
+        remap_link(clone, element)
+        _rebase_resource_references(
+            clone,
+            source_dir,
+            output_path.parent,
+            project_path,
+            recursive=False,
+        )
+        if source_ref:
+            source = layered_index.get(source_ref)
+            if source is not None:
+                if source_ref.startswith("slide:"):
+                    for name in (
+                        "data-pptx-shape-id",
+                        "data-pptx-shape-scope",
+                        "data-pptx-shape-name",
+                        "data-name",
+                    ):
+                        if clone.get(name) is None and source.get(name) is not None:
+                            clone.set(name, str(source.get(name)))
+                _restore_preserved_effect_metadata(clone, source)
+                _restore_unchanged_text_body(
+                    clone, source, current_occurrences[source_ref][0], baseline_occurrences[source_ref][0],
+                )
+        if (

@@ -1,0 +1,100 @@
+        _mark_unchanged_preset_previews(root)
+        _require_project_freeform_geometry(root, svg_path)
+
+    try:
+        injected_geometry_count = materialize_inline_geometry_properties(root)
+    except GeometryStyleError as exc:
+        raise SvgNativeConversionError(
+            f'{svg_path.name}: expanded icon geometry materialization failed: {exc}'
+        ) from exc
+    if injected_geometry_count:
+        geometry_count += injected_geometry_count
+        if geometry_trace is None:
+            geometry_trace = {
+                'action': 'materialize-inline-geometry',
+                'count': geometry_count,
+            }
+            trace_steps.append(geometry_trace)
+        else:
+            geometry_trace['count'] = geometry_count
+        if verbose:
+            print(
+                f'  Materialized {injected_geometry_count} inline geometry '
+                'declaration(s) from expanded icons'
+            )
+
+    try:
+        expanded_local = expand_local_use_references(root)
+    except UseExpansionError as exc:
+        raise SvgNativeConversionError(
+            f'{svg_path.name}: local <use> expansion failed: {exc}'
+        ) from exc
+    if expanded_local:
+        trace_steps.append({
+            'action': 'expand-local-use-references',
+            'count': expanded_local,
+        })
+        if verbose:
+            print(f'  Expanded {expanded_local} local <use href="#..."/> instance(s)')
+
+    if dangerous_nonconforming_export:
+        expanded_normalizations = normalize_single_child_group_filters(root)
+        if expanded_normalizations:
+            dangerous_normalizations.extend(expanded_normalizations)
+            if verbose:
+                print(
+                    '  [DANGEROUS][NORMALIZED] '
+                    f'{len(expanded_normalizations)} expanded-resource '
+                    'group filter(s)'
+                )
+
+    _require_inline_formula_markers(root, svg_path)
+    _require_project_hyperlinks(
+        root,
+        svg_path,
+        slide_count=slide_count,
+    )
+
+    # Recheck compiler-injected icon/use wrappers and cloned definition trees.
+    _require_project_nested_svg_crops(root, svg_path)
+    _require_project_images(root, svg_path, resource_root)
+    _require_project_clip_paths(root, svg_path)
+    _require_project_text_properties(root, svg_path)
+    _require_project_stroke_styles(root, svg_path)
+    _require_project_opacities(root, svg_path)
+    _require_project_paints(root, svg_path)
+    _require_project_masks(root, svg_path)
+    _require_project_definitions(root, svg_path)
+    _require_project_paint_references(root, svg_path)
+    _require_project_gradients(root, svg_path)
+    _require_project_effect_status(root, svg_path)
+    _require_project_filters(root, svg_path)
+    _require_project_image_aspect_ratios(root, svg_path)
+    _require_project_transforms(root, svg_path)
+
+    try:
+        materialize_project_text_metrics(root)
+    except ValueError as exc:
+        raise SvgNativeConversionError(
+            f'{svg_path.name}: text-metric materialization failed: {exc}'
+        ) from exc
+
+    inline_formula_count_before_text_lowering = sum(
+        1 for elem in root.iter()
+        if elem.get(INLINE_FORMULA_ATTR) is not None
+    )
+    hyperlink_count_before_text_lowering = sum(
+        1 for elem in root.iter()
+        if (
+            elem.tag == f'{{{SVG_NS}}}a'
+            or elem.get(SHAPE_HYPERLINK_ATTR) is not None
+        )
+    )
+
+    # Flatten positional <tspan> (those with x/y/non-zero dy) into independent
+    # <text> elements. DrawingML runs cannot reposition mid-paragraph, so a
+    # dy-stacked block of tspans would otherwise collapse onto one baseline,
+    # and an x-anchored tspan would render in the wrong column. finalize_svg
+    # does the same flattening on disk; doing it here keeps native pptx output
+    # correct when reading raw svg_output/.
+    # Preserve/reflow modes additionally fold conservative paragraph blocks

@@ -1,0 +1,117 @@
+            xfrm,
+            palette=palette,
+        )
+        return payload, visual_styles
+    else:
+        raise _UnsupportedChart("unsupported-chart-type")
+
+    if has_date_axis:
+        payload["axes"] = _single_axis_contract(
+            plot_area,
+            chart,
+            category_kind="date",
+            cross_between="midCat",
+        )
+        expected_category_format = payload["axes"]["category"].get(
+            "number_format",
+            "m/d/yyyy",
+        )
+        if _numeric_category_cache_format(chart) != expected_category_format:
+            raise _UnsupportedChart("unsupported-chart-category-format")
+
+    visual_styles = _validate_chart_semantics(
+        payload,
+        plot_area,
+        chart,
+        palette=palette,
+        validate_axes=not (
+            has_date_axis or chart_tag in {"bubbleChart", "scatterChart"}
+        ),
+    )
+    _apply_chart_metadata(
+        payload,
+        chart_root,
+        plot_area,
+        chart,
+        palette=palette,
+    )
+    return payload, visual_styles
+
+
+def _combo_payload(
+    chart_root: ET.Element,
+    plot_area: ET.Element,
+    chart_nodes: list[ET.Element],
+    xfrm: Xfrm,
+    *,
+    palette: ColorPalette | None,
+) -> tuple[dict[str, Any], list[SeriesVisualStyle]]:
+    series_identifiers_by_plot = [
+        _plot_series_identifiers(chart, "unsupported-combo-series-order")
+        for chart in chart_nodes
+    ]
+    source_indices_by_plot = [
+        identifiers[0] for identifiers in series_identifiers_by_plot
+    ]
+    source_orders_by_plot = [
+        identifiers[1] for identifiers in series_identifiers_by_plot
+    ]
+    flat_source_indices = [
+        index
+        for indices in source_indices_by_plot
+        for index in indices
+    ]
+    flat_source_orders = [
+        order
+        for orders in source_orders_by_plot
+        for order in orders
+    ]
+    expected_series_order = list(range(len(flat_source_orders)))
+    canonical_indices = (
+        flat_source_indices == flat_source_orders
+        and sorted(flat_source_indices) == expected_series_order
+    )
+    normalizable_indices = (
+        len(set(flat_source_indices)) == len(flat_source_indices)
+        and sorted(flat_source_orders) == expected_series_order
+    )
+    if canonical_indices:
+        series_indices_by_plot = source_indices_by_plot
+    elif normalizable_indices and palette is not None and not palette.strict:
+        palette._diagnose(
+            "combo-series-indices-normalized",
+            "Combo chart series idx values do not match their contiguous "
+            "display order",
+            "reindex series by their unique contiguous order values",
+        )
+        series_indices_by_plot = source_orders_by_plot
+    else:
+        raise _UnsupportedChart("unsupported-combo-series-order")
+    axes_by_id = _axis_nodes_by_id(plot_area)
+    if not axes_by_id:
+        raise _UnsupportedChart("unsupported-combo-chart")
+    axes: dict[str, dict[str, Any]] = {}
+    axis_pairs: dict[str, tuple[str, str]] = {}
+    primary_categories: list[Any] | None = None
+    primary_categories_are_numeric = False
+    plots: list[dict[str, Any]] = []
+    visual_styles: list[SeriesVisualStyle] = []
+    colors: list[str] = []
+    referenced_axis_ids: set[str] = set()
+
+    for chart, series_indices in zip(chart_nodes, series_indices_by_plot):
+        chart_tag = _local_name(chart.tag)
+        if chart_tag == "barChart":
+            if _bar_chart_type(chart) != "column":
+                raise _UnsupportedChart("unsupported-combo-chart")
+            chart_type = "column"
+        elif chart_tag == "lineChart":
+            chart_type = "line"
+        elif chart_tag == "areaChart":
+            chart_type = "area"
+        else:
+            raise _UnsupportedChart("unsupported-combo-chart")
+
+        cat_id, cat_axis, val_id, val_axis = _plot_axis_pair(chart, axes_by_id)
+        if _local_name(cat_axis.tag) != "catAx":
+            raise _UnsupportedChart("unsupported-combo-chart")

@@ -1,0 +1,116 @@
+        raise RuntimeError("Native PPTX table style must be an object")
+    _reject_unknown_fields(style, _TABLE_STYLE_FIELDS, "style")
+
+    defaults = _validated_defaults(source)
+    cell_styles = _validated_cell_styles(source)
+    expanded = {
+        key: copy.deepcopy(value)
+        for key, value in source.items()
+        if key not in {"schema", "defaults", "cell_styles", "columns", "rows"}
+    }
+    if "columns" in source:
+        columns = source["columns"]
+        if not isinstance(columns, list):
+            raise RuntimeError("Native PPTX table columns must be a list")
+        expanded["columns"] = [
+            _expand_cell(cell, defaults, cell_styles) for cell in columns
+        ]
+    if "rows" in source:
+        rows = source["rows"]
+        if not isinstance(rows, list):
+            raise RuntimeError("Native PPTX table rows must be a list")
+        expanded_rows: list[list[dict[str, Any]]] = []
+        for row_index, row in enumerate(rows, start=1):
+            if not isinstance(row, list):
+                raise RuntimeError(
+                    f"Native PPTX table row {row_index} must be a list"
+                )
+            expanded_rows.append(
+                [_expand_cell(cell, defaults, cell_styles) for cell in row]
+            )
+        expanded["rows"] = expanded_rows
+    return expanded
+
+
+def _iter_cells(payload: dict[str, Any]) -> Iterable[dict[str, Any]]:
+    columns = payload.get("columns")
+    if isinstance(columns, list):
+        for cell in columns:
+            if isinstance(cell, dict):
+                yield cell
+    rows = payload.get("rows")
+    if isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, list):
+                continue
+            for cell in row:
+                if isinstance(cell, dict):
+                    yield cell
+
+
+def _iter_paragraphs(cells: Iterable[dict[str, Any]]) -> Iterable[dict[str, Any]]:
+    for cell in cells:
+        paragraphs = cell.get("paragraphs")
+        if not isinstance(paragraphs, list):
+            continue
+        for paragraph in paragraphs:
+            if isinstance(paragraph, dict):
+                yield paragraph
+
+
+def _iter_runs(paragraphs: Iterable[dict[str, Any]]) -> Iterable[dict[str, Any]]:
+    for paragraph in paragraphs:
+        runs = paragraph.get("runs")
+        if not isinstance(runs, list):
+            continue
+        for run in runs:
+            if isinstance(run, dict):
+                yield run
+
+
+def _most_common_value(items: list[dict[str, Any]], field: str) -> Any:
+    counts: dict[str, int] = {}
+    values: dict[str, Any] = {}
+    order: list[str] = []
+    for item in items:
+        signature = _canonical_json(item[field])
+        if signature not in counts:
+            counts[signature] = 0
+            values[signature] = item[field]
+            order.append(signature)
+        counts[signature] += 1
+    winner = max(order, key=lambda signature: counts[signature])
+    return copy.deepcopy(values[winner])
+
+
+def _promote_defaults(
+    payload: dict[str, Any],
+    defaults: dict[str, dict[str, Any]],
+    section: str,
+    items: list[dict[str, Any]],
+    fields: tuple[str, ...],
+) -> None:
+    if not items:
+        return
+    for field in fields:
+        if any(field not in item for item in items):
+            continue
+        value = _most_common_value(items, field)
+        before = _payload_size(payload, defaults)
+        matching = [item for item in items if item[field] == value]
+        defaults[section][field] = value
+        for item in matching:
+            del item[field]
+        after = _payload_size(payload, defaults)
+        if after < before:
+            continue
+        del defaults[section][field]
+        for item in matching:
+            item[field] = copy.deepcopy(value)
+
+
+def _compact_plain_paragraphs(payload: dict[str, Any]) -> None:
+    for cell in _iter_cells(payload):
+        paragraphs = cell.get("paragraphs")
+        if not isinstance(paragraphs, list):
+            continue

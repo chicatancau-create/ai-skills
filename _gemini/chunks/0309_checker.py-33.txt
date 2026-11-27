@@ -1,0 +1,104 @@
+        source_runs: List[Tuple[ET.Element, str]],
+        parent_by_id: Dict[int, ET.Element],
+        font_sizes: Dict[int, float],
+        letter_spacings: Dict[int, float],
+    ) -> List[Dict]:
+        """Resolve run metrics shared by single and classified text lines."""
+        resolved: List[Dict] = []
+        for owner, text in source_runs:
+            raw_weight = (
+                _effective_presentation_value(
+                    owner,
+                    'font-weight',
+                    parent_by_id,
+                )
+                or 'normal'
+            ).strip().lower()
+            weight = _parse_project_font_weight(raw_weight).canonical
+            family = (
+                _effective_presentation_value(
+                    owner,
+                    'font-family',
+                    parent_by_id,
+                )
+                or ''
+            )
+            opacity_chain: List[str] = []
+            current: ET.Element | None = owner
+            while current is not None:
+                style_values = (
+                    _parse_inline_style(current.get('style'))
+                    if _parse_inline_style is not None else {}
+                )
+                raw_opacity = style_values.get('opacity')
+                if raw_opacity is None:
+                    raw_opacity = current.get('opacity')
+                if raw_opacity is not None:
+                    opacity_chain.append(raw_opacity.strip())
+                current = parent_by_id.get(id(current))
+            resolved.append({
+                'owner': owner,
+                'text': text,
+                'font_size': font_sizes[id(owner)],
+                'font_weight': weight,
+                'font_family': family,
+                'letter_spacing': letter_spacings[id(owner)],
+                'font_style': _effective_presentation_value(
+                    owner,
+                    'font-style',
+                    parent_by_id,
+                ) or 'normal',
+                'text_decoration': _effective_presentation_value(
+                    owner,
+                    'text-decoration',
+                    parent_by_id,
+                ) or 'none',
+                'fill_raw': _effective_presentation_value(
+                    owner,
+                    'fill',
+                    parent_by_id,
+                ) or '#000000',
+                'fill_opacity': _effective_presentation_value(
+                    owner,
+                    'fill-opacity',
+                    parent_by_id,
+                ) or '1',
+                'stroke_raw': _effective_presentation_value(
+                    owner,
+                    'stroke',
+                    parent_by_id,
+                ) or 'none',
+                'stroke_width': _effective_presentation_value(
+                    owner,
+                    'stroke-width',
+                    parent_by_id,
+                ) or '1',
+                'stroke_opacity': _effective_presentation_value(
+                    owner,
+                    'stroke-opacity',
+                    parent_by_id,
+                ) or '1',
+                'opacity_chain': tuple(reversed(opacity_chain)),
+                'inline_formula': owner.get(_INLINE_FORMULA_ATTR),
+            })
+            if not text:
+                resolved[-1]['_inline_dx'] = _parse_svg_length(
+                    owner.get('dx'),
+                    font_size=font_sizes[id(owner)],
+                )
+                resolved[-1]['inline_formula'] = None
+        return cls._coalesce_checker_text_runs(resolved)
+
+    @staticmethod
+    def _coalesce_checker_text_runs(runs: List[Dict]) -> List[Dict]:
+        """Join only runs whose resolved source styles are provably equal."""
+        if _detect_text_lang is None:
+            return runs
+        style_keys = (
+            'font_size',
+            'font_weight',
+            'font_family',
+            'letter_spacing',
+            'font_style',
+            'text_decoration',
+            'fill_raw',

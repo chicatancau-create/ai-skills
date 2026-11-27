@@ -1,0 +1,121 @@
+    for group in required_terms:
+        for part in group.split("|"):
+            normalized = part.strip().lower()
+            if normalized in _WEAK_REQUIRED_TERM_PARTS:
+                weak.append(part.strip())
+    if weak:
+        print(
+            "  warning: required_terms contains generic category term(s) "
+            f"{weak}; keep proper-name / geography anchors too, and prefer "
+            "Needs-Manual or --from-url over loosening identity gates.",
+            file=sys.stderr,
+        )
+
+
+# ---------------------------------------------------------------------------
+# .env loading
+# ---------------------------------------------------------------------------
+
+
+def _load_search_env_file() -> None:
+    """Load image-search keys from the shared PPT Master .env locations."""
+    load_prefixed_env_file(("PEXELS_", "PIXABAY_"))
+
+
+# ---------------------------------------------------------------------------
+# Provider dispatch
+# ---------------------------------------------------------------------------
+
+
+def _load_provider(name: str):
+    return importlib.import_module(PROVIDER_MODULES[name])
+
+
+def _is_keyed_provider_unconfigured(provider_name: str, exc: Exception) -> bool:
+    """Treat 'API key missing' as a non-fatal skip so the default provider
+    chain can keep going."""
+    if provider_name not in KEYED_PROVIDERS:
+        return False
+    return "API_KEY" in str(exc)
+
+
+@dataclass
+class SearchDownloadResult:
+    """Carry one search result without collapsing no-match and retryable failures."""
+
+    candidate: Optional[AssetCandidate] = None
+    provider_name: Optional[str] = None
+    stage: Optional[str] = None
+    actual_dimensions: Optional[tuple[int, int]] = None
+    staged_path: Optional[Path] = None
+    output_path: Optional[Path] = None
+    selection_required: bool = False
+    candidate_count: int = 0
+    candidate_total: int = 0
+    candidate_page: int = 1
+    has_more_candidates: bool = False
+    review_sheet: Optional[Path] = None
+    failure_kind: Optional[str] = None
+    error: Optional[str] = None
+
+
+class DownloadQualityError(ValueError):
+    """Signal a readable candidate that fails the requested image contract."""
+
+
+def _clear_candidate_selection_outputs(item: dict) -> None:
+    """Remove stale shortlist results while preserving query inputs."""
+    for field_name in _CANDIDATE_SELECTION_OUTPUT_FIELDS:
+        item.pop(field_name, None)
+
+
+def _is_pillow_decompression_error(exc: BaseException) -> bool:
+    """Recognize Pillow's safety exception without making Pillow a hard import."""
+    cls = type(exc)
+    return (
+        cls.__name__ == "DecompressionBombError"
+        and cls.__module__.startswith("PIL.")
+    )
+
+
+def _is_recoverable_image_error(exc: BaseException) -> bool:
+    """Return whether a provider/download/image failure can be reported cleanly."""
+    return isinstance(
+        exc,
+        (
+            requests.RequestException,
+            OSError,
+            RuntimeError,
+            SyntaxError,
+            ValueError,
+        ),
+    ) or _is_pillow_decompression_error(exc)
+
+
+def _try_provider(
+    name: str,
+    request: ImageSearchRequest,
+    license_tier_filter: str,
+    *,
+    provider_is_explicit: bool = False,
+) -> tuple[Optional[list[AssetCandidate]], Optional[str]]:
+    """Run one provider while preserving whether it errored or returned no rows.
+
+    An explicitly selected provider is required; a missing key is retryable
+    instead of an optional-provider skip.
+    """
+    try:
+        module = _load_provider(name)
+        return module.search(request, license_tier_filter=license_tier_filter), None
+    except RuntimeError as exc:
+        if (
+            not provider_is_explicit
+            and _is_keyed_provider_unconfigured(name, exc)
+        ):
+            print(
+                f"  [{name}] skipped: {exc}",
+                file=sys.stderr,
+            )
+            return None, None
+        else:
+            print(f"  [{name}] error: {exc}", file=sys.stderr)

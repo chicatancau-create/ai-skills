@@ -1,0 +1,101 @@
+                    'image_sources_invalid',
+                    error,
+                ))
+                self._source_manifest_errors_reported.add(manifest_path)
+            return
+
+        manifest_items = {
+            str(item.get('filename') or ''): item
+            for item in payload['items']
+            if item.get('filename')
+        }
+        valid_tiers = {
+            'no-attribution',
+            'attribution-required',
+            'manual',
+        }
+        for filename in sourced:
+            item = manifest_items.get(filename)
+            if item is None:
+                self._illustration_issues.append((
+                    'error',
+                    'sourced_image_missing_provenance',
+                    f"{filename} is Sourced but has no matching entry in "
+                    "images/image_sources.json.",
+                ))
+                continue
+
+            tier = str(item.get('license_tier') or '').strip()
+            if tier not in valid_tiers:
+                self._illustration_issues.append((
+                    'error',
+                    'sourced_image_invalid_license_tier',
+                    f"{filename} has invalid license_tier {tier!r} in "
+                    "images/image_sources.json.",
+                ))
+            if tier != 'manual' and not str(
+                item.get('attribution_text') or ''
+            ).strip():
+                self._illustration_issues.append((
+                    'error',
+                    'sourced_image_missing_attribution_text',
+                    f"{filename} has license_tier {tier!r} but no "
+                    "attribution_text in images/image_sources.json.",
+                ))
+            if tier == 'attribution-required' and not str(
+                item.get('author') or ''
+            ).strip():
+                self._illustration_issues.append((
+                    'error',
+                    'sourced_image_missing_author',
+                    f"{filename} requires attribution but has no author in "
+                    "images/image_sources.json.",
+                ))
+
+    def _check_animation_config_contract(self, dir_path: Path) -> None:
+        """Project-level animations.json reference checks."""
+        project_path = self._resolve_project_path(dir_path)
+        config_path = project_path / 'animations.json'
+        if (
+            _load_animation_config is None
+            or _validate_animation_config is None
+            or _validate_animation_config_errors is None
+            or _validate_transition_config is None
+        ):
+            if config_path.is_file():
+                detail = _animation_config_import_error or 'unknown import error'
+                self._animation_issues.append((
+                    'error',
+                    f'animations.json validation is unavailable: {detail}',
+                ))
+            return
+        try:
+            config = _load_animation_config(project_path)
+        except Exception as exc:
+            self._animation_issues.append(('error', f"animations.json is invalid: {exc}"))
+            return
+        if not config:
+            return
+        fatal_errors = list(dict.fromkeys(
+            _validate_transition_config(config)
+            + _validate_animation_config_errors(config)
+        ))
+        for error in fatal_errors:
+            self._animation_issues.append(('error', error))
+        for message in _validate_animation_config(project_path, config):
+            severity = (
+                'warning'
+                if ' has no id and cannot be customized in animations.json' in message
+                else 'error'
+            )
+            self._animation_issues.append((severity, message))
+
+    def _check_template_contract(
+        self,
+        dir_path: Path,
+        svg_files: List[Path],
+        *,
+        check_structure: bool,
+    ) -> None:
+        """Check reusable-template structure, roster, and placeholder hints.
+

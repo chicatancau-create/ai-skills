@@ -1,0 +1,110 @@
+                name, value = declaration.split(':', 1)
+                if name.strip().lower() == 'font-family' and value.strip():
+                    font_stacks.add(value.strip())
+            if element.tag.rsplit('}', 1)[-1] != 'image':
+                continue
+            href = (
+                element.get('href')
+                or element.get('{http://www.w3.org/1999/xlink}href')
+                or ''
+            ).strip()
+            if href.startswith('data:'):
+                image_counts['data_uri'] += 1
+            elif re.match(r'^[a-z][a-z0-9+.-]*://', href, re.IGNORECASE):
+                image_counts['external'] += 1
+                external_images.append({
+                    'file': svg_path.name,
+                    'href': href,
+                })
+            elif href:
+                image_counts['local'] += 1
+    generic_only_font_stacks = sorted({
+        stack
+        for stack in font_stacks
+        if _font_stack_is_generic_only(stack)
+    })
+    unsafe_font_faces = [
+        {
+            'stack': stack,
+            'role': role,
+            'typeface': typeface,
+        }
+        for stack in sorted(font_stacks)
+        for role, typeface in unsafe_exported_font_faces(stack).items()
+    ]
+    return {
+        'unresolved_template_tokens': placeholders,
+        'fonts': {
+            'stacks': sorted(font_stacks),
+            'generic_only_stacks': generic_only_font_stacks,
+            'unsafe_exported_faces': unsafe_font_faces,
+        },
+        'images': {
+            **image_counts,
+            'external_references': external_images,
+        },
+    }
+
+
+def _svg_source_fingerprint(svg_files: list[Path]) -> dict[str, object]:
+    """Return one deterministic digest for the exact SVG export inputs."""
+    files: list[dict[str, object]] = []
+    aggregate = hashlib.sha256()
+    for path in sorted(svg_files, key=lambda item: item.name):
+        file_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+        files.append({'file': path.name, 'sha256': file_sha256})
+        aggregate.update(path.name.encode('utf-8'))
+        aggregate.update(b'\0')
+        aggregate.update(file_sha256.encode('ascii'))
+        aggregate.update(b'\n')
+    return {
+        'algorithm': 'sha256',
+        'digest': aggregate.hexdigest(),
+        'file_count': len(files),
+        'files': files,
+    }
+
+
+def _quality_report_context(
+    project_path: Path,
+    source_fingerprint: dict[str, object],
+) -> dict[str, object]:
+    """Load the final SVG quality report when the preceding gate wrote one."""
+    quality_path = project_path / 'validation' / 'svg_quality_report.json'
+    try:
+        quality = json.loads(quality_path.read_text(encoding='utf-8'))
+    except FileNotFoundError:
+        return {'status': 'not-provided', 'path': str(quality_path)}
+    except (OSError, json.JSONDecodeError) as exc:
+        return {
+            'status': 'unreadable',
+            'path': str(quality_path),
+            'error': str(exc),
+        }
+    schema = quality.get('schema')
+    if schema != 'ppt-master.svg-quality-report.v1':
+        return {
+            'status': 'unsupported-schema',
+            'path': str(quality_path),
+            'schema': schema,
+        }
+    categories = quality.get('categories')
+    quality_fingerprint = quality.get('source_fingerprint')
+    if not isinstance(quality_fingerprint, dict):
+        source_match = 'unavailable'
+    elif (
+        quality_fingerprint.get('algorithm') == 'sha256'
+        and quality_fingerprint.get('digest') == source_fingerprint.get('digest')
+        and quality_fingerprint.get('file_count')
+        == source_fingerprint.get('file_count')
+    ):
+        source_match = 'passed'
+    else:
+        source_match = 'mismatch'
+    return {
+        'status': 'loaded',
+        'path': str(quality_path),
+        'schema': schema,
+        'stage': quality.get('stage'),
+        'source_match': source_match,
+        'source_fingerprint': quality_fingerprint,

@@ -1,0 +1,131 @@
+    else:
+        transition.set("advClick", "1" if advance_on_click else "0")
+    if advance_after is None:
+        transition.attrib.pop("advTm", None)
+    else:
+        transition.set(
+            "advTm",
+            str(
+                _seconds_to_ms(
+                    advance_after,
+                    "slide advance after",
+                    allow_zero=True,
+                )
+            ),
+        )
+
+
+def _insert_transition_carrier(slide_root: Any, carrier: Any) -> None:
+    children = list(slide_root)
+    for index, child in enumerate(children):
+        if child.tag in {
+            _qn(PML_NS, "timing"),
+            _qn(PML_NS, "extLst"),
+        }:
+            slide_root.insert(index, carrier)
+            return
+
+    clr_map = None
+    for child in children:
+        if child.tag == _qn(PML_NS, "clrMapOvr"):
+            clr_map = child
+    if clr_map is not None:
+        slide_root.insert(list(slide_root).index(clr_map) + 1, carrier)
+        return
+    slide_root.append(carrier)
+
+
+def _apply_slide_motion_unchecked(
+    slide_root: Any,
+    *,
+    enter: EnterUpdate,
+    advance: AdvanceUpdate,
+) -> bool:
+    """Apply one resolved enter/advance update and return whether advTm remains."""
+    valid_policies = {"preserve", "replace", "none"}
+    if enter.policy not in valid_policies:
+        raise ValueError(
+            f"unknown transition enter policy {enter.policy!r}; "
+            f"valid policies: {', '.join(sorted(valid_policies))}"
+        )
+    if (
+        enter.policy != "replace"
+        and enter.effect_options not in (None, {})
+    ):
+        raise ValueError(
+            "transition effect_options require enter policy 'replace'"
+        )
+
+    carriers = transition_carriers(slide_root)
+    if len(carriers) > 1:
+        raise ValueError(
+            "slide contains multiple logical transition carriers; "
+            "refusing to preserve or replace an ambiguous source"
+        )
+
+    preserved_click, preserved_after = _captured_advance(carriers)
+    advance_on_click, advance_after = _resolve_advance(
+        advance,
+        preserved_click=preserved_click,
+        preserved_after=preserved_after,
+    )
+
+    if enter.policy == "preserve":
+        if advance.mode == "preserve":
+            return any(
+                transition.get("advTm") is not None
+                for carrier in carriers
+                for transition in _transition_elements(carrier)
+            )
+        if carriers:
+            for transition in _transition_elements(carriers[0]):
+                _set_advance_attributes(
+                    transition,
+                    advance_on_click=advance_on_click,
+                    advance_after=advance_after,
+                )
+            return advance_after is not None
+
+        transition = _build_transition_element(
+            slide_root,
+            effect=None,
+            duration=enter.duration,
+            advance_after=advance_after,
+            advance_on_click=advance_on_click,
+            effect_options=None,
+        )
+        if transition is not None:
+            _insert_transition_carrier(slide_root, transition)
+        return advance_after is not None
+
+    effect, effect_options = (
+        normalize_transition_effect_request(
+            enter.effect,
+            enter.effect_options,
+            allow_none=False,
+        )
+        if enter.policy == "replace"
+        else (None, {})
+    )
+    duration = validate_seconds(
+        enter.duration,
+        "transition duration",
+        allow_zero=False,
+    )
+
+    if carriers:
+        slide_root.remove(carriers[0])
+
+    transition = _build_transition_element(
+        slide_root,
+        effect=effect,
+        duration=duration,
+        advance_after=advance_after,
+        advance_on_click=advance_on_click,
+        effect_options=effect_options,
+    )
+    if transition is not None:
+        _insert_transition_carrier(slide_root, transition)
+    return advance_after is not None
+
+

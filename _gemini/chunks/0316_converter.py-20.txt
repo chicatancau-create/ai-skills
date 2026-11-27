@@ -1,0 +1,102 @@
+    # established expanded transport IR.  Downstream conversion validates the
+    # generated preview hash, not the source-format allowlist again.
+    try:
+        materialize_compact_authored_preset_tree(root)
+    except ValueError as exc:
+        raise SvgNativeConversionError(
+            f'Invalid compact authored preset: {exc}'
+        ) from exc
+    _mark_unchanged_txbody_groups(root)
+    _mark_unchanged_preset_previews(root)
+    has_roundtrip_object = any(
+        elem.get('data-pptx-roundtrip-object') is not None
+        for elem in root.iter()
+    )
+    if native_objects or has_roundtrip_object:
+        try:
+            snapshot_native_fallback_freshness(root)
+        except NativeMarkerAttributeError as exc:
+            raise SvgNativeConversionError(
+                f'{Path(svg_path).name}: conflicting chart/table replacement '
+                f'metadata: {exc}'
+            ) from exc
+    trace_events: list[dict[str, Any]] | None = [] if trace_out is not None else None
+    trace_steps: list[dict[str, Any]] = []
+
+    from ..geometry_properties import (
+        GeometryStyleError,
+        materialize_inline_geometry_properties,
+    )
+
+    try:
+        geometry_count = materialize_inline_geometry_properties(root)
+    except GeometryStyleError as exc:
+        raise SvgNativeConversionError(
+            f'{svg_path.name}: inline geometry materialization failed: {exc}'
+        ) from exc
+    geometry_trace = None
+    if geometry_count:
+        geometry_trace = {
+            'action': 'materialize-inline-geometry',
+            'count': geometry_count,
+        }
+        trace_steps.append(geometry_trace)
+        if verbose:
+            print(f'  Materialized {geometry_count} inline geometry declaration(s)')
+
+    geometry_length_errors = project_geometry_length_errors(root)
+    if geometry_length_errors:
+        preview = '; '.join(geometry_length_errors[:8])
+        suffix = (
+            '' if len(geometry_length_errors) <= 8
+            else f'; +{len(geometry_length_errors) - 8} more'
+        )
+        raise SvgNativeConversionError(
+            f'{Path(svg_path).name}: invalid project geometry length(s): '
+            f'{preview}{suffix}'
+        )
+
+    _require_project_text_properties(root, svg_path)
+    _require_project_freeform_geometry(root, svg_path)
+    _require_project_stroke_styles(root, svg_path)
+    _require_project_opacities(root, svg_path)
+    _require_project_paints(root, svg_path)
+    _require_project_masks(root, svg_path)
+    _require_project_definitions(root, svg_path)
+    _require_project_paint_references(root, svg_path)
+    _require_project_line_end_markers(root, svg_path)
+    _require_project_gradients(root, svg_path)
+    _require_project_effect_status(root, svg_path)
+    _require_project_filters(root, svg_path)
+    _require_project_image_aspect_ratios(root, svg_path)
+    _require_project_transforms(root, svg_path)
+
+    viewport_width, viewport_height = _root_viewport_size(root)
+
+    # Expand project icon placeholders and static same-document <use>
+    # references before unsupported-element preflight.
+    from ..use_expander import (
+        UseExpansionError,
+        expand_local_use_references,
+        expand_use_data_icons,
+    )
+
+    icons_dir = icon_dir_for_project(resource_root)
+    try:
+        expanded = expand_use_data_icons(root, icons_dir)
+    except UseExpansionError as exc:
+        raise SvgNativeConversionError(
+            f'{svg_path.name}: icon expansion failed: {exc}'
+        ) from exc
+    if expanded:
+        trace_steps.append({'action': 'expand-use-data-icons', 'count': expanded})
+    if verbose and expanded:
+        print(f'  Expanded {expanded} <use data-icon="..."/> placeholder(s)')
+    if expanded:
+        hydrated = _hydrate_native_payloads(root, svg_path)
+        if hydrated:
+            trace_steps.append({
+                'action': 'hydrate-native-payloads-from-icons',
+                'count': hydrated,
+            })
+        _mark_unchanged_txbody_groups(root)

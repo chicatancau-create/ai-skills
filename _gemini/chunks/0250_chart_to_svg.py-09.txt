@@ -1,0 +1,93 @@
+    if palette is not None:
+        resolved = palette.resolve_scheme(f"accent{index % 6 + 1}")
+        if resolved:
+            return f"#{resolved.upper()}"
+    return _FALLBACK_CHART_COLORS[index % len(_FALLBACK_CHART_COLORS)]
+
+
+def _line_color(line: _LinePaint | None, default: str | None) -> str | None:
+    if line is None:
+        return default
+    if not line.visible:
+        return None
+    return default if line.automatic else line.color
+
+
+def _series_visual_style(
+    shape: _ShapePaint,
+    marker: _MarkerPaint,
+    *,
+    chart_type: str,
+    auto_color: str,
+) -> SeriesVisualStyle:
+    fill_default = auto_color if chart_type in {"area", "bar", "bubble", "column"} else None
+    fill = shape.fill if shape.fill_explicit else fill_default
+    if chart_type in {"line", "scatter"}:
+        line_default = auto_color
+    elif chart_type == "area":
+        line_default = auto_color
+    else:
+        line_default = None
+    stroke = _line_color(shape.line, line_default)
+    marker_fill = marker.shape.fill if marker.shape.fill_explicit else auto_color
+    marker_stroke = _line_color(marker.shape.line, auto_color)
+    line = shape.line
+    marker_line = marker.shape.line
+    return SeriesVisualStyle(
+        fill=fill,
+        fill_opacity=shape.fill_opacity,
+        stroke=stroke,
+        stroke_opacity=line.opacity if line is not None else 1.0,
+        stroke_width=line.width if line is not None else 1.5,
+        line_cap=line.cap if line is not None else "round",
+        marker_fill=marker_fill,
+        marker_fill_opacity=marker.shape.fill_opacity,
+        marker_stroke=marker_stroke,
+        marker_stroke_opacity=marker_line.opacity if marker_line is not None else 1.0,
+        marker_stroke_width=marker_line.width if marker_line is not None else 1.0,
+        marker_size=marker.size,
+    )
+
+
+def _pie_visual_styles(
+    payload: dict[str, Any],
+    series: ET.Element,
+    palette: ColorPalette | None,
+) -> list[SeriesVisualStyle]:
+    chart_type = payload["type"]
+    expected_count = len(payload["categories"]) + (1 if chart_type == "of_pie" else 0)
+    base_shape = _resolved_shape_paint(series.find("c:spPr", C_NS), palette)
+    point_nodes = series.findall("c:dPt", C_NS)
+    points: dict[int, _ShapePaint] = {}
+    for point in point_nodes:
+        if point.attrib:
+            raise _UnsupportedChart("unsupported-chart-series-style")
+        allowed = {"idx", "bubble3D", "explosion", "spPr"}
+        names = [_local_name(child.tag) for child in point]
+        if any(name not in allowed for name in names) or len(names) != len(set(names)):
+            raise _UnsupportedChart("unsupported-chart-series-style")
+        idx = point.find("c:idx", C_NS)
+        if idx is None or set(idx.attrib) != {"val"} or list(idx):
+            raise _UnsupportedChart("unsupported-chart-series-style")
+        try:
+            point_index = int(idx.attrib["val"])
+        except ValueError:
+            raise _UnsupportedChart("unsupported-chart-series-style") from None
+        bubble_3d = point.find("c:bubble3D", C_NS)
+        if bubble_3d is not None and (
+            not set(bubble_3d.attrib).issubset({"val"})
+            or list(bubble_3d)
+            or ooxml_bool(bubble_3d.attrib.get("val"), True)
+        ):
+            raise _UnsupportedChart("unsupported-chart-series-style")
+        if point_index < 0 or point_index >= expected_count or point_index in points:
+            raise _UnsupportedChart("unsupported-chart-series-style")
+        points[point_index] = _resolved_shape_paint(point.find("c:spPr", C_NS), palette)
+    if points and set(points) != set(range(expected_count)):
+        raise _UnsupportedChart("unsupported-chart-series-style")
+
+    styles: list[SeriesVisualStyle] = []
+    for index in range(expected_count):
+        auto = _automatic_color(palette, index)
+        point_shape = points.get(index, base_shape)
+        fill = point_shape.fill if point_shape.fill_explicit else auto

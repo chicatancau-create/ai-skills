@@ -1,0 +1,108 @@
+            if baseline_unreferenced[child_hash] > 0:
+                baseline_unreferenced[child_hash] -= 1
+                if not any(
+                    item.get(SOURCE_REF_ATTRIBUTE) or item.get("data-icon") in current_assets
+                    for item in child.iter()
+                ):
+                    continue
+            else:
+                authored_unreferenced += 1
+        replacements = restore_nodes(child)
+        if _local_name(child.tag) == "use" and len(replacements) > 1:
+            expanded_vector_uses += 1
+        for replacement in replacements:
+            output_root.append(replacement)
+
+    _prune_unreferenced_definitions(output_root)
+    residual_refs = sorted({
+        source_ref
+        for element in output_root.iter()
+        if (source_ref := element.get(SOURCE_REF_ATTRIBUTE))
+    })
+    if residual_refs:
+        raise AuthoringRoundtripError(
+            f"{document.name} materialization left source refs: {residual_refs[:5]}"
+        )
+    output_path.write_bytes(_serialize_svg(output_root))
+    return {
+        "file": document.name,
+        "source_file": document.source_name,
+        "source_slide": document.source_slide,
+        "document_unchanged": document_unchanged,
+        "source_ref_count": len(expected_refs),
+        "source_ref_ids": sorted(expected_refs),
+        "unchanged_refs": len(unchanged_refs),
+        "unchanged_ref_ids": sorted(unchanged_refs),
+        "edited_refs": len(edited_refs),
+        "edited_ref_ids": sorted(edited_refs),
+        "deleted_refs": len(deleted_refs),
+        "deleted_ref_ids": sorted(deleted_refs),
+        "authored_unreferenced": authored_unreferenced,
+        "expanded_vector_uses": expanded_vector_uses,
+        "defs_changed": defs_changed,
+    }
+
+
+def materialize_flat_authoring_roundtrip(
+    project_path: Path,
+    authoring_dir: Path,
+    output_dir: Path,
+) -> AuthoringRoundtripResult:
+    """Materialize a flat authoring bundle into preserve-mode slide SVGs."""
+    project_path = project_path.resolve()
+    authoring_dir = authoring_dir.resolve()
+    output_dir = output_dir.resolve()
+    try:
+        authoring_dir.relative_to(project_path)
+        output_dir.relative_to(project_path)
+    except ValueError as exc:
+        raise AuthoringRoundtripError(
+            "Authoring and materialized directories must stay inside the project"
+        ) from exc
+    if not authoring_dir.is_dir():
+        raise AuthoringRoundtripError(
+            f"Authoring directory does not exist: {authoring_dir}"
+        )
+    if output_dir.exists() and any(output_dir.iterdir()):
+        raise AuthoringRoundtripError(
+            f"Materialized output directory must be empty: {output_dir}"
+        )
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    (
+        source_root,
+        source_proxy_dir,
+        documents,
+        manifest,
+        _roundtrip_manifest,
+    ) = _load_documents(
+        project_path,
+        authoring_dir,
+    )
+    pages, page_plan_present = _load_page_plan(
+        project_path,
+        authoring_dir,
+        documents,
+    )
+    output_documents = _output_documents(pages, documents, authoring_dir)
+    current_assets, inventory = _load_current_assets(
+        project_path,
+        authoring_dir,
+        documents,
+    )
+    baseline_temporary, baseline_root, baseline_assets = _generate_baseline_bundle(
+        project_path,
+        source_root,
+        source_proxy_dir,
+        documents,
+        inventory,
+    )
+    try:
+        current_keys = sorted(record.baseline_key for record in current_assets.values())
+        baseline_keys = sorted(record.baseline_key for record in baseline_assets.values())
+        if current_keys != baseline_keys:
+            raise AuthoringRoundtripError(
+                "Regenerated flat vector extraction differs from its inventory; "
+                f"missing={sorted(set(current_keys) - set(baseline_keys))}, "
+                f"extra={sorted(set(baseline_keys) - set(current_keys))}"
+            )

@@ -1,0 +1,101 @@
+        first_line_ascent, line_descent, has_formula = (
+            _text_line_vertical_extent(runs, font_size)
+        )
+        text_height = font_size * 1.5
+        if has_formula:
+            text_height = max(
+                text_height,
+                _native_text_line_frame_height(
+                    first_line_ascent,
+                    line_descent,
+                    font_size,
+                ),
+            )
+    padding = _textbox_padding(font_size)
+
+    # Adjust position based on text-anchor. This first box follows the visible
+    # glyph baseline and remains useful for reconstructing imported text-body
+    # insets when data-pptx-frame supplies the owning PowerPoint shape frame.
+    if text_anchor == 'middle':
+        box_x = x - text_width / 2 - padding
+    elif text_anchor == 'end':
+        box_x = x - text_width - padding
+    else:
+        box_x = x - padding
+
+    box_y = y - first_line_ascent
+    box_w = text_width + padding * 2
+    box_h = text_height + padding
+    if reflect_y:
+        box_y = 2 * y - box_y - box_h
+
+    visual_box_x = box_x
+    visual_box_y = box_y
+    exact_text_frame = None
+    exact_text_insets: tuple[float, float, float] | None = None
+    if elem.get('data-pptx-frame') is not None:
+        _preset, _guides, exact_text_frame = _parse_preset_geometry_metadata(elem)
+        if exact_text_frame is None:
+            raise ValueError('data-pptx-frame did not resolve to a text frame')
+        raw_frame_x, raw_frame_y, raw_frame_w, raw_frame_h = exact_text_frame
+        if use_axis_transform:
+            frame_x_1, frame_y_1 = transform_point(
+                ctx.transform_matrix,
+                raw_frame_x,
+                raw_frame_y,
+            )
+            frame_x_2, frame_y_2 = transform_point(
+                ctx.transform_matrix,
+                raw_frame_x + raw_frame_w,
+                raw_frame_y + raw_frame_h,
+            )
+        else:
+            frame_x_1 = ctx_x(raw_frame_x, ctx)
+            frame_x_2 = ctx_x(raw_frame_x + raw_frame_w, ctx)
+            frame_y_1 = ctx_y(raw_frame_y, ctx)
+            frame_y_2 = ctx_y(raw_frame_y + raw_frame_h, ctx)
+        box_x = min(frame_x_1, frame_x_2)
+        box_y = min(frame_y_1, frame_y_2)
+        box_w = abs(frame_x_2 - frame_x_1)
+        box_h = abs(frame_y_2 - frame_y_1)
+        top_inset = visual_box_y - box_y
+        if text_anchor == 'start':
+            left_inset = x - box_x
+            right_inset = 0.0
+        elif text_anchor == 'end':
+            left_inset = 0.0
+            right_inset = box_x + box_w - x
+        else:
+            center_delta = x - (box_x + box_w / 2)
+            left_inset = max(0.0, center_delta * 2)
+            right_inset = max(0.0, -center_delta * 2)
+        exact_text_insets = (left_inset, top_inset, right_inset)
+
+    text_transform = elem.get('transform', '')
+    text_operations = (
+        parse_transform_operations(text_transform)
+        if text_transform else ()
+    )
+    translate_only = bool(text_operations) and all(
+        name == 'translate' for name, _args in text_operations
+    )
+    rotate_only = (
+        len(text_operations) == 1
+        and text_operations[0][0] == 'rotate'
+    )
+    if text_operations and not (translate_only or rotate_only):
+        raise ValueError(
+            'Text transform must be a translate-only list or one rotate operation'
+        )
+    if translate_only and not ctx.use_transform_matrix:
+        a, b, c, d, e, f = parse_transform_matrix(text_transform)
+        # A pure-translate transform on a text element (hand-authored, or written
+        # by a live-preview move) was otherwise ignored here, drifting the text.
+        # Absorb the translation into the frame position.
+        if (
+            abs(a - 1.0) < 1e-9 and abs(b) < 1e-9
+            and abs(c) < 1e-9 and abs(d - 1.0) < 1e-9
+        ):
+            sx = ctx.scale_x or 1.0
+            sy = ctx.scale_y or 1.0
+            raw_box_x = (box_x - ctx.translate_x) / sx

@@ -1,0 +1,127 @@
+    infos: Sequence[Any]
+    positions: Sequence[Any]
+    scale: float
+    advance_x: float
+
+
+@dataclass
+class _DrawState:
+    origin_x: float
+    origin_y: float
+    scale: float
+    commands: list[PathCommand]
+    segment_count: int = 0
+
+    def point(self, x: float, y: float) -> tuple[float, float]:
+        return (
+            self.origin_x + x * self.scale,
+            self.origin_y - y * self.scale,
+        )
+
+
+def text_element_to_path_commands(
+    element: ET.Element,
+    parents: Mapping[ET.Element, ET.Element],
+    *,
+    font_dirs: Sequence[str | Path] = (),
+) -> list[PathCommand]:
+    """Return closed glyph outlines for one supported SVG ``<text>`` element."""
+    chain = _element_chain(element, parents)
+    _validate_text_structure(element, chain)
+    text = _normalized_direct_text(element, chain)
+    if not text:
+        raise ValueError(f"{_element_label(element)} has no rendered text")
+    if any(
+        unicodedata.bidirectional(character)
+        in _UNSUPPORTED_BIDI_CLASSES
+        for character in text
+    ):
+        raise ValueError(
+            f"{_element_label(element)} uses right-to-left or bidirectional "
+            "text; materialize its glyph outlines before Shape Boolean"
+        )
+
+    style = _resolve_text_style(chain)
+    x = _text_position(element, "x")
+    y = _text_position(element, "y")
+    explicit_roots = _normalize_explicit_font_dirs(font_dirs)
+    catalog = _font_catalog(explicit_roots)
+    candidates = _font_candidates(
+        catalog,
+        style.families,
+        style.font_weight,
+        style.italic,
+    )
+    if not candidates:
+        family_list = ", ".join(style.families)
+        raise ValueError(
+            f"{_element_label(element)} cannot resolve an installed font from "
+            f"{family_list!r}; add a usable fallback or pass --font-dir"
+        )
+
+    clusters = split_project_text_clusters(text)
+    runs = _font_runs(
+        element,
+        clusters,
+        candidates,
+        style.families,
+    )
+    shaped_runs = _shape_runs(
+        runs,
+        style.font_size,
+        style.font_weight,
+        style.italic,
+        style.letter_spacing,
+    )
+    natural_width = sum(run.advance_x for run in shaped_runs)
+    tracked_width = (
+        natural_width
+        + max(0, len(clusters) - 1) * style.letter_spacing
+    )
+    if not math.isfinite(tracked_width) or tracked_width <= 0:
+        raise ValueError(
+            f"{_element_label(element)} resolves to a non-positive text width"
+        )
+    anchor_shift = {
+        "start": 0.0,
+        "middle": -tracked_width / 2.0,
+        "end": -tracked_width,
+    }[style.anchor]
+
+    hb = _load_harfbuzz()
+    draw_funcs = _draw_functions(hb)
+    commands: list[PathCommand] = []
+    natural_run_x = 0.0
+    for shaped in shaped_runs:
+        run_offsets = _cluster_offsets(shaped.run.clusters)
+        glyph_cursor_x = 0.0
+        glyph_cursor_y = 0.0
+        for info, position in zip(shaped.infos, shaped.positions):
+            if info.codepoint == 0:
+                raise ValueError(
+                    f"{_element_label(element)} shaped a missing glyph in "
+                    f"{shaped.run.face.path.name}"
+                )
+            cluster_index = max(
+                0,
+                bisect.bisect_right(run_offsets, info.cluster) - 1,
+            )
+            cluster_index = min(
+                cluster_index,
+                len(shaped.run.clusters) - 1,
+            )
+            global_cluster = (
+                shaped.run.global_cluster_start + cluster_index
+            )
+            spacing_shift = global_cluster * style.letter_spacing
+            state = _DrawState(
+                origin_x=(
+                    x
+                    + anchor_shift
+                    + natural_run_x
+                    + glyph_cursor_x
+                    + position.x_offset * shaped.scale
+                    + spacing_shift
+                ),
+                origin_y=(
+                    y

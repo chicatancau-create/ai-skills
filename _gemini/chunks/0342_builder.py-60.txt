@@ -1,0 +1,101 @@
+            spec.slide_num == source_slide.index
+            and spec.layout_key == source_slide.layout_key
+            for spec, source_slide in zip(specs, contract.slides)
+        )
+    )
+    if source_roster_matches:
+        shutil.copy2(contract.source_template, output_path)
+        return True
+
+    presentation = Presentation(str(contract.source_template))
+    actual_size = (int(presentation.slide_width), int(presentation.slide_height))
+    if actual_size != contract.slide_size_emu:
+        raise TemplateStructureError(
+            f"{contract.source_template.name} slide size does not match "
+            f"{contract.contract_path.name}"
+        )
+    if actual_size != slide_size_emu:
+        raise TemplateStructureError(
+            "Generated SVG canvas does not match the preserved source template size"
+        )
+
+    layouts_by_part = {
+        str(layout.part.partname).lstrip("/"): layout
+        for master in presentation.slide_masters
+        for layout in master.slide_layouts
+    }
+    slide_ids = presentation.slides._sldIdLst
+    for slide_id in list(slide_ids):
+        presentation.part.drop_rel(slide_id.rId)
+        slide_ids.remove(slide_id)
+
+    for spec in specs:
+        layout_contract = contract.layout(spec.layout_key)
+        layout = layouts_by_part.get(layout_contract.package_part)
+        if layout is None:
+            raise TemplateStructureError(
+                f"Preserved source package did not load layout part "
+                f"{layout_contract.package_part!r}"
+            )
+        presentation.slides.add_slide(layout)
+    presentation.save(str(output_path))
+    return False
+
+
+def _clear_preserved_slide_collections(extract_dir: Path) -> None:
+    """Remove source slide-order metadata that cannot apply to generated pages."""
+    presentation_path = extract_dir / "ppt" / "presentation.xml"
+    tree = ET.parse(presentation_path)
+    root = tree.getroot()
+    custom_shows = root.find(f"{{{PML_NS}}}custShowLst")
+    if custom_shows is not None:
+        root.remove(custom_shows)
+    for extension_list in root.findall(f".//{{{PML_NS}}}extLst"):
+        for extension in list(extension_list):
+            if any(
+                child.tag.rsplit("}", 1)[-1] == "sectionLst"
+                for child in extension.iter()
+                if isinstance(child.tag, str)
+            ):
+                extension_list.remove(extension)
+    _write_xml_tree(presentation_path, tree)
+
+
+def _validate_source_theme_xml(payload: bytes) -> None:
+    """Validate one imported Theme part before package installation."""
+    try:
+        root = ET.fromstring(payload)
+    except ET.ParseError as exc:
+        raise ThemeColorError(f"Imported source theme is malformed: {exc}") from exc
+    if root.tag != f"{{{DML_NS}}}theme":
+        raise ThemeColorError("Imported source theme root must be a:theme")
+    if any(
+        isinstance(name, str) and name.startswith(f"{{{REL_NS}}}")
+        for node in root.iter()
+        for name in node.attrib
+    ):
+        raise ThemeColorError("Imported source theme cannot contain relationships")
+
+
+def _install_source_theme_xml(extract_dir: Path, payload: bytes) -> None:
+    """Install a validated imported theme into the generated flat package."""
+    _validate_source_theme_xml(payload)
+
+    theme_paths = sorted((extract_dir / "ppt" / "theme").glob("theme*.xml"))
+    if not theme_paths:
+        raise ThemeColorError("Generated PPTX package has no theme part")
+    for theme_path in theme_paths:
+        theme_path.write_bytes(payload)
+
+
+def _install_source_themes_by_master(
+    extract_dir: Path,
+    master_parts_by_key: dict[str, str],
+    payloads_by_key: dict[str, bytes],
+) -> None:
+    """Install one exact source Theme into each structured mirror Master."""
+    expected = set(master_parts_by_key)
+    actual = set(payloads_by_key)
+    if actual != expected:
+        raise ThemeColorError(
+            "Structured source Theme roster differs from Master roster; "

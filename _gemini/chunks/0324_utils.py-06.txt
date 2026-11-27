@@ -1,0 +1,121 @@
+        raise ValueError('dash length must be positive')
+    if allow_zero_gap:
+        if values[1] < 0:
+            raise ValueError('dash gap must be non-negative')
+    elif values[1] <= 0:
+        raise ValueError('dash gap must be positive')
+    if any(value <= 0 for value in values[2:]):
+        raise ValueError('additional dash and gap values must be positive')
+    return DASH_PRESETS.get(values), values, tokens
+
+
+def parse_project_stroke_dasharray(
+    raw: str,
+    *,
+    allow_zero_gap: bool = False,
+) -> tuple[str | None, tuple[float, ...]] | None:
+    """Return the registered preset and numeric values for one dash array."""
+    parsed = _parse_project_stroke_dasharray(
+        raw,
+        allow_zero_gap=allow_zero_gap,
+    )
+    if parsed is None:
+        return None
+    preset, values, _tokens = parsed
+    return preset, values
+
+
+def noncanonical_stroke_dash_numbers(raw: str) -> tuple[str, ...]:
+    """Return compatible dash numbers outside the generated-SVG spelling."""
+    parsed = _parse_project_stroke_dasharray(raw, allow_zero_gap=True)
+    if parsed is None:
+        return ()
+    _preset, _values, tokens = parsed
+    return tuple(
+        token
+        for token in tokens
+        if not _CANONICAL_PROJECT_GEOMETRY_LENGTH_RE.fullmatch(token)
+    )
+
+
+def parse_project_stroke_enum(attribute: str, raw: str) -> str:
+    """Parse one closed line-presentation enumeration."""
+    allowed = PROJECT_STROKE_ENUM_VALUES.get(attribute)
+    if allowed is None:
+        raise ValueError(f'has no registered project enumeration for {attribute!r}')
+    value = raw.strip()
+    if value not in allowed:
+        choices = ', '.join(sorted(allowed))
+        raise ValueError(f'must be one of: {choices}')
+    return value
+
+
+def is_thick_circle_shorthand(
+    dasharray: str | None,
+    stroke: str | None,
+    fill: str | None,
+    stroke_width: float,
+    radius: float,
+) -> bool:
+    """Return whether one circle uses the converter's thick-arc shorthand."""
+    if (
+        not dasharray
+        or not stroke
+        or stroke.strip().lower() in {'none', 'transparent'}
+    ):
+        return False
+    if not fill or fill.strip().lower() != 'none':
+        return False
+    if stroke_width <= 0 or radius <= 0 or stroke_width >= 2 * radius:
+        return False
+    if stroke_width / radius < 0.15:
+        return False
+    try:
+        parsed = parse_project_stroke_dasharray(
+            dasharray,
+            allow_zero_gap=True,
+        )
+    except ValueError:
+        return False
+    if parsed is None:
+        return False
+    preset, values = parsed
+    if preset is not None or len(values) != 2:
+        return False
+    dash, gap = values
+    circumference = 2 * math.pi * radius
+    return (
+        dash < circumference
+        and dash + gap + THICK_CIRCLE_COVERAGE_TOLERANCE >= circumference
+    )
+
+
+def svg_length_x(val: str | None, ctx: ConvertContext, default: float = 0.0) -> float:
+    return parse_svg_length(val, default, percent_base=ctx.viewport_width)
+
+
+def svg_length_y(val: str | None, ctx: ConvertContext, default: float = 0.0) -> float:
+    return parse_svg_length(val, default, percent_base=ctx.viewport_height)
+
+
+def svg_length_size(val: str | None, ctx: ConvertContext, default: float = 0.0) -> float:
+    base = min(ctx.viewport_width, ctx.viewport_height)
+    return parse_svg_length(val, default, percent_base=base)
+
+
+# ---------------------------------------------------------------------------
+# SVG transform matrix helpers
+# ---------------------------------------------------------------------------
+
+_TRANSFORM_NUMBER_PATTERN = (
+    r'[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?'
+)
+_TRANSFORM_NUMBER_RE = re.compile(_TRANSFORM_NUMBER_PATTERN)
+_CANONICAL_TRANSFORM_NUMBER_RE = re.compile(
+    r'-?(?:\d+(?:\.\d+)?|\.\d+)$'
+)
+_TRANSFORM_OPERATION_RE = re.compile(r'([A-Za-z]+)\(([^()]*)\)')
+_TRANSFORM_WHITESPACE_RE = re.compile(r'[ \t\r\n]*')
+_TRANSFORM_SEPARATOR_PATTERN = (
+    r'(?:[ \t\r\n]+|[ \t\r\n]*,[ \t\r\n]*)'
+)

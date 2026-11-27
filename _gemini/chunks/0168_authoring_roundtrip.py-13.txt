@@ -1,0 +1,113 @@
+    occurrences: dict[str, list[RefOccurrence]] = {}
+    for element in root.iter():
+        source_ref = element.get(SOURCE_REF_ATTRIBUTE)
+        if source_ref:
+            occurrences.setdefault(source_ref, []).append(
+                RefOccurrence(element=element, asset=None, root=root)
+            )
+    for record, asset_root in referenced_assets.values():
+        context_root = copy.deepcopy(root)
+        use = next(item for item in context_root.iter() if item.get("data-icon") == record.icon)
+        use.append(asset_root)
+        for element in asset_root.iter():
+            source_ref = element.get(SOURCE_REF_ATTRIBUTE)
+            if source_ref:
+                occurrences.setdefault(source_ref, []).append(
+                    RefOccurrence(element=element, asset=record, root=context_root)
+                )
+    return occurrences
+
+
+def _outer_source_ref_elements(root: ET.Element) -> list[ET.Element]:
+    elements: list[ET.Element] = []
+
+    def visit(element: ET.Element, inside_ref: bool) -> None:
+        source_ref = element.get(SOURCE_REF_ATTRIBUTE)
+        if source_ref and not inside_ref:
+            elements.append(element)
+            return
+        for child in element:
+            visit(child, inside_ref or bool(source_ref))
+
+    visit(root, False)
+    return elements
+
+
+def _layered_ref_index(root: ET.Element) -> dict[str, ET.Element]:
+    index: dict[str, ET.Element] = {}
+    for element in root.iter():
+        if not element.get("id") or not element.get("data-pptx-object"):
+            continue
+        source_ref = _source_identity(element)
+        if source_ref is None:
+            continue
+        if source_ref in index:
+            raise AuthoringRoundtripError(
+                f"Layered SVG contains duplicate source identity {source_ref!r}"
+            )
+        index[source_ref] = element
+    return index
+
+
+def _direct_defs(root: ET.Element) -> ET.Element | None:
+    return next(
+        (child for child in root if _local_name(child.tag) == "defs"),
+        None,
+    )
+
+
+def _definition_changes(
+    current_root: ET.Element,
+    baseline_root: ET.Element,
+    current_assets: dict[str, VectorAssetRecord],
+    baseline_assets: dict[str, VectorAssetRecord],
+) -> tuple[bool, set[str]]:
+    current_defs = _direct_defs(current_root)
+    baseline_defs = _direct_defs(baseline_root)
+    current_hash = (
+        normalized_authoring_subtree_sha256(current_defs, current_assets)
+        if current_defs is not None
+        else None
+    )
+    baseline_hash = (
+        normalized_authoring_subtree_sha256(baseline_defs, baseline_assets)
+        if baseline_defs is not None
+        else None
+    )
+    if current_hash == baseline_hash:
+        return False, set()
+    current_children = list(current_defs) if current_defs is not None else []
+    baseline_children = list(baseline_defs) if baseline_defs is not None else []
+    current_by_id = {
+        child.get("id"): child
+        for child in current_children
+        if child.get("id")
+    }
+    baseline_by_id = {
+        child.get("id"): child
+        for child in baseline_children
+        if child.get("id")
+    }
+    changed_ids = {
+        definition_id
+        for definition_id in set(current_by_id) | set(baseline_by_id)
+        if definition_id not in current_by_id
+        or definition_id not in baseline_by_id
+        or normalized_authoring_subtree_sha256(
+            current_by_id[definition_id],
+            current_assets,
+        )
+        != normalized_authoring_subtree_sha256(
+            baseline_by_id[definition_id],
+            baseline_assets,
+        )
+    }
+    return True, changed_ids
+
+
+def _referenced_definition_ids(element: ET.Element) -> set[str]:
+    references: set[str] = set()
+    for item in element.iter():
+        for name, value in item.attrib.items():
+            references.update(match.group(2) for match in _URL_ID_RE.finditer(value))
+            if _local_name(name) == "href" and value.startswith("#"):

@@ -1,0 +1,73 @@
+    ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, ""]]]
+]
+```
+
+### textSlot（文本插槽）
+
+- **tag**: `"cangjie-textinline"`
+- **attrs**:
+  - `subType: "textSlot"` — 固定标识
+  - `data.slotInfo.style.color: string` — 文字颜色（支持渐变色）
+- **children**: 文本内容
+- **示例**:
+
+```json
+["cangjie-textinline", {"subType": "textSlot", "data": {"slotInfo": {"style": {"color": "#1890ff"}}}}, "插槽文本"]
+```
+
+---
+
+## 完整文档示例
+
+```json
+["root", {"sectPr": {"pgSz": {"w": 11906, "h": 16838}}},
+  ["h1", {"uuid": "h1"},
+    ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "文档标题"]]],
+
+  ["p", {"uuid": "p1"},
+    ["span", {"data-type": "text"},
+      ["span", {"data-type": "leaf"}, "这是一段普通文本，包含"],
+      ["span", {"data-type": "leaf", "bold": true}, "加粗"],
+      ["span", {"data-type": "leaf"}, "和"]],
+    ["a", {"href": "https://example.com"}, "链接"],
+    ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "。"]]],
+
+  ["h2", {"uuid": "h2"},
+    ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "列表示例"]]],
+  ["p", {"uuid": "li1", "list": {"listId": "l1", "level": 0, "isOrdered": true, "start": 1}},
+    ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "第一项"]]],
+  ["p", {"uuid": "li2", "list": {"listId": "l1", "level": 0, "isOrdered": true, "start": 2}},
+    ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "第二项"]]],
+  ["p", {"uuid": "li3", "list": {"listId": "l1", "level": 1, "isOrdered": false}},
+    ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "子项"]]],
+
+  ["hr", {"uuid": "hr1"}],
+
+  ["code", {"uuid": "cd1", "syntax": "javascript", "code": "function hello() {\n  return 'world';\n}"}],
+
+  ["container", {"uuid": "co1", "subType": "colorBlocks", "metadata": {"bgcolor": "#E8F2FE"}},
+    ["p", {"uuid": "co1p1"},
+      ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "这是一个提示块"]]]],
+
+  ["table", {"uuid": "tb1", "colsWidth": [200, 200]},
+    ["tr", {"uuid": "tr1"},
+      ["tc", {"uuid": "tc1", "colSpan": 1, "rowSpan": 1},
+        ["p", {"uuid": "tcp1"}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "A"]]]],
+      ["tc", {"uuid": "tc2", "colSpan": 1, "rowSpan": 1},
+        ["p", {"uuid": "tcp2"}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "B"]]]]
+    ]
+  ]
+]
+```
+
+## 设计要点
+
+1. **Canonical 文本是 span/leaf**：每段文字 = `["span", {"data-type":"text"}, ["span", {"data-type":"leaf", ...marks}, "..."]]`。legacy `["text", {marks}, "..."]` 仍被接受但不建议新写。
+2. **裸字符串作 block 子节点违法**：validator 报错；默认 normalize 自动包成 canonical 并打印 `[FIX]`；可用 `--no-fix-jsonml` 关闭。
+3. **每个 block 必带 `uuid`**：手写 JSONML 时建议每个 block 自带 `uuid`（base32 alphanumeric，dws CLI 用 `dws` 前缀）。写入端 normalize **仅在 `attrs` 槽完全缺失（如 `["p", "text"]`）** 时自动补一个；只要 `attrs` 槽存在（即使是 `{}`），normalize 不再补 uuid —— 这保证 `doc read → doc update` 回灌不会污染原文档节点。
+4. **扁平列表**: 列表不嵌套，通过 `listId` + `level` 表达层级。
+5. **属性装饰**: blockquote / list / footnote 不是独立 tag，是 paragraph 的属性。
+6. **Void 节点**: hr / code / img / card / toc / embed / onlineVideo 在构造时不需要传子节点；服务端返回的真实文档中这些节点**可能包含内部配置数据子节点**，解析时应兼容。
+7. **columns = table + sr:true**: 分栏复用表格结构。
+8. **card 轻引用**: body 中只存 cardType + metadata.id，重数据在 parts 层。
+9. **root 节点**: 服务端返回的完整 body 以 `["root", {sectPr...}, ...blocks]` 包裹，写入时可直接使用此格式或纯块列表格式。

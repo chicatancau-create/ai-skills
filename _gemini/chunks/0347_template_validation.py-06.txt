@@ -1,0 +1,119 @@
+def _first_run_size(shape: ET.Element) -> str | None:
+    text_body = _direct_text_body(shape)
+    if text_body is None:
+        return None
+    run_props = text_body.find(f".//{{{DML_NS}}}rPr")
+    return run_props.get("sz") if run_props is not None else None
+
+
+def _level_one_default_size(shape: ET.Element) -> str | None:
+    text_body = _direct_text_body(shape)
+    if text_body is None:
+        return None
+    default_props = text_body.find(
+        f"{{{DML_NS}}}lstStyle/"
+        f"{{{DML_NS}}}lvl1pPr/"
+        f"{{{DML_NS}}}defRPr"
+    )
+    return default_props.get("sz") if default_props is not None else None
+
+
+def _content_type_overrides(
+    reader: _PackageReader,
+) -> dict[str, list[str]]:
+    root = reader.xml("[Content_Types].xml")
+    overrides: dict[str, list[str]] = {}
+    if root is None:
+        return overrides
+    for elem in root:
+        if elem.tag.rsplit("}", 1)[-1] != "Override":
+            continue
+        part_name = elem.get("PartName", "")
+        content_type = elem.get("ContentType", "")
+        if part_name and content_type:
+            overrides.setdefault(part_name, []).append(content_type)
+    return overrides
+
+
+def _validate_uint32_id_roster(
+    elements: list[ET.Element],
+    context: str,
+    errors: list[str],
+    *,
+    min_value: int = 0,
+) -> set[int]:
+    values: set[int] = set()
+    for element in elements:
+        raw_value = element.get("id")
+        try:
+            value = int(raw_value) if raw_value is not None else -1
+        except ValueError:
+            value = -1
+        if not min_value <= value <= OOXML_UINT32_MAX:
+            errors.append(
+                f"{context} contains id {raw_value!r} outside the OOXML range "
+                f"{min_value}..{OOXML_UINT32_MAX}"
+            )
+            continue
+        if value in values:
+            errors.append(f"{context} repeats numeric id {value}")
+            continue
+        values.add(value)
+    return values
+
+
+def _validate_registered_part_roster(
+    reader: _PackageReader,
+    source_part: str,
+    rel_type: str,
+    entries: list[ET.Element],
+    expected_targets: set[str],
+    context: str,
+    *,
+    min_id: int = PRESENTATION_COLLECTION_ID_MIN,
+) -> set[int]:
+    relationships = [
+        relationship
+        for relationship in reader.relationships(source_part)
+        if relationship.rel_type == rel_type
+    ]
+    targets_by_id: dict[str, str] = {}
+    ids_by_target: dict[str, list[str]] = {}
+    for relationship in relationships:
+        target = _resolve_relationship_target(
+            source_part,
+            relationship,
+            reader.errors,
+            context,
+        )
+        if target is None:
+            continue
+        targets_by_id[relationship.rel_id] = target
+        ids_by_target.setdefault(target, []).append(relationship.rel_id)
+    for target, rel_ids in sorted(ids_by_target.items()):
+        if len(rel_ids) > 1:
+            reader.errors.append(
+                f"{context} targets {target} through multiple relationships: "
+                + ", ".join(rel_ids)
+            )
+
+    actual_targets = set(targets_by_id.values())
+    if actual_targets != expected_targets:
+        missing = sorted(expected_targets - actual_targets)
+        extra = sorted(actual_targets - expected_targets)
+        reader.errors.append(
+            f"{context} registered target roster differs; missing={missing}, "
+            f"extra={extra}"
+        )
+
+    entry_rel_ids: list[str] = []
+    for entry in entries:
+        rel_id = entry.get(f"{{{REL_NS}}}id")
+        if not rel_id:
+            reader.errors.append(f"{context} contains an entry without r:id")
+            continue
+        entry_rel_ids.append(rel_id)
+    if len(entry_rel_ids) != len(set(entry_rel_ids)):
+        reader.errors.append(f"{context} repeats an entry r:id")
+    if set(entry_rel_ids) != {relationship.rel_id for relationship in relationships}:
+        reader.errors.append(

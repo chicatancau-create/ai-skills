@@ -1,0 +1,105 @@
+    """Resolves scheme colors via the master's a:clrMap + theme1's a:clrScheme.
+
+    a:clrMap remaps presentation-level scheme names (bg1/tx1) to theme-level
+    names (lt1/dk1) — this is rarely overridden but must be honored.
+    """
+
+    def __init__(
+        self,
+        master: PartRef | None,
+        theme: PartRef | None,
+        *,
+        strict: bool = True,
+        diagnostic_sink: Callable[[str, str, str], None] | None = None,
+    ) -> None:
+        self.scheme: dict[str, str] = {}
+        self.clr_map: dict[str, str] = {}
+        self.strict = strict
+        self.diagnostic_sink = diagnostic_sink
+        if theme is not None:
+            try:
+                self._load_scheme(theme)
+            except ValueError as exc:
+                if strict:
+                    raise
+                self.scheme.clear()
+                self._diagnose(
+                    "theme-color-scheme-normalized",
+                    str(exc),
+                    "read recognized theme color slots",
+                )
+                self._load_scheme_compatible(theme)
+        if master is not None:
+            try:
+                self._load_clr_map(master)
+            except ValueError as exc:
+                if strict:
+                    raise
+                self.clr_map.clear()
+                self._diagnose(
+                    "theme-color-map-normalized",
+                    str(exc),
+                    "read recognized color-map entries",
+                )
+                self._load_clr_map_compatible(master)
+
+    def _diagnose(self, code: str, message: str, fallback: str) -> None:
+        if self.diagnostic_sink is not None:
+            self.diagnostic_sink(code, message, fallback)
+
+    def _load_scheme_compatible(self, theme: PartRef) -> None:
+        """Read recognizable theme slots without requiring canonical wrapper XML."""
+        clr_scheme = theme.xml.find(".//a:clrScheme", NS)
+        if clr_scheme is None:
+            return
+        for slot in clr_scheme:
+            if not isinstance(slot.tag, str):
+                continue
+            name = slot.tag.rsplit("}", 1)[-1]
+            color = next(
+                (
+                    child
+                    for child in slot
+                    if isinstance(child.tag, str)
+                    and child.tag.rsplit("}", 1)[-1] in COLOR_TAGS
+                ),
+                None,
+            )
+            hex_, _alpha = resolve_color(color, None, strict=False)
+            if hex_ is not None:
+                self.scheme[name] = hex_[1:]
+
+    def _load_clr_map_compatible(self, master: PartRef) -> None:
+        """Read valid known clrMap entries and ignore unrelated extensions."""
+        clr_map = master.xml.find("p:clrMap", NS)
+        if clr_map is None:
+            return
+        for source in _COLOR_MAP_SOURCES:
+            target = clr_map.attrib.get(source)
+            if target in _THEME_SCHEME_SLOTS:
+                self.clr_map[source] = target
+
+    def _load_scheme(self, theme: PartRef) -> None:
+        theme_root = theme.xml
+        if theme_root.tag != f"{{{NS['a']}}}theme":
+            raise ValueError(f"{theme.path}: expected a:theme root")
+
+        theme_elements = theme_root.findall("a:themeElements", NS)
+        if len(theme_elements) != 1:
+            raise ValueError(
+                f"{theme.path}: expected exactly one direct a:themeElements"
+            )
+        clr_schemes = theme_elements[0].findall("a:clrScheme", NS)
+        if len(clr_schemes) != 1:
+            raise ValueError(
+                f"{theme.path}: expected exactly one direct a:clrScheme"
+            )
+        clr_scheme = clr_schemes[0]
+        children = list(clr_scheme)
+        expected_tags = [
+            f"{{{NS['a']}}}{name}" for name in _THEME_SCHEME_SLOTS
+        ]
+        if (
+            set(clr_scheme.attrib) != {"name"}
+            or (clr_scheme.text or "").strip()
+            or [child.tag for child in children] != expected_tags

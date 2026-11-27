@@ -1,0 +1,133 @@
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except KeyboardInterrupt:
+        return 130
+    if result.stdout.strip():
+        print(result.stdout.strip(), file=sys.stderr)
+    if result.stderr.strip():
+        print(result.stderr.strip(), file=sys.stderr)
+    return result.returncode
+
+
+def print_output(path: Path) -> None:
+    print(f"OUTPUT: {path.resolve()}")
+
+
+def write_passthrough(
+    input_arg: str,
+    output: Path,
+    conversion_type: str,
+    json_output: bool = False,
+) -> int:
+    """Copy text-like input to Markdown and write the profile sidecar."""
+    source = Path(input_arg)
+    try:
+        raw = source.read_bytes()
+    except OSError as exc:
+        print(f"[ERROR] Cannot read {source}: {exc}", file=sys.stderr)
+        return 1
+
+    encodings = ("utf-8", "gb18030")
+    if raw.startswith(codecs.BOM_UTF8):
+        encodings = ("utf-8-sig",)
+    elif raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        encodings = ("utf-16",)
+    for encoding in encodings:
+        try:
+            text = raw.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        print(
+            f"[ERROR] Cannot decode {source} as {' or '.join(encodings)}. "
+            "Save the source as UTF-8 text and retry.",
+            file=sys.stderr,
+        )
+        return 1
+    if any(ord(char) < 32 and char not in "\t\n\r\f" for char in text):
+        print(f"[ERROR] Binary control characters in {source}; provide a text file.", file=sys.stderr)
+        return 1
+    if encoding != "utf-8" and output.resolve() == source.resolve():
+        print(
+            f"[ERROR] {source} uses {encoding}; choose a different -o path for UTF-8 output.",
+            file=sys.stderr,
+        )
+        return 1
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if output.resolve() != source.resolve():
+        output.write_bytes(text.encode("utf-8"))
+    warnings = []
+    if encoding != "utf-8":
+        warnings.append(f"Detected source encoding: {encoding}; converted to UTF-8.")
+    profile = write_conversion_profile(
+        input_path=input_arg,
+        markdown_path=output,
+        converter="source_to_md.py",
+        conversion_type=conversion_type,
+        warnings=warnings,
+    )
+    for warning in warnings:
+        _print_status(f"[INFO] {warning}")
+    _print_status(f"[OK] Saved Markdown to: {output}")
+    _print_status(f"   Wrote conversion profile -> {profile}")
+    if not json_output:
+        print_output(output)
+    if json_output:
+        payload = build_result_payload(
+            input_path=input_arg,
+            markdown_path=output,
+            converter="source_to_md.py",
+            conversion_type=conversion_type,
+            profile_path=profile,
+        )
+        print(json.dumps(payload, ensure_ascii=False))
+    return 0
+
+
+def ensure_profile(
+    input_arg: str,
+    output: Path,
+    converter: str,
+    conversion_type: str,
+) -> Path:
+    """Return an existing profile path, writing one if the backend did not."""
+    profile = profile_path_for(output)
+    if profile.is_file():
+        return profile
+    return write_conversion_profile(
+        input_path=input_arg,
+        markdown_path=output,
+        converter=converter,
+        conversion_type=conversion_type,
+    )
+
+
+def print_json_result(
+    input_arg: str,
+    output: Path,
+    converter: str,
+    conversion_type: str,
+    profile: Path,
+) -> None:
+    payload = build_result_payload(
+        input_path=input_arg,
+        markdown_path=output,
+        converter=converter,
+        conversion_type=conversion_type,
+        profile_path=profile,
+    )
+    print(json.dumps(payload, ensure_ascii=False))
+
+
+def _read_emit_result(path: Path) -> Path | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None

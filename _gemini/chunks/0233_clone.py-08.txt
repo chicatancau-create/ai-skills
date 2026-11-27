@@ -1,0 +1,97 @@
+            elif len(outputs) > 1:
+                repeated[target_label] = repeated.get(target_label, 0) + 1
+        for label, count in sorted(omitted.items()):
+            problems.append(f"{owner_label} links to omitted {label} ({count} relationship(s))")
+        for label, count in sorted(repeated.items()):
+            problems.append(f"{owner_label} links to repeated {label} ({count} relationship(s))")
+    if problems:
+        raise RuntimeError(
+            f"{len(problems)} slide-jump target(s) leave the page plan; include each "
+            "target exactly once or retarget the links: " + "; ".join(problems)
+        )
+
+
+def clone_presentation_slides(
+    source_pptx: Path,
+    source_slides: tuple[int, ...],
+    output_path: Path,
+    *,
+    package_overrides: dict[str, bytes] | None = None,
+    discarded_shape_links: dict[int, set[str]] | None = None,
+) -> None:
+    """Clone an ordered source-slide roster into canonical output slide parts.
+
+    Structured private dependencies, including notes, charts, diagrams, and
+    embeddings, are cloned per output page. Shared layout/master/theme parts and
+    ordinary media remain shared. Same-deck hyperlinks use the page-plan
+    omitted/ambiguous destination contract.
+    """
+    if not source_slides:
+        raise RuntimeError("Round-trip page plan must contain at least one slide")
+    with zipfile.ZipFile(source_pptx) as archive:
+        entries = {
+            info.filename: archive.read(info.filename)
+            for info in archive.infolist()
+            if not info.is_dir()
+        }
+        slide_refs = {
+            slide.index: slide
+            for slide in _parse_slide_refs(archive)
+        }
+    for part_name, payload in (package_overrides or {}).items():
+        if part_name not in entries:
+            raise RuntimeError(
+                f"Round-trip resource override names a missing source part: {part_name}"
+            )
+        entries[part_name] = payload
+    _validate_internal_relationship_targets(entries)
+
+    missing = sorted(set(source_slides) - set(slide_refs))
+    if missing:
+        raise RuntimeError(
+            "Round-trip page plan references missing source slide(s): "
+            + ", ".join(str(index) for index in missing)
+        )
+
+    presentation_root = ET.fromstring(entries["ppt/presentation.xml"])
+    presentation_rels_root = ET.fromstring(
+        entries["ppt/_rels/presentation.xml.rels"]
+    )
+    content_root = _content_type_root(
+        ET.fromstring(entries["[Content_Types].xml"])
+    )
+    slide_list = presentation_root.find("p:sldIdLst", NS)
+    if slide_list is None:
+        raise RuntimeError("Source presentation.xml has no p:sldIdLst")
+    source_slide_ids = {
+        entry.attrib.get(_qn(NS["r"], "id"), ""): copy.deepcopy(entry)
+        for entry in slide_list.findall("p:sldId", NS)
+    }
+    for child in list(slide_list):
+        slide_list.remove(child)
+    for rel in list(
+        presentation_rels_root.findall(_qn(REL_NS, "Relationship"))
+    ):
+        if rel.attrib.get("Type") == SLIDE_REL_TYPE:
+            presentation_rels_root.remove(rel)
+    _remove_stale_slide_order_metadata(presentation_root)
+    reset_slide_show_selection(entries)
+
+    next_rid = _max_numeric_rid(presentation_rels_root) + 1
+    allocate = _make_part_allocator(entries)
+    source_ref_by_part = {
+        reference.part_name: reference
+        for reference in slide_refs.values()
+    }
+    output_slides: list[tuple[str, str]] = []
+    outputs_by_source_part: dict[str, list[str]] = {}
+    for output_index, source_index in enumerate(source_slides, start=1):
+        source_ref = slide_refs[source_index]
+        output_part = f"ppt/slides/slide{output_index}.xml"
+        output_rels = _rels_name_for_part(output_part)
+        output_slides.append((output_part, output_rels))
+        outputs_by_source_part.setdefault(source_ref.part_name, []).append(
+            output_part
+        )
+    source_entries = dict(entries)
+    _report_all_dangling_slide_jumps(

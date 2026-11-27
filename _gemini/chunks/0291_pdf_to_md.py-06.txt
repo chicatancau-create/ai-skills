@@ -1,0 +1,116 @@
+        return False
+    return all(channel >= 0.98 for channel in color[:3])
+
+
+def _is_background_drawing(drawing: dict[str, object]) -> bool:
+    """Identify white background rectangles that should not drive crops."""
+    return _is_white(drawing.get("fill")) and drawing.get("color") is None
+
+
+def find_figure_caption_rects(page: fitz.Page) -> list[fitz.Rect]:
+    """Return text-line rectangles that look like figure captions."""
+    caption_rects = []
+    for block in page.get_text("dict")["blocks"]:
+        if block.get("type") != 0:
+            continue
+        for line in block["lines"]:
+            text = "".join(span["text"] for span in line["spans"]).strip()
+            if FIGURE_CAPTION_RE.match(text):
+                caption_rects.append(fitz.Rect(line["bbox"]))
+    return caption_rects
+
+
+def _expand_rect(rect: fitz.Rect, padding: float, page_rect: fitz.Rect) -> fitz.Rect:
+    """Pad a rectangle and clamp it to the current PDF page."""
+    return _clip_rect_to_page(
+        fitz.Rect(
+            rect.x0 - padding,
+            rect.y0 - padding,
+            rect.x1 + padding,
+            rect.y1 + padding,
+        ),
+        page_rect,
+    )
+
+
+def _union_rects(rects: list[fitz.Rect]) -> fitz.Rect:
+    """Return the bounding union for one or more rectangles."""
+    result = fitz.Rect(rects[0])
+    for rect in rects[1:]:
+        result |= rect
+    return result
+
+
+def _find_captioned_vector_figures(
+    page: fitz.Page,
+    drawing_rects: list[fitz.Rect],
+    background_rects: list[fitz.Rect],
+    caption_rects: list[fitz.Rect],
+) -> list[fitz.Rect]:
+    """Build tight figure crops from non-background drawings above captions."""
+    figure_rects = []
+    page_rect = page.rect
+
+    for caption_rect in caption_rects:
+        related = []
+        for rect in drawing_rects:
+            horizontal_gap = max(caption_rect.x0 - rect.x1, rect.x0 - caption_rect.x1, 0)
+            if horizontal_gap > VECTOR_CAPTION_HORIZONTAL_GAP:
+                continue
+            if rect.y0 > caption_rect.y0:
+                continue
+            if caption_rect.y0 - rect.y1 > VECTOR_CAPTION_SEARCH_HEIGHT:
+                continue
+            related.append(rect)
+
+        if not related:
+            continue
+
+        content_rect = _union_rects(related)
+        rect = content_rect
+        for background_rect in background_rects:
+            background_rect = _clip_rect_to_page(background_rect, page_rect)
+            if not _is_rect_contained(content_rect, background_rect, threshold=0.95):
+                continue
+            if background_rect.get_area() > content_rect.get_area() * MAX_VECTOR_BACKGROUND_AREA_RATIO:
+                continue
+            rect = background_rect
+            break
+
+        rect = _expand_rect(rect, 10, page_rect)
+        rect.y1 = min(rect.y1, caption_rect.y0 - 2)
+        if rect.width >= MIN_VECTOR_FIGURE_WIDTH and rect.height >= MIN_VECTOR_FIGURE_HEIGHT:
+            figure_rects.append(rect)
+
+    return figure_rects
+
+
+def detect_vector_figure_rects(page: fitz.Page, tab_rects: list[fitz.Rect]) -> list[fitz.Rect]:
+    """Detect large vector drawing regions that should be rasterized as figures.
+
+    Some academic PDFs store charts and diagrams as vector drawing commands,
+    not image XObjects. ``page.get_text("dict")`` exposes only raster image
+    blocks, so those figures need a separate drawing-region fallback.
+    """
+    candidates = []
+    page_rect = page.rect
+    caption_rects = find_figure_caption_rects(page)
+    drawing_rects = []
+    background_rects = []
+
+    for drawing in page.get_drawings():
+        rect = drawing.get("rect")
+        if not rect:
+            continue
+
+        rect = fitz.Rect(rect)
+        if rect.is_empty:
+            continue
+
+        if _is_background_drawing(drawing):
+            background_rects.append(rect)
+            continue
+
+        drawing_rects.append(rect)
+
+    if caption_rects:

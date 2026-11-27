@@ -1,0 +1,119 @@
+        if href is not None and '<a href=' in inner:
+            attrs.append(
+                f'{SHAPE_HYPERLINK_ATTR}="{_xml_escape(href)}"'
+            )
+            if href.startswith('#slide-'):
+                attrs.append(f'{SOURCE_HREF_ATTR}="{_xml_escape(href)}"')
+            return f"<g {' '.join(attrs)}>\n{inner}\n</g>"
+        if href is not None:
+            provenance = f' {SOURCE_HREF_ATTR}="{_xml_escape(href)}"' if href.startswith('#slide-') else ''
+            return f'<a href="{_xml_escape(href)}"{provenance}>{group_xml}</a>'
+    return group_xml
+
+
+def _attrs_to_xml(attrs: dict[str, str]) -> str:
+    if not attrs:
+        return ""
+    return "".join(f' {key}="{_xml_escape(value)}"' for key, value in attrs.items())
+
+
+def _metadata_group_attrs(attrs: dict[str, str]) -> list[str]:
+    """Serialize import metadata for a logical object wrapper."""
+    return [
+        f'{key}="{_xml_escape(value)}"'
+        for key, value in attrs.items()
+    ]
+
+
+def _diagnose_unsupported_effect(
+    ctx: AssemblyContext,
+    metadata: dict[str, str],
+) -> None:
+    """Copy an import-only blocking effect marker into the conversion report."""
+    reason = metadata.get(EFFECT_REASON_ATTR)
+    if reason is None:
+        return
+    ctx.diagnose(
+        "effect-unsupported",
+        reason,
+        "retain the base object and record blocking effect metadata",
+    )
+
+
+def _geometry_group_attrs(geom: GeomResult | None) -> list[str]:
+    """Mirror native geometry semantics onto the logical shape container."""
+    if geom is None:
+        return []
+    keys = (
+        "data-pptx-prst",
+        "data-pptx-geometry-kind",
+        "data-pptx-geometry-sha256",
+        "data-pptx-preview-sha256",
+        "data-pptx-geometry-status",
+        "data-pptx-geometry-reason",
+        EFFECT_STATUS_ATTR,
+        EFFECT_REASON_ATTR,
+        NATIVE_EFFECT_ATTR,
+        NATIVE_EFFECT_SHA256_ATTR,
+    )
+    attrs: list[str] = []
+    for key, value in geom.attrs.items():
+        if key in keys or key.startswith("data-pptx-av-"):
+            attrs.append(f'{key}="{_xml_escape(value)}"')
+    return attrs
+
+
+def _object_metadata(
+    node: ShapeNode,
+    ctx: AssemblyContext,
+    *,
+    fallback_shape_id: str = "",
+) -> dict[str, str]:
+    """Describe the source object without coupling geometry to its SVG bounds."""
+    object_kind = {
+        SHAPE: "shape",
+        PICTURE: "picture",
+        CONNECTOR: "connector",
+        GROUP: "group",
+        GRAPHIC: "graphic-frame",
+    }.get(node.kind, node.kind)
+    shape_id = node.spid or fallback_shape_id
+    frame = " ".join((
+        fmt_num(node.xfrm.x, 8),
+        fmt_num(node.xfrm.y, 8),
+        fmt_num(node.xfrm.w, 8),
+        fmt_num(node.xfrm.h, 8),
+    ))
+    attrs = {
+        "data-pptx-object": object_kind,
+        "data-pptx-shape-id": shape_id,
+        "data-pptx-shape-scope": _shape_scope(ctx),
+        "data-pptx-frame": frame,
+    }
+    if node.name:
+        attrs["data-pptx-shape-name"] = node.name
+    if node.placeholder is not None:
+        if node.placeholder.type:
+            attrs["data-ph-type"] = node.placeholder.type
+        if node.placeholder.idx is not None:
+            attrs["data-pptx-placeholder-index"] = node.placeholder.idx
+        if node.placeholder.sz is not None:
+            attrs["data-pptx-placeholder-size"] = node.placeholder.sz
+        if node.placeholder.orient is not None:
+            attrs["data-pptx-placeholder-orientation"] = node.placeholder.orient
+    if node.kind == CONNECTOR:
+        attrs.update(_connector_metadata(node, _shape_scope(ctx)))
+    return attrs
+
+
+def _shape_scope(ctx: AssemblyContext) -> str:
+    if ctx.group_id_prefix.startswith("master-"):
+        return "master"
+    if ctx.group_id_prefix.startswith("layout-"):
+        return "layout"
+    return "slide"
+
+
+def _connector_metadata(node: ShapeNode, scope: str) -> dict[str, str]:
+    """Preserve connector endpoint references when PowerPoint declares them."""
+    attrs: dict[str, str] = {}

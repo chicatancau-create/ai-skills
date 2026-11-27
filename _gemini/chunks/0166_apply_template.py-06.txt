@@ -1,0 +1,91 @@
+                hashlib.sha256(mapping.content).hexdigest()
+                if mapping.content is not None else _file_sha256(mapping.src)
+            )
+            if _file_sha256(destination) != expected:
+                raise ApplyTemplateError(f"Staged file does not match its source: {mapping.dst}")
+        if _root_snapshots(plan.roots) != plan.root_snapshots:
+            raise ApplyTemplateError("Template source changed during staging; retry the installation")
+        specs, roster, paths = _install_contract(plan.root_snapshots)
+        receipt = {
+            "schema_version": 1,
+            "project": str(plan.project),
+            "selection_sha256": plan.selection_sha256,
+            "roots": plan.root_snapshots,
+            "installed_specs": specs,
+            "active_roster": roster,
+            "files": {name: _file_sha256(staged / name) for name in sorted(paths)},
+        }
+        (staged / INSTALL_RECEIPT_NAME).write_text(
+            json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
+        )
+        read_template_install(plan.project, plan.root_snapshots, plan.selection_sha256, content_root=staged)
+        for name in [*names, INSTALL_RECEIPT_NAME]:
+            if not (staged / name).exists():
+                continue
+            current = plan.project / name
+            if current.exists():
+                os.replace(current, backup / name)
+                moved.append(name)
+            os.replace(staged / name, current)
+            published.append(name)
+    except BaseException:
+        try:
+            for name in reversed(published):
+                os.replace(plan.project / name, staged / name)
+            for name in reversed(moved):
+                os.replace(backup / name, plan.project / name)
+        except OSError as exc:
+            cleanup = False
+            raise ApplyTemplateError(f"Installation rollback failed; recover backups in {transaction}: {exc}") from exc
+        raise
+    finally:
+        if cleanup:
+            shutil.rmtree(transaction)
+
+
+def _receipt(plan: InstallPlan) -> str:
+    kinds_present = {kind for root in plan.roots for kind in root.kinds}
+    identity = (
+        "brand" if "brand" in kinds_present
+        else "deck" if "deck" in kinds_present
+        else "current-project"
+    )
+    structure = plan.owner_kind or "free-design"
+    application = "deck" if "deck" in kinds_present else "none"
+    direction = "style" if "style" in kinds_present else "unresolved"
+    active_roster = (
+        f"{plan.owner_kind}:{plan.owner.display}" if plan.owner else "none"
+    )
+    install = "in-place" if all(root.in_place for root in plan.roots) else "copied"
+    return (
+        "roots=" + ";".join(root.display for root in plan.roots)
+        + "; sources=" + ";".join(root.source for root in plan.roots)
+        + "; kinds=" + ";".join(",".join(root.kinds) for root in plan.roots)
+        + f"; segments=identity:{identity},structure:{structure},"
+        f"application_context:{application},direction:{direction}"
+        + f"; active_roster={active_roster}"
+        + f"; install={install}"
+        + "; installed_specs=" + ",".join(plan.installed_specs)
+    )
+
+
+def apply_templates(
+    project_path: str | Path,
+    root_args: list[str],
+    *,
+    dry_run: bool = False,
+    validate: bool = True,
+) -> InstallPlan:
+    """Plan, preflight, and (unless ``dry_run``) install the selected roots."""
+    project = Path(project_path).expanduser().resolve()
+    if not project.is_dir():
+        raise ApplyTemplateError(f"project path is not a directory: {project_path}")
+    if not root_args:
+        raise ApplyTemplateError("pass at least one --root workspace")
+    roots = [_load_root(arg, project) for arg in root_args]
+    unique = {record.root for record in roots}
+    if len(unique) != len(roots):
+        raise ApplyTemplateError("the same workspace root was passed more than once")
+    _check_kind_cardinality(roots)
+    if validate:
+        for record in roots:

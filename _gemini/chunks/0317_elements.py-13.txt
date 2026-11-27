@@ -1,0 +1,120 @@
+            raw_y,
+            raw_w,
+            raw_h,
+            x,
+            y,
+            w,
+            h,
+            transform,
+        )
+    xfrm_attr, off_x, off_y, ext_cx, ext_cy, bounds_emu = xfrm
+    return ShapeResult(
+        xml=_wrap_geometry_object(
+            elem,
+            ctx,
+            shape_id, f'Rectangle {shape_id}',
+            off_x, off_y, ext_cx, ext_cy,
+            geom, fill, stroke, effect, xfrm_attr=xfrm_attr,
+        ),
+        bounds_emu=bounds_emu,
+    )
+
+
+# ---------------------------------------------------------------------------
+# circle (including donut-chart arc segments)
+# ---------------------------------------------------------------------------
+
+def _build_arc_ring_path(
+    cx: float, cy: float, r: float,
+    stroke_width: float,
+    dash_len: float, dash_offset: float,
+    rotate_deg: float,
+    sx: float, sy: float,
+) -> tuple[str, int, int, int, int]:
+    """Build a filled annular-sector (donut segment) as DrawingML custGeom.
+
+    SVG donut charts use stroke-dasharray on a circle to draw arc segments.
+    DrawingML cannot reproduce this, so we convert each arc segment into a
+    filled ring shape (outer arc -> line -> inner arc -> close).
+
+    Returns:
+        (geom_xml, min_x_emu, min_y_emu, w_emu, h_emu).
+    """
+    circumference = 2 * math.pi * r
+    if circumference <= 0:
+        return '', 0, 0, 0, 0
+
+    start_frac = -dash_offset / circumference
+    end_frac = start_frac + dash_len / circumference
+
+    start_angle = start_frac * 2 * math.pi + math.radians(rotate_deg)
+    end_angle = end_frac * 2 * math.pi + math.radians(rotate_deg)
+
+    half_sw = stroke_width / 2
+    r_outer = r + half_sw
+    r_inner = r - half_sw
+
+    num_segments = max(16, int(abs(end_angle - start_angle) / (math.pi / 32)))
+    angles = [
+        start_angle + (end_angle - start_angle) * i / num_segments
+        for i in range(num_segments + 1)
+    ]
+
+    outer_pts = [(cx + r_outer * math.sin(a), cy - r_outer * math.cos(a)) for a in angles]
+    inner_pts = [(cx + r_inner * math.sin(a), cy - r_inner * math.cos(a)) for a in reversed(angles)]
+
+    all_pts = [(px * sx, py * sy) for px, py in outer_pts + inner_pts]
+
+    xs = [p[0] for p in all_pts]
+    ys = [p[1] for p in all_pts]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    width = max_x - min_x
+    height = max_y - min_y
+
+    if width < 0.5 or height < 0.5:
+        return '', 0, 0, 0, 0
+
+    w_emu = px_to_emu(width)
+    h_emu = px_to_emu(height)
+
+    lines: list[str] = []
+    for i, (px, py) in enumerate(all_pts):
+        lx = px_to_emu(px - min_x)
+        ly = px_to_emu(py - min_y)
+        if i == 0:
+            lines.append(f'<a:moveTo><a:pt x="{lx}" y="{ly}"/></a:moveTo>')
+        else:
+            lines.append(f'<a:lnTo><a:pt x="{lx}" y="{ly}"/></a:lnTo>')
+    lines.append('<a:close/>')
+
+    path_xml = '\n'.join(lines)
+    geom = f'''<a:custGeom>
+<a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/>
+<a:rect l="l" t="t" r="r" b="b"/>
+<a:pathLst><a:path w="{w_emu}" h="{h_emu}">
+{path_xml}
+</a:path></a:pathLst>
+</a:custGeom>'''
+
+    return geom, px_to_emu(min_x), px_to_emu(min_y), w_emu, h_emu
+
+
+def _is_donut_circle(elem: ET.Element, ctx: ConvertContext) -> bool:
+    """Detect if a circle uses stroke-dasharray to simulate an arc segment."""
+    dasharray = _get_attr(elem, 'stroke-dasharray', ctx)
+    stroke = _get_attr(elem, 'stroke', ctx)
+    fill = _get_attr(elem, 'fill', ctx)
+    sw = svg_length_size(_get_attr(elem, 'stroke-width', ctx), ctx, 0)
+    r = svg_length_size(elem.get('r'), ctx, 0)
+    return is_thick_circle_shorthand(dasharray, stroke, fill, sw, r)
+
+
+def convert_circle(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
+    """Convert SVG <circle> to DrawingML ellipse or donut-arc shape."""
+    cx_ = svg_length_x(elem.get('cx'), ctx)
+    cy_ = svg_length_y(elem.get('cy'), ctx)
+    r = svg_length_size(elem.get('r'), ctx)
+    preset_geom = _build_preset_geom_from_meta(elem)
+
+    if r <= 0:

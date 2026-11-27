@@ -1,0 +1,117 @@
+        if not href or href.startswith('data:'):
+            continue
+        img_path = _resolve_image_path(href, svg_dir)
+        if img_path and img_path.suffix.lower() in _OFFICE_VECTOR_EXTENSIONS:
+            count += 1
+    return count
+
+
+def align_and_embed_images_in_svg(
+    svg_path: str | Path,
+    *,
+    dry_run: bool = False,
+    verbose: bool = False,
+    compress: bool = True,
+    max_dimension: int | None = 2560,
+    image_scale: float = 2.0,
+) -> tuple[int, int]:
+    """Run the merged align + embed pass on a single SVG file.
+
+    Returns ``(processed_count, error_count)``.
+    """
+    svg_path = Path(svg_path)
+    svg_dir = svg_path.parent.resolve()
+
+    # Register namespaces for clean serialization
+    ET.register_namespace('', SVG_NS)
+    ET.register_namespace('xlink', XLINK_NS)
+
+    try:
+        tree = ET.parse(svg_path)
+    except ET.ParseError as exc:
+        print(
+            f'  [ERROR] {svg_path.name}: parse failed ({exc})',
+            file=sys.stderr,
+        )
+        return (0, 1)
+    root = tree.getroot()
+    nested_crop_image_ids = _nested_crop_image_ids(root)
+
+    # Avoid double-iteration if an element matches both namespaced and
+    # bare-tag iteration paths.
+    seen: set[int] = set()
+    processed = 0
+    errors = 0
+
+    for image in _iter_image_elements(root):
+        ident = id(image)
+        if ident in seen:
+            continue
+        seen.add(ident)
+
+        if dry_run:
+            processed += 1
+            continue
+
+        ok, err = _process_one_image(
+            image, svg_dir,
+            compress=compress, max_dimension=max_dimension,
+            image_scale=image_scale,
+            preserve_source_pixels=ident in nested_crop_image_ids,
+            verbose=verbose,
+        )
+        if ok:
+            processed += 1
+        elif err:
+            errors += 1
+            print(f'   [ERROR] {svg_path.name}: {err}', file=sys.stderr)
+
+    if processed > 0 and errors == 0 and not dry_run:
+        tree.write(svg_path, encoding='utf-8', xml_declaration=False)
+
+    return (processed, errors)
+
+
+# ---------------------------------------------------------------------------
+# Standalone CLI (rare; the main entry point is finalize_svg.py)
+# ---------------------------------------------------------------------------
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the standalone diagnostic parser."""
+    import argparse
+    parser = argparse.ArgumentParser(
+        description='Align (slice/meet) and Base64-embed all <image> refs in an SVG.',
+    )
+    parser.add_argument('svg', type=Path, help='SVG file to process in place')
+    parser.add_argument('-n', '--dry-run', action='store_true')
+    parser.add_argument('-v', '--verbose', action='store_true')
+    parser.add_argument('--compress', dest='compress', action='store_true', default=True,
+                        help='Compress images before embedding (default)')
+    parser.add_argument('--no-compress', dest='compress', action='store_false',
+                        help='Disable image compression')
+    parser.add_argument('--max-dimension', type=int, default=2560,
+                        help='Downscale images larger than this on either axis (default: 2560)')
+    parser.add_argument('--image-scale', type=float, default=2.0,
+                        help='Target pixels per rendered SVG pixel')
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the standalone diagnostic CLI."""
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if not args.svg.exists():
+        print(f'Error: file not found: {args.svg}', file=sys.stderr)
+        return 1
+    if args.max_dimension < 1:
+        print('Error: --max-dimension must be >= 1', file=sys.stderr)
+        return 1
+    if args.image_scale < 1:
+        print('Error: --image-scale must be >= 1', file=sys.stderr)
+        return 1
+
+    proc, err = align_and_embed_images_in_svg(
+        args.svg,
+        dry_run=args.dry_run,
+        verbose=args.verbose,

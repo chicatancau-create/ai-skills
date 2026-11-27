@@ -1,0 +1,112 @@
+    mode_fields = _section_fields(lock_sections, "mode")
+    visual_style_fields = _section_fields(lock_sections, "visual_style")
+    # Each on-demand projection includes bounded lock anchors; large reference
+    # payloads stay outside it and are represented by reference_set.
+    global_context = {
+        "communication": _section_fields(lock_sections, "communication"),
+        "canvas": _section_fields(lock_sections, "canvas"),
+        "mode": mode_fields.get("mode"),
+        "mode_behavior": mode_fields.get("mode_behavior"),
+        "visual_style": visual_style_fields.get("visual_style"),
+        "visual_style_behavior": visual_style_fields.get(
+            "visual_style_behavior"
+        ),
+        "colors": _section_fields(lock_sections, "colors"),
+        "typography": _section_fields(lock_sections, "typography"),
+        "icons": _section_fields(lock_sections, "icons"),
+        "pptx_structure": _section_fields(lock_sections, "pptx_structure"),
+        "forbidden": _forbidden_items(lock_sections),
+    }
+    global_context = {
+        key: value
+        for key, value in global_context.items()
+        if value not in ({}, [], None, "")
+    }
+    current_page: dict[str, object] = {
+        "part": part,
+        "brief_markdown": brief,
+        "rhythm": rhythm,
+        "image_selection": image_selection,
+    }
+    if (
+        visualization_entry is not None
+        and visualization_entry.kind == VISUALIZATION_SVG_KIND
+    ):
+        current_page["visualization"] = visualization_entry.reference
+    elif (
+        visualization_entry is not None
+        and visualization_entry.kind == LEGACY_STRUCTURE_INTENT_KIND
+    ):
+        current_page["structure_intent"] = visualization_entry.key
+    if legacy_chart_key is not None:
+        current_page["chart"] = legacy_chart_key
+    if selected_images:
+        current_page["images"] = selected_images
+    if template is not None:
+        current_page["template"] = template
+    context: dict[str, object] = {
+        "schema": PAGE_CONTEXT_SCHEMA,
+        "page": page,
+        "lock_source": {
+            "path": "spec_lock.md",
+            "sha256": _file_sha256(lock_path),
+            "load_policy": "on-demand-anchor-projection",
+        },
+        "global": global_context,
+        "page_context": current_page,
+        "reference_set": reference_set,
+    }
+    if warnings:
+        context["warnings"] = warnings
+    unique_inputs = tuple(dict.fromkeys(path.resolve() for path in inputs))
+    return PageContextResult(
+        project_path=project_path,
+        page=page,
+        context=context,
+        inputs=unique_inputs,
+    )
+
+
+def _compact_json(payload: object) -> str:
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+
+
+def _pretty_json(payload: object) -> str:
+    return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+
+
+def render_page_context(
+    result: PageContextResult,
+    *,
+    bundle: bool = False,
+    pretty: bool = False,
+) -> tuple[str, tuple[PageRead, ...]]:
+    """Render compact stdout; ``bundle`` remains a compatibility no-op."""
+    context_payload = (
+        _pretty_json(result.context) if pretty else _compact_json(result.context)
+    )
+    context_read = PageRead(
+        kind="page-context",
+        path="stdout:page-context",
+        payload=context_payload,
+    )
+    return context_payload, (context_read,)
+
+
+def _sha256_bytes(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _input_location(project_path: Path, path: Path) -> tuple[str, str]:
+    """Return a stable project- or Skill-relative locator for telemetry."""
+    resolved = path.resolve()
+    for scope, root in (("project", project_path), ("skill", _SKILL_DIR)):
+        try:

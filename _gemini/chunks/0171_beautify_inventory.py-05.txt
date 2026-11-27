@@ -1,0 +1,61 @@
+            "beautify_inventory.v1 input requires --summary or --page; "
+            "builder mode requires slide_library.json"
+        )
+    if is_inventory and args.images:
+        parser.error("--images cannot be combined with a beautify_inventory.v1 input")
+    if view_requested and not is_inventory:
+        parser.error("--summary/--page require a canonical beautify_inventory.v1 input")
+
+    manifest: list = []
+    if args.images and not is_inventory:
+        img_path = Path(args.images)
+        if not img_path.is_file():
+            print(f"[ERROR] image manifest not found: {img_path}", file=sys.stderr)
+            return 1
+        manifest = json.loads(img_path.read_text(encoding="utf-8"))
+
+    inventory = input_data if is_inventory else build_inventory(
+        input_data,
+        _images_by_slide(manifest),
+    )
+
+    if args.verify is not None:
+        pptx_path = Path(args.verify)
+        if not pptx_path.is_file():
+            print(f"[ERROR] exported deck not found: {pptx_path}", file=sys.stderr)
+            return 1
+        rows, clean = verify_against_export(inventory, pptx_path)
+        _print_verify(rows, clean, pptx_path)
+        return 0 if clean else 1
+
+    if args.summary:
+        print(json.dumps(_summary_view(inventory), ensure_ascii=False, indent=2))
+        return 0
+    if args.page is not None:
+        page_view = _page_view(inventory, args.page, args.with_geometry)
+        if page_view is None:
+            available = ", ".join(
+                str(slide.get("slide_index"))
+                for slide in inventory.get("slides", [])
+            )
+            print(
+                f"[ERROR] slide_index {args.page} not found; available: {available or 'none'}",
+                file=sys.stderr,
+            )
+            return 1
+        print(json.dumps(page_view, ensure_ascii=False, indent=2))
+        return 0
+
+    payload = json.dumps(inventory, ensure_ascii=False, indent=2)
+    if args.output:
+        out = Path(args.output)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(payload + "\n", encoding="utf-8")
+        print(f"[OK] inventory written to: {out}", file=sys.stderr)
+    else:
+        print(payload)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,124 @@
+    payload["style"] = style
+
+    rows_payload: list[list[Any]] = []
+    for row_cells in cells:
+        row_payload: list[Any] = []
+        for slot in row_cells:
+            if slot is None:
+                row_payload.append("")
+                continue
+            cell_payload = _native_cell_payload(
+                slot.element,
+                palette,
+                theme_fonts,
+            )
+            if slot.is_dropped:
+                cell_payload["merge_continuation"] = True
+                row_payload.append(cell_payload)
+                continue
+            if slot.row_span > 1:
+                cell_payload["row_span"] = slot.row_span
+            if slot.col_span > 1:
+                cell_payload["col_span"] = slot.col_span
+            row_payload.append(cell_payload)
+        rows_payload.append(row_payload)
+    payload["rows"] = rows_payload
+    return compact_semantic_table_payload(payload)
+
+
+def _native_cell_payload(
+    tc: ET.Element,
+    palette: ColorPalette | None,
+    theme_fonts: dict[str, str],
+) -> dict[str, Any]:
+    tx_body = tc.find("a:txBody", NS)
+    tc_pr = tc.find("a:tcPr", NS)
+    paragraph_payloads = _cell_paragraph_payloads(tx_body)
+    rich_paragraphs = _cell_rich_paragraph_payloads(
+        tx_body,
+        palette,
+        theme_fonts,
+    )
+    if rich_paragraphs is not None:
+        cell: dict[str, Any] = {"paragraphs": rich_paragraphs}
+    elif len(paragraph_payloads) > 1:
+        cell: dict[str, Any] = {"paragraphs": paragraph_payloads}
+    else:
+        cell = {"text": _cell_plain_text(tx_body)}
+
+    fill, fill_opacity = _cell_fill_payload(tc_pr, palette)
+    if fill:
+        cell["fill"] = fill
+    if fill_opacity is not None:
+        cell["fill_opacity"] = fill_opacity
+    if rich_paragraphs is None:
+        color = _cell_text_color(tx_body, palette)
+        if color:
+            cell["color"] = color
+        font_size = _cell_font_size_px(tx_body)
+        if font_size:
+            cell["font_size"] = font_size
+    if len(paragraph_payloads) <= 1:
+        align = _cell_align(tx_body)
+        if align:
+            cell["align"] = align
+    valign = _cell_valign(tc_pr)
+    if valign:
+        cell["valign"] = valign
+    if rich_paragraphs is None:
+        bold = _cell_bold(tx_body)
+        if bold is not None:
+            cell["bold"] = bold
+    borders = _cell_borders_payload(tc_pr, palette)
+    if borders:
+        cell["borders"] = borders
+    _copy_cell_margins(tc_pr, cell)
+    _copy_cell_layout_options(tc_pr, cell)
+    return cell
+
+
+def _cell_plain_text(tx_body: ET.Element | None) -> str:
+    if tx_body is None:
+        return ""
+    paragraphs: list[str] = []
+    for paragraph in tx_body.findall("a:p", NS):
+        text = "".join(node.text or "" for node in paragraph.findall(".//a:t", NS))
+        if text:
+            paragraphs.append(text)
+    return "\n".join(paragraphs)
+
+
+def _cell_paragraph_payloads(
+    tx_body: ET.Element | None,
+) -> list[str | dict[str, str]]:
+    if tx_body is None:
+        return []
+    payloads: list[str | dict[str, str]] = []
+    for paragraph in tx_body.findall("a:p", NS):
+        text = "".join(node.text or "" for node in paragraph.findall(".//a:t", NS))
+        p_pr = paragraph.find("a:pPr", NS)
+        align = p_pr.get("algn") if p_pr is not None else None
+        if align in {"l", "ctr", "r", "just"}:
+            payloads.append({"text": text, "align": align})
+        else:
+            payloads.append(text)
+    return payloads
+
+
+def _effective_run_attr(
+    r_pr: ET.Element | None,
+    default_r_pr: ET.Element | None,
+    name: str,
+) -> str | None:
+    if r_pr is not None and r_pr.get(name) is not None:
+        return r_pr.get(name)
+    return default_r_pr.get(name) if default_r_pr is not None else None
+
+
+def _effective_run_child(
+    r_pr: ET.Element | None,
+    default_r_pr: ET.Element | None,
+    name: str,
+) -> ET.Element | None:
+    child = r_pr.find(f"a:{name}", NS) if r_pr is not None else None
+    if child is not None:

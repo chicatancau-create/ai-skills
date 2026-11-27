@@ -1,0 +1,123 @@
+        resolved = palette.resolve_scheme(raw) if palette is not None else None
+        if resolved is None or _OOXML_HEX_COLOR_RE.fullmatch(resolved) is None:
+            raise ValueError(f"unresolvable-color:{color_name}")
+    elif color_name == "sysClr":
+        if not (color.get("val") or "").strip():
+            raise ValueError(f"invalid-color:{color_name}")
+        raw = color.get("lastClr") or ""
+        if _OOXML_HEX_COLOR_RE.fullmatch(raw) is None:
+            raise ValueError(f"unresolvable-color:{color_name}")
+    elif color_name == "hslClr":
+        _required_integer(color, "hue", 0, 21_599_999)
+        _required_integer(color, "sat", 0, 100000)
+        _required_integer(color, "lum", 0, 100000)
+    elif color_name == "scrgbClr":
+        for attr in ("r", "g", "b"):
+            _required_integer(color, attr, 0, 100000)
+    elif not (color.get("val") or "").strip():
+        raise ValueError(f"invalid-color:{color_name}")
+
+def _required_integer(
+    elem: ET.Element,
+    attr: str,
+    minimum: int,
+    maximum: int,
+) -> int:
+    raw = elem.get(attr)
+    if raw is None:
+        raise ValueError(f"missing-{_local_name(elem)}-{attr}")
+    token = raw.strip()
+    if _OOXML_INTEGER_RE.fullmatch(token) is None:
+        raise ValueError(f"invalid-{_local_name(elem)}-{attr}")
+    value = int(token)
+    if not minimum <= value <= maximum:
+        raise ValueError(f"invalid-{_local_name(elem)}-{attr}")
+    return value
+
+
+def _local_name(elem: ET.Element) -> str:
+    return elem.tag.rsplit("}", 1)[-1]
+
+
+def _effect_integer(
+    elem: ET.Element,
+    attr: str,
+    *,
+    default: int = 0,
+    non_negative: bool = False,
+    maximum: int | None = None,
+) -> int:
+    raw = elem.get(attr)
+    if raw is None:
+        value = default
+    else:
+        token = raw.strip()
+        if _OOXML_INTEGER_RE.fullmatch(token) is None:
+            raise ValueError(f"{attr}={raw!r}")
+        value = int(token)
+    if (
+        (non_negative and value < 0)
+        or (maximum is not None and value > maximum)
+    ):
+        raise ValueError(f"{attr}={raw!r}")
+    return value
+
+
+def _unsupported_outer_shadow_attributes(
+    elem: ET.Element,
+    *,
+    target_rotation_degrees: float,
+) -> tuple[str, ...]:
+    """Return source shadow attributes the local SVG filter cannot preserve."""
+    unsupported = set(elem.attrib) - _OUTER_SHADOW_ATTRIBUTES
+    neutral_transforms = (
+        ("sx", 100000),
+        ("sy", 100000),
+        ("kx", 0),
+        ("ky", 0),
+    )
+    for attr, neutral in neutral_transforms:
+        if attr in elem.attrib and _effect_integer(elem, attr) != neutral:
+            unsupported.add(attr)
+
+    raw_alignment = elem.get("algn")
+    if (
+        raw_alignment is not None
+        and raw_alignment.strip() not in _OUTER_SHADOW_ALIGNMENTS
+    ):
+        raise ValueError(f"algn={raw_alignment!r}")
+
+    raw_rotates = elem.get("rotWithShape")
+    if raw_rotates is None:
+        rotates_with_shape = True
+    else:
+        token = raw_rotates.strip()
+        if token in {"1", "true"}:
+            rotates_with_shape = True
+        elif token in {"0", "false"}:
+            rotates_with_shape = False
+        else:
+            raise ValueError(f"rotWithShape={raw_rotates!r}")
+    target_is_rotated = not math.isclose(
+        math.remainder(target_rotation_degrees, 360.0),
+        0.0,
+        abs_tol=1e-9,
+    )
+    if rotates_with_shape and target_is_rotated:
+        # CT_OuterShadowEffect defaults rotWithShape to true, while the local
+        # SVG-to-PPTX mapping writes false. Blocking the visible distinction
+        # prevents the next export from changing the source shadow direction.
+        unsupported.add("rotWithShape")
+
+    return tuple(sorted(unsupported))
+
+
+def _direction_offset(elem: ET.Element) -> tuple[float, float]:
+    """Read dir / dist into (dx, dy) px."""
+    direction_units = _effect_integer(
+        elem,
+        "dir",
+        non_negative=True,
+        maximum=21_599_999,
+    )
+    dist_emu = _effect_integer(

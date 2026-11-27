@@ -1,0 +1,94 @@
+        raise RuntimeError("Native PPTX hierarchical charts require levels or path categories")
+    for level in levels:
+        if len(level) != count:
+            raise RuntimeError("Native PPTX hierarchical chart levels must match values length")
+    return levels
+
+
+def _treemap_parent_labels(payload: dict[str, Any]) -> str:
+    raw = payload.get("parent_label_layout", payload.get("parent_labels", "overlapping"))
+    aliases = {
+        "banner": "banner",
+        "none": "none",
+        "overlapping": "overlapping",
+    }
+    layout = aliases.get(_compact_key(raw))
+    if not layout:
+        raise RuntimeError(
+            "Native PPTX treemap parent_label_layout must be one of: banner, none, overlapping"
+        )
+    return layout
+
+
+def _chartex_chart_data(payload: dict[str, Any], chart_type: str) -> dict[str, Any]:
+    if chart_type in {"sunburst", "treemap"}:
+        values = _chart_values(payload)
+        levels = _hierarchy_levels(payload, len(values))
+        data = {
+            "kind": "chartex",
+            "levels": levels,
+            "type": chart_type,
+            "values": values,
+        }
+        if chart_type == "treemap":
+            data["parent_labels"] = _treemap_parent_labels(payload)
+        return data
+
+    if chart_type == "histogram":
+        return {
+            "kind": "chartex",
+            "type": chart_type,
+            "values": _chart_values(payload),
+        }
+
+    if chart_type in {"funnel", "pareto", "waterfall"}:
+        values = _chart_values(payload)
+        data = {
+            "categories": _chart_categories(payload, len(values)),
+            "kind": "chartex",
+            "type": chart_type,
+            "values": values,
+        }
+        if chart_type == "waterfall":
+            raw_subtotals = payload.get(
+                "subtotals",
+                payload.get("subtotal_indices", []),
+            )
+            subtotals: list[int] = []
+            seen_subtotals: set[int] = set()
+            for value in _chart_list(raw_subtotals, "subtotals"):
+                index = _chart_number(value)
+                if not isinstance(index, int):
+                    raise RuntimeError("Native PPTX waterfall subtotal indices must be integers")
+                if index < 0 or index >= len(values):
+                    raise RuntimeError(
+                        "Native PPTX waterfall subtotal index is outside point range"
+                    )
+                if index in seen_subtotals:
+                    raise RuntimeError(
+                        "Native PPTX waterfall subtotal indices must be unique"
+                    )
+                seen_subtotals.add(index)
+                subtotals.append(index)
+            data["subtotals"] = subtotals
+        return data
+
+    if chart_type == "box_whisker":
+        raw_series = _chart_list(payload.get("series", []), "series")
+        if not raw_series:
+            raise RuntimeError("Native PPTX boxWhisker chart requires non-empty series")
+        series: list[dict[str, Any]] = []
+        for idx, item in enumerate(raw_series, start=1):
+            if not isinstance(item, dict):
+                raise RuntimeError("Native PPTX chart series entries must be objects")
+            values = [_chart_number(value) for value in _chart_list(item.get("values", []), "series[].values")]
+            if not values:
+                raise RuntimeError("Native PPTX boxWhisker series values must be non-empty")
+            categories = item.get("categories")
+            if categories is None:
+                categories = [str(item.get("name") or f"Series {idx}")] * len(values)
+            categories_list = [str(value) for value in _chart_list(categories, "series[].categories")]
+            if len(categories_list) != len(values):
+                raise RuntimeError("Native PPTX boxWhisker series categories must match values length")
+            series.append({
+                "categories": categories_list,

@@ -1,0 +1,79 @@
+    media_files: dict[str, bytes] = {}
+    relationship_id = readback.summary.sound_relationship_id
+    if relationship_id is not None:
+        source_part, sound_path, sound_bytes = _resolve_transition_sound(
+            pkg,
+            slide,
+            relationship_id,
+        )
+        mapped_path = (resource_path_map or {}).get(source_part)
+        if mapped_path is not None:
+            config["sound"] = mapped_path
+        else:
+            media_files[sound_path] = sound_bytes
+            config["sound"] = (
+                PurePosixPath(media_subdir) / sound_path
+            ).as_posix()
+    return TransitionImport(config=config, media_files=media_files)
+
+
+def _sound_expectation(
+    summary: TransitionSummary,
+) -> dict[str, str] | None:
+    relationship_id = summary.sound_relationship_id
+    name = summary.sound_name
+    if relationship_id is None and name is None:
+        return None
+    if not relationship_id or not name:
+        raise TransitionImportError(
+            "transition sound requires both relationship id and display name"
+        )
+    return {
+        "relationship_id": relationship_id,
+        "name": name,
+    }
+
+
+def _resolve_transition_sound(
+    pkg: OoxmlPackage,
+    slide: SlideRef,
+    relationship_id: str,
+) -> tuple[str, str, bytes]:
+    relationship = slide.part.rels.get(relationship_id)
+    if relationship is None:
+        raise TransitionImportError(
+            f"transition sound relationship is missing: {relationship_id}"
+        )
+    if relationship.get("external"):
+        raise TransitionImportError("transition sound relationship must be internal")
+    if relationship.get("type") != _AUDIO_RELATIONSHIP_TYPE:
+        raise TransitionImportError(
+            "transition sound relationship must use the OOXML audio type"
+        )
+    target = relationship.get("target") or ""
+    if PurePosixPath(target).suffix.lower() != ".wav":
+        raise TransitionImportError("transition sound part must use .wav")
+    payload = pkg.read_part_bytes(target)
+    if payload is None:
+        raise TransitionImportError(
+            f"transition sound part is missing: {target}"
+        )
+    if not (
+        len(payload) >= 12
+        and payload[:4] in {b"RIFF", b"RF64"}
+        and payload[8:12] == b"WAVE"
+    ):
+        raise TransitionImportError(
+            f"transition sound part is not a valid WAV file: {target}"
+        )
+    digest = hashlib.sha256(payload).hexdigest()[:16]
+    return target, f"transition_sound_{digest}.wav", payload
+
+
+__all__ = [
+    "TransitionImport",
+    "TransitionImportError",
+    "TransitionReadback",
+    "import_slide_transition",
+    "read_transition_config",
+]

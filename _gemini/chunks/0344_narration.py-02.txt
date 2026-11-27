@@ -1,0 +1,85 @@
+        candidates = exact.get(stem)
+        if not candidates and stem in inherited:
+            # A page-plan copy intentionally shares its source narration file.
+            matched[stem] = inherited[stem]
+            continue
+        if not candidates:
+            candidates = normalized.get(_normalize_title(stem))
+        if not candidates:
+            candidates = numbered.get(index)
+        if not candidates:
+            continue
+        if len(candidates) > 1:
+            names = ", ".join(path.name for path in candidates)
+            raise ValueError(
+                f"multiple narration audio files match slide {stem!r}: "
+                f"{names}; keep exactly one supported file for this slide"
+            )
+        candidate = candidates[0]
+        previous_stem = claimed_by.get(candidate)
+        if previous_stem is not None:
+            raise ValueError(
+                f"narration audio file {candidate.name!r} matches multiple slides: "
+                f"{previous_stem!r}, {stem!r}; provide one distinct audio file "
+                "per slide"
+            )
+        matched[stem] = candidate
+        claimed_by[candidate] = stem
+    return matched
+
+
+def narration_shapes(root: ET.Element) -> list[ET.Element]:
+    """Identify our marked narration and the exact legacy off-canvas carrier."""
+    autoplay_ids = {
+        target.get("spid")
+        for audio in root.iter(_qn(PML_NS, "audio"))
+        for target in audio.iter(_qn(PML_NS, "spTgt"))
+    }
+    found = []
+    for picture in root.findall(f"{_qn(PML_NS, 'cSld')}/{_qn(PML_NS, 'spTree')}/{_qn(PML_NS, 'pic')}"):
+        props = picture.find(f"{_qn(PML_NS, 'nvPicPr')}/{_qn(PML_NS, 'cNvPr')}")
+        if props is None or picture.find(f".//{_qn(DRAWINGML_NS, 'audioFile')}") is None:
+            continue
+        name = props.get("name", "")
+        marked = name.startswith(NARRATION_SHAPE_PREFIX)
+        offset = picture.find(f"{_qn(PML_NS, 'spPr')}/{_qn(DRAWINGML_NS, 'xfrm')}/{_qn(DRAWINGML_NS, 'off')}")
+        extent = picture.find(f"{_qn(PML_NS, 'spPr')}/{_qn(DRAWINGML_NS, 'xfrm')}/{_qn(DRAWINGML_NS, 'ext')}")
+        legacy = (
+            re.fullmatch(r"narration[1-9]\d*\.(?:m4a|mp3|wav)", name) is not None
+            and props.get("id") in autoplay_ids
+            and offset is not None and extent is not None
+            and all(offset.get(key) == str(AUDIO_MARKER_OFF_CANVAS_EMU) for key in ("x", "y"))
+            and all(extent.get(key) == str(AUDIO_MARKER_SIZE_EMU) for key in ("cx", "cy"))
+            and picture.find(f".//{_qn(P14_NS, 'media')}") is not None
+        )
+        if marked or legacy:
+            found.append(picture)
+    return found
+
+
+def narration_audio_parts(slide_xml: bytes, rels_xml: bytes, slide_part: str) -> tuple[str, ...]:
+    """Read recognized narration targets without reconstructing source motion."""
+    relationships = {rel.get("Id"): rel for rel in ET.fromstring(rels_xml)}
+    parts = set()
+    for picture in narration_shapes(ET.fromstring(slide_xml)):
+        audio = picture.find(f".//{_qn(DRAWINGML_NS, 'audioFile')}")
+        relationship = relationships.get(audio.get(_qn(RELATIONSHIPS_NS, "link")))
+        if relationship is None or relationship.get("TargetMode") == "External":
+            continue
+        target = relationship.get("Target", "")
+        if target:
+            parts.add(posixpath.normpath(posixpath.join(posixpath.dirname(slide_part), target)).lstrip("/"))
+    return tuple(sorted(parts))
+
+
+def _roundtrip_narration_files(audio_dir: Path, svg_files: list[Path]) -> dict[str, Path]:
+    workspace = audio_dir.parent
+    manifest = load_roundtrip_manifest(workspace)
+    if manifest is None:
+        return {}
+    rows = {row["index"]: row for row in manifest["slides"]}
+    sources = {f"slide_{index:02d}": index for index in rows}
+    plan_path = workspace / "page_plan.json"
+    if plan_path.is_file():
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        sources = {

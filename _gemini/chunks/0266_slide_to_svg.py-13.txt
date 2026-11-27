@@ -1,0 +1,106 @@
+
+
+def _preset_layers_to_svg(
+    geom: GeomResult,
+    semantic_attrs: dict[str, str],
+    style_attrs: dict[str, str],
+) -> str:
+    """Serialize one semantic carrier plus every visible preset path layer.
+
+    DrawingML applies shape-level fill/line first, then each preset path can
+    override whether and how that paint is used.  A hidden carrier retains the
+    unmodified shape-level style for native round-trip; visible detail paths
+    reproduce the preset's independent paint behavior without being exported
+    as duplicate PowerPoint shapes.
+    """
+    markup = serialize_preset_layers(
+        geom.layers,
+        semantic_attrs,
+        style_attrs,
+    )
+    geom.attrs["data-pptx-preview-sha256"] = markup.preview_hash
+    semantic_attrs["data-pptx-preview-sha256"] = markup.preview_hash
+    return markup.markup
+
+
+def _clip_blip_image(image_xml: str, geom: GeomResult | None,
+                     ctx: AssemblyContext) -> str:
+    """Clip image fills to the owning shape geometry when it is not a plain rect."""
+    if geom is None or geom.tag == "line":
+        return image_xml
+    if geom.attrs.get("data-pptx-prst") == "rect":
+        return image_xml
+    if geom.tag == "rect" and not geom.attrs.get("rx") and not geom.attrs.get("ry"):
+        return image_xml
+
+    clip_geom = geom
+    if image_xml.startswith("<svg"):
+        flattened = None
+        if (
+            not ctx.strict
+            and geom.attrs.get("data-pptx-geometry-kind") == "custom"
+        ):
+            flattened = _flatten_vector_custom_crop(image_xml)
+        if flattened is not None:
+            image_xml = flattened
+            ctx.diagnose(
+                "vector-custom-geometry-crop-normalized",
+                "SVG-only picture combines srcRect with custom geometry; "
+                "Office renders the complete vector as the custom-shape fill",
+                "ignore srcRect and clip the complete vector to the custom geometry",
+            )
+        else:
+            try:
+                clip_geom = _project_clip_into_nested_crop(geom, image_xml)
+            except ValueError as exc:
+                if ctx.strict:
+                    raise ValueError(
+                        f"Cannot project picture geometry into its crop viewBox: {exc}"
+                    ) from exc
+                ctx.diagnose(
+                    "nested-crop-shape-clip-omitted",
+                    f"Cannot project picture geometry into its crop viewBox: {exc}",
+                    "source image crop retained without the additional shape clip",
+                )
+                return image_xml
+
+    ctx.clip_seq[0] += 1
+    clip_id = f"{ctx.group_id_prefix}clip{ctx.clip_seq[0]}"
+    clip_shape = _geom_to_svg(clip_geom, "")
+    ctx.defs.append(
+        f'<clipPath id="{clip_id}" clipPathUnits="userSpaceOnUse">'
+        f'{clip_shape}</clipPath>'
+    )
+    return _inject_clip_path(image_xml, clip_id)
+
+
+def _flatten_vector_custom_crop(image_xml: str) -> str | None:
+    """Normalize an SVG-only custom-shape crop to a plain full-vector image."""
+    wrapper = ET.fromstring(image_xml)
+    if wrapper.tag != "svg" or len(wrapper) != 1 or wrapper[0].tag != "image":
+        return None
+    image = wrapper[0]
+    href = image.attrib.get("href", "")
+    href_path = href.split("#", 1)[0].split("?", 1)[0].casefold()
+    if not (
+        href_path.endswith(".svg")
+        or href_path.startswith("data:image/svg+xml")
+    ):
+        return None
+
+    attrs = {
+        key: value
+        for key, value in image.attrib.items()
+        if key not in {"x", "y", "width", "height", "preserveAspectRatio"}
+    }
+    for key in ("x", "y", "width", "height"):
+        value = wrapper.attrib.get(key)
+        if value is None:
+            return None
+        attrs[key] = value
+    attrs["preserveAspectRatio"] = "none"
+    return f"<image{_attrs_to_xml(attrs)}/>"
+
+
+def _inject_clip_path(image_xml: str, clip_id: str) -> str:
+    clip_attr = f' clip-path="url(#{clip_id})"'

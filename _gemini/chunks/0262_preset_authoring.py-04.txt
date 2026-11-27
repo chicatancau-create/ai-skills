@@ -1,0 +1,109 @@
+    if len(direct_children) != len(expected_children):
+        errors.append(
+            "Compact authored preset path count differs from registry output: "
+            f"expected {len(expected_children)}, found {len(direct_children)}"
+        )
+        return errors
+    for index, (actual, expected) in enumerate(
+        zip(direct_children, expected_children),
+        start=1,
+    ):
+        if actual.attrib != expected.attrib:
+            errors.append(
+                f"Compact authored preset path {index} differs from registry output"
+            )
+    return errors
+
+
+def _validate_expanded_authored_preset_group(group: ET.Element) -> list[str]:
+    """Validate the legacy expanded authored-preset compatibility form."""
+    if group.get(AUTHORING_ATTR) != AUTHORING_VALUE:
+        return []
+    errors: list[str] = []
+    if not _is_svg_element(group, "g"):
+        return [f'{AUTHORING_ATTR}="{AUTHORING_VALUE}" requires an SVG <g>']
+    element_id = group.get("id")
+    if element_id is None:
+        errors.append("Authored preset logical group requires a stable id")
+    elif _ID_RE.fullmatch(element_id) is None:
+        errors.append(f"Authored preset logical group has invalid id {element_id!r}")
+
+    unexpected_group_attrs = sorted(
+        name for name in group.attrib
+        if _is_unexpected_group_attr(name, compact=False)
+    )
+    if unexpected_group_attrs:
+        errors.append(
+            "Authored preset logical group has unsupported attributes: "
+            + ", ".join(unexpected_group_attrs)
+        )
+
+    direct_children = list(group)
+    carriers = [
+        child
+        for child in direct_children
+        if child.get("data-pptx-part") == "geometry"
+    ]
+    previews = [
+        child
+        for child in direct_children
+        if child.get("data-pptx-part") == "geometry-preview"
+    ]
+    if len(carriers) != 1:
+        errors.append(
+            f"Authored preset requires exactly one direct geometry carrier; "
+            f"found {len(carriers)}"
+        )
+    if len(previews) != 1:
+        errors.append(
+            f"Authored preset requires exactly one direct geometry preview; "
+            f"found {len(previews)}"
+        )
+    allowed_children = set(carriers + previews)
+    foreign_children = [
+        child for child in direct_children
+        if child not in allowed_children
+    ]
+    if foreign_children:
+        errors.append(
+            "Authored preset groups are atomic; place labels or decorations "
+            "in a parent group"
+        )
+    if len(carriers) != 1 or len(previews) != 1:
+        return errors
+
+    carrier = carriers[0]
+    preview = previews[0]
+    if not _is_svg_element(carrier, "path"):
+        errors.append("Authored preset geometry carrier must be an SVG <path>")
+    if not _is_svg_element(preview, "g"):
+        errors.append("Authored preset geometry preview must be an SVG <g>")
+    if carrier.get("visibility") != "hidden":
+        errors.append('Authored preset carrier requires visibility="hidden"')
+    if carrier.get("pointer-events") != "none":
+        errors.append('Authored preset carrier requires pointer-events="none"')
+
+    for attr_name in _SEMANTIC_ATTRS:
+        if group.get(attr_name) != carrier.get(attr_name):
+            errors.append(
+                f"Authored preset group/carrier {attr_name} values differ"
+            )
+    adjustment_names = {
+        name
+        for element in (group, carrier)
+        for name in element.attrib
+        if name.startswith(_ADJUSTMENT_PREFIX)
+    }
+    for attr_name in sorted(adjustment_names):
+        if group.get(attr_name) != carrier.get(attr_name):
+            errors.append(
+                f"Authored preset group/carrier {attr_name} values differ"
+            )
+
+    unexpected_carrier_attrs = [
+        name
+        for name in carrier.attrib
+        if _is_unexpected_carrier_attr(name)
+    ]
+    if unexpected_carrier_attrs:
+        errors.append(

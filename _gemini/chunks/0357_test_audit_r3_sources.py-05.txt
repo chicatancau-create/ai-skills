@@ -1,0 +1,76 @@
+                markdown, warnings = self._convert(self._docx(Path(tmp), note_type=note_type))
+                self.assertIn("Amount[^2]", markdown)
+                self.assertIn("[^2]: Amount excludes tax.", markdown)
+                self.assertEqual(warnings, [])
+                outputs.append(markdown)
+        self.assertEqual(outputs[0], outputs[1])
+
+    def test_a03_separator_footnote_types_are_not_body(self) -> None:
+        for note_type in ("separator", "continuationSeparator", "continuationNotice"):
+            with self.subTest(note_type=note_type), tempfile.TemporaryDirectory() as tmp:
+                markdown, warnings = self._convert(self._docx(Path(tmp), note_type=note_type))
+                self.assertNotIn("Amount excludes tax.", markdown)
+                self.assertEqual(warnings, [])
+
+    def test_a04_absolute_and_relative_chart_targets_preserve_data(self) -> None:
+        outputs = []
+        for target in ("charts/chart1.xml", "/word/charts/chart1.xml"):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as tmp:
+                markdown, warnings = self._convert(self._docx(Path(tmp), chart_target=target))
+                self.assertIn("| 2026 | 54321 |", markdown)
+                self.assertEqual(warnings, [])
+                outputs.append(markdown)
+        self.assertEqual(outputs[0], outputs[1])
+
+    def test_a04_missing_chart_part_keeps_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            markdown, warnings = self._convert(self._docx(Path(tmp), include_chart=False))
+        self.assertIn("Chart 1 — data unavailable (KeyError)", markdown)
+        self.assertEqual(warnings, ["Chart 1 (word/charts/chart1.xml): chart data unavailable"])
+
+
+class ArchivedProjectImportTests(unittest.TestCase):
+    def _assert_import_behavior(
+        self,
+        relative: str,
+        *,
+        initialized: bool,
+        preserved: bool,
+        quick_generate: bool = False,
+        move: bool = False,
+        copy: bool = False,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp) / "projects"
+            projects.mkdir()
+            # The shared projects README must not turn scratch into a project.
+            (projects / "README.md").write_text("# Projects\n", encoding="utf-8")
+            manager = project_cli.ProjectManager(base_dir=projects)
+            with contextlib.redirect_stdout(io.StringIO()):
+                target = Path(manager.init_project("new_project", quick_generate=True))
+                if initialized:
+                    old = Path(manager.init_project(
+                        "old_project",
+                        base_dir=str(projects / relative),
+                        quick_generate=quick_generate,
+                    ))
+                    source_dir = old / "sources" / "nested"
+                else:
+                    source_dir = projects / relative
+            source_dir.mkdir(parents=True, exist_ok=True)
+            source = source_dir / "source.md"
+            content = "# Source\n\nKeep the original project intact.\n"
+            source.write_text(content, encoding="utf-8")
+            log = io.StringIO()
+            with patch.object(project_cli, "PROJECTS_ROOT", projects), contextlib.redirect_stderr(log):
+                result = manager.import_sources(str(target), [str(source)], move=move, copy=copy)
+            self.assertEqual(result["skipped"], [])
+            self.assertEqual(len(result["markdown"]), 1)
+            self.assertEqual(Path(result["markdown"][0]).read_text(encoding="utf-8"), content)
+            self.assertEqual(source.exists(), preserved)
+            if initialized and not move and not copy:
+                self.assertIn("belongs to another project; copied", log.getvalue())
+
+    def test_initialized_projects_copy_sources_by_default(self) -> None:
+        for relative in ("", "archive/2026-09"):
+            for quick_generate in (False, True):

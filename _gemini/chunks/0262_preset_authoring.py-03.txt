@@ -1,0 +1,98 @@
+            "Compact authored preset cannot mix transport carrier/preview markers"
+        )
+        return errors
+    if any(
+        not _is_svg_element(child, "path")
+        for child in direct_children
+    ):
+        errors.append(
+            "Compact authored preset is atomic and may contain only direct SVG paths"
+        )
+        return errors
+    if any(list(child) for child in direct_children):
+        errors.append("Compact authored preset paths cannot contain child elements")
+    if any(
+        (child.text or "").strip() or (child.tail or "").strip()
+        for child in direct_children
+    ):
+        errors.append(
+            "Compact authored preset paths may contain only whitespace around markup"
+        )
+
+    preset = group.get("data-pptx-prst") or ""
+    object_kind = group.get("data-pptx-object") or ""
+    if object_kind not in {"shape", "connector"}:
+        errors.append(
+            "Authored preset data-pptx-object must be 'shape' or 'connector'"
+        )
+    if preset in CONNECTOR_PRESET_TYPES and object_kind != "connector":
+        errors.append(
+            f"Connector preset {preset!r} requires data-pptx-object='connector'"
+        )
+    if object_kind == "connector" and preset not in CONNECTOR_PRESET_TYPES:
+        errors.append(
+            f"Authored connector requires a connector preset, got {preset!r}"
+        )
+
+    try:
+        frame = _parse_frame(group.get("data-pptx-frame"), object_kind)
+        canonical_frame = " ".join(fmt_num(value, 8) for value in frame)
+        if group.get("data-pptx-frame") != canonical_frame:
+            raise ValueError(
+                "Compact authored preset data-pptx-frame must use the helper's "
+                f"canonical spelling {canonical_frame!r}"
+            )
+        adjustments = {
+            name[len(_ADJUSTMENT_PREFIX):]: value
+            for name, value in group.attrib.items()
+            if name.startswith(_ADJUSTMENT_PREFIX)
+        }
+        _validate_adjustments(preset, adjustments)
+        rendered = render_preset_geometry(
+            preset,
+            Xfrm(x=frame[0], y=frame[1], w=frame[2], h=frame[3]),
+            adjustments,
+        )
+        raw_style = {
+            name: group.attrib[name]
+            for name in _STYLE_ATTRS
+            if name in group.attrib
+        }
+        if "fill" not in raw_style or "stroke" not in raw_style:
+            raise ValueError(
+                "Compact authored preset requires explicit local fill and stroke"
+            )
+        style_attrs = _validate_style(raw_style)
+        _validate_filter_reference(group.get("filter"), object_kind)
+        noncanonical_style = sorted(
+            name for name, value in style_attrs.items()
+            if raw_style.get(name) != value
+        )
+        if noncanonical_style:
+            raise ValueError(
+                "Compact authored preset style uses non-canonical values: "
+                + ", ".join(noncanonical_style)
+            )
+        if style_attrs.get("stroke", "none") != "none" and (
+            "stroke-width" not in style_attrs
+        ):
+            raise ValueError(
+                "Compact authored preset with a visible stroke requires stroke-width"
+            )
+        if object_kind == "connector":
+            if style_attrs.get("fill", "none") != "none":
+                raise ValueError("Authored connector fill must be none")
+            if not _has_visible_stroke(style_attrs):
+                raise ValueError("Authored connector requires a visible stroke")
+        expected_markup = serialize_compact_preset_layers(
+            rendered.paths,
+            style_attrs,
+        )
+        expected_root = ET.fromstring(
+            f'<g xmlns="http://www.w3.org/2000/svg">{expected_markup}</g>'
+        )
+    except (ET.ParseError, ValueError) as exc:
+        errors.append(f"Cannot regenerate compact authored preset: {exc}")
+        return errors
+
+    expected_children = list(expected_root)

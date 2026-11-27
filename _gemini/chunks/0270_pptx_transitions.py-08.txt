@@ -1,0 +1,109 @@
+        field = f"transition effect_options.{name}"
+        if spec["type"] == "enum":
+            if not isinstance(value, str) or value not in spec["values"]:
+                valid = ", ".join(spec["values"])
+                raise ValueError(
+                    f"{field} for {effect!r} must be one of {valid}: {value!r}"
+                )
+            normalized[name] = value
+        elif spec["type"] == "boolean":
+            if not isinstance(value, bool):
+                raise ValueError(f"{field} must be a boolean: {value!r}")
+            normalized[name] = value
+        else:
+            raise AssertionError(
+                f"unhandled transition option type: {spec['type']!r}"
+            )
+    return normalized
+
+
+def normalize_transition_effect_request(
+    effect: object,
+    options: object = None,
+    *,
+    allow_none: bool = True,
+) -> tuple[str | None, dict[str, object]]:
+    """Normalize one native effect plus options and legacy semantic aliases."""
+    raw_effect = effect
+    canonical = normalize_transition_effect(effect, allow_none=allow_none)
+    alias_options = (
+        TRANSITION_ALIAS_OPTIONS.get(raw_effect, {})
+        if isinstance(raw_effect, str)
+        else {}
+    )
+    explicit_options: Mapping[str, object]
+    if options is None:
+        explicit_options = {}
+    elif isinstance(options, Mapping):
+        explicit_options = options
+    else:
+        raise ValueError(
+            f"transition effect_options must be an object: {options!r}"
+        )
+    for name, alias_value in alias_options.items():
+        if name in explicit_options and explicit_options[name] != alias_value:
+            raise ValueError(
+                f"legacy transition effect {raw_effect!r} implies "
+                f"effect_options.{name}={alias_value!r}, which conflicts with "
+                f"{explicit_options[name]!r}"
+            )
+    merged = {**alias_options, **explicit_options}
+    if canonical is None:
+        if merged:
+            raise ValueError(
+                "transition effect_options require one explicit native effect; "
+                "found 'none'"
+            )
+        return None, {}
+    return canonical, normalize_transition_effect_options(canonical, merged)
+
+
+def describe_transition_effect(effect: object) -> dict[str, Any]:
+    """Return the author-facing parameter contract for one transition."""
+    canonical, implied_options = normalize_transition_effect_request(
+        effect,
+        allow_none=False,
+    )
+    option_contract: dict[str, Any] = {}
+    for name, raw_spec in NATIVE_TRANSITIONS[canonical]["effectOptions"].items():
+        option_contract[name] = {
+            "type": raw_spec["type"],
+            "default": raw_spec["default"],
+            "values": list(raw_spec["values"]),
+        }
+    return {
+        "input": effect,
+        "effect": canonical,
+        "name": NATIVE_TRANSITIONS[canonical]["name"],
+        "category": NATIVE_TRANSITIONS[canonical]["category"],
+        "compatibility_alias": (
+            effect
+            if isinstance(effect, str) and effect in TRANSITION_ALIASES
+            else None
+        ),
+        "implied_effect_options": implied_options,
+        "effect_options": option_contract,
+        "timing": {
+            "duration": "positive seconds",
+            "auto_advance": "non-negative seconds",
+        },
+        "sound": "project-relative .wav path or null in animations.json",
+    }
+
+
+def _seconds_to_ms(value: object, field: str, *, allow_zero: bool) -> int:
+    seconds = validate_seconds(value, field, allow_zero=allow_zero)
+    raw_milliseconds = seconds * 1000
+    if (
+        not math.isfinite(raw_milliseconds)
+        or raw_milliseconds > MAX_OOXML_MILLISECONDS
+    ):
+        raise ValueError(
+            f"{field} exceeds the OOXML millisecond limit: {value!r}"
+        )
+    milliseconds = int(raw_milliseconds)
+    return milliseconds if allow_zero else max(1, milliseconds)
+
+
+def _effect_spec(
+    effect: str,

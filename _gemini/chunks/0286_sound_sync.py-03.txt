@@ -1,0 +1,87 @@
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--query",
+        default="",
+        help="Case-insensitive terms matched against ID, label, source, tags, and contexts",
+    )
+    return parser
+
+
+def _build_sync_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Copy explicitly selected library sounds into a project's sounds/ folder. "
+            "Review `templates/sounds/sound-vocabulary.md` first; use "
+            "`sound_sync.py list [--query TERM]` only for optional exact filtering."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("project_path", help="Existing project directory")
+    parser.add_argument("sound_ids", nargs="+", help="Sound IDs such as bigsoundbank/1797")
+    return parser
+
+
+def _run_list(argv: list[str]) -> int:
+    args = _build_list_parser().parse_args(argv)
+    try:
+        sounds = list_sounds(args.query)
+    except RuntimeError as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 1
+
+    for item in sounds:
+        marker = "*" if item.get("recommended") is True else " "
+        sound_id = str(item["id"])
+        duration = float(item.get("duration_seconds", 0.0))
+        label = str(item.get("label", ""))
+        contexts = ",".join(str(value) for value in item.get("contexts", []))
+        print(f"{marker} {sound_id:<42} {duration:>7.3f}s  {label}  [{contexts}]")
+
+    print(f"[OK] {len(sounds)} sound(s) matched", file=sys.stderr)
+    return 0
+
+
+def _run_sync(argv: list[str]) -> int:
+    args = _build_sync_parser().parse_args(argv)
+    project = Path(args.project_path)
+    if not project.is_dir():
+        print(f"[ERROR] project not found: {project}", file=sys.stderr)
+        return 1
+
+    try:
+        copied, missing = sync_sounds(project, args.sound_ids)
+    except RuntimeError as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 1
+
+    if missing:
+        print(
+            f"[MISSING] {len(missing)} sound ID(s) not in the library; nothing was copied:",
+            file=sys.stderr,
+        )
+        for sound_id in missing:
+            print(f"     x {sound_id}", file=sys.stderr)
+        print(
+            "Review `skills/ppt-master/templates/sounds/sound-vocabulary.md`, then "
+            "optionally run `python3 skills/ppt-master/scripts/sound_sync.py list "
+            "--query <term>` to locate an exact ID.",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(f"[OK] {len(copied)} sound(s) in {project / 'sounds'}:", file=sys.stderr)
+    for sound_id in copied:
+        print(f"     + {sound_id}", file=sys.stderr)
+    return 0
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    raw_args = list(sys.argv[1:] if argv is None else argv)
+    if raw_args and raw_args[0] == "list":
+        return _run_list(raw_args[1:])
+    return _run_sync(raw_args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

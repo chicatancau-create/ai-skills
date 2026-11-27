@@ -1,0 +1,108 @@
+        maximum=MAX_OOXML_UNSIGNED_INT,
+    )
+    if preset_id is None or preset_subtype is None:
+        return (), preset_class, preset_id, preset_subtype
+    matches = [
+        key
+        for key, info in NATIVE_ANIMATIONS.items()
+        if info['presetClass'] == preset_class
+        if int(info['presetID']) == preset_id
+    ]
+    return tuple(matches), preset_class, preset_id, preset_subtype
+
+
+def _behavior_duration_ms(
+    row: ET.Element,
+    errors: list[str],
+) -> int | None:
+    duration = _row_effective_duration_ms(row)
+    if duration is not None and duration > MAX_OOXML_MILLISECONDS:
+        errors.append(
+            'object-animation behavior duration exceeds the OOXML '
+            f'millisecond limit: {duration}'
+        )
+    return duration
+
+
+def _read_animation_color(
+    row: ET.Element,
+    errors: list[str],
+    label: str,
+) -> str | None:
+    colors = [
+        element
+        for element in row.iter()
+        if element.tag in {
+            _qn(_DML_NS, 'srgbClr'),
+            _qn(_DML_NS, 'schemeClr'),
+        }
+    ]
+    if not colors:
+        errors.append(f'{label} is missing its color value')
+        return None
+    rendered = []
+    for color in colors:
+        if color.tag == _qn(_DML_NS, 'srgbClr'):
+            value = color.get('val')
+            rendered.append(f'#{value.upper()}' if value else '')
+        else:
+            value = color.get('val')
+            rendered.append(f'theme:{value}' if value else '')
+    unique = tuple(dict.fromkeys(value for value in rendered if value))
+    if len(unique) != 1:
+        errors.append(f'{label} contains inconsistent color values: {unique!r}')
+        return None
+    return unique[0] if unique else None
+
+
+def _read_effect_options(
+    row: ET.Element,
+    effect: str | None,
+    filter_name: str | None,
+    errors: list[str],
+) -> dict[str, object]:
+    if effect is None:
+        return {}
+    option_specs = NATIVE_ANIMATIONS[effect]['effectOptions']
+    values: dict[str, object] = {}
+    for name, spec in option_specs.items():
+        option_type = spec['type']
+        if option_type == 'enum':
+            matches = []
+            for value, variant_xml in spec['values'].items():
+                variant = ET.fromstring(variant_xml)
+                variant_filter = _row_filter(variant, variant.get('presetClass', ''), [])
+                if variant.get('presetSubtype') != row.get('presetSubtype'):
+                    continue
+                if variant_filter != filter_name:
+                    continue
+                matches.append(value)
+            if len(matches) != 1:
+                errors.append(
+                    f'animation effect {effect!r} option {name!r} could not be '
+                    f'read from presetSubtype={row.get("presetSubtype")!r}, '
+                    f'filter={filter_name!r}'
+                )
+                continue
+            value: object = matches[0]
+            if name == 'amount' and re.fullmatch(r'\d+', str(value)):
+                value = int(str(value))
+            values[name] = value
+        elif name == 'amount' and effect == 'emphasis_spin':
+            rotations = list(row.iter(_qn(PML_NS, 'animRot')))
+            raw = rotations[0].get('by') if len(rotations) == 1 else None
+            if raw is None or not re.fullmatch(r'-?\d+', raw):
+                errors.append('emphasis_spin row has an invalid rotation amount')
+            else:
+                values[name] = int(raw) / 60000
+        elif name == 'amount' and effect == 'emphasis_transparency':
+            opacity_values = []
+            for node in row.iter(_qn(PML_NS, 'set')):
+                attributes = {
+                    (attribute.text or '').strip()
+                    for attribute in node.iter(_qn(PML_NS, 'attrName'))
+                }
+                if 'style.opacity' in attributes:
+                    opacity_values.extend(
+                        value.get('val')
+                        for value in node.iter(_qn(PML_NS, 'strVal'))

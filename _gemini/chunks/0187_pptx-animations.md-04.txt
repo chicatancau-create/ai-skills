@@ -1,0 +1,60 @@
+After packaging, validation scans every slide part for root timing placement,
+duplicate or malformed `p:cTn` ids, missing `p:spTgt` shapes, invalid build
+targets, and unsupported generated effect tuples. A mismatch fails export
+before the requested output file replaces an existing deck.
+
+`pptx_to_svg.py` reuses that semantic reader and behavior-tree validator for a
+finite reverse projection. A row enters `animations.json` only when its current
+registry effect/options, pane order, Start trigger, exact behavior duration,
+relative delay, and target/optional trigger shape can be represented by unique
+top-level slide SVG groups. Repeated targets become `effects[]`. Duration-less
+native rows, advanced timing modifiers, sounds, build/media commands, unknown
+trees, and unmapped targets remain explicit import diagnostics. This is not a
+general PowerPoint timing-tree normalizer.
+
+Narration injection parses and merges the slide DOM. It adds audio timing under
+the existing `tmRoot`, allocates fresh ids, and preserves object animation.
+For bounce timing it updates both p14 Choice and Fallback; unsupported nested
+timing containers still fail safely instead of being duplicated.
+
+The conversion trace is also the authoritative input for downstream video
+motion. `video_motion_plan.py` preserves the resolved effect/options, direction,
+row order, base and repeat-aware playback duration, absolute offset, object
+bounds, and narration-derived slide advance while adding only renderer-specific enhancement parameters. Video
+renderers must not bypass this read-back result and infer motion from sidecar
+delay values alone.
+
+---
+
+## 7. Compatibility Scope
+
+The compatibility contract covers PowerPoint OOXML and PowerPoint read-back.
+Other presentation applications may interpret timing trees or filter values
+differently; the exporter does not make an unconditional Keynote guarantee.
+
+Official references:
+
+- [Microsoft `MsoAnimEffect` enumeration](https://learn.microsoft.com/en-us/office/vba/api/powerpoint.msoanimeffect)
+- [Microsoft `Sequence.AddEffect`](https://learn.microsoft.com/en-us/office/vba/api/powerpoint.sequence.addeffect)
+- [Microsoft `Effect.Exit`](https://learn.microsoft.com/en-us/office/vba/api/powerpoint.effect.exit)
+- [Microsoft animation-filter implementation notes](https://learn.microsoft.com/en-us/openspecs/office_standards/ms-oe376/a96dab70-2e72-4319-928d-0eb4b275ce58)
+- [Microsoft `p:bldP` implementation restrictions](https://learn.microsoft.com/en-us/openspecs/office_standards/ms-oe376/40d17b6d-30c0-4c10-b042-b2597824a820)
+- [Open XML SDK time-node values](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.presentation.timenodevalues?view=openxml-3.0.1)
+- [Open XML SDK shape target](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.presentation.shapetarget?view=openxml-3.0.1)
+
+See [`pptx-transitions.md`](./pptx-transitions.md) for the symmetric page-motion
+core, MCE handling, and slide-advance contract.
+See [`video-motion-plan.md`](./video-motion-plan.md) for the downstream
+animation-to-video contract.
+
+## 8. Sidecar Field Reference
+
+`animations.json` fields as validated by `animation_config.py validate` and consumed by export; the [`customize-animations`](../../workflows/stages/customize-animations.md) stage owns when and why each is written.
+
+| Field | Behavior |
+|---|---|
+| `defaults.transition` / `slides.<slide>.transition` | Deck-wide or slide-specific page transition object |
+| `transition.effect` | One of the 48 canonical native effects, or `none` (removes only the visual effect; timed advance remains) |
+| `transition.effect_options` | Only the selected effect's PowerPoint Effect Options (`pptx_animations.py --describe-transition <effect>`); requires an explicit `effect` |
+| `transition.duration` | Finite seconds greater than zero |
+| `transition.auto_advance` | Optional finite non-negative seconds before automatic advance; click stays enabled; valid with `effect: none` |

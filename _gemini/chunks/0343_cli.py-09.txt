@@ -1,0 +1,89 @@
+                if source_part not in names or rels_part not in names:
+                    continue
+                rels_root = ET.fromstring(archive.read(rels_part))
+                paths_by_relationship: dict[str, set[str]] = {}
+                for relationship in rels_root:
+                    relationship_id = relationship.get("Id")
+                    target = relationship.get("Target")
+                    if (
+                        not relationship_id
+                        or not target
+                        or relationship.get("TargetMode") == "External"
+                    ):
+                        continue
+                    target_part = posixpath.normpath(posixpath.join(
+                        posixpath.dirname(source_part),
+                        unquote(target),
+                    ))
+                    for workspace_path, package_part in (
+                        paths_by_package_part.items()
+                    ):
+                        if target_part == package_part:
+                            paths_by_relationship.setdefault(
+                                relationship_id,
+                                set(),
+                            ).add(workspace_path)
+                if not paths_by_relationship:
+                    continue
+                slide_root = ET.fromstring(archive.read(source_part))
+                parent_by_id = {
+                    id(child): parent
+                    for parent in slide_root.iter()
+                    for child in list(parent)
+                }
+                for element in slide_root.iter():
+                    relationship_ids = {
+                        value
+                        for name, value in element.attrib.items()
+                        if name.startswith(f"{{{relationship_namespace}}}")
+                        and value in paths_by_relationship
+                    }
+                    if not relationship_ids:
+                        continue
+                    current: ET.Element | None = element
+                    while current is not None:
+                        if current.tag in shape_tags:
+                            non_visual = next(
+                                (
+                                    candidate
+                                    for candidate in current.iter()
+                                    if candidate.tag
+                                    == f"{{{presentation_namespace}}}cNvPr"
+                                ),
+                                None,
+                            )
+                            shape_id = (
+                                non_visual.get("id")
+                                if non_visual is not None
+                                else None
+                            )
+                            if shape_id:
+                                source_ref = f"slide:{shape_id}"
+                                for relationship_id in relationship_ids:
+                                    owner_paths.setdefault(index, {}).setdefault(
+                                        source_ref,
+                                        set(),
+                                    ).update(
+                                        paths_by_relationship[relationship_id]
+                                    )
+                        current = parent_by_id.get(id(current))
+    except (ET.ParseError, KeyError, OSError, zipfile.BadZipFile) as exc:
+        raise RuntimeError(
+            f"Cannot resolve opaque round-trip resource owners: {exc}"
+        ) from exc
+    return {
+        index: {
+            source_ref: frozenset(paths)
+            for source_ref, paths in refs.items()
+        }
+        for index, refs in owner_paths.items()
+    }
+
+
+_PPTX_STRUCTURE_SECTION_RE = re.compile(
+    r"(?ms)^##[ \t]+pptx_structure[ \t]*\r?\n(.*?)(?=^##[ \t]+|\Z)"
+)
+_PPTX_STRUCTURE_MODE_RE = re.compile(
+    r"(?m)^-[ \t]+mode[ \t]*:[ \t]*([^#\r\n]*?)[ \t]*(?:#.*)?$"
+)
+_LEGACY_PPTX_STRUCTURE_MODES = frozenset({

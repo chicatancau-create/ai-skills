@@ -1,0 +1,99 @@
+        and element.get("data-pptx-shape-id")
+    }
+    detached: set[tuple[str, str, str]] = set()
+    for element in root.iter():
+        connector_scope = element.get("data-pptx-shape-scope") or "unknown"
+        connector_id = element.get("data-pptx-shape-id") or element.get("id") or "unknown"
+        for endpoint in ("start", "end"):
+            target_id_attr = f"data-pptx-{endpoint}-shape-id"
+            target_id = element.get(target_id_attr)
+            if target_id is None:
+                continue
+            target_scope = element.get(
+                f"data-pptx-{endpoint}-shape-scope",
+                connector_scope,
+            )
+            if (target_scope, target_id) in identities:
+                continue
+            detached.add((connector_scope, connector_id, endpoint))
+            for suffix in ("shape-id", "shape-scope", "site"):
+                element.attrib.pop(f"data-pptx-{endpoint}-{suffix}", None)
+    return len(detached)
+
+
+def _local_asset_path(value: str, base_dir: Path) -> Path | None:
+    if not value or value.startswith("#"):
+        return None
+    parsed = urlsplit(value)
+    if parsed.scheme == "file":
+        return Path(unquote(parsed.path)).resolve()
+    if parsed.scheme or parsed.netloc or not parsed.path:
+        return None
+    path = Path(unquote(parsed.path))
+    return path.resolve() if path.is_absolute() else (base_dir / path).resolve()
+
+
+def _detected_bitmap_extension(path: Path) -> str | None:
+    header = path.read_bytes()[:32]
+    if header.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if header.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if header.startswith((b"GIF87a", b"GIF89a")):
+        return ".gif"
+    if header.startswith(b"BM"):
+        return ".bmp"
+    if header.startswith((b"II*\x00", b"MM\x00*")):
+        return ".tiff"
+    if len(header) >= 12 and header[:4] == b"RIFF" and header[8:12] == b"WEBP":
+        return ".webp"
+    return None
+
+
+def _rewrite_packaged_assets(
+    root: ET.Element,
+    *,
+    source_base: Path,
+    final_svg_path: Path,
+    template_workspace: Path,
+    asset_sources: dict[Path, Path],
+) -> None:
+    for element in root.iter():
+        for attribute in ("href", f"{{{XLINK_NS}}}href"):
+            value = element.get(attribute)
+            if value is None:
+                continue
+            source = _local_asset_path(value, source_base)
+            if source is None:
+                continue
+            if not source.is_file():
+                raise MirrorMaterializationError(
+                    f"Referenced local asset is missing: {source}"
+                )
+            detected_extension = _detected_bitmap_extension(source)
+            if detected_extension is not None:
+                source_suffix = source.suffix.lower()
+                equivalent_suffixes = (
+                    {".jpg", ".jpeg"}
+                    if detected_extension == ".jpg"
+                    else {detected_extension}
+                )
+                packaged_name = (
+                    source.name
+                    if source_suffix in equivalent_suffixes
+                    else f"{source.stem}{detected_extension}"
+                )
+                relative_target = Path("images") / packaged_name
+            elif source.suffix.lower() in IMAGE_EXTENSIONS:
+                relative_target = Path("images") / source.name
+            elif source.suffix.lower() in VIDEO_EXTENSIONS:
+                relative_target = Path("video") / source.name
+            elif source.suffix.lower() in AUDIO_EXTENSIONS:
+                relative_target = Path("audio") / source.name
+            else:
+                relative_target = (
+                    Path("native-payloads") / "imported" / source.name
+                )
+            previous = asset_sources.get(relative_target)
+            if previous is not None and _sha256_file(previous) != _sha256_file(source):
+                raise MirrorMaterializationError(

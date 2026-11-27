@@ -1,0 +1,102 @@
+                continue
+            attribute, bounds = resolved
+            self._record_bounds_overflow(
+                result,
+                subject=f'{_element_label(group)} {attribute}',
+                inner=bounds,
+                container='canvas viewBox',
+                outer=canvas,
+                repair=(
+                    'keep the root module subcanvas inside the SVG viewBox'
+                ),
+            )
+
+        structured_page = all(
+            (root.get(attribute) or '').strip()
+            for attribute in _PPTX_ROOT_STRUCTURE_ATTRS
+        )
+        for index, (first_group, first_bounds) in enumerate(
+            bounded_root_groups,
+        ):
+            if self._root_module_overlap_exempt(
+                first_group,
+                structured_page=structured_page,
+                canvas=canvas,
+            ):
+                continue
+            for second_group, second_bounds in bounded_root_groups[index + 1:]:
+                if self._root_module_overlap_exempt(
+                    second_group,
+                    structured_page=structured_page,
+                    canvas=canvas,
+                ):
+                    continue
+                overlap_width, overlap_height = self._bounds_overlap_dimensions(
+                    first_bounds,
+                    second_bounds,
+                )
+                if (
+                    overlap_width <= _BOUNDS_OVERFLOW_TOLERANCE
+                    or overlap_height <= _BOUNDS_OVERFLOW_TOLERANCE
+                ):
+                    continue
+                result['errors'].append(
+                    f'{_element_label(first_group)} {_BOUNDS_ATTR} overlaps '
+                    f'{_element_label(second_group)} {_BOUNDS_ATTR} by '
+                    f'{overlap_width:.1f}px x {overlap_height:.1f}px; keep '
+                    'ordinary direct-root module zones disjoint beyond the '
+                    f'{_BOUNDS_OVERFLOW_TOLERANCE:.0f}px tolerance'
+                )
+
+        if missing:
+            sample = '; '.join(missing[:3])
+            suffix = '' if len(missing) <= 3 else f'; +{len(missing) - 3} more'
+            bucket = result['errors'] if require_bounds else result['warnings']
+            prefix = 'Detected' if require_bounds else 'Reference SVG: detected'
+            bucket.append(
+                f'{prefix} {len(missing)} visible root-level <g> '
+                f'module(s) without explicit {_BOUNDS_ATTR} '
+                f'({sample}{suffix}); every final-page/template root <g> other '
+                'than a compact authored-preset atom declares its root-coordinate '
+                'layout subcanvas even when it also carries native coordinates'
+            )
+
+    def _check_text_bounds(
+        self,
+        root: ET.Element,
+        result: Dict,
+        *,
+        included_text_ids: set[int] | None = None,
+    ) -> None:
+        """Validate visible text against page and root-module bounds."""
+        helpers = (
+            _estimate_single_line_text_frame_width,
+            _parse_project_font_weight,
+            _parse_project_geometry_length,
+            _parse_project_text_anchor,
+            _resolve_project_font_sizes,
+            _resolve_project_letter_spacings,
+        )
+        if any(helper is None for helper in helpers):
+            return
+        try:
+            font_sizes = _resolve_project_font_sizes(root)
+            letter_spacings = _resolve_project_letter_spacings(
+                root,
+                font_sizes,
+            )
+        except ValueError:
+            return
+
+        parent_by_id = {
+            id(child): parent
+            for parent in root.iter()
+            for child in list(parent)
+        }
+        unchanged_groups = self._unchanged_txbody_group_ids(root)
+        viewbox = _parse_viewbox_values(root.get('viewBox') or '')
+        canvas = None
+        if viewbox is not None:
+            x, y, width, height = viewbox
+            canvas = (x, y, x + width, y + height)
+

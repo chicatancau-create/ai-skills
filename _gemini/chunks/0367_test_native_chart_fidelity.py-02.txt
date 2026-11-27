@@ -1,0 +1,81 @@
+                    _cache_point_values(cache)
+
+    def test_normalized_chart_preview_keeps_gaps(self) -> None:
+        payload = {
+            "type": "line", "x": 0, "y": 0, "width": 400, "height": 200,
+            "categories": ["A", "B", "C", "D", "E", "F"],
+            "series": [{"name": "S", "values": [None, 1, 2, None, 4, None]}],
+            "line_style": "lineMarker",
+        }
+        rendered = render_normalized_chart_svg(payload, [])
+        self.assertIsNotNone(rendered)
+        root = ET.fromstring(f'<svg xmlns="{SVG_NS}">{rendered}</svg>')
+        lines = root.findall(f'.//{{{SVG_NS}}}polyline')
+        self.assertEqual([len(line.get("points").split()) for line in lines], [2, 1])
+        self.assertEqual(len(root.findall(f'.//{{{SVG_NS}}}circle')), 3)
+        for chart_type in ("area", "bar", "column"):
+            with self.subTest(type=chart_type):
+                self.assertIsNotNone(render_normalized_chart_svg({**payload, "type": chart_type}, []))
+        combo = {**payload, "type": "combo", "plots": [{"type": "line", "series": payload["series"]}]}
+        self.assertIsNotNone(render_normalized_chart_svg(combo, []))
+
+    def test_unsupported_graphic_placeholder_can_publish_authoring_projection(self) -> None:
+        xml = ET.fromstring(
+            f'<p:graphicFrame xmlns:p="{NS["p"]}" xmlns:a="{NS["a"]}">'
+            '<a:graphic><a:graphicData '
+            'uri="http://schemas.openxmlformats.org/drawingml/2006/chart"/>'
+            '</a:graphic></p:graphicFrame>'
+        )
+        node = ShapeNode(GRAPHIC, xml, Xfrm(20, 20, 200, 100), name="unsupported", spid="2")
+        ctx = AssemblyContext(
+            palette=None, pkg=None,
+            slide_part=PartRef("ppt/slides/slide1.xml", ET.Element("slide")),
+            render_graphic_previews=False,
+        )
+        fallback = _convert_graphic_fallback(node, ctx, top_level=True)
+        self.assertIn("unsupported-chart-reference", fallback)
+        self.assertIn("[chart]", fallback)
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "slide.svg"
+            source.write_text(
+                f'<svg xmlns="{SVG_NS}" viewBox="0 0 400 200">{fallback}</svg>',
+                encoding="utf-8",
+            )
+            _, rendered, _ = _render_projection(source, Path(tmp) / "authoring.svg")
+            root = ET.fromstring(rendered)
+            self.assertTrue(root.get("font-family"))
+            self.assertIn("[chart]", "".join(root.itertext()))
+
+
+class NumberFormatTests(unittest.TestCase):
+    def test_quoted_literal_prefix_and_suffix_render_without_scaling(self) -> None:
+        from svg_to_pptx.native_objects.chart_style import _format_number_like_excel
+
+        self.assertEqual(_format_number_like_excel(34.5, '0.0"%"'), '34.5%')
+        self.assertEqual(_format_number_like_excel(0.345, '0.0%'), '34.5%')
+        self.assertEqual(_format_number_like_excel(12345, '"$"#,##0'), '$12,345')
+        self.assertIsNone(_format_number_like_excel(3, 'yyyy'))
+
+
+class ChartExPayloadGuardTests(unittest.TestCase):
+    def test_chartex_refuses_a_classic_axes_block(self) -> None:
+        from svg_to_pptx.native_objects.chart_data import _chart_data
+
+        payload = {
+            "type": "waterfall",
+            "categories": ["Start", "Step", "End"],
+            "values": [10, 5, 15],
+            "axes": {"value": {"kind": "value", "minimum": 0, "maximum": 24}},
+        }
+        with self.assertRaises(RuntimeError) as caught:
+            _chart_data(payload)
+        self.assertIn("classic charts only", str(caught.exception))
+        payload.pop("axes")
+        self.assertEqual(_chart_data(payload)["kind"], "chartex")
+
+
+class CategoryOrderTests(unittest.TestCase):
+    def test_bar_categories_read_top_down_with_value_axis_at_bottom(self) -> None:
+        xml = _render(_bar_payload())
+        cat_ax = xml[xml.index("<c:catAx>"):xml.index("</c:catAx>")]
+        val_ax = xml[xml.index("<c:valAx>"):xml.index("</c:valAx>")]

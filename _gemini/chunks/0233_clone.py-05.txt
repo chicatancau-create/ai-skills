@@ -1,0 +1,104 @@
+    """Remap links inherited from layouts and masters used by output slides."""
+    pending: list[str] = []
+    for part_name, rels_name in output_slides:
+        rels_data = entries.get(rels_name)
+        if not rels_data:
+            continue
+        rels_root = ET.fromstring(rels_data)
+        for rel in rels_root.findall(_qn(REL_NS, "Relationship")):
+            if rel.attrib.get("Type") != _SLIDE_LAYOUT_REL_TYPE:
+                continue
+            target = rel.attrib.get("Target")
+            if target:
+                pending.append(_normalize_part(target, part_name))
+
+    visited: set[str] = set()
+    while pending:
+        part_name = pending.pop()
+        if part_name in visited:
+            continue
+        visited.add(part_name)
+        part_data = entries.get(part_name)
+        rels_name = _rels_name_for_part(part_name)
+        rels_data = entries.get(rels_name)
+        if not part_data or not rels_data:
+            continue
+        part_root = ET.fromstring(part_data)
+        rels_root = ET.fromstring(rels_data)
+        changed = _remap_slide_jump_relationships(
+            part_root,
+            rels_root,
+            source_owner_part=part_name,
+            output_owner_part=part_name,
+            owner_label=part_name,
+            outputs_by_source_part=outputs_by_source_part,
+            source_ref_by_part=source_ref_by_part,
+            fail_on_non_jump_slide_relationships=(
+                fail_on_non_jump_slide_relationships
+            ),
+        )
+        if changed:
+            entries[rels_name] = _xml_bytes(rels_root)
+        for rel in rels_root.findall(_qn(REL_NS, "Relationship")):
+            if rel.attrib.get("Type") != _SLIDE_MASTER_REL_TYPE:
+                continue
+            target = rel.attrib.get("Target")
+            if target:
+                pending.append(_normalize_part(target, part_name))
+
+
+def _remap_cloned_xml_part_slide_jumps(
+    entries: dict[str, bytes],
+    cloned_parts: dict[str, str],
+    content_root: ET.Element,
+    *,
+    output_part: str,
+    outputs_by_source_part: dict[str, list[str]],
+    source_ref_by_part: dict[str, SlideRef],
+    source_slide_part: str,
+) -> None:
+    """Validate and remap slide links in every cloned XML dependency."""
+    for source_part, cloned_part in sorted(cloned_parts.items()):
+        if not _part_is_xml(content_root, cloned_part):
+            continue
+        try:
+            part_root = ET.fromstring(entries[cloned_part])
+        except ET.ParseError as exc:
+            raise RuntimeError(
+                f"Cannot parse cloned XML part {cloned_part}: {exc}"
+            ) from exc
+        rels_name = _rels_name_for_part(cloned_part)
+        rels_data = entries.get(rels_name)
+        if rels_data is None:
+            rels_root = _empty_relationships_root()
+        else:
+            try:
+                rels_root = ET.fromstring(rels_data)
+            except ET.ParseError as exc:
+                raise RuntimeError(
+                    f"Cannot parse relationships part {rels_name}: {exc}"
+                ) from exc
+        changed = _remap_slide_jump_relationships(
+            part_root,
+            rels_root,
+            source_owner_part=source_part,
+            output_owner_part=cloned_part,
+            owner_label=f"Cloned part {cloned_part}",
+            outputs_by_source_part=outputs_by_source_part,
+            source_ref_by_part=source_ref_by_part,
+            self_source_part=source_slide_part,
+            self_output_part=output_part,
+            fail_on_non_jump_slide_relationships=True,
+            allow_self_non_jump_retarget=(
+                _part_content_type(content_root, cloned_part)
+                == NOTES_SLIDE_CONTENT_TYPE
+            ),
+        )
+        if changed:
+            if rels_data is None:
+                raise RuntimeError(
+                    f"Cloned part {cloned_part} changed a missing relationship part"
+                )
+            entries[rels_name] = _xml_bytes(rels_root)
+
+

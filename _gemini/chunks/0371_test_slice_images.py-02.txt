@@ -1,0 +1,97 @@
+            output_dir = root / "output"
+            image = Image.new("RGB", (100, 80), (87, 178, 101))
+            draw = ImageDraw.Draw(image)
+            draw.rectangle((30, 22, 70, 58), fill=(170, 40, 55))
+            draw.point((0, 0), fill=(84, 176, 100))
+            draw.point((99, 79), fill=(88, 180, 102))
+            image.save(sheet_path)
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    str(sheet_path),
+                    "--grid", "1x1",
+                    "--names", "element",
+                    "--trim",
+                    "--alpha",
+                    "--strict-alpha",
+                    "--bg", "#00FF00",
+                    "--tolerance", "12",
+                    "--output", str(output_dir),
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("key background #00FF00", result.stderr)
+            self.assertIn("dominant #57B265", result.stderr)
+            self.assertIn("key spread 3", result.stderr)
+            self.assertIn("--bg #57B265 --tolerance 12", result.stderr)
+            self.assertFalse((output_dir / "element.png").exists())
+
+    def test_strict_alpha_retries_once_when_every_finding_is_key_noise(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sheet_path = root / "sheet.png"
+            output_dir = root / "output"
+            # A slightly off, noisy key (as a JPEG round-trip leaves it) with
+            # one element well clear of every cell edge.
+            image = Image.new("RGB", (120, 120), (2, 253, 2))
+            px = image.load()
+            for y in range(120):
+                for x in range(120):
+                    if (x * 7 + y * 13) % 5 == 0:
+                        px[x, y] = (6, 240, 8)
+            draw = ImageDraw.Draw(image)
+            draw.rectangle((40, 40, 80, 80), fill=(170, 40, 55))
+            image.save(sheet_path)
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    str(sheet_path),
+                    "--grid", "1x1",
+                    "--names", "element",
+                    "--trim",
+                    "--alpha",
+                    "--strict-alpha",
+                    "--bg", "#00FF00",
+                    "--tolerance", "12",
+                    "--output", str(output_dir),
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+
+            # Every finding is measured key noise, so the tool retries once
+            # with the tolerance it measured instead of asking for a rerun.
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("key noise", result.stderr)
+            self.assertIn("auto-retrying once with --tolerance", result.stderr)
+            self.assertNotIn("content reaches the", result.stderr)
+            self.assertTrue((output_dir / "element.png").exists())
+
+    def test_inset_accepts_horizontal_and_vertical_fractions(self) -> None:
+        from slice_images import parse_inset
+
+        self.assertEqual(parse_inset("0.03"), (0.03, 0.03))
+        self.assertEqual(parse_inset("0.01,0.03"), (0.01, 0.03))
+        with self.assertRaises(ValueError):
+            parse_inset("0.5")
+        with self.assertRaises(ValueError):
+            parse_inset("0.1,0.2,0.3")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sheet_path = root / "sheet.png"
+            output_dir = root / "output"
+            # Two wide bands with a white grid line between them: an

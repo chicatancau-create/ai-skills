@@ -1,0 +1,92 @@
+                    if transition.logical_count:
+                        transition_carriers.append(slide.index)
+                        effect = (
+                            transition.canonical_effect
+                            or transition.effect
+                            or "timing-only"
+                        )
+                        transition_effects[effect] += 1
+                    if transition.effect is not None:
+                        visual_transitions.append(slide.index)
+                    if transition.advance_after_ms is not None:
+                        timed_advances.append(slide.index)
+
+                try:
+                    animation = read_slide_animation_sequence(
+                        slide_xml,
+                        require_supported_effects=False,
+                    )
+                except (ET.ParseError, ValueError):
+                    animation = None
+
+                try:
+                    has_object_animation = (
+                        object_animation_fingerprint(slide_xml) is not None
+                    )
+                except ValueError as exc:
+                    errors.append(
+                        _issue(
+                            "animation_presence_readback_failed",
+                            f"{slide.part.path}: {exc}",
+                            slide_index=slide.index,
+                            part=slide.part.path,
+                        )
+                    )
+                    has_object_animation = False
+
+                root = ET.fromstring(slide_xml)
+                has_timing = any(
+                    node.tag == f"{{{PRESENTATION_NS}}}timing"
+                    for node in root
+                )
+                has_audio_timing = any(
+                    node.tag == f"{{{PRESENTATION_NS}}}audio"
+                    for node in root.iter()
+                )
+                if animation is not None:
+                    has_timing = has_timing or bool(animation.timing_count)
+                    has_object_animation = (
+                        has_object_animation or bool(animation.rows)
+                    )
+                    has_audio_timing = (
+                        has_audio_timing or bool(animation.audio_target_ids)
+                    )
+                if has_timing:
+                    timing_slides.append(slide.index)
+                if has_object_animation:
+                    object_animation_slides.append(slide.index)
+                if has_audio_timing:
+                    audio_timing_slides.append(slide.index)
+            if (
+                roster_count != loaded_count
+                or loaded_count != inspected_count
+            ):
+                errors.append(
+                    _issue(
+                        "slide_inventory_failed",
+                        (
+                            f"Presentation declares {roster_count} slides, "
+                            f"but the loader resolved {loaded_count} and the "
+                            f"delivery audit inspected {inspected_count}."
+                        ),
+                        roster_count=roster_count,
+                        loaded_count=loaded_count,
+                        inspected_count=inspected_count,
+                    )
+                )
+    except (KeyError, OSError, RuntimeError, ValueError, zipfile.BadZipFile) as exc:
+        errors.append(
+            _issue(
+                "slide_inventory_failed",
+                f"Cannot inspect presentation slides: {exc}.",
+            )
+        )
+
+    return slide_count, hidden, {
+        "transitions": {
+            "carrier_slide_count": len(transition_carriers),
+            "visual_effect_slide_count": len(visual_transitions),
+            "timed_advance_slide_count": len(timed_advances),
+            "carrier_slides": transition_carriers,
+            "visual_effect_slides": visual_transitions,
+            "timed_advance_slides": timed_advances,

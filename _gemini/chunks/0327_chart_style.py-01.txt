@@ -1,0 +1,143 @@
+"""Native chart styling and companion text helpers."""
+
+from __future__ import annotations
+
+import math
+import re
+from typing import Any
+from xml.etree import ElementTree as ET
+
+from .marker_attributes import native_import_source, native_json_is_authoritative
+
+from ..drawingml.context import ConvertContext, ShapeResult
+from ..drawingml.utils import (
+    _xml_escape,
+    ctx_x,
+    ctx_y,
+    detect_text_lang,
+    parse_font_family,
+    px_to_emu,
+    quantize_ooxml_alpha,
+    text_has_rtl_characters,
+    text_uses_rtl,
+)
+from .chart_data import _DEFAULT_CHART_COLORS, _category_axis_reversed, _chart_data
+from .marker_common import (
+    _bool_attr,
+    _bounds,
+    _chart_bool,
+    _clean_hex,
+    _compact_key,
+    _fallback_concentric_circle_radii,
+    _fallback_fill_candidates,
+    _fallback_shape_records,
+    _fallback_stroke_colors,
+    _fallback_text_colors,
+    _fallback_text_records,
+    _first_present,
+    _font_size_hpt,
+    _hex_or_none,
+    _inferred_chart_background,
+    _local_tag,
+    _maybe_number,
+    _most_common_color,
+    _number,
+    _normalized_fallback_text,
+    _powerpoint_emu,
+    _powerpoint_emu_value,
+    _style_attr,
+    _visible_fallback_texts,
+)
+
+
+def _chart_style_value(payload: dict[str, Any], *keys: str) -> Any:
+    style = payload.get("style") if isinstance(payload.get("style"), dict) else {}
+    for source in (payload, style):
+        for key in keys:
+            if source.get(key) is not None:
+                return source.get(key)
+    return None
+
+
+def _chart_style_color(
+    payload: dict[str, Any],
+    keys: tuple[str, ...],
+    default: str | None,
+) -> str | None:
+    raw = _chart_style_value(payload, *keys)
+    if raw is None:
+        return default
+    if str(raw).strip().lower() in {"none", "transparent"}:
+        return None
+    return _hex_or_none(raw) or default
+
+
+def _fallback_text_attr_values(
+    elem: ET.Element,
+    attr: str,
+    inherited_value: str | None = None,
+) -> list[str]:
+    tag = _local_tag(elem)
+    if tag == "metadata" or tag in {"defs", "clipPath", "mask", "filter", "style"}:
+        return []
+    if elem.get("display") == "none" or elem.get("visibility") == "hidden":
+        return []
+
+    own_value = _style_attr(elem, attr)
+    next_value = own_value if own_value is not None else inherited_value
+    values: list[str] = []
+    if tag in {"text", "tspan"} and next_value:
+        values.append(str(next_value).strip())
+    for child in elem:
+        values.extend(_fallback_text_attr_values(child, attr, next_value))
+    return values
+
+
+def _most_common_value(values: list[str]) -> str | None:
+    if not values:
+        return None
+    counts: dict[str, int] = {}
+    for value in values:
+        counts[value] = counts.get(value, 0) + 1
+    return max(counts.items(), key=lambda item: item[1])[0]
+
+
+def _most_common_font_size(values: list[str]) -> str | None:
+    if not values:
+        return None
+    counts: dict[str, int] = {}
+    for value in values:
+        counts[value] = counts.get(value, 0) + 1
+    max_count = max(counts.values())
+    candidates = [value for value, count in counts.items() if count == max_count]
+    numeric_candidates = [
+        (float(value), value)
+        for value in candidates
+        if _maybe_number(value) is not None
+    ]
+    if numeric_candidates:
+        return min(numeric_candidates, key=lambda item: item[0])[1]
+    return candidates[0]
+
+
+def _record_has_label(record: Any, *needles: str) -> bool:
+    return any(
+        needle in label
+        for label in record.labels
+        for needle in needles
+    )
+
+
+def _fallback_chart_colors(
+    elem: ET.Element,
+    inherited_styles: dict[str, str] | None = None,
+) -> dict[str, str | None]:
+    inherited_styles = inherited_styles or {}
+    text_color = _most_common_color(
+        _fallback_text_colors(elem, inherited_styles.get("fill"))
+    )
+    stroke_colors = _fallback_stroke_colors(
+        elem,
+        inherited_styles.get("stroke"),
+    )
+    shape_records = _fallback_shape_records(

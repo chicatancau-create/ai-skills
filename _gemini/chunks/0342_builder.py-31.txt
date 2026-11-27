@@ -1,0 +1,104 @@
+    """Move repeated full-slide solid rects into a master/layout p:bg."""
+    backgrounds = [
+        _solid_background_xml_from_shape(shape, slide_size_emu)
+        for shape in shapes
+    ]
+    if not any(backgrounds):
+        return None
+    if any(background is None for background in backgrounds):
+        raise TemplateStructureError(
+            "A template background resolves to a full-slide solid rect on only "
+            "some slides sharing the structure"
+        )
+    reference_indices = _template_reference_indices(states, public_slide_count)
+    canonical = {backgrounds[index] for index in reference_indices}
+    if len(canonical) != 1:
+        slide_names = ", ".join(states[index].spec.svg_path.name for index in reference_indices)
+        raise TemplateStructureError(
+            f"Explicit template solid background differs across slides: {slide_names}"
+        )
+    background_xml = backgrounds[reference_indices[0]]
+    if background_xml is None:
+        return None
+    target_xml = target_path.read_text(encoding="utf-8")
+    updated = _put_background_on_part(target_xml, background_xml)
+    if updated is None:
+        raise TemplateStructureError(
+            f"Cannot install explicit solid background on {target_path.name}"
+        )
+    target_path.write_text(updated, encoding="utf-8")
+    for state, shape in zip(states, shapes):
+        _remove_template_shape(state, shape)
+    return background_xml
+
+
+def _set_slide_tree_background(
+    state: _TemplateRuntimeSlide,
+    background_xml: str,
+) -> None:
+    """Replace the slide tree's p:bg with explicit background XML."""
+    c_sld = state.root.find(f"{{{PML_NS}}}cSld")
+    if c_sld is None:
+        raise TemplateStructureError(
+            f"{state.spec.svg_path.name}: slide has no p:cSld"
+        )
+    for existing in list(c_sld):
+        if existing.tag == f"{{{PML_NS}}}bg":
+            c_sld.remove(existing)
+    background = ET.fromstring(background_xml)
+    sp_tree_tag = f"{{{PML_NS}}}spTree"
+    insert_at = next(
+        (index for index, child in enumerate(c_sld) if child.tag == sp_tree_tag),
+        0,
+    )
+    c_sld.insert(insert_at, background)
+
+
+def _apply_template_slide_backgrounds(
+    states: list[_TemplateRuntimeSlide],
+    slide_size_emu: tuple[int, int],
+) -> dict[str, str]:
+    """Compile one-page solid backgrounds into slide-level p:bg."""
+    applied: dict[str, str] = {}
+    for state in states:
+        items = [
+            item for item in state.spec.elements
+            if item.layer == "slide" and item.is_background
+        ]
+        if not items:
+            continue
+        item = items[0]
+        shape = _template_shape_for_item(state, item)
+        if shape is None:
+            c_sld = state.root.find(f"{{{PML_NS}}}cSld")
+            background = (
+                c_sld.find(f"{{{PML_NS}}}bg")
+                if c_sld is not None
+                else None
+            )
+            if background is None:
+                raise TemplateStructureError(
+                    f"{state.spec.svg_path.name}: slide background disappeared "
+                    "during explicit Layout structure assembly"
+                )
+            applied[f"ppt/slides/slide{state.spec.slide_num}.xml"] = ET.tostring(
+                background,
+                encoding="unicode",
+            )
+            continue
+        background_xml = _solid_background_xml_from_shape(shape, slide_size_emu)
+        if background_xml is None:
+            raise TemplateStructureError(
+                f"{state.spec.svg_path.name}: {item.element_id!r} must remain an "
+                "exact full-slide solid rectangle"
+            )
+        _remove_template_shape(state, shape)
+        _set_slide_tree_background(state, background_xml)
+        applied[f"ppt/slides/slide{state.spec.slide_num}.xml"] = background_xml
+    return applied
+
+
+def _move_template_static_shape(
+    states: list[_TemplateRuntimeSlide],
+    item: TemplateElementSpec,
+    target_path: Path,

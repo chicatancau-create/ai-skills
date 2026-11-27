@@ -1,0 +1,95 @@
+            if not ok:
+                failures.append(f'{filename}: Failed to apply edits: {reason}')
+                continue
+
+            old_annotations = {
+                item['element_id']: item['annotation']
+                for item in parse_annotations(root)
+            }
+            if not has_staged_annotations:
+                anns = old_annotations
+
+            # Clear all existing annotations from the file before writing current state
+            for elem in root.iter():
+                elem.attrib.pop('data-edit-target', None)
+                elem.attrib.pop('data-edit-annotation', None)
+
+            for element_id, annotation_text in anns.items():
+                set_annotation(root, element_id, annotation_text)
+
+            # Strip transient _edit_N ids from elements that are NOT user-annotated.
+            # Only annotated elements need to keep their id so the AI can locate them
+            # via check_annotations.py; the rest are pollution.
+            annotated_ids = set(anns.keys())
+            strip_unused_temp_ids(root, annotated_ids)
+
+            try:
+                tree.write(str(svg_file), encoding='UTF-8', xml_declaration=True)
+            except OSError as exc:
+                failures.append(f'{filename}: Failed to write SVG: {exc}')
+                continue
+            ts = time.time()
+            for element_id, annotation_text in anns.items():
+                old_text = old_annotations.get(element_id)
+                action = 'annotation_saved' if old_text is None else 'annotation_updated'
+                if old_text == annotation_text:
+                    action = 'annotation_saved'
+                _append_annotation_log(project_path, {
+                    'ts': ts, 'file': filename, 'element_id': element_id,
+                    'action': action, 'old': old_text, 'new': annotation_text,
+                })
+            for element_id, old_text in old_annotations.items():
+                if element_id not in anns:
+                    _append_annotation_log(project_path, {
+                        'ts': ts, 'file': filename, 'element_id': element_id,
+                        'action': 'annotation_removed', 'old': old_text, 'new': None,
+                    })
+            for edit in edits:
+                for chg in edit.get('changes', []):
+                    _append_edit_log(project_path, {
+                        'ts': ts, 'file': filename, 'element_id': edit.get('element_id'),
+                        'action': 'edit', 'kind': chg.get('kind'), 'key': chg.get('key'),
+                        'old': chg.get('old'), 'new': chg.get('new'),
+                    })
+            modified.append(filename)
+            annotations.pop(filename, None)
+            pending_edits.pop(filename, None)
+
+        if failures:
+            return jsonify({
+                'error': 'Failed to save: ' + '; '.join(failures),
+                'files_modified': modified,
+            }), 500
+
+        return jsonify({'status': 'ok', 'files_modified': modified})
+
+    return app
+
+
+def _runtime_dir(project_path: Path) -> Path:
+    return project_path / LIVE_PREVIEW_DIR_NAME
+
+
+def _lock_file(project_path: Path) -> Path:
+    return _runtime_dir(project_path) / LOCK_FILE_NAME
+
+
+def _legacy_live_lock(project_path: Path) -> Optional[dict]:
+    """Return a live legacy root lock, if one exists."""
+    legacy_lock = project_path / LEGACY_LOCK_FILE_NAME
+    existing = _read_lock(legacy_lock)
+    if existing and _process_alive(_lock_pid(existing)):
+        return existing
+    return None
+
+
+def _shutdown_existing(project_path: Path) -> int:
+    """Stop a live-preview server for this project (idempotent)."""
+    lock_file = _lock_file(project_path)
+    existing = _read_lock(lock_file)
+    legacy_lock_file = project_path / LEGACY_LOCK_FILE_NAME
+    if not existing:
+        existing = _read_lock(legacy_lock_file)
+        lock_file = legacy_lock_file
+    if not existing:
+        logger.info('no live preview server running — nothing to stop')

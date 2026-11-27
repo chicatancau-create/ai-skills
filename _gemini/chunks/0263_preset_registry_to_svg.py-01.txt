@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""
+PPT Master - Preset Geometry SVG Adapter
+
+Render evaluated DrawingML preset geometry as absolute SVG path layers.
+
+Usage:
+    Import render_preset_geometry from pptx_to_svg.preset_registry_to_svg.
+
+Examples:
+    geometry = render_preset_geometry("rightArrow", xfrm)
+
+Dependencies:
+    None (only uses standard library and local PPT Master modules)
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from typing import Mapping
+
+from pptx_shapes import get_preset_registry
+
+from .emu_units import Xfrm, fmt_num
+
+
+@dataclass(frozen=True)
+class SvgPresetPath:
+    """One visible layer from a DrawingML preset's ``a:pathLst``."""
+
+    d: str
+    fill: str
+    stroke: bool
+
+
+@dataclass(frozen=True)
+class SvgPresetGeometry:
+    """A fully evaluated preset preview in slide-absolute SVG coordinates."""
+
+    paths: tuple[SvgPresetPath, ...]
+
+
+def render_preset_geometry(
+    preset: str,
+    xfrm: Xfrm,
+    adjustments: Mapping[str, str | int | float] | None = None,
+) -> SvgPresetGeometry:
+    """Evaluate ``preset`` and project every DrawingML path into SVG space."""
+
+    evaluated = get_preset_registry().evaluate(
+        preset,
+        xfrm.w,
+        xfrm.h,
+        adjustments=adjustments,
+    )
+    layers = tuple(
+        SvgPresetPath(
+            d=render_evaluated_path(
+                path.commands,
+                x=xfrm.x,
+                y=xfrm.y,
+                width=xfrm.w,
+                height=xfrm.h,
+                coordinate_width=path.coordinate_width,
+                coordinate_height=path.coordinate_height,
+            ),
+            fill=path.fill,
+            stroke=path.stroke,
+        )
+        for path in evaluated.paths
+    )
+    return SvgPresetGeometry(paths=tuple(layer for layer in layers if layer.d))
+
+
+def render_evaluated_path(
+    commands,
+    *,
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    coordinate_width: float,
+    coordinate_height: float,
+) -> str:
+    scale_x = width / coordinate_width if coordinate_width else 1.0
+    scale_y = height / coordinate_height if coordinate_height else 1.0
+
+    def point(px: float, py: float) -> tuple[float, float]:
+        return x + px * scale_x, y + py * scale_y
+
+    parts: list[str] = []
+    current = (x, y)
+    subpath_start = current
+    for command in commands:
+        values = command.parameters
+        if command.name == "moveTo":
+            current = point(values[0], values[1])
+            subpath_start = current
+            parts.append(f"M {fmt_num(current[0])} {fmt_num(current[1])}")
+        elif command.name == "lnTo":
+            current = point(values[0], values[1])
+            parts.append(f"L {fmt_num(current[0])} {fmt_num(current[1])}")
+        elif command.name == "quadBezTo":
+            control = point(values[0], values[1])
+            current = point(values[2], values[3])
+            parts.append(
+                "Q "
+                f"{fmt_num(control[0])} {fmt_num(control[1])} "
+                f"{fmt_num(current[0])} {fmt_num(current[1])}"
+            )
+        elif command.name == "cubicBezTo":
+            control_1 = point(values[0], values[1])
+            control_2 = point(values[2], values[3])
+            current = point(values[4], values[5])
+            parts.append(
+                "C "
+                f"{fmt_num(control_1[0])} {fmt_num(control_1[1])} "
+                f"{fmt_num(control_2[0])} {fmt_num(control_2[1])} "
+                f"{fmt_num(current[0])} {fmt_num(current[1])}"
+            )
+        elif command.name == "arcTo":
+            arc_parts, current = _render_arc(
+                current,
+                radius_x=values[0],
+                radius_y=values[1],
+                scale_x=scale_x,
+                scale_y=scale_y,
+                start_angle=values[2],
+                sweep_angle=values[3],
+            )
+            parts.extend(arc_parts)
+        elif command.name == "close":
+            parts.append("Z")

@@ -1,0 +1,107 @@
+        theme2_path = theme_dir / 'theme2.xml'
+        if not theme2_path.exists():
+            if theme1_path.exists():
+                shutil.copy2(theme1_path, theme2_path)
+            else:
+                raise RuntimeError(
+                    'Cannot create notes theme: ppt/theme/theme1.xml is missing'
+                )
+        created_theme_part = 'ppt/theme/theme2.xml'
+
+        notes_master_rels_path = _relationships_path_for_part(
+            extract_dir,
+            selected_part,
+        )
+        notes_master_rels_path.parent.mkdir(parents=True, exist_ok=True)
+        notes_master_rels_path.write_text(
+            create_notes_master_rels_xml(),
+            encoding='utf-8',
+        )
+
+    if selected_rid is None:
+        selected_rid = _append_relationship(
+            presentation_rels_path,
+            _NOTES_MASTER_REL_TYPE,
+            posixpath.relpath(selected_part, 'ppt'),
+        )
+    _register_notes_master_id(presentation_path, selected_rid)
+    return _NotesMasterReference(
+        package_part=selected_part,
+        created_theme_part=created_theme_part,
+    )
+
+
+def _slide_config(animation_config: dict[str, Any] | None, svg_stem: str) -> dict[str, Any]:
+    if not animation_config:
+        return {}
+    slides_value = animation_config.get('slides', {})
+    if not isinstance(slides_value, dict):
+        raise ValueError('animations.json field "slides" must be an object')
+    slide_value = slides_value.get(svg_stem, {})
+    if not isinstance(slide_value, dict):
+        raise ValueError(
+            f'animations.json slide "{svg_stem}" must be an object'
+        )
+    return slide_value
+
+
+def _slide_transition_settings(
+    default_transition_cfg: dict[str, Any],
+    slide_cfg: dict[str, Any],
+    transition: str | None,
+    transition_effect_options: dict[str, object] | None,
+    duration: float,
+    auto_advance: float | None,
+    transition_sound: str | None,
+    cli_overrides: dict[str, bool],
+) -> tuple[str | None, dict[str, object], float, float | None, str | None]:
+    trans_value = slide_cfg.get('transition', {})
+    if not isinstance(trans_value, dict):
+        raise ValueError('animations.json slide transition must be an object')
+    trans_cfg = trans_value
+    effect, effect_options = normalize_transition_effect_request(
+        transition,
+        transition_effect_options,
+    )
+    if not cli_overrides.get('transition'):
+        if 'effect' in trans_cfg:
+            raw_effect = trans_cfg['effect']
+            raw_options = trans_cfg.get('effect_options')
+            effect, effect_options = normalize_transition_effect_request(
+                raw_effect,
+                raw_options,
+            )
+        elif 'effect_options' in trans_cfg:
+            raise ValueError(
+                'animations.json transition effect_options requires '
+                'an explicit effect'
+            )
+    if not cli_overrides.get('transition_duration'):
+        if 'duration' in trans_cfg:
+            duration = validate_seconds(
+                trans_cfg.get('duration'),
+                "transition duration",
+                allow_zero=effect is None,
+            )
+    if not cli_overrides.get('auto_advance') and 'auto_advance' in trans_cfg:
+        auto_advance = validate_seconds(
+            trans_cfg.get('auto_advance'),
+            "transition auto_advance",
+            allow_zero=True,
+        )
+    raw_sound = transition_sound
+    if raw_sound is None and not cli_overrides.get('transition_sound'):
+        raw_sound = default_transition_cfg.get('sound')
+    if 'sound' in trans_cfg:
+        raw_sound = trans_cfg['sound']
+    if raw_sound is not None and (
+        not isinstance(raw_sound, str) or not raw_sound.strip()
+    ):
+        raise ValueError(
+            'animations.json transition sound must be a non-empty '
+            'project-relative .wav path or null'
+        )
+    return effect, effect_options, duration, auto_advance, raw_sound
+
+
+def _slide_animation_settings(

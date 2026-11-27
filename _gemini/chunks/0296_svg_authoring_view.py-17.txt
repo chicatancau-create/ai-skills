@@ -1,0 +1,122 @@
+        path.relative_to(authoring_dir.resolve())
+    except ValueError as exc:
+        raise ValueError(f"{label} escapes the authoring directory: {name!r}") from exc
+    if not path.is_file():
+        raise ValueError(f"{label} does not exist: {path}")
+    return path
+
+
+def _parse_authoring_svg(path: Path) -> ET.Element:
+    parser = ET.XMLParser(
+        target=ET.TreeBuilder(insert_comments=True, insert_pis=True),
+    )
+    try:
+        root = ET.fromstring(path.read_bytes(), parser=parser)
+    except (OSError, ET.ParseError) as exc:
+        raise ValueError(f"Cannot parse authoring SVG {path}: {exc}") from exc
+    if _local_name(root.tag) != "svg":
+        raise ValueError(f"Authoring document root is not <svg>: {path}")
+    return root
+
+
+def _element_chain(
+    root: ET.Element,
+    element: ET.Element,
+) -> tuple[ET.Element, ...]:
+    """Return the root-to-element ancestry chain."""
+    parent_by_child = {
+        child: parent
+        for parent in root.iter()
+        for child in parent
+    }
+    chain = [element]
+    while chain[-1] is not root:
+        parent = parent_by_child.get(chain[-1])
+        if parent is None:
+            raise ValueError("Adopted element is detached from its source SVG")
+        chain.append(parent)
+    return tuple(reversed(chain))
+
+
+def _local_inherited_presentation(element: ET.Element) -> dict[str, str]:
+    """Resolve supported local presentation attributes with CSS precedence."""
+    values = {
+        name: value
+        for name in _ADOPT_INHERITED_ATTRIBUTES
+        if (value := element.get(name)) is not None
+    }
+    values.update({
+        name: value
+        for name, value in parse_inline_style(element.get("style")).items()
+        if name in _ADOPT_INHERITED_ATTRIBUTES
+    })
+    return values
+
+
+def _local_opacity(element: ET.Element) -> str | None:
+    inline = parse_inline_style(element.get("style"))
+    return inline.get("opacity") or element.get("opacity")
+
+
+def _set_explicit_presentation(
+    element: ET.Element,
+    name: str,
+    value: str,
+) -> None:
+    """Write one resolved style as an attribute, removing its inline shadow."""
+    inline = parse_inline_style(element.get("style"))
+    if name in inline:
+        inline.pop(name)
+        if inline:
+            element.set(
+                "style",
+                "; ".join(
+                    f"{property_name}: {property_value}"
+                    for property_name, property_value in inline.items()
+                ),
+            )
+        else:
+            element.attrib.pop("style", None)
+    element.set(name, value)
+
+
+def _format_transform_number(value: float) -> str:
+    if math.isclose(value, 0.0, abs_tol=1e-12):
+        value = 0.0
+    return f"{value:.12g}"
+
+
+def _materialize_adopted_context(
+    source_root: ET.Element,
+    source_element: ET.Element,
+    target_root: ET.Element,
+    adopted: ET.Element,
+) -> tuple[tuple[str, ...], bool]:
+    """Carry source ancestry style and transforms onto an adopted object."""
+    chain = _element_chain(source_root, source_element)
+    effective: dict[str, str] = {}
+    for ancestor in chain:
+        effective.update(_local_inherited_presentation(ancestor))
+    target_defaults = _local_inherited_presentation(target_root)
+    materialized: list[str] = []
+    for name, value in effective.items():
+        if target_defaults.get(name) == value:
+            continue
+        _set_explicit_presentation(adopted, name, value)
+        materialized.append(name)
+
+    source_opacity = 1.0
+    source_has_opacity = False
+    try:
+        for ancestor in chain:
+            raw_opacity = _local_opacity(ancestor)
+            if raw_opacity is None:
+                continue
+            source_has_opacity = True
+            source_opacity *= parse_opacity(
+                raw_opacity,
+                allow_percentage=True,
+            )
+        target_raw_opacity = _local_opacity(target_root)
+        target_opacity = parse_opacity(
+            target_raw_opacity,

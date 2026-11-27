@@ -1,0 +1,105 @@
+        if default_theme is not None:
+            result.theme_colors, result.theme_fonts = _extract_theme_info(default_theme, palette)
+            result.theme_xml = ET.tostring(default_theme.xml, encoding="utf-8")
+        if pkg.presentation is not None and pkg.zip is not None:
+            try:
+                result.embedded_fonts = capture_embedded_fonts(
+                    pkg.presentation.xml,
+                    pkg.presentation.rels,
+                    pkg.zip.read,
+                )
+            except EmbeddedFontError as exc:
+                if options.strict:
+                    raise
+                append_diagnostic(
+                    result.diagnostics,
+                    ImportDiagnostic(
+                        code="embedded-fonts-omitted",
+                        message=str(exc),
+                        fallback=(
+                            "keep editable text and rely on an installed or "
+                            "substitute font"
+                        ),
+                        part_path=pkg.presentation.path,
+                    ),
+                )
+
+        for master in pkg.iter_all_masters():
+            theme = pkg.resolve_theme(master) or default_theme
+            pal = _make_palette(
+                master,
+                theme,
+                options,
+                result,
+                part_path=master.path,
+            )
+            colors, fonts = _extract_theme_info(theme, pal) if theme is not None else ({}, {})
+            result.master_themes[master.path] = {
+                "themePath": theme.path if theme is not None else None,
+                "colors": colors,
+                "fonts": fonts,
+            }
+
+        # Per-slide conversion. The primary view is layered when emitted
+        # (template designers care most about that one); the flat view is
+        # rendered alongside when needed.
+        primary_mode = "layered" if emit_layered else "flat"
+        for slide in pkg.iter_slides():
+            _read_back_slide_transition(
+                pkg,
+                slide,
+                result,
+                options,
+            )
+            slide_theme = pkg.resolve_theme(slide.master) or default_theme
+            slide_palette = _make_palette(
+                slide.master,
+                slide_theme,
+                options,
+                result,
+                part_path=slide.part.path,
+                slide_index=slide.index,
+            )
+            _colors, slide_fonts = (
+                _extract_theme_info(slide_theme, slide_palette)
+                if slide_theme is not None
+                else ({}, result.theme_fonts)
+            )
+            artifact = _convert_slide(
+                pkg,
+                slide,
+                slide_palette,
+                options,
+                result.diagnostics,
+                slide_fonts,
+                inheritance_mode=primary_mode,
+            )
+            result.slides.append(artifact)
+            _read_back_slide_animation(
+                pkg,
+                slide,
+                artifact,
+                result,
+                options,
+            )
+        if emit_layered and emit_flat:
+            for slide in pkg.iter_slides():
+                slide_theme = pkg.resolve_theme(slide.master) or default_theme
+                slide_palette = _make_palette(
+                    slide.master,
+                    slide_theme,
+                    options,
+                    result,
+                    part_path=slide.part.path,
+                    slide_index=slide.index,
+                )
+                _colors, slide_fonts = (
+                    _extract_theme_info(slide_theme, slide_palette)
+                    if slide_theme is not None
+                    else ({}, result.theme_fonts)
+                )
+                artifact = _convert_slide(
+                    pkg,
+                    slide,
+                    slide_palette,
+                    options,

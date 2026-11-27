@@ -1,0 +1,205 @@
+## 4. Value Types vs Reference Types
+
+**Impact:** HIGH
+
+### 4.1 Prefer Structs (Value Types)
+
+Use structs for simple data models, independent copies:
+
+```swift
+struct User {
+    var name: String
+    var email: String
+}
+
+struct Point {
+    var x: Double
+    var y: Double
+}
+```
+
+### 4.2 Use Classes When Needed
+
+Use classes when identity, shared ownership, or reference semantics matter.
+Prefer actors for mutable state shared across concurrent tasks:
+
+```swift
+class NetworkManager {
+    static let shared = NetworkManager()
+    private init() { }
+}
+
+class FileHandle {
+    // Wrapping system resource
+}
+```
+
+### 4.3 Enums for Finite States
+
+```swift
+enum LoadingState {
+    case idle
+    case loading
+    case success(Data)
+    case failure(Error)
+}
+
+enum Result<Success, Failure: Error> {
+    case success(Success)
+    case failure(Failure)
+}
+```
+
+| Type | Use When |
+|------|----------|
+| `struct` | Data models, coordinates, independent values |
+| `class` | Shared state, identity matters, inheritance needed |
+| `enum` | Finite set of options, state machines |
+
+---
+
+## 5. Memory Management with ARC
+
+**Impact:** CRITICAL
+
+### 5.1 Breaking Retain Cycles with weak
+
+```swift
+class Apartment {
+    weak var tenant: Person?
+}
+
+class Person {
+    var apartment: Apartment?
+}
+```
+
+### 5.2 Closure Capture Lists
+
+Use capture lists intentionally to avoid retain cycles.
+Choose `weak` or `unowned` based on lifetime guarantees:
+
+```swift
+// Weak capture for optional self
+onComplete = { [weak self] in
+    self?.processResult()
+}
+
+// Capture specific values
+let id = user.id
+fetchData { [id] result in
+    print("Fetched for \(id)")
+}
+```
+
+### 5.3 unowned for Guaranteed Lifetime
+
+Use when reference should never be nil during object lifetime:
+
+```swift
+class CreditCard {
+    unowned let customer: Customer
+    
+    init(customer: Customer) {
+        self.customer = customer
+    }
+}
+```
+
+| Keyword | Use When |
+|---------|----------|
+| `weak` | Reference may become nil |
+| `unowned` | Reference guaranteed to outlive |
+| None | Strong ownership needed |
+
+---
+
+## 6. Error Handling
+
+**Impact:** HIGH
+
+### 6.1 Define Typed Errors
+
+```swift
+enum NetworkError: Error {
+    case invalidURL
+    case noConnection
+    case serverError(statusCode: Int)
+    case decodingFailed(underlying: Error)
+}
+
+enum ValidationError: LocalizedError {
+    case emptyField(name: String)
+    case invalidFormat(field: String, expected: String)
+    
+    var errorDescription: String? {
+        switch self {
+        case .emptyField(let name):
+            return "\(name) cannot be empty"
+        case .invalidFormat(let field, let expected):
+            return "\(field) must be \(expected)"
+        }
+    }
+}
+```
+
+### 6.2 Throwing Functions
+
+```swift
+func fetchUser(id: Int) throws -> User {
+    guard let url = URL(string: "https://api.example.com/users/\(id)") else {
+        throw NetworkError.invalidURL
+    }
+    // ... implementation
+}
+```
+
+### 6.3 Do-Catch Handling
+
+```swift
+do {
+    let user = try fetchUser(id: 123)
+    print(user.name)
+} catch NetworkError.serverError(let code) {
+    print("Server error: \(code)")
+} catch NetworkError.noConnection {
+    print("Check your internet connection")
+} catch {
+    print("Unknown error: \(error)")
+}
+```
+
+### 6.4 try? and try!
+
+```swift
+// try? returns optional (nil on error)
+let user = try? fetchUser(id: 123)
+
+// try! crashes on error - use only when failure is programmer error
+let config = try! loadBundledConfig()
+```
+
+### 6.5 Rethrows
+
+```swift
+func perform<T>(_ operation: () throws -> T) rethrows -> T {
+    return try operation()
+}
+```
+
+---
+
+## 7. Modern Concurrency (async/await)
+
+**Impact:** CRITICAL
+
+Use actor isolation and `Sendable` to prevent data races across concurrency domains.
+
+### 7.1 Async Functions
+
+```swift
+func fetchUser(id: Int) async throws -> User {
+    guard let url = URL(string: "https://api.example.com/users/\(id)") else {
+        throw NetworkError.invalidURL
+    }
+    let (data, _) = try await URLSession.shared.data(from: url)

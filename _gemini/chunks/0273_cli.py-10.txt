@@ -1,0 +1,76 @@
+                )
+            elif inside_projects and not inside_other_project and not move and not copy:
+                print(
+                    f"note: {source_path} is under projects/; moved into the target "
+                    f"project. Pass --copy to preserve it.",
+                    file=sys.stderr,
+                )
+            suffix = source_path.suffix.lower()
+
+            if suffix in {".md", ".markdown"}:
+                duplicate_markdown = self._find_equivalent_markdown(source_path, sources_dir)
+                if duplicate_markdown is not None:
+                    if str(duplicate_markdown) not in summary["markdown"]:
+                        summary["markdown"].append(str(duplicate_markdown))
+                    if propagate_images:
+                        self._propagate_companion_image_assets(duplicate_markdown, project_dir)
+                    # A moved source must leave projects/ even when its content
+                    # already sits in the project under another name.
+                    removed = ""
+                    if effective_move and source_path.resolve() != duplicate_markdown.resolve():
+                        source_path.unlink()
+                        removed = "; the moved duplicate was removed"
+                    summary["notes"].append(
+                        f"{item}: skipped duplicate markdown import because equivalent content already exists as {duplicate_markdown.name}{removed}"
+                    )
+                    continue
+
+                web_sources = source_path.with_name(f"{source_path.stem}_web_sources")
+                archived_markdown, asset_dir, note = self._import_markdown_with_assets(
+                    source_path,
+                    sources_dir,
+                    move=effective_move,
+                )
+                summary["archived"].append(str(archived_markdown))
+                summary["markdown"].append(str(archived_markdown))
+                if (
+                    effective_move
+                    and web_sources.is_dir()
+                    and web_sources.resolve().parent == PROJECTS_ROOT.resolve()
+                ):
+                    # topic-research fetches pages beside its pair under
+                    # projects/; they travel with the pair as provenance
+                    # rather than staying behind in the shared directory.
+                    target = project_dir / "analysis" / "research_web_sources" / web_sources.name
+                    if target.exists():
+                        summary["notes"].append(
+                            f"{web_sources}: left in place; {target} already exists"
+                        )
+                    else:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.move(str(web_sources), str(target))
+                        summary["analysis"].append(str(target))
+                        moved_web_sources[web_sources] = target
+                if asset_dir is not None:
+                    summary["assets"].append(str(asset_dir))
+                    if propagate_images:
+                        self._propagate_image_assets(asset_dir, project_dir)
+                if note:
+                    summary["notes"].append(note)
+                continue
+
+            archived_path = self._copy_or_move_file(
+                source_path,
+                sources_dir / source_path.name,
+                move=effective_move,
+            )
+            summary["archived"].append(str(archived_path))
+
+            if suffix in BITMAP_IMAGE_SUFFIXES:
+                images_dir = project_dir / "images"
+                images_dir.mkdir(parents=True, exist_ok=True)
+                image_path = self._ensure_unique_path(images_dir / archived_path.name)
+                shutil.copy2(archived_path, image_path)
+                summary["images"].append(str(image_path))
+                if image_path.name != archived_path.name:
+                    summary["notes"].append(

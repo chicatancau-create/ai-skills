@@ -1,0 +1,54 @@
+                    encoding="utf-8",
+                )
+                options = ["--role", f"hero:{explicit_family}:48"] if explicit_family else []
+                first = json.loads(self._run_calibration(project, *options, "--json").stdout)
+                result = self._run_calibration(project, "--role", "kicker:Arial:16")
+                second = self._read_calibration(project)
+                self.assertEqual(second["roles"]["hero"], first["roles"]["hero"])
+                first_fallback = [note for note in first["notes"] if "no hero_family" in note]
+                second_fallback = [note for note in second["notes"] if "no hero_family" in note]
+                self.assertEqual(second_fallback, first_fallback)
+                if explicit_family:
+                    self.assertEqual(second_fallback, [])
+                    self.assertEqual(second["roles"]["hero"]["family"], explicit_family)
+                else:
+                    self.assertEqual(len(second_fallback), 1)
+                    self.assertIn("body_family", second_fallback[0])
+                    self.assertIn(second_fallback[0], result.stdout)
+
+    def test_added_script_sample_preserves_saved_rows_and_displays_missing_rates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            first_run = self._run_calibration(
+                project, "--role", "title:Arial:40:bold", "--sample", THAI_SAMPLE, "--json",
+            )
+            first = json.loads(first_run.stdout)
+            second_run = self._run_calibration(
+                project, "--role", "body:Arial:20", "--sample", ARABIC_SAMPLE,
+                "--sample", THAI_SAMPLE[::-1],
+            )
+            second = self._read_calibration(project)
+            self.assertEqual(second["roles"]["title"], first["roles"]["title"])
+            self.assertEqual(second["script_samples"]["Thai"], first["script_samples"]["Thai"])
+            self.assertEqual(set(second["script_samples"]), {"Thai", "Arabic"})
+            self.assertEqual(set(second["roles"]["body"]["script_clusters_per_100px"]), {"Thai", "Arabic"})
+            rows = [line.split(" | ") for line in second_run.stdout.splitlines()]
+            headers = next(row for row in rows if row[0] == "role")
+            title = next(row for row in rows if row[0] == "title")
+            self.assertEqual(title[headers.index("Arabic ≈clusters/100px")], "-")
+
+    def test_legacy_saved_script_rates_keep_their_column_without_sample_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            self._run_calibration(
+                project, "--role", "title:Arial:40:bold", "--sample", THAI_SAMPLE,
+            )
+            previous = self._read_calibration(project)
+            previous["script_samples"] = {}
+            (project / "validation" / "text_calibration.json").write_text(
+                json.dumps(previous), encoding="utf-8",
+            )
+            result = self._run_calibration(project, "--role", "body:Arial:20")
+            current = self._read_calibration(project)
+            self.assertEqual(current["roles"]["title"], previous["roles"]["title"])
+            self.assertIn("Thai ≈clusters/100px", result.stdout)

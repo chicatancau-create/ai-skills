@@ -1,0 +1,84 @@
+                                font_face=run.font_family or font_face,
+                                language=run.lang or language,
+                                default_language=ctx.primary_language,
+                                theme_color_spec=ctx.theme_color_spec,
+                                italic=run.italic,
+                                underline=run.underline,
+                                strike=run.strike,
+                                alt_language=run.alt_lang,
+                                exact_font_face=run.font_family is not None,
+                                baseline=run.baseline,
+                                outline=run.outline,
+                            )
+                            for run in paragraph.runs
+                        )
+                    paragraph_parts.append(
+                        f"<a:p>{paragraph_props}{text_run_xml}</a:p>"
+                    )
+                paragraphs_xml = "".join(paragraph_parts)
+            anchor_keys = {"valign"}
+            anchor_attr = ""
+            if not preserve_source_style or anchor_keys.intersection(cell_data) or anchor_keys.intersection(style):
+                anchor_attr = f' anchor="{_table_anchor(cell_data, style)}"'
+            tc_pr_attrs = (
+                f'{anchor_attr}'
+                f'{_table_padding_attrs(cell_data, style, row_height=row_heights[row_idx], paragraphs_xml=paragraphs_xml)}'
+                f'{_table_cell_extra_attrs(cell_data)}'
+            )
+            border_xml = _table_border_xml(
+                cell_data,
+                style,
+                ctx.theme_color_spec,
+            )
+            if fill is None and not preserve_source_style:
+                fill_xml = "<a:noFill/>"
+            else:
+                fill_xml = _table_fill_xml(
+                    fill,
+                    _table_fill_opacity(cell_data),
+                    ctx.theme_color_spec,
+                )
+            cells_xml.append(
+                f"<a:tc{merge_attrs}>"
+                "<a:txBody><a:bodyPr/><a:lstStyle/>"
+                f"{paragraphs_xml}"
+                "</a:txBody>"
+                f'<a:tcPr{tc_pr_attrs}>{border_xml}{fill_xml}</a:tcPr>'
+                "</a:tc>"
+            )
+        rows_xml.append(f'<a:tr h="{row_heights[row_idx]}">{"".join(cells_xml)}</a:tr>')
+
+    shape_id = ctx.claim_shape_id(
+        elem.get("data-pptx-shape-id"),
+        elem.get("data-pptx-shape-scope"),
+    )
+    first_row = _bool_attr(header_rows > 0)
+    band_row = _bool_attr(band_rows_enabled)
+    table_style_id = style.get("table_style_id")
+    if table_style_id is None and not preserve_source_style:
+        table_style_id = "{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}"
+    table_style_xml = (
+        f'<a:tableStyleId>{_xml_escape(str(table_style_id))}</a:tableStyleId>'
+        if table_style_id else ""
+    )
+    name = _xml_escape(str(payload.get("name") or elem.get("id") or f"Native Table {shape_id}"))
+    xml = f'''<p:graphicFrame>
+<p:nvGraphicFramePr>
+<p:cNvPr id="{shape_id}" name="{name}"/>
+<p:cNvGraphicFramePr><a:graphicFrameLocks noGrp="1"/></p:cNvGraphicFramePr>
+<p:nvPr/>
+</p:nvGraphicFramePr>
+<p:xfrm><a:off x="{off_x}" y="{off_y}"/><a:ext cx="{ext_cx}" cy="{ext_cy}"/></p:xfrm>
+<a:graphic>
+<a:graphicData uri="{TABLE_URI}">
+<a:tbl>
+<a:tblPr firstRow="{first_row}" bandRow="{band_row}">
+{table_style_xml}
+</a:tblPr>
+<a:tblGrid>{grid_xml}</a:tblGrid>
+{''.join(rows_xml)}
+</a:tbl>
+</a:graphicData>
+</a:graphic>
+</p:graphicFrame>'''
+    return ShapeResult(xml=xml, bounds_emu=(off_x, off_y, off_x + ext_cx, off_y + ext_cy))

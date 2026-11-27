@@ -1,0 +1,111 @@
+    if leader_lines is not None:
+        config["show_leader_lines"] = ooxml_bool(
+            leader_lines.attrib.get("val"),
+            True,
+        )
+
+    position = _data_label_position_payload(dlabels)
+    if position:
+        config["position"] = position
+    num_fmt = dlabels.find("c:numFmt", C_NS)
+    if num_fmt is not None and num_fmt.attrib.get("formatCode"):
+        config["number_format"] = num_fmt.attrib["formatCode"]
+    tx_pr = dlabels.find("c:txPr", C_NS)
+    if tx_pr is not None:
+        try:
+            config.update(_data_label_text_style(tx_pr))
+        except _UnsupportedChart:
+            config.update(_source_data_label_text_style(tx_pr, palette))
+    if point_nodes:
+        assert point_count is not None
+        points = [
+            _point_data_label_payload(
+                point,
+                palette=palette,
+                point_count=point_count,
+            )
+            for point in point_nodes
+        ]
+        if len({point["idx"] for point in points}) != len(points):
+            raise _UnsupportedChart("unsupported-chart-point-labels")
+        config["points"] = points
+        if preserve_source:
+            config["source_ooxml"] = _source_data_labels_ooxml(dlabels)
+    if not any(
+        config.get(field)
+        for field in (
+            "points", "show_category", "show_percent", "show_series", "show_value",
+        )
+    ):
+        return None
+    return config
+
+
+def _category_payload(
+    chart: ET.Element,
+    chart_type: str,
+    xfrm: Xfrm,
+    *,
+    category_kind: str = "text",
+) -> dict[str, Any]:
+    series_nodes = chart.findall("c:ser", C_NS)
+    if not series_nodes:
+        raise _UnsupportedChart("unsupported-chart-cache")
+
+    category_reader = (
+        _numeric_values
+        if category_kind in {"date", "numeric"}
+        else _category_values
+    )
+    categories = category_reader(series_nodes[0].find("c:cat", C_NS))
+    if not categories:
+        raise _UnsupportedChart("unsupported-chart-cache")
+
+    series: list[dict[str, Any]] = []
+    for idx, ser in enumerate(series_nodes, start=1):
+        if category_reader(ser.find("c:cat", C_NS)) != categories:
+            raise _UnsupportedChart("unsupported-chart-cache")
+        values = _numeric_values(ser.find("c:val", C_NS))
+        if not values or len(values) != len(categories):
+            raise _UnsupportedChart("unsupported-chart-cache")
+        series.append({
+            "name": _series_name(ser, idx),
+            "values": values,
+        })
+
+    payload: dict[str, Any] = {
+        **_bounds_payload(xfrm),
+        "categories": categories,
+        "series": series,
+        "type": chart_type,
+    }
+    grouping = _element_val(chart.find("c:grouping", C_NS))
+    if grouping and chart_type in {"area", "bar", "column", "line"}:
+        payload["grouping"] = grouping
+    if chart_type == "line":
+        payload["line_style"] = _line_style(chart, series_nodes)
+    if chart_type == "of_pie":
+        payload["of_pie_type"] = _element_val(chart.find("c:ofPieType", C_NS)) or "pie"
+    return payload
+
+
+def _xy_payload(chart: ET.Element, chart_type: str, xfrm: Xfrm) -> dict[str, Any]:
+    series_nodes = chart.findall("c:ser", C_NS)
+    if not series_nodes:
+        raise _UnsupportedChart("unsupported-chart-cache")
+
+    series: list[dict[str, Any]] = []
+    for idx, ser in enumerate(series_nodes, start=1):
+        x_values = _numeric_values(ser.find("c:xVal", C_NS))
+        y_values = _numeric_values(ser.find("c:yVal", C_NS))
+        if not x_values or len(x_values) != len(y_values):
+            raise _UnsupportedChart("unsupported-chart-cache")
+        item: dict[str, Any] = {
+            "name": _series_name(ser, idx),
+            "x": x_values,
+            "y": y_values,
+        }
+        if chart_type == "bubble":
+            sizes = _numeric_values(ser.find("c:bubbleSize", C_NS))
+            if len(sizes) != len(x_values):
+                raise _UnsupportedChart("unsupported-chart-cache")

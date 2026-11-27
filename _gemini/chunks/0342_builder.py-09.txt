@@ -1,0 +1,124 @@
+def _roundtrip_synthetic_shape_id(source_order: tuple[int, ...]) -> str:
+    """Return the importer's stable identity for a shape with no native id."""
+    return "missing-" + "-".join(str(value) for value in source_order)
+
+
+def _direct_shape_id(element: ET.Element) -> str | None:
+    """Return one shape's own cNvPr id without descending into child shapes."""
+    if element.tag == f"{{{MC_NS}}}AlternateContent":
+        return _shape_id(element)
+    for child in element:
+        c_nv_pr = child.find(f"{{{PML_NS}}}cNvPr")
+        if c_nv_pr is not None:
+            return c_nv_pr.get("id")
+    return None
+
+
+def _roundtrip_shape_id_closure(
+    element: ET.Element,
+    source_order: tuple[int, ...],
+) -> set[str]:
+    """Return native and synthetic identities in one source shape subtree."""
+    identity = _direct_shape_id(element) or _roundtrip_synthetic_shape_id(
+        source_order
+    )
+    identities = _shape_ids_in_element(element) | {identity}
+    if element.tag != f"{{{PML_NS}}}grpSp":
+        return identities
+    child_order = 0
+    for child in element:
+        if child.tag not in _TOP_LEVEL_SHAPE_TAGS:
+            continue
+        child_order += 1
+        identities.update(
+            _roundtrip_shape_id_closure(
+                child,
+                (*source_order, child_order),
+            )
+        )
+    return identities
+
+
+def _index_roundtrip_source_shape(
+    element: ET.Element,
+    source_order: tuple[int, ...],
+    shapes: dict[str, ET.Element],
+    key_by_element: dict[int, str],
+) -> None:
+    """Index one native source shape subtree by stable round-trip identity."""
+    shape_id = _direct_shape_id(element) or _roundtrip_synthetic_shape_id(
+        source_order
+    )
+    if shape_id in shapes:
+        raise TemplateStructureError(
+            f"Round-trip source slide repeats shape id {shape_id}"
+        )
+    shapes[shape_id] = element
+    key_by_element[id(element)] = shape_id
+    if element.tag != f"{{{PML_NS}}}grpSp":
+        return
+    child_order = 0
+    for child in element:
+        if child.tag not in _TOP_LEVEL_SHAPE_TAGS:
+            continue
+        child_order += 1
+        _index_roundtrip_source_shape(
+            child,
+            (*source_order, child_order),
+            shapes,
+            key_by_element,
+        )
+
+
+def _roundtrip_source_shape_roster(
+    source_tree: ET.Element,
+) -> tuple[
+    dict[str, ET.Element],
+    dict[str, set[str]],
+    dict[int, str],
+    dict[str, ET.Element],
+]:
+    """Index source top-level shapes without mutating missing native ids."""
+    shapes: dict[str, ET.Element] = {}
+    descendant_ids: dict[str, set[str]] = {}
+    key_by_element: dict[int, str] = {}
+    all_shapes: dict[str, ET.Element] = {}
+    source_order = 0
+    for child in source_tree:
+        if child.tag not in _TOP_LEVEL_SHAPE_TAGS:
+            continue
+        source_order += 1
+        order_path = (source_order,)
+        _index_roundtrip_source_shape(
+            child,
+            order_path,
+            all_shapes,
+            key_by_element,
+        )
+        shape_id = key_by_element[id(child)]
+        shapes[shape_id] = child
+        descendant_ids[shape_id] = _roundtrip_shape_id_closure(
+            child,
+            order_path,
+        )
+    return shapes, descendant_ids, key_by_element, all_shapes
+
+
+def _roundtrip_nested_restore_ids(
+    source_shapes: dict[str, ET.Element],
+    source_key_by_element: dict[int, str],
+    affected_top_ids: set[str],
+    unchanged_ids: set[str],
+    deleted_ids: set[str],
+) -> set[str]:
+    """Return outermost unchanged source shapes inside rebuilt top-level groups."""
+    restore_ids: set[str] = set()
+
+    def visit(element: ET.Element) -> None:
+        shape_id = source_key_by_element[id(element)]
+        if shape_id in unchanged_ids:
+            restore_ids.add(shape_id)
+            return
+        if shape_id in deleted_ids or element.tag != f"{{{PML_NS}}}grpSp":
+            return
+        for child in element:

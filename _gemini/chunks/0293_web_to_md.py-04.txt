@@ -1,0 +1,103 @@
+                    f"Exceeded {max_redirects} redirects.", response=response,
+                )
+            cookie_headers = Message()
+            for value in response.headers.get_list("Set-Cookie"):
+                cookie_headers.add_header("Set-Cookie", value)
+            cookies.extract_cookies(
+                requests.cookies.MockResponse(cookie_headers), Request(response.url),
+            )
+            if requests.Session().should_strip_auth(response.url, next_url):
+                headers = headers.copy()
+                for name in ("Authorization", "Cookie", "Host"):
+                    headers.pop(name, None)
+            url = next_url
+        finally:
+            response.close()
+
+
+def _http_get(url: str, *, headers: dict | None = None, timeout: int | None = None,
+              verify: bool = True, stream: bool = False):
+    """HTTP GET with curl_cffi preferred, requests fallback.
+
+    Using curl_cffi lets this script fetch sites that reject Python's default
+    TLS fingerprint (notably mp.weixin.qq.com). Signature mirrors the subset of
+    requests.get() this script actually uses.
+    """
+    if curl_requests is not None:
+        return _curl_http_get(
+            url, headers=headers, timeout=timeout, verify=verify, stream=stream,
+        )
+    url, _ = _validate_public_url(url)
+    with requests.Session() as session:
+        if not CONFIG["allow_private_hosts"]:
+            session.trust_env = False
+            adapter = _public_http_adapter()
+            session.mount("http://", adapter)
+            session.mount("https://", adapter)
+        response = session.get(
+            url, headers=headers, timeout=timeout, verify=verify, stream=stream,
+            hooks={"response": _validate_response_redirect},
+        )
+    try:
+        _validate_public_url(response.url)
+    except _UnsafeUrlError:
+        response.close()
+        raise
+    return response
+
+
+def _normalize_charset(charset: str | None) -> str:
+    """Return a Python codec name when the declared charset is usable."""
+    if not charset:
+        return ""
+    charset = charset.strip().strip('"').strip("'").lower()
+    if not charset:
+        return ""
+    try:
+        return codecs.lookup(charset).name
+    except LookupError:
+        return ""
+
+
+def _charset_from_headers(headers: dict) -> str:
+    content_type = headers.get("Content-Type") or headers.get("content-type") or ""
+    match = re.search(r"charset\s*=\s*([^;\s]+)", content_type, re.I)
+    return _normalize_charset(match.group(1)) if match else ""
+
+
+def _charset_from_html(raw: bytes) -> str:
+    """Extract a charset declaration from the first chunk of HTML bytes."""
+    head = raw[:8192]
+    patterns = [
+        rb"<meta[^>]+charset=[\"']?\s*([a-zA-Z0-9_\-]+)",
+        rb"<meta[^>]+content=[\"'][^\"']*charset=\s*([a-zA-Z0-9_\-]+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, head, re.I)
+        if match:
+            return _normalize_charset(match.group(1).decode("ascii", "ignore"))
+    return ""
+
+
+BODY_SHORTFALL_MIN_CHARS = 200
+BODY_SHORTFALL_RATIO = 0.25
+
+
+def _page_visible_text(soup) -> str:
+    """Return the page's rendered text with scripts, styles, and noscript removed."""
+    for node in soup(["script", "style", "noscript", "template"]):
+        node.decompose()
+    return re.sub(r"\s+", " ", soup.get_text(" ")).strip()
+
+
+def _body_shortfall_warning(markdown_text: str, page_text: str) -> str | None:
+    """Warn when the extracted body is a sliver of the text the page shows.
+
+    A content container that the extractor did not recognise yields a short,
+    plausible-looking Markdown file; comparing it against the page's visible
+    text turns that silent loss into a warning the caller can act on.
+    """
+    body_chars = len(re.sub(r"\s+", "", markdown_text))
+    page_chars = len(re.sub(r"\s+", "", page_text))
+    if body_chars >= BODY_SHORTFALL_MIN_CHARS or page_chars < BODY_SHORTFALL_MIN_CHARS * 2:
+        return None

@@ -1,0 +1,93 @@
+            idx=_placeholder_idx(raw.get("idx")),
+            shape_id=shape_id,
+            bounds=bounds,
+        ))
+    effective_indices = [plan.idx if plan.idx is not None else 0 for plan in plans]
+    if len(effective_indices) != len(set(effective_indices)):
+        raise MirrorMaterializationError(
+            f"Layout {layout.get('key')!r} has duplicate effective placeholder idx values"
+        )
+    return plans
+
+
+def _copy_text_carrier(source: ET.Element | None) -> ET.Element | None:
+    if source is None:
+        return None
+    texts = [element for element in source.iter() if _local_name(element.tag) == "text"]
+    if not texts:
+        return None
+    if len(texts) == 1:
+        carrier = copy.deepcopy(texts[0])
+    else:
+        carrier = ET.Element(f"{{{SVG_NS}}}text", dict(texts[0].attrib))
+        previous_y = _optional_float(texts[0].get("y"))
+        first_output = True
+        for text_index, text in enumerate(texts):
+            text_y = _optional_float(text.get("y"))
+            text_children = [
+                child for child in text if _local_name(child.tag) == "tspan"
+            ]
+            if text_children:
+                for child_index, child in enumerate(text_children):
+                    tspan = copy.deepcopy(child)
+                    tspan.attrib.pop("y", None)
+                    if first_output:
+                        tspan.attrib.pop("x", None)
+                    elif child_index == 0 and text_y is not None and previous_y is not None:
+                        tspan.set("x", text.get("x", texts[0].get("x", "0")))
+                        tspan.set("dy", format_coordinate(text_y - previous_y))
+                    if text_index > 0 and child_index == 0:
+                        tspan.set("data-paragraph-soft-break", "0")
+                    carrier.append(tspan)
+                    first_output = False
+            elif text.text:
+                attrs: dict[str, str] = {}
+                if not first_output and text_y is not None and previous_y is not None:
+                    attrs["x"] = text.get("x", texts[0].get("x", "0"))
+                    attrs["dy"] = format_coordinate(text_y - previous_y)
+                if text_index > 0:
+                    attrs["data-paragraph-soft-break"] = "0"
+                tspan = ET.SubElement(carrier, f"{{{SVG_NS}}}tspan", attrs)
+                tspan.text = text.text
+                first_output = False
+            if text_y is not None:
+                previous_y = text_y
+    carrier.attrib.pop("id", None)
+    _normalize_mergeable_tspans(carrier)
+    source_frame = _frame(source)
+    if source_frame is not None:
+        carrier.set(
+            "data-pptx-frame",
+            " ".join(format_coordinate(value) for value in source_frame),
+        )
+    carrier.set("data-pptx-carrier", "true")
+    return carrier
+
+
+def _visible_placeholder_decoration(element: ET.Element) -> bool:
+    """Return whether one non-text placeholder subtree paints any pixels."""
+    if _hidden(element):
+        return False
+    tag = _local_name(element.tag)
+    if tag in _NON_VISUAL_TAGS or tag == "text":
+        return False
+    if tag in {"g", "svg", "a"}:
+        return any(_visible_placeholder_decoration(child) for child in element)
+    if tag in {"image", "foreignObject", "use"}:
+        return _visible_leaf(element)
+    if tag in {"line", "polyline"}:
+        stroke = _paint_value(element, "stroke")
+        return stroke not in {None, "none", "transparent"}
+    if tag in {"rect", "path", "polygon", "circle", "ellipse"}:
+        fill = _paint_value(element, "fill")
+        stroke = _paint_value(element, "stroke")
+        filter_value = _paint_value(element, "filter")
+        return (
+            fill not in {"none", "transparent"}
+            or stroke not in {None, "none", "transparent"}
+            or filter_value not in {None, "none"}
+        )
+    return False
+
+
+def _placeholder_decorations(source: ET.Element | None) -> list[ET.Element]:

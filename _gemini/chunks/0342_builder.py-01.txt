@@ -1,0 +1,147 @@
+"""Core PPTX assembly: create_pptx_with_native_svg."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import mimetypes
+import os
+import posixpath
+import random
+import re
+import shutil
+import stat
+import subprocess
+import tempfile
+import uuid
+import zipfile
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import Any
+from xml.etree import ElementTree as ET
+from xml.sax.saxutils import escape, quoteattr
+
+from pptx import Presentation
+
+from pptx_embedded_fonts import (
+    FONT_CONTENT_TYPE,
+    FONT_REL_TYPE,
+    PML_NS as EMBEDDED_FONT_PML_NS,
+    REL_NS as EMBEDDED_FONT_REL_NS,
+    EmbeddedFontBundle,
+    EmbeddedFontError,
+    embedded_font_typefaces,
+)
+from pptx_transitions import (
+    AdvanceUpdate,
+    DEFAULT_TRANSITION_DURATION,
+    EnterUpdate,
+    MorphPairExpectation,
+    NATIVE_TRANSITIONS,
+    apply_slide_motion_xml,
+    create_transition_xml,
+    normalize_transition_effect_request,
+    read_slide_transition_xml,
+    serialize_source_xml,
+    set_directory_use_timings,
+    transition_carriers,
+    validate_generated_transition_xml,
+    validate_pptx_morph_pairs,
+    validate_pptx_transition_package,
+    validate_seconds,
+)
+from pptx_animations import (
+    ANIMATION_TIMING_OPTION_FIELDS,
+    animation_seconds_to_milliseconds,
+    create_sequence_timing_xml,
+    normalize_animation_effect,
+    normalize_animation_effect_request,
+    normalize_animation_trigger,
+    object_animation_fingerprint,
+    pick_animation_effect,
+    validate_generated_animation_xml,
+    validate_pptx_animation_package,
+)
+from pptx_opc_validation import (
+    canonical_opc_part_path as _canonical_opc_part_path,
+    resolve_internal_opc_target as _resolve_internal_opc_target,
+    verify_internal_relationships,
+)
+from pptx_workspace import WorkspaceResourceSpec
+from pptx_ooxml.clone import clone_presentation_slides
+from pptx_ooxml.package import prune_unreferenced_directory_parts
+from language_tags import language_uses_rtl, office_language_tag
+from hyperlink_contract import (
+    HYPERLINK_REL_TYPE,
+    trigger_shape_hyperlink_errors,
+)
+
+from ..animation_config import (
+    MorphPair,
+    animation_group_effect_entries,
+    resolve_morph_pairs,
+    resolve_slide_animation_config,
+)
+from ..drawingml.context import resolve_text_flow
+from ..drawingml.converter import convert_svg_to_slide_shapes
+from ..drawingml.theme_colors import (
+    ThemeColorError,
+    ThemeColorSpec,
+    apply_theme_color_spec,
+    rewrite_chart_accent_colors,
+)
+from ..drawingml.theme_fonts import (
+    MasterTextStyleSpec,
+    ThemeFontSpec,
+    apply_master_text_style_spec,
+    apply_theme_font_spec,
+)
+from ..drawingml.utils import EMU_PER_PX, detect_text_lang
+from ..semantic_markers import (
+    chrome_token_from_markers,
+    page_layout_name_from_svg,
+)
+from .dimensions import (
+    CANVAS_FORMATS,
+    resolve_svg_canvas,
+)
+from .media import (
+    PNG_RENDERER,
+    get_png_renderer_info, convert_svg_to_png, convert_svg_to_png_cached,
+)
+from .notes import (
+    markdown_to_plain_text,
+    create_notes_master_rels_xml,
+    create_notes_master_xml,
+    create_notes_slide_xml,
+    create_notes_slide_rels_xml,
+)
+from .narration import (
+    AUDIO_CONTENT_TYPES,
+    AUDIO_REL_TYPE,
+    AUDIO_MARKER_PNG_BYTES,
+    DEFAULT_NARRATION_START_FLOOR,
+    IMAGE_REL_TYPE,
+    MEDIA_REL_TYPE,
+    apply_recorded_timing,
+    inject_narration,
+    narration_lead_in_seconds,
+    next_shape_id,
+    probe_audio_duration,
+    remove_narration,
+)
+from .slide_xml import (
+    create_slide_xml_with_svg, create_slide_rels_xml,
+)
+from .template_structure import (
+    NativeStructureContract,
+    OOXML_UINT32_MAX,
+    TEMPLATE_PLACEHOLDER_TYPES,
+    TemplateElementSpec,
+    TemplateSlideSpec,
+    TemplateStructureError,
+    flat_structure_metadata_errors,
+    is_proxy_placeholder,
+    match_native_placeholders,

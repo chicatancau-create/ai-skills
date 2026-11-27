@@ -1,0 +1,140 @@
+"""Per-slide composition: dispatches every ShapeNode through the right
+converter, accumulates <defs>, and produces one final SVG string.
+
+The output structure mirrors what svg_to_pptx expects so the deck can be
+round-tripped:
+    <svg viewBox="0 0 W H">
+        <defs>
+            <linearGradient id=.../>
+            <marker id=.../>
+            <filter id=.../>
+        </defs>
+        <!-- background -->
+        <rect ... />        (slide background, if any)
+        <g id="shape-1">...</g>
+        <g id="shape-2">...</g>
+        ...
+    </svg>
+
+Each top-level <g> wraps one shape and is treated by svg_to_pptx as an
+animation anchor.
+"""
+
+from __future__ import annotations
+
+import base64
+import copy
+import hashlib
+import json
+import posixpath
+from dataclasses import dataclass, field
+from xml.etree import ElementTree as ET
+
+from pptx_shapes import (
+    CONNECTOR_PRESET_TYPES,
+    NATIVE_FALLBACK_SHA256_ATTR,
+    has_relationship_attributes,
+    svg_native_fallback_markup_fingerprint,
+    svg_text_fingerprint,
+)
+from pptx_effects import (
+    EFFECT_REASON_ATTR,
+    EFFECT_STATUS_ATTR,
+    NATIVE_EFFECT_ATTR,
+    NATIVE_EFFECT_SHA256_ATTR,
+    txbody_has_run_effects,
+    unsupported_effect_metadata,
+)
+from hyperlink_contract import SHAPE_HYPERLINK_ATTR, SOURCE_HREF_ATTR
+from svg_to_pptx.drawingml.paths import (
+    PathCommand,
+    normalize_path_commands,
+    parse_svg_path,
+    parse_svg_points,
+    svg_path_to_absolute,
+    transform_path_commands,
+)
+
+from .color_resolver import ColorPalette, find_color_elem, resolve_color
+from .chart_to_svg import CHART_URI, CHARTEX_URI, extract_native_chart_payload
+from .custgeom_to_svg import convert_custom_geom
+from .effect_to_svg import (
+    EffectResult,
+    convert_effects,
+    unsupported_target_effect_metadata,
+)
+from .emu_units import NS, Xfrm, fmt_num, format_canvas_px_from_emu
+from .fill_to_svg import FillResult, resolve_fill
+from .formula_import import (
+    A14_NS,
+    FormulaImport,
+    FormulaImportError,
+    import_formula,
+    opaque_formula_preview,
+)
+from .import_diagnostics import (
+    ImportDiagnostic,
+    append_diagnostic,
+)
+from .hyperlinks import resolve_click_hyperlink
+from .ln_to_svg import StrokeResult, resolve_stroke
+from .ooxml_loader import (
+    OoxmlPackage,
+    PartRef,
+    SlideRef,
+    inherited_shape_visibility,
+)
+from .pic_to_svg import (
+    LinkedImageResolutionError,
+    MediaResolutionError,
+    PictureResult,
+    convert_blip_fill,
+    convert_picture,
+)
+from .prstgeom_to_svg import GeomResult, convert_prst_geom
+from .preset_svg_markup import serialize_preset_layers
+from .shape_walker import (
+    CONNECTOR, GRAPHIC, GROUP, PICTURE, SHAPE,
+    ShapeNode, get_background, walk_sp_tree,
+)
+from .tbl_to_svg import convert_tbl
+from .txbody_to_svg import (
+    TextResult,
+    convert_txbody,
+    convert_vertical_txbody,
+    is_vertical_txbody,
+    DEFAULT_FONT_SIZE_PX,
+)
+
+
+# ---------------------------------------------------------------------------
+# AssemblyContext
+# ---------------------------------------------------------------------------
+
+_SOURCE_PROXY_ATTRIBUTE = "data-pptx-source-proxy"
+_SOURCE_PROXY_KIND = "native-restore"
+_EXTERNAL_LINKED_IMAGE_PROXY_ATTRIBUTE = (
+    "data-pptx-external-linked-image-proxy"
+)
+
+@dataclass
+class AssemblyContext:
+    """Per-slide accumulator for unique IDs + media + defs."""
+
+    palette: ColorPalette | None
+    pkg: OoxmlPackage
+    slide_part: PartRef
+    slide_number: int | None = None
+    theme_fonts: dict[str, str] = field(default_factory=dict)
+    media_subdir: str = "images"
+    embed_images: bool = False
+    keep_hidden: bool = False
+    strict: bool = False
+    group_id_prefix: str = ""
+    render_graphic_previews: bool = True
+    preserve_placeholder_inheritance: bool = False
+    asset_name_map: dict[str, str] = field(default_factory=dict)
+    diagnostics: list[ImportDiagnostic] = field(default_factory=list)
+    source_slide_index: int | None = None
+    current_node: ShapeNode | None = None
+

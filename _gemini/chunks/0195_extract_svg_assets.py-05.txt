@@ -1,0 +1,123 @@
+            "Semantic authoring content must remain inline and cannot become "
+            "imported decoration assets"
+        )
+    svg = ET.Element(f"{{{SVG_NS}}}svg")
+    svg.set("data-icon-style", "preserve-color")
+    svg.set(ASSET_ROLE_ATTRIBUTE, DECORATION_ASSET_ROLE)
+    if view_box:
+        svg.set("viewBox", view_box)
+    if width:
+        svg.set("width", width)
+    if height:
+        svg.set("height", height)
+    if dependencies:
+        defs = ET.SubElement(svg, f"{{{SVG_NS}}}defs")
+        for dependency in dependencies:
+            defs.append(dependency)
+    svg.append(group)
+    normalize_compact_authoring_tree(svg)
+    ET.register_namespace("", SVG_NS)
+    ET.register_namespace("xlink", XLINK_NS)
+    return ET.tostring(svg, encoding="utf-8", xml_declaration=True)
+
+
+def _source_sha256(
+    group: ET.Element,
+    dependencies: list[ET.Element],
+    view_box: str | None,
+    width: str | None,
+    height: str | None,
+) -> str:
+    """Fingerprint an extracted subtree before asset-id namespacing."""
+    payload = _asset_svg(
+        copy.deepcopy(group),
+        [copy.deepcopy(dependency) for dependency in dependencies],
+        view_box,
+        width,
+        height,
+    )
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _asset_group(nodes: list[ET.Element]) -> ET.Element:
+    group = ET.Element(f"{{{SVG_NS}}}g")
+    for node in nodes:
+        group.append(node)
+    return group
+
+
+def _asset_id(svg_path: Path, index: int, id_prefix: str) -> str:
+    prefix = f"{id_prefix}_" if id_prefix else ""
+    return f"{prefix}{svg_path.stem}_ill{index:02d}"
+
+
+def _icon_reference(icon_namespace: str, asset_id: str) -> str:
+    return f"{icon_namespace}/{asset_id}" if icon_namespace else asset_id
+
+
+def _asset_relative_path(icon_namespace: str, asset_id: str) -> str:
+    return f"{_icon_reference(icon_namespace, asset_id)}.svg"
+
+
+def _icon_asset_for_namespace(icon_name: str, icon_namespace: str) -> str | None:
+    """Map one local placeholder to its asset path, excluding other libraries."""
+    if icon_namespace:
+        prefix = f"{icon_namespace}/"
+        if not icon_name.startswith(prefix):
+            return None
+        asset_id = icon_name[len(prefix):]
+        if not asset_id or "/" in asset_id:
+            return None
+        return f"{icon_name}.svg"
+    if "/" in icon_name:
+        return None
+    return f"{icon_name}.svg"
+
+
+def _has_namespace_placeholder(root: ET.Element, icon_namespace: str) -> bool:
+    if not icon_namespace:
+        return False
+    return any(
+        _local(elem.tag) == "use"
+        and (icon_name := elem.get("data-icon")) is not None
+        and _icon_asset_for_namespace(icon_name, icon_namespace) is not None
+        for elem in root.iter()
+    )
+
+
+def _generated_asset_re(svg_stems: list[str], id_prefix: str) -> re.Pattern[str] | None:
+    if not svg_stems:
+        return None
+    prefix = f"{re.escape(id_prefix)}_" if id_prefix else ""
+    stems = "|".join(re.escape(stem) for stem in svg_stems)
+    return re.compile(rf"^{prefix}(?:{stems})_ill\d+\.svg$")
+
+
+def _clean_stale_assets(
+    icons_dir: Path,
+    icon_namespace: str,
+    svg_paths: list[Path],
+    id_prefix: str,
+    keep_assets: set[str],
+) -> list[str]:
+    pattern = _generated_asset_re([path.stem for path in svg_paths], id_prefix)
+    if pattern is None:
+        return []
+
+    removed: list[str] = []
+    asset_dir = icons_dir / icon_namespace if icon_namespace else icons_dir
+    for asset_path in sorted(asset_dir.glob("*.svg")):
+        relative_asset = asset_path.relative_to(icons_dir).as_posix()
+        if relative_asset in keep_assets or not pattern.match(asset_path.name):
+            continue
+        asset_path.unlink()
+        removed.append(relative_asset)
+    return removed
+
+
+def _referenced_icon_assets(svg_paths: list[Path], icon_namespace: str) -> set[str]:
+    assets: set[str] = set()
+    for svg_path in svg_paths:
+        try:
+            root = ET.parse(svg_path).getroot()
+        except ET.ParseError:

@@ -1,0 +1,114 @@
+    def _parse_color(self) -> str:
+        raw = self._parse_raw_required_group("formula color").strip()
+        if _COLOR_HEX_RE.fullmatch(raw):
+            return raw[1:].upper()
+        color = COLOR_NAMES.get(raw.lower())
+        if color is None:
+            self._fail(f"Unsupported formula color {raw!r}")
+        return color
+
+    def _delimiter_from_raw(self, raw: str) -> str:
+        raw = raw.strip()
+        if raw in {"", "."}:
+            return ""
+        if raw in "()[]|{}⟨⟩⌊⌋⌈⌉⟦⟧":
+            return raw
+        control_symbols = {r"\{": "{", r"\}": "}", r"\|": "‖"}
+        if raw in control_symbols:
+            return control_symbols[raw]
+        if raw.startswith("\\"):
+            command = raw[1:]
+            if command in DELIMITER_COMMANDS:
+                return DELIMITER_COMMANDS[command]
+        self._fail(f"Unsupported generalized-fraction delimiter {raw!r}")
+
+    def _roman_name(self, name: str) -> Sequence:
+        return Sequence((Text(name, _ROMAN_STYLE),))
+
+    def _single_node(self, sequence: Sequence) -> Node:
+        if len(sequence.children) == 1:
+            return sequence.children[0]
+        return sequence
+
+    def _styled_text(
+        self,
+        value: str,
+        style: RunStyle | None = None,
+        *,
+        literal: bool = False,
+    ) -> Text:
+        return Text(
+            value,
+            merge_run_styles(self.current_style, style),
+            literal=literal,
+        )
+
+    def _current_infix_command(self) -> str | None:
+        for command in _INFIX_FRACTIONS:
+            if self._at_control_word(command):
+                return command
+        return None
+
+    def _at_control_word(self, expected: str) -> bool:
+        prefix = f"\\{expected}"
+        if not self.source.startswith(prefix, self.position):
+            return False
+        following = self.position + len(prefix)
+        return following >= len(self.source) or not _is_command_letter(self.source[following])
+
+    def _consume_control_word(self, expected: str) -> None:
+        if not self._at_control_word(expected):
+            self._fail(f"Expected \\{expected}")
+        self.position += len(expected) + 1
+        self._skip_whitespace()
+
+    def _read_control_word_body(self) -> str:
+        start = self.position
+        while self.position < len(self.source) and _is_command_letter(self.source[self.position]):
+            self.position += 1
+        return self.source[start:self.position]
+
+    def _skip_whitespace(self) -> None:
+        self.position = _skip_whitespace(self.source, self.position)
+
+    def _fail(self, message: str, *, position: int | None = None) -> None:
+        offset = self.position if position is None else position
+        start = max(0, offset - 16)
+        end = min(len(self.source), offset + 16)
+        context = self.source[start:end].replace("\n", " ")
+        raise FormulaCompileError(f"{message} at offset {offset}: {context!r}")
+
+
+_STYLE_COLOR_COMMANDS = frozenset({"color", "textcolor"})
+
+
+class _ChemParser:
+    """Parse the documented Microsoft 365 mhchem subset into shared AST nodes."""
+
+    _ARROWS = {
+        "<-->": "⟷",
+        "<=>": "⇌",
+        "<->": "↔",
+        "->": "→",
+        "<-": "←",
+    }
+    _UNSUPPORTED_AT_LABEL_RE = re.compile(r"@[<>=-]+\{")
+
+    def __init__(self, source: str, *, display: bool) -> None:
+        self.source = source
+        self.position = 0
+        self.display = display
+
+    def parse(self) -> Sequence:
+        children: list[Node] = []
+        while self.position < len(self.source):
+            if self._UNSUPPORTED_AT_LABEL_RE.match(self.source, self.position):
+                raise FormulaCompileError(
+                    "mhchem @{} arrow labels are unsupported; use [above][below]"
+                )
+            self._reject_unsupported_arrow()
+            arrow = self._match_arrow()
+            if arrow is not None:
+                append_child(children, arrow)
+                continue
+            char = self.source[self.position]

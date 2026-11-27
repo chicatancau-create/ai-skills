@@ -1,0 +1,117 @@
+        details = "\n".join(f"  - {error}" for error in errors)
+        raise SpecParseError(
+            f"invalid qualified Design Spec identity ({path.name}):\n{details}"
+        )
+    return filename_kind, filename_id, fm, body
+
+
+def _validate_spec_shape(template_dir: Path) -> list[tuple[Path, str]]:
+    """Reject ambiguous project-spec naming and duplicate kind ownership."""
+    exact = template_dir / "design_spec.md"
+    qualified = _qualified_template_specs(template_dir)
+    if exact.is_file() and qualified:
+        raise SpecParseError(
+            "design_spec.md and design_spec.<kind>.<id>.md cannot share "
+            f"{template_dir}; rename the bare spec to its kind-qualified name"
+        )
+    kinds = [kind for _path, kind in qualified]
+    duplicate_kinds = sorted({
+        kind for kind in kinds if kinds.count(kind) > 1
+    })
+    if duplicate_kinds:
+        raise SpecParseError(
+            f"{template_dir} declares the same kind more than once: "
+            + ", ".join(duplicate_kinds)
+        )
+    for path, _kind in qualified:
+        validate_qualified_spec_identity(path)
+    return qualified
+
+
+def _has_qualified_roster_spec(template_dir: Path) -> bool:
+    """Return whether a project directory declares a structural kind."""
+    return any(
+        kind in {"layout", "deck"}
+        for _path, kind in _qualified_template_specs(template_dir)
+    )
+
+
+def _template_content_dir(template_root: Path) -> Path:
+    """Resolve the only canonical template source directory."""
+    nested = template_root / "templates"
+    if (nested / "design_spec.md").is_file() or _has_kind_qualified_spec(nested):
+        return nested
+    raise SpecParseError(
+        "missing templates/design_spec.md or "
+        f"templates/design_spec.<kind>.<id>.md in {template_root}"
+    )
+
+
+def _list_pages(template_dir: Path) -> list[str]:
+    """Page stems in roster order, the order the preview and export use."""
+    return [p.stem for p in discover_slide_svgs(template_dir)]
+
+
+def _derive_page_types(pages: list[str]) -> list[str]:
+    """Derive canonical page-type list from SVG filenames (strips leading 'NN_')."""
+    types: list[str] = []
+    seen: set[str] = set()
+    for p in pages:
+        m = re.match(r"^\d+[a-z]?_(.+)$", p)
+        role = m.group(1) if m else p
+        if role not in seen:
+            seen.add(role)
+            types.append(role)
+    return types
+
+
+def _numbered_section(body: str, title: str) -> str | None:
+    match = re.search(
+        rf"^##\s+[IVX]+\.\s+{re.escape(title)}\s*$.*?(?=^##\s+|\Z)",
+        body,
+        re.MULTILINE | re.DOTALL,
+    )
+    return match.group(0) if match else None
+
+
+def _markdown_subsection(body: str, title: str) -> str | None:
+    match = re.search(
+        rf"^###\s+{re.escape(title)}\s*$.*?(?=^#{{2,3}}\s+|\Z)",
+        body,
+        re.MULTILINE | re.DOTALL,
+    )
+    return match.group(0) if match else None
+
+
+def _markdown_table_rows(section: str) -> list[list[str]]:
+    rows: list[list[str]] = []
+    for line in section.splitlines():
+        if not line.lstrip().startswith("|"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if not cells or all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells):
+            continue
+        rows.append(cells)
+    return rows
+
+
+def _style_value_is_substantive(value: str | None) -> bool:
+    if value is None:
+        return False
+    cleaned = _clean_field_value(value)
+    if not cleaned or re.fullmatch(r"<[^>]+>", cleaned):
+        return False
+    return cleaned.casefold() not in {"tbd", "todo", "n/a", "none", "-", "—"}
+
+
+def _style_field_is_declared(body: str, label: str) -> bool:
+    escaped = re.escape(label)
+    return bool(
+        re.search(
+            rf"^\s*(?:>\s*)?(?:[-*]\s*)?"
+            rf"\*{{0,2}}{escaped}\*{{0,2}}\s*[:：]",
+            body,
+            re.MULTILINE | re.IGNORECASE,
+        )
+        or re.search(
+            rf"^\|\s*\*{{0,2}}{escaped}\*{{0,2}}\s*\|",

@@ -1,0 +1,104 @@
+    if isinstance(min_body_chars, int) and len(str(section["body"]).strip()) < min_body_chars:
+        errors.append(
+            f"{markdown_name} schema: section '{section_id}' must contain content"
+        )
+
+    entry_key_pattern = definition.get("entry_key_pattern")
+    if isinstance(entry_key_pattern, str):
+        field_names = section["field_names"]
+        assert isinstance(field_names, dict)
+        for field_name in field_names.values():
+            if re.fullmatch(entry_key_pattern, str(field_name)) is None:
+                errors.append(
+                    f"{markdown_name} schema: section '{section_id}' has malformed "
+                    f"entry key '{field_name}'"
+                )
+
+    value_enum = definition.get("value_enum")
+    if isinstance(value_enum, list):
+        allowed_values = [str(item) for item in value_enum]
+        for field_value in fields.values():
+            value = _normalize_schema_value(str(field_value))
+            if value not in allowed_values:
+                errors.append(
+                    f"{markdown_name} schema: section '{section_id}' has illegal "
+                    f"value '{value}'"
+                )
+
+    value_pattern = definition.get("value_pattern")
+    if isinstance(value_pattern, str):
+        for field_value in fields.values():
+            value = _normalize_schema_value(str(field_value))
+            if re.fullmatch(value_pattern, value) is None:
+                errors.append(
+                    f"{markdown_name} schema: section '{section_id}' has malformed "
+                    f"value '{value}'"
+                )
+
+    value_catalog = definition.get("value_catalog")
+    if isinstance(value_catalog, dict):
+        errors.extend(
+            _validate_catalog_values(
+                markdown_name=markdown_name,
+                section_id=section_id,
+                fields=fields,
+                schema_path=schema_path,
+                value_catalog=value_catalog,
+            )
+        )
+    return errors
+
+
+def _condition_applies(
+    when: Mapping[str, object],
+    matched: Mapping[str, dict[str, object] | None],
+) -> bool:
+    """Return whether a schema condition applies to the matched document."""
+    section = matched.get(str(when.get("section", "")))
+    if section is None:
+        return False
+    applies = True
+    field_name = when.get("field")
+    if field_name is not None:
+        fields = section["fields"]
+        assert isinstance(fields, dict)
+        field_value = fields.get(str(field_name))
+        applies = field_value is not None
+        if applies and "equals" in when:
+            applies = _normalize_schema_value(str(field_value)) == str(when["equals"])
+    body_regex = when.get("body_regex")
+    if applies and isinstance(body_regex, str):
+        applies = re.search(body_regex, str(section["body"])) is not None
+    return applies
+
+
+def _validate_condition(
+    *,
+    markdown_name: str,
+    condition_id: str,
+    then: Mapping[str, object],
+    matched: Mapping[str, dict[str, object] | None],
+) -> list[str]:
+    """Apply one active cross-section condition."""
+    errors: list[str] = []
+
+    required_sections = then.get("required_sections", [])
+    if isinstance(required_sections, list):
+        for section_id in required_sections:
+            if matched.get(str(section_id)) is None:
+                errors.append(
+                    f"{markdown_name} schema: condition '{condition_id}' requires "
+                    f"section '{section_id}'"
+                )
+
+    forbidden_sections = then.get("forbidden_sections", [])
+    if isinstance(forbidden_sections, list):
+        for section_id in forbidden_sections:
+            if matched.get(str(section_id)) is not None:
+                errors.append(
+                    f"{markdown_name} schema: condition '{condition_id}' forbids "
+                    f"section '{section_id}'"
+                )
+
+    field_groups = then.get("required_fields", [])
+    if isinstance(field_groups, list):

@@ -1,0 +1,108 @@
+            'fill_opacity',
+            'stroke_raw',
+            'stroke_width',
+            'stroke_opacity',
+            'opacity_chain',
+        )
+
+        def signature(run: Dict) -> Tuple:
+            return (
+                _detect_text_lang(str(run.get('text', ''))),
+                *(run.get(key) for key in style_keys),
+            )
+
+        merged: List[Dict] = []
+        previous_signature: Tuple | None = None
+        for run in runs:
+            if run.get('inline_formula') is not None or '_inline_dx' in run:
+                merged.append(run)
+                previous_signature = None
+                continue
+            current_signature = signature(run)
+            if merged and current_signature == previous_signature:
+                candidate = {
+                    **merged[-1],
+                    'text': (
+                        str(merged[-1].get('text', ''))
+                        + str(run.get('text', ''))
+                    ),
+                }
+                candidate_signature = signature(candidate)
+                if candidate_signature == previous_signature:
+                    merged[-1] = candidate
+                    previous_signature = candidate_signature
+                    continue
+            merged.append(run)
+            previous_signature = current_signature
+        return merged
+
+    @staticmethod
+    def _text_line_vertical_extent(
+        runs: List[Dict],
+        font_size: float,
+    ) -> Tuple[float, float]:
+        """Return native-math-aware ascent/descent for checker bounds."""
+        ascent = font_size * 0.85
+        descent = font_size * 0.35
+        if _estimate_inline_formula_vertical_extent is None:
+            return ascent, descent
+        for run in runs:
+            latex = run.get('inline_formula')
+            if latex is None:
+                continue
+            try:
+                run_font_size = float(run.get('font_size', font_size))
+                extent = _estimate_inline_formula_vertical_extent(str(latex))
+            except (TypeError, ValueError):
+                continue
+            ascent = max(ascent, run_font_size * extent.ascent_em)
+            descent = max(descent, run_font_size * extent.descent_em)
+        return ascent, descent
+
+    def _check_text_output_geometry(
+        self,
+        root: ET.Element,
+        result: Dict,
+        *,
+        included_text_ids: set[int] | None = None,
+    ) -> None:
+        """Reject measurable run advances or frames with non-positive geometry."""
+        helpers = (
+            _drawingml_text_frame_width_emu,
+            _estimate_single_line_text_frame_width,
+            _parse_project_font_weight,
+            _resolve_project_font_sizes,
+            _resolve_project_letter_spacings,
+            _validate_single_line_text_run_advances,
+        )
+        if any(helper is None for helper in helpers):
+            return
+        try:
+            font_sizes = _resolve_project_font_sizes(root)
+            letter_spacings = _resolve_project_letter_spacings(root, font_sizes)
+        except ValueError:
+            return
+
+        parent_by_id = {
+            id(child): parent
+            for parent in root.iter()
+            for child in list(parent)
+        }
+        unchanged_groups = self._unchanged_txbody_group_ids(root)
+        errors: List[str] = []
+        for text_el in root.iter(f'{{{SVG_NS}}}text'):
+            if (
+                included_text_ids is not None
+                and id(text_el) not in included_text_ids
+            ):
+                continue
+            chain: List[ET.Element] = []
+            current: ET.Element | None = text_el
+            while current is not None:
+                chain.append(current)
+                current = parent_by_id.get(id(current))
+            if any(
+                _local_name(current) in _NON_VISUAL_SVG_TAGS
+                for current in chain
+            ):
+                continue

@@ -1,0 +1,141 @@
+                bottom - radius_y,
+            ],
+        ),
+        PathCommand("L", [x, y + radius_y]),
+        PathCommand(
+            "C",
+            [
+                x,
+                y + radius_y - ky,
+                x + radius_x - kx,
+                y,
+                x + radius_x,
+                y,
+            ],
+        ),
+        PathCommand("Z", []),
+    ]
+
+
+def _ellipse_commands(
+    center_x: float,
+    center_y: float,
+    radius_x: float,
+    radius_y: float,
+) -> list[PathCommand]:
+    kx = radius_x * _BEZIER_QUARTER_K
+    ky = radius_y * _BEZIER_QUARTER_K
+    return [
+        PathCommand("M", [center_x + radius_x, center_y]),
+        PathCommand(
+            "C",
+            [
+                center_x + radius_x,
+                center_y + ky,
+                center_x + kx,
+                center_y + radius_y,
+                center_x,
+                center_y + radius_y,
+            ],
+        ),
+        PathCommand(
+            "C",
+            [
+                center_x - kx,
+                center_y + radius_y,
+                center_x - radius_x,
+                center_y + ky,
+                center_x - radius_x,
+                center_y,
+            ],
+        ),
+        PathCommand(
+            "C",
+            [
+                center_x - radius_x,
+                center_y - ky,
+                center_x - kx,
+                center_y - radius_y,
+                center_x,
+                center_y - radius_y,
+            ],
+        ),
+        PathCommand(
+            "C",
+            [
+                center_x + kx,
+                center_y - radius_y,
+                center_x + radius_x,
+                center_y - ky,
+                center_x + radius_x,
+                center_y,
+            ],
+        ),
+        PathCommand("Z", []),
+    ]
+
+
+def _compact_preset_commands(
+    group: ET.Element,
+    matrix: AffineMatrix,
+) -> list[PathCommand]:
+    encoding = authored_preset_encoding(group)
+    if encoding != "compact":
+        raise ValueError(
+            f"Shape Boolean source {_element_label(group)} must be a compact "
+            "authored preset group"
+        )
+    errors = validate_authored_preset_group(group)
+    if errors:
+        raise ValueError(
+            f"Invalid compact authored preset {_element_label(group)}: "
+            + "; ".join(errors)
+        )
+    if group.get("data-pptx-object") != "shape":
+        raise ValueError(
+            f"Shape Boolean source {_element_label(group)} must be a shape, "
+            "not a connector"
+        )
+
+    frame = tuple(
+        float(value)
+        for value in (group.get("data-pptx-frame") or "").split()
+    )
+    if len(frame) != 4:
+        raise ValueError(
+            f"Compact authored preset {_element_label(group)} has an invalid "
+            "data-pptx-frame"
+        )
+    adjustments = {
+        name[len("data-pptx-av-"):]: value
+        for name, value in group.attrib.items()
+        if name.startswith("data-pptx-av-")
+    }
+    rendered = render_preset_geometry(
+        group.get("data-pptx-prst") or "",
+        Xfrm(x=frame[0], y=frame[1], w=frame[2], h=frame[3]),
+        adjustments,
+    )
+    children = list(group)
+    if len(children) != len(rendered.paths):
+        raise ValueError(
+            f"Compact authored preset {_element_label(group)} layer count "
+            "differs from its registry geometry"
+        )
+
+    commands: list[PathCommand] = []
+    for child, layer in zip(children, rendered.paths):
+        if layer.fill == "none":
+            continue
+        raw_path = child.get("d")
+        if raw_path is None:
+            raise ValueError(
+                f"Compact authored preset {_element_label(group)} contains a "
+                "path without d"
+            )
+        child_commands = normalize_path_commands(
+            svg_path_to_absolute(parse_svg_path(raw_path))
+        )
+        child_commands = _close_filled_commands(
+            child_commands,
+            f"{_element_label(group)} preset layer",

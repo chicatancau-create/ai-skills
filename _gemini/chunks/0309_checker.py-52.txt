@@ -1,0 +1,88 @@
+                local_scale_y = local_display_h / visible_h
+                if align == 'none':
+                    render_scale = max(
+                        local_scale_x * axis_scale_x,
+                        local_scale_y * axis_scale_y,
+                    )
+                    fit_label = 'none'
+                elif mode == 'slice':
+                    render_scale = (
+                        max(local_scale_x, local_scale_y)
+                        * max(axis_scale_x, axis_scale_y)
+                    )
+                    fit_label = 'slice'
+                else:
+                    render_scale = (
+                        min(local_scale_x, local_scale_y)
+                        * max(axis_scale_x, axis_scale_y)
+                    )
+                    fit_label = 'meet'
+
+                if render_scale > IMAGE_UPSCALE_WARN_RATIO:
+                    result['warnings'].append(
+                        f"Image {href} is {actual_w}x{actual_h} and renders at "
+                        f"{render_scale:.2f}x scale in a "
+                        f"{int(display_w)}x{int(display_h)} {fit_label} frame "
+                        f"— about {render_scale * 1.5:.1f}x on a 1080p projector, "
+                        "visibly soft; use a larger source or a smaller frame"
+                    )
+                elif (
+                    render_scale < 1.0 / IMAGE_DOWNSIZE_WARN_RATIO
+                    and source_bytes >= IMAGE_DOWNSIZE_WARN_MIN_BYTES
+                ):
+                    source_mib = source_bytes / (1024 * 1024)
+                    result['warnings'].append(
+                        f"Image {href} is {actual_w}x{actual_h} and renders at "
+                        f"{render_scale:.2f}x scale in a "
+                        f"{int(display_w)}x{int(display_h)} {fit_label} frame; "
+                        f"the source is {source_mib:.1f} MiB — file-size "
+                        "advisory only, not an aspect-ratio warning; consider "
+                        "a smaller source asset, or export with "
+                        "svg_to_pptx.py --image-sizing display to downsize "
+                        "at export time"
+                    )
+            except ImportError:
+                pass  # PIL not available, skip resolution check
+            except Exception:
+                pass  # Image unreadable, skip resolution check
+
+    def _check_icon_placeholders(self, root: ET.Element, svg_path: Path, result: Dict) -> None:
+        """Check that <use data-icon="..."> placeholders resolve."""
+        placeholders = [
+            elem for elem in root.iter()
+            if _local_name(elem).lower() == 'use' and elem.get('data-icon') is not None
+        ]
+        if not placeholders:
+            return
+
+        if _resolve_icon_path is None:
+            result['warnings'].append(
+                "Detected data-icon placeholders, but icon resolver could not be imported; "
+                "post-processing/export will still validate them."
+            )
+            return
+        if _icon_dir_for_svg is None:
+            result['warnings'].append(
+                "Detected data-icon placeholders, but the project icon helper could not be imported; "
+                "post-processing/export will still validate them."
+            )
+            return
+
+        icons_dir = _icon_dir_for_svg(svg_path)
+        seen = set()
+        for elem in placeholders:
+            icon_name = (elem.get('data-icon') or '').strip()
+            if not icon_name:
+                result['errors'].append("Icon placeholder has empty data-icon value")
+                continue
+            if icon_name in seen:
+                continue
+            seen.add(icon_name)
+
+            try:
+                icon_path, _ = _resolve_icon_path(icon_name, icons_dir)
+            except ValueError as exc:
+                result['errors'].append(str(exc))
+                continue
+            if not icon_path.exists():
+                suggestion = (

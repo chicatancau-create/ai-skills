@@ -1,0 +1,46 @@
+| `items[].aspect_ratio` | yes | Passed to `image_gen.py --aspect_ratio`; every backend accepts a subset of the CLI union (e.g. gemini has no `3:1`), and `--manifest` fails the item before any request when the resolved backend rejects its ratio |
+| `items[].prompt` | yes | The assembled paragraph |
+| `items[].image_size` | no | `512px` / `1K` / `2K` / `4K` |
+| `items[].model` | no | Per-item backend model override |
+| `items[].alt_text` | no | Short caption |
+| `items[].slice_grid`, `items[].slice_names` | for a placeable-element sheet | Exact `RxC` and the comma-separated basenames (`rows*cols` unique outputs) for `slice_images.py`; slice basenames are unique across the manifest, so re-cutting part of a sheet rewrites the parent's `slice_names` (and grid) rather than adding a second item with the same names |
+| `items[].status` | yes | `Pending` initially; the CLI writes `Generated` / `Failed` / `Needs-Manual` |
+
+Legacy manifest spellings and their current readings: [`image.md`](../scripts/docs/image.md).
+
+---
+
+## 7. Generation Execution
+
+Prerequisite: §3 complete and `images/image_prompts.json` validates. The manifest is the shared contract for every mode; it never implies that `image_gen.py --manifest` runs — that command is Path A only.
+
+| Trigger | Mode | Mechanism |
+|---|---|---|
+| `api`, or `auto` with `IMAGE_BACKEND` configured | **Path A** `image_gen.py --manifest` | One command runs the manifest with concurrency and writes status per item |
+| `host-native`, or `auto` with a host image tool | **Path B** host-native tool | The agent invokes the host capability; outputs land at `project/images/<filename>` |
+| Default confirmed `manual`, or Quick explicitly `manual` | **Offline Manual** | Manifest stays on disk; the user generates from `items[].prompt` and places files |
+
+**Path selection**: planning never inspects configuration or probes a provider — capability is resolved only here. All modes share one output contract: a file at `project/images/<filename>`.
+
+| Recorded path | Resolution |
+|---|---|
+| Default `api` (from `AI Image Acquisition Path` in `design_spec.md §I`, already consumed from the confirmation; never reopen `result.json`) | Path A |
+| Default `host-native` | Path B, skipping A even when `IMAGE_BACKEND` is configured |
+| Default `manual` | Offline Manual |
+| Default `auto` | Path A when `IMAGE_BACKEND` is configured (two consecutive failures fall to B), then Path B when the host has a native tool; never Offline Manual by itself |
+| Default missing row | Return to Step 4 recovery |
+| Quick explicit `api` / `host-native` / `manual` | That path |
+| Quick otherwise | `auto` A → B without asking |
+
+**Hard rule — no reopened selection**: normal execution never reopens selection. A confirmed path that fails after its retry never switches provider — Default enters the recovery decision below, Quick applies its no-AI replan.
+
+### Path A — `image_gen.py --manifest`
+
+```bash
+python3 scripts/image_gen.py --manifest project/images/image_prompts.json --output project/images
+```
+
+Validates the file behind every `Generated` row before skipping it, iterates retryable rows with bounded concurrency, and writes each status atomically. Interrupting is safe (completed items stay `Generated`), and `--render-md` refreshes the Markdown sidecar after an interruption. Backend selection, `.env` lookup order, provider keys, and the OpenAI-compatible knobs: [`image.md`](../scripts/docs/image.md). The single-image form `image_gen.py "prompt" --filename …` remains for ad-hoc re-rolls. Backends return their own native resolutions: backfill the actual pixels into `Dimensions`, and when a file is far larger than its planned on-slide size, downscale it to that size as a prepared derivative (`image_treat.py --fit WxH`); never upscale.
+
+### Path B — host-native image tool
+

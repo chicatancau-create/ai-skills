@@ -1,0 +1,93 @@
+|------|-----------|--------|------|
+| `["span", {"data-type":"text"}, ["span", {"data-type":"leaf"}, "x"]]` | ✓ canonical | ✓ | ✅ 新内容首选 |
+| `["text", {marks}, "x"]` | ✓（`text` 在 inline 白名单中） | ✓（兼容） | ⚠️ 历史 inline tag。`doc read` 不会输出这种形式；如需复制粘贴回写、保持与现有内容一致，建议改写为 canonical |
+| `"raw string"` 作为 block 子节点 | ✗ 报错 `段落子节点不能是裸字符串` | — | 不要直接写。默认 normalize 会自动包成 canonical（打印 `[FIX]`） |
+
+> Marks 表的属性集对 canonical 的 leaf 和 legacy 的 text 都适用；差别仅在承载位置（leaf 的 attrs vs text 的 attrs）。
+
+---
+
+## 块级节点
+
+所有 block 节点的 tag 白名单（validator `validBlockTags`）：
+`p` / `h1` / `h2` / `h3` / `h4` / `h5` / `h6` / `hr` / `table` / `code` / `container` / `embed` / `onlineVideo` / `card` / `toc` / `refblock` / `cangjie-voidblock` / `cangjie-container`
+
+未在白名单的 tag 会触发 `未知的块级 tag` 警告，并给出基于编辑距离 (Levenshtein ≤2) 的最接近建议（如 `"containr"` → `did you mean "container"?`）。
+
+### paragraph（段落）
+
+- **tag**: `"p"`
+- **attrs**（全部 optional）:
+  - `jc?: "left" | "center" | "right" | "both" | "distribute" | "justify"` — 对齐
+  - `ind?` — 缩进（单位 **twips**，1 twip = 1/1440 英寸）
+    - `left?: number`, `right?: number`, `firstLine?: number`, `firstLineChars?: number`, `hanging?: number`
+  - `spacing?` — 行间距（单位 **twips**；`line` 字段：`lineRule=auto` 时 1/240 行，否则 twips）
+    - `line?: number`, `before?: number`, `after?: number`
+    - `lineRule?: "atLeast" | "auto" | "exact"`
+  - `shd?: {val?, fill?, color?}` — 底纹
+  - `quote?: boolean` — 引用标识（注：服务端也接受 `blockquote: true` 的别名）
+  - `list?: object` — 列表标识（见下方 list 节点）
+  - `refs?: string[]` — 脚注引用 ID（footnote 标识）
+- **children**: 一个 text 容器 + 可选的 inline 节点（link/img/tag/mention 等）
+- **示例**:
+
+```json
+["p", {"uuid": "p1"}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "普通段落"]]]
+["p", {"uuid": "p2", "jc": "center"}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "居中段落"]]]
+["p", {"uuid": "p3", "ind": {"firstLine": 420}}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "首行缩进段落"]]]
+```
+
+### heading（标题）
+
+- **tag**: `"h1"` | `"h2"` | `"h3"` | `"h4"` | `"h5"` | `"h6"`
+- **attrs**: 同 paragraph
+- **children**: 同 paragraph
+- **示例**:
+
+```json
+["h1", {"uuid": "h1a"}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "一级标题"]]]
+["h3", {"uuid": "h3a", "jc": "center"}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "居中三级标题"]]]
+```
+
+### blockquote（引用）
+
+- **tag**: `"p"` 或 `"h1"`~`"h6"`（不是独立 tag，是属性装饰）
+- **标识**: `attrs.quote: true`（也接受 `blockquote: true`）
+- **示例**:
+
+```json
+["p", {"uuid": "q1", "quote": true}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "这是一段引用"]]]
+["h2", {"uuid": "q2", "quote": true}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "引用标题"]]]
+```
+
+### list（列表）
+
+- **tag**: `"p"`（列表项在 JSONML 层面是扁平的段落，通过 `attrs.list` 标识）
+- **attrs.list**:
+  - `listId: string` — **必传**。同一列表的项共享相同 ID。validator 报错：`必传字段缺失`
+  - `level: number` — **必传**。缩进层级（0-based，≥0）。validator 报错：`必传字段缺失` / `必须 ≥0`
+  - `isOrdered?: boolean` — 是否有序，默认 `false`
+  - `isTaskList?: boolean` — 是否任务列表，默认 `false`
+  - `isChecked?: boolean` — 任务是否完成（仅 isTaskList=true 时有意义）
+  - `isCanceled?: boolean` — 任务是否取消
+  - `start?: number` — 有序列表起始序号（≥1）。validator 报错：`必须 ≥1`
+  - `listStyleType?: string` — 样式类型（31 种预设）
+  - `hideSymbol?: boolean` — 隐藏列表符号
+- **示例**:
+
+```json
+["p", {"uuid": "li1", "list": {"listId": "abc", "level": 0, "isOrdered": false}},
+  ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "无序列表项"]]]
+["p", {"uuid": "li2", "list": {"listId": "def", "level": 0, "isOrdered": true, "start": 1}},
+  ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "有序列表项"]]]
+["p", {"uuid": "li3", "list": {"listId": "ghi", "level": 1, "isOrdered": false}},
+  ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "二级缩进"]]]
+["p", {"uuid": "li4", "list": {"listId": "jkl", "level": 0, "isTaskList": true, "isChecked": false}},
+  ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "待办事项"]]]
+```
+
+- **注意**: 列表是扁平结构，不是嵌套的 ol/ul/li
+
+### hr（分割线）
+
+- **tag**: `"hr"`

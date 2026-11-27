@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+"""
+PPT Master - SVG Annotation Utilities
+
+Read, write, and manage edit annotations in SVG files.
+Annotations are stored as custom XML attributes (data-edit-target, data-edit-annotation)
+on SVG elements, enabling AI-driven targeted editing.
+
+Usage:
+    (library module — imported by server.py and check_annotations.py)
+
+Dependencies:
+    None (only uses standard library)
+"""
+
+import xml.etree.ElementTree as ET
+import re
+from copy import deepcopy
+from typing import Optional
+
+SVG_NS = 'http://www.w3.org/2000/svg'
+XLINK_NS = 'http://www.w3.org/1999/xlink'
+
+# Register namespaces to avoid generated ns0/ns1 prefixes in saved SVGs.
+ET.register_namespace('', SVG_NS)
+ET.register_namespace('xlink', XLINK_NS)
+
+
+def assign_temp_ids(root: ET.Element) -> None:
+    """Assign deterministic temp ids (_edit_0, _edit_1, ...) to elements without one.
+
+    Clears any leftover _edit_N ids from previous sessions first, to avoid
+    shifted numbering when elements are added/removed between sessions.
+    """
+    for elem in root.iter():
+        eid = elem.get('id', '')
+        if eid.startswith('_edit_'):
+            elem.attrib.pop('id', None)
+
+    counter = 0
+    for elem in root.iter():
+        if elem is root:
+            continue
+        if elem.get('id') is None:
+            elem.set('id', f'_edit_{counter}')
+            counter += 1
+
+
+def _find_by_id(root: ET.Element, element_id: str) -> Optional[ET.Element]:
+    """Find an element by its id attribute in the SVG tree."""
+    for elem in root.iter():
+        if elem.get('id') == element_id:
+            return elem
+    return None
+
+
+def _find_with_parent(
+    root: ET.Element, element_id: str,
+) -> tuple[Optional[ET.Element], Optional[ET.Element]]:
+    """Find an element and its parent by id."""
+    for parent in root.iter():
+        for child in list(parent):
+            if child.get('id') == element_id:
+                return child, parent
+    return None, None
+
+
+def _local_name(elem: ET.Element) -> str:
+    return elem.tag.split('}', 1)[1] if '}' in elem.tag else elem.tag
+
+
+def _first_number(value: Optional[str]) -> Optional[float]:
+    if value is None:
+        return None
+    match = re.search(r'-?\d+(?:\.\d+)?', value)
+    return float(match.group(0)) if match else None
+
+
+def _format_number(value: float) -> str:
+    text = f'{value:.3f}'.rstrip('0').rstrip('.')
+    return text or '0'
+
+
+def _tspan_baseline(text_el: ET.Element, tspan_el: ET.Element) -> Optional[tuple[float, float]]:
+    cur_x = _first_number(text_el.get('x'))
+    cur_y = _first_number(text_el.get('y'))
+    for child in list(text_el):
+        if _local_name(child) != 'tspan':
+            continue
+        x_val = _first_number(child.get('x'))
+        y_val = _first_number(child.get('y'))
+        dx_val = _first_number(child.get('dx'))
+        dy_val = _first_number(child.get('dy'))
+        if x_val is not None:
+            cur_x = x_val
+        elif dx_val is not None:
+            cur_x = (cur_x or 0.0) + dx_val
+        if y_val is not None:
+            cur_y = y_val
+        elif dy_val is not None:
+            cur_y = (cur_y or 0.0) + dy_val
+        if child is tspan_el:
+            break
+    if cur_x is None or cur_y is None:
+        return None
+    return cur_x, cur_y
+
+
+def _adjust_following_tspan_dy(
+    text_el: ET.Element,
+    target: ET.Element,
+) -> None:
+    """Keep later line-break tspans visually stable when one sibling is removed."""
+    children = list(text_el)
+    try:
+        idx = children.index(target)
+    except ValueError:
+        return
+    if idx + 1 >= len(children):
+        return
+    next_el = children[idx + 1]
+    if _local_name(next_el) != 'tspan' or next_el.get('y') is not None or next_el.get('dy') is None:
+        return
+    next_baseline = _tspan_baseline(text_el, next_el)
+    if next_baseline is None:
+        return
+    prev_y: Optional[float] = None
+    for prior in reversed(children[:idx]):
+        if _local_name(prior) != 'tspan':
+            continue

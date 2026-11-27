@@ -1,0 +1,115 @@
+def _gradient_stop_list(gs_list: ET.Element) -> list[ET.Element]:
+    """Validate one DrawingML gradient-stop list and return its stops."""
+    stops = list(gs_list)
+    stop_tag = f"{{{NS['a']}}}gs"
+    if (
+        gs_list.attrib
+        or (gs_list.text or "").strip()
+        or any(
+            stop.tag != stop_tag or (stop.tail or "").strip()
+            for stop in stops
+        )
+    ):
+        raise ValueError("Invalid DrawingML gradient stop list structure")
+    if len(stops) < 2:
+        raise ValueError(
+            "DrawingML gradient fill requires at least two color stops"
+        )
+    return stops
+
+
+def _gradient_stop_color(gs: ET.Element) -> ET.Element:
+    """Return the single registered color child of one gradient stop."""
+    children = list(gs)
+    color_tags = {f"{{{NS['a']}}}{name}" for name in COLOR_TAGS}
+    if (
+        set(gs.attrib) != {"pos"}
+        or len(children) != 1
+        or children[0].tag not in color_tags
+        or (gs.text or "").strip()
+        or (children[0].tail or "").strip()
+    ):
+        raise ValueError("Invalid DrawingML gradient stop structure")
+    return children[0]
+
+
+def _linear_gradient_angle(lin: ET.Element) -> int:
+    """Parse one optional DrawingML positive fixed angle."""
+    raw = lin.get("ang")
+    if raw is None:
+        return 0
+    token = raw.strip()
+    if _OOXML_INTEGER_RE.fullmatch(token) is None:
+        raise ValueError(f"Invalid DrawingML linear gradient angle: {raw!r}")
+    angle = int(token)
+    if not 0 <= angle < _OOXML_FULL_CIRCLE:
+        raise ValueError(
+            f"DrawingML linear gradient angle={angle} is outside "
+            f"0..{_OOXML_FULL_CIRCLE - 1}"
+        )
+    return angle
+
+
+def _validate_linear_gradient_structure(lin: ET.Element) -> None:
+    """Require one leaf a:lin with only the registered attributes."""
+    unsupported = sorted(set(lin.attrib) - {"ang", "scaled"})
+    if unsupported or list(lin) or (lin.text or "").strip():
+        details = ", ".join(unsupported) if unsupported else "payload"
+        raise ValueError(
+            f"Invalid DrawingML linear gradient structure: {details}"
+        )
+
+
+def _validate_or_normalize_linear_gradient_scaling(
+    lin: ET.Element,
+    angle: int,
+    palette: ColorPalette | None,
+) -> None:
+    """Normalize unscaled oblique gradients only in tolerant import mode."""
+    scaled = _parse_ooxml_boolean(
+        lin.get("scaled"),
+        default=False,
+        label="linear gradient scaled value",
+    )
+    quarter_turn = 90 * ANGLE_UNIT
+    if not scaled and angle % quarter_turn:
+        message = (
+            "Unscaled non-cardinal DrawingML linear gradients are not "
+            "representable by the normalized SVG mapping"
+        )
+        if palette is None or palette.strict:
+            raise ValueError(message)
+        palette._diagnose(
+            "gradient-scaling-normalized",
+            message,
+            "map the angle to the normalized SVG unit box while preserving "
+            "its stops",
+        )
+
+
+def _validate_gradient_rotation(
+    gradient: ET.Element,
+    palette: ColorPalette | None,
+) -> None:
+    """Normalize fixed-page gradient rotation only in tolerant import mode."""
+    rotates_with_shape = _parse_ooxml_boolean(
+        gradient.get("rotWithShape"),
+        default=True,
+        label="gradient rotWithShape value",
+    )
+    if not rotates_with_shape:
+        message = (
+            "DrawingML gradients that do not rotate with their shape are "
+            "not representable by the local SVG mapping"
+        )
+        if palette is None or palette.strict:
+            raise ValueError(message)
+        palette._diagnose(
+            "gradient-rotation-normalized",
+            message,
+            "render the gradient in the shape-local SVG box and preserve "
+            "the exact DrawingML gradient for unchanged round-trip",
+        )
+
+
+def _validate_gradient_attributes(gradient: ET.Element) -> None:

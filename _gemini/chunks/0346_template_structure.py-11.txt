@@ -1,0 +1,90 @@
+                "preserve mode maps source Layouts directly in pptx_layouts"
+            )
+        seen_slides: set[int] = set()
+        for page_key, raw_value in layout_rows:
+            page_match = _LOCK_PAGE_RE.fullmatch(page_key)
+            if not page_match or int(page_match.group(1)) <= 0:
+                raise TemplateStructureError(
+                    f"spec_lock.md pptx_layouts key {page_key!r} must be P<NN>"
+                )
+            slide_num = int(page_match.group(1))
+            if slide_num in seen_slides:
+                raise TemplateStructureError(
+                    f"spec_lock.md pptx_layouts repeats page P{slide_num:02d}"
+                )
+            seen_slides.add(slide_num)
+            parts = [part.strip() for part in raw_value.split("|")]
+            if len(parts) not in {1, 2} or not parts[0]:
+                raise TemplateStructureError(
+                    f"spec_lock.md P{slide_num:02d} preserve mapping must be "
+                    "'<layout_key>' or '<layout_key> | <PowerPoint layout name>'"
+                )
+            layout_key = parts[0]
+            if not _LAYOUT_KEY_RE.fullmatch(layout_key):
+                raise TemplateStructureError(
+                    f"spec_lock.md P{slide_num:02d} has invalid Layout key "
+                    f"{layout_key!r}"
+                )
+            references.append(PptxLayoutReference(
+                slide_num=slide_num,
+                layout_key=layout_key,
+                layout_name=parts[1] if len(parts) == 2 else None,
+            ))
+        if not references:
+            raise TemplateStructureError(
+                "spec_lock.md preserve mode requires one pptx_layouts row per page"
+            )
+    else:
+        if layout_section_present or page_layout_section_present:
+            raise TemplateStructureError(
+                "spec_lock.md pptx_layouts/page_pptx_layouts sections are not "
+                "allowed when pptx_structure.mode is flat"
+            )
+    return PptxStructureLock(
+        mode=mode,
+        template_reuse_scope=template_reuse_scope,
+        template_adherence=template_adherence,
+        masters=tuple(masters),
+        layout_definitions=tuple(layout_definitions),
+        layouts=tuple(sorted(references, key=lambda item: item.slide_num)),
+        prototypes=tuple(sorted(prototypes, key=lambda item: item.slide_num)),
+        source_template=source_template,
+        native_structure=native_structure,
+    )
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _native_geometry(raw: Any, context: str) -> tuple[float, float, float, float] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise TemplateStructureError(f"{context} geometry must be an object or null")
+    try:
+        values = tuple(float(raw[key]) for key in ("x", "y", "width", "height"))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise TemplateStructureError(f"{context} geometry is invalid") from exc
+    if not all(math.isfinite(value) for value in values) or values[2] < 0 or values[3] < 0:
+        raise TemplateStructureError(f"{context} geometry must be finite and non-negative")
+    if values[2] == 0 or values[3] == 0:
+        # PowerPoint writes <a:ext cx="0" cy="0"/> for a collapsed placeholder
+        # (built-in vertical-text layouts do this); it carries no usable box.
+        return None
+    return values
+
+
+def load_native_structure_contract(
+    structure_lock: PptxStructureLock,
+) -> NativeStructureContract:
+    """Load and verify the native structure bundle selected by preserve mode."""
+    if structure_lock.mode != "preserve":
+        raise TemplateStructureError(
+            "native structure contracts are available only in preserve mode"
+        )
+    source_template = structure_lock.source_template

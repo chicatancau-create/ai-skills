@@ -1,0 +1,100 @@
+            'clip-path',
+            'filter',
+            'fill-opacity',
+            'mask',
+            'opacity',
+            'style',
+            'transform',
+        )
+        if image.get(name) is not None
+    ]
+    if unsupported:
+        raise ValueError(f"pattern image must not use {', '.join(unsupported)}")
+    return mode, image
+
+
+def project_paint_reference_errors(root: ET.Element) -> list[str]:
+    """Validate local paint-server references and their native contexts."""
+    definitions, _duplicates = project_definition_index(root)
+    pattern_descendant_ids = {
+        id(descendant)
+        for pattern in root.iter()
+        if _svg_element_tag(pattern) == 'pattern'
+        for descendant in pattern.iter()
+        if descendant is not pattern
+    }
+    fill_shape_tags = frozenset({
+        'rect', 'circle', 'ellipse', 'path', 'polygon', 'polyline',
+    })
+    stroke_shape_tags = fill_shape_tags | {'line'}
+    errors: set[str] = set()
+
+    for elem in root.iter():
+        style_values = parse_inline_style(elem.get('style'))
+        for property_name in PROJECT_REFERENCE_PAINT_PROPERTIES:
+            raw = (
+                style_values[property_name]
+                if property_name in style_values
+                else elem.get(property_name)
+            )
+            if raw is None:
+                continue
+            try:
+                kind, reference_id, _alpha = parse_project_paint(
+                    raw,
+                    property_name,
+                )
+            except ValueError:
+                continue
+            if kind != 'reference' or reference_id is None:
+                continue
+
+            elem_tag = _svg_element_tag(elem) or str(elem.tag)
+            elem_tag_lower = elem_tag.lower()
+            target = definitions.get(reference_id)
+            if target is None:
+                errors.add(
+                    f'<{elem_tag}> {property_name}=url(#{reference_id}) has no '
+                    'matching direct <defs> definition'
+                )
+                continue
+
+            has_text_descendant = any(
+                (_svg_element_tag(descendant) or '').lower() in {'text', 'tspan'}
+                for descendant in elem.iter()
+                if descendant is not elem
+            )
+            if id(elem) in pattern_descendant_ids:
+                allowed_tags: tuple[str, ...] = ()
+            elif property_name == 'fill' and elem_tag_lower in fill_shape_tags:
+                allowed_tags = ('lineargradient', 'radialgradient', 'pattern')
+            elif property_name == 'stroke' and elem_tag_lower in stroke_shape_tags:
+                allowed_tags = ('lineargradient', 'radialgradient')
+            elif property_name == 'fill' and elem_tag_lower in {'text', 'tspan'}:
+                target_tag = (_svg_element_tag(target) or str(target.tag)).lower()
+                if target_tag == 'pattern' and target.get(PROJECT_TEXT_IMAGE_FILL_ATTR) is not None:
+                    allowed_tags = ('lineargradient', 'radialgradient', 'pattern')
+                else:
+                    allowed_tags = ('lineargradient', 'radialgradient')
+            elif property_name == 'fill' and elem_tag_lower == 'g':
+                allowed_tags = (
+                    ('lineargradient', 'radialgradient')
+                    if has_text_descendant
+                    else ('lineargradient', 'radialgradient', 'pattern')
+                )
+            elif (
+                property_name == 'stroke'
+                and elem_tag_lower == 'g'
+                and not has_text_descendant
+            ):
+                allowed_tags = ('lineargradient', 'radialgradient')
+            else:
+                allowed_tags = ()
+
+            if not allowed_tags:
+                errors.add(
+                    f'<{elem_tag}> {property_name}=url(#{reference_id}) is not '
+                    'supported by native PPTX conversion in this context'
+                )
+                continue
+

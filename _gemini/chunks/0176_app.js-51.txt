@@ -1,0 +1,77 @@
+        var value = pick(field, catalog);
+        var behavior = customCandidateBehavior(field);
+        if (value && value !== "custom" && !findCatalogOption(catalog, value)) {
+            behavior = String(value);
+            value = "custom";
+        }
+        STATE[field] = value;
+        STATE[behaviorKey] = behavior;
+    }
+
+    function initStage1State() {
+        STATE.primary_language = recommendationLanguage();
+        STATE.canvas = pick("canvas", CAT.canvas);
+        STATE.audience = (REC.audience && REC.audience.value) || "";
+        STATE.communication_intent = (REC.communication_intent && REC.communication_intent.value) || "";
+        STATE.audience_outcome = (REC.audience_outcome && REC.audience_outcome.value) || "";
+        STATE.core_message = (REC.core_message && REC.core_message.value) || "";
+        STATE.delivery_context = (REC.delivery_context && REC.delivery_context.value) || "";
+        STATE.artifact_afterlife = (REC.artifact_afterlife && REC.artifact_afterlife.value) || "";
+        STATE.content_divergence = (REC.content_divergence && REC.content_divergence.value) || "";  // free text; blank = balanced default
+    }
+
+    // Stage-2 fields are (re-)read from the recommendations. At boot they come from
+    // the active stage file; after a stage-1 confirm enterStage() calls this again
+    // with the newly authored candidates. Stage-1 STATE is preserved
+    // across the single-session transition — this never resets the contract.
+    function initStage2State() {
+        [
+            "audience",
+            "communication_intent",
+            "audience_outcome",
+            "core_message",
+            "delivery_context",
+            "artifact_afterlife",
+            "content_divergence"
+        ].forEach(function (field) {
+            var value = recValue(field);
+            if (value && typeof value === "object") value = value.value;
+            if (value != null) STATE[field] = String(value);
+        });
+        STATE.primary_language = recommendationLanguage();
+        resetTypographySizeOverrides();
+        var templateApplication = templateApplicationRecommendation();
+        if (templateApplication != null) {
+            STATE.template_application = templateApplication;
+        } else if (stageNumber(REC) === 2) {
+            delete STATE.template_application;
+        }
+        // Reading mode is a design-density tool, not part of the communication
+        // purpose. Keep the legacy delivery_purpose key for JSON compatibility.
+        STATE.delivery_purpose = recId("delivery_purpose") ||
+            directionField("delivery_purpose") || STATE.delivery_purpose || "balanced";
+        STATE.page_count = (REC.page_count && REC.page_count.value != null) ? String(REC.page_count.value) : (STATE.page_count || "");
+        initCreativeSelection("mode", CAT.modes, "mode_behavior");
+        initCreativeSelection("visual_style", CAT.visual_styles, "visual_style_behavior");
+        var cc = colorRecommendationCandidates();
+        var csel = (REC.color && REC.color.selected != null) ? REC.color.selected :
+            selectedDesignDirectionIndex();
+        var c0 = cc[Math.min(csel, Math.max(cc.length - 1, 0))] || {};
+        STATE.color = {
+            name: localized(c0, "name") || c0.name || "",
+            palette: Object.assign({}, normPalette(c0))
+        };
+
+        STATE.icons = pick("icons", CAT.icons);
+
+        var tc = typographyRecommendationCandidates();
+        var tsel = (REC.typography && REC.typography.selected != null) ? REC.typography.selected :
+            selectedDesignDirectionIndex();
+        var t0 = normTypography(tc[Math.min(tsel, Math.max(tc.length - 1, 0))] || {});
+        STATE.typography = {
+            name: localized(t0, "name") || t0.name || "",
+            heading: t0.heading || {},
+            body: t0.body || {},
+            body_size: t0.body_size || typographyBodySize(REC.typography),
+            sizes: Object.assign({}, t0.sizes || {})
+        };

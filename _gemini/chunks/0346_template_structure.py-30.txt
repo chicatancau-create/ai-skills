@@ -1,0 +1,119 @@
+            "shared Layout element metadata (data-pptx-* attributes), geometry, "
+            "topology, or content differs; fills, strokes, and gradients may be "
+            "repainted"
+        )
+    return "; ".join(details)
+
+
+def _mirror_comparable_attributes(
+    element: ET.Element,
+    svg_path: Path,
+    *,
+    ignore_structure_attrs: bool,
+) -> dict[str, str]:
+    """Return literal mirror attributes using the validator's normalization."""
+    return {
+        name: _signature_attr_value(
+            name,
+            value,
+            svg_path=svg_path,
+            asset_identity=True,
+        )
+        for name, value in element.attrib.items()
+        if not (
+            ignore_structure_attrs
+            and name.rsplit("}", 1)[-1] in _STRUCTURE_ATTRS
+        )
+    }
+
+
+def _mirror_node_label(element: ET.Element, index: int) -> str:
+    """Return a compact stable-enough path segment for one SVG node."""
+    tag = _local_tag(element)
+    element_id = (element.get("id") or "").strip()
+    return f"{tag}#{element_id}" if element_id else f"{tag}[{index}]"
+
+
+def _mirror_element_difference(
+    expected: ET.Element,
+    actual: ET.Element,
+    *,
+    expected_svg: Path,
+    actual_svg: Path,
+    path: str,
+    ignore_structure_attrs: bool,
+) -> str | None:
+    """Describe the first literal mirror subtree difference."""
+    expected_tag = _local_tag(expected)
+    actual_tag = _local_tag(actual)
+    if expected_tag != actual_tag:
+        return f"{path}: expected <{expected_tag}>, found <{actual_tag}>"
+    if (
+        expected_tag == "metadata"
+        and (expected.text or "") != (actual.text or "")
+    ):
+        return f"{path}: metadata payload differs"
+
+    expected_attrs = _mirror_comparable_attributes(
+        expected,
+        expected_svg,
+        ignore_structure_attrs=ignore_structure_attrs,
+    )
+    actual_attrs = _mirror_comparable_attributes(
+        actual,
+        actual_svg,
+        ignore_structure_attrs=ignore_structure_attrs,
+    )
+    if expected_attrs != actual_attrs:
+        for name in sorted(set(expected_attrs) | set(actual_attrs)):
+            expected_value = expected_attrs.get(name)
+            actual_value = actual_attrs.get(name)
+            if expected_value != actual_value:
+                return (
+                    f"{path}: attribute {name.rsplit('}', 1)[-1]!r} expected "
+                    f"{expected_value!r}, found {actual_value!r}"
+                )
+
+    expected_children = list(_mirror_comparison_children(expected))
+    actual_children = list(_mirror_comparison_children(actual))
+    if len(expected_children) != len(actual_children):
+        expected_tspans = sum(
+            _local_tag(child) == "tspan" for child in expected_children
+        )
+        actual_tspans = sum(
+            _local_tag(child) == "tspan" for child in actual_children
+        )
+        if expected_tspans != actual_tspans:
+            return (
+                f"{path}: expected {expected_tspans} direct <tspan> child(ren), "
+                f"found {actual_tspans}; mirror text node count/order must stay "
+                "unchanged"
+            )
+        return (
+            f"{path}: expected {len(expected_children)} child node(s), found "
+            f"{len(actual_children)}"
+        )
+
+    for index, (expected_child, actual_child) in enumerate(
+        zip(expected_children, actual_children),
+        start=1,
+    ):
+        child_path = f"{path}/{_mirror_node_label(expected_child, index)}"
+        difference = _mirror_element_difference(
+            expected_child,
+            actual_child,
+            expected_svg=expected_svg,
+            actual_svg=actual_svg,
+            path=child_path,
+            ignore_structure_attrs=ignore_structure_attrs,
+        )
+        if difference:
+            return difference
+    return None
+
+
+def _mirror_slide_local_difference(
+    expected_spec: TemplateSlideSpec,
+    actual_spec: TemplateSlideSpec,
+    protected_ids: set[str],
+) -> str | None:

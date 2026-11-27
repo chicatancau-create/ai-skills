@@ -1,0 +1,83 @@
+        chart_area = None
+        if hasattr(args, 'area') and args.area:
+            parts = args.area
+            chart_area = ChartArea(parts[0], parts[1], parts[2], parts[3])
+
+        if args.chart_type == 'bar':
+            canvas = args.canvas if hasattr(args, 'canvas') else 'ppt169'
+            coord = CoordinateSystem(canvas, chart_area)
+            calc = BarChartCalculator(coord)
+            data = args.data
+
+            # Parse value-range from axis tick labels (if provided)
+            v_min, v_max = 0, None
+            scale_source = 'auto (max*1.1)'
+            if hasattr(args, 'value_range') and args.value_range:
+                vr = args.value_range
+                if len(vr) != 2:
+                    parser.error('calc bar --value-range must contain exactly two values: "min,max"')
+                v_min, v_max = vr[0], vr[1]
+                if v_max <= v_min:
+                    parser.error('calc bar --value-range max must be greater than min')
+                scale_source = f'axis ticks ({v_min}-{v_max})'
+
+            if args.gap_width is not None:
+                if args.gap_width < 0:
+                    parser.error('calc bar --gap-width must be zero or positive')
+                positions = calc.calculate(data, bar_width=None,
+                                          gap_ratio=args.gap_width / 100.0,
+                                          horizontal=args.horizontal,
+                                          y_min=v_min, y_max=v_max)
+            else:
+                positions = calc.calculate(data, bar_width=args.bar_width,
+                                          horizontal=args.horizontal,
+                                          y_min=v_min, y_max=v_max)
+
+            print(f"\n=== Bar Chart Coordinate Calculation ===")
+            if args.gap_width is not None:
+                print(f"Category layout: PowerPoint slots, gap_width {args.gap_width:g}% (bar width derived)")
+            print(f"Canvas: {CANVAS_FORMATS.get(canvas, {}).get('dimensions', canvas)}")
+            print(f"Chart area: ({coord.chart_area.x_min}, {coord.chart_area.y_min}) - "
+                  f"({coord.chart_area.x_max}, {coord.chart_area.y_max})")
+            print(f"Value scale: {scale_source}")
+            print()
+            print(calc.format_table(positions))
+
+        elif args.chart_type == 'pie':
+            center = args.center
+            calc = PieChartCalculator(center, args.radius)
+            data = args.data
+            slices = calc.calculate(data, start_angle=args.start_angle, inner_radius=args.inner_radius)
+
+            print(f"\n=== Pie Chart Slice Calculation ===")
+            print(calc.format_table(slices))
+
+        elif args.chart_type == 'radar':
+            center = args.center
+            calc = RadarChartCalculator(center, args.radius)
+            data = args.data
+            points = calc.calculate(data, max_value=args.max_value)
+
+            print(f"\n=== Radar Chart Vertex Calculation ===")
+            print(calc.format_table(points))
+
+        elif args.chart_type == 'line':
+            canvas = args.canvas if hasattr(args, 'canvas') else 'ppt169'
+            coord = CoordinateSystem(canvas, chart_area)
+            calc = LineChartCalculator(coord)
+            data = args.data
+            x_range = args.x_range
+            y_range = args.y_range
+
+            points = calc.calculate(data, x_range, y_range)
+            if getattr(args, 'slot_midpoints', False):
+                points = slot_midpoint_points(points, coord)
+
+            print(f"\n=== Line / Scatter Chart Coordinate Calculation ===")
+            print(f"Canvas: {CANVAS_FORMATS.get(canvas, {}).get('dimensions', canvas)}")
+            print(calc.format_table(points))
+
+        elif args.chart_type == 'grid':
+            canvas = args.canvas if hasattr(args, 'canvas') else 'ppt169'
+            coord = CoordinateSystem(canvas, chart_area)
+            calc = GridLayoutCalculator(coord)

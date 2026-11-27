@@ -1,0 +1,106 @@
+                raise ValueError(f'{field} must be a boolean: {value!r}')
+            normalized[name] = value
+        elif option_type == 'color':
+            normalized[name] = _normalize_animation_color(value, field)
+        else:
+            raise AssertionError(f'unhandled animation effect option type: {option_type}')
+    return normalized
+
+
+def normalize_animation_effect_request(
+    effect: object,
+    options: object = None,
+    *,
+    allow_none: bool = True,
+    allow_modes: bool = True,
+) -> tuple[str | None, dict[str, object]]:
+    """Normalize one effect plus options, including legacy semantic aliases."""
+    raw_effect = effect
+    canonical = normalize_animation_effect(
+        effect,
+        allow_none=allow_none,
+        allow_modes=allow_modes,
+    )
+    alias_options = (
+        ANIMATION_ALIAS_OPTIONS.get(raw_effect, {})
+        if isinstance(raw_effect, str)
+        else {}
+    )
+    explicit_options: Mapping[str, object]
+    if options is None:
+        explicit_options = {}
+    elif isinstance(options, Mapping):
+        explicit_options = options
+    else:
+        raise ValueError(f'animation effect_options must be an object: {options!r}')
+    for name, alias_value in alias_options.items():
+        if name in explicit_options and explicit_options[name] != alias_value:
+            raise ValueError(
+                f'legacy animation effect {raw_effect!r} implies '
+                f'effect_options.{name}={alias_value!r}, which conflicts with '
+                f'{explicit_options[name]!r}'
+            )
+    merged = {**alias_options, **explicit_options}
+    if canonical is None or canonical in ANIMATION_MODES:
+        if merged:
+            raise ValueError(
+                'animation effect_options require one explicit canonical effect; '
+                f'found {canonical or "none"!r}'
+            )
+        return canonical, {}
+    return canonical, normalize_animation_effect_options(canonical, merged)
+
+
+def normalize_animation_trigger(trigger: object) -> str:
+    """Return a supported PowerPoint Start mode or raise a precise error."""
+    if not isinstance(trigger, str):
+        raise ValueError(f'animation trigger must be a string: {trigger!r}')
+    if trigger not in ANIMATION_TRIGGERS:
+        raise ValueError(
+            f'unknown animation trigger {trigger!r}; valid triggers: '
+            f'{", ".join(ANIMATION_TRIGGERS)}'
+        )
+    return trigger
+
+
+def _seconds_to_ms(value: object, field: str, *, allow_zero: bool) -> int:
+    seconds = validate_seconds(value, field, allow_zero=allow_zero)
+    raw_milliseconds = seconds * 1000
+    if (
+        not math.isfinite(raw_milliseconds)
+        or raw_milliseconds > MAX_OOXML_MILLISECONDS
+    ):
+        raise ValueError(f'{field} exceeds the OOXML millisecond limit: {value!r}')
+    milliseconds = int(raw_milliseconds)
+    return milliseconds if allow_zero else max(1, milliseconds)
+
+
+def animation_seconds_to_milliseconds(
+    value: object,
+    field: str,
+    *,
+    allow_zero: bool,
+) -> int:
+    """Convert validated animation seconds to the OOXML millisecond range."""
+    return _seconds_to_ms(value, field, allow_zero=allow_zero)
+
+
+def _positive_shape_id(value: object, field: str = 'animation shape_id') -> int:
+    if isinstance(value, bool):
+        raise ValueError(f'{field} must be a positive integer: {value!r}')
+    if isinstance(value, int):
+        shape_id = value
+    elif isinstance(value, str) and re.fullmatch(r'[1-9]\d*', value):
+        shape_id = int(value)
+    else:
+        raise ValueError(f'{field} must be a positive integer: {value!r}')
+    if shape_id <= 0 or shape_id > MAX_OOXML_UNSIGNED_INT:
+        raise ValueError(f'{field} must be a positive integer: {value!r}')
+    return shape_id
+
+
+def _non_negative_milliseconds(value: object, field: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f'{field} must be a non-negative integer: {value!r}')
+    if isinstance(value, int):
+        milliseconds = value

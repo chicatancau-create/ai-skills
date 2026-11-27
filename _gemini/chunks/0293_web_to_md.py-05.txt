@@ -1,0 +1,112 @@
+    if body_chars > page_chars * BODY_SHORTFALL_RATIO:
+        return None
+    return (
+        f"body extraction kept {body_chars} characters while the page shows "
+        f"{page_chars}; the content container was not recognised, so verify "
+        "the Markdown against the page before using it as a source"
+    )
+
+
+def _decode_quality_score(text: str) -> int:
+    """Score obvious decode artifacts; lower is better."""
+    mojibake_markers = [
+        "�", "锟", "Ã", "Â", "â€", "â€™", "â€œ", "â€\x9d",
+        "琚", "佸", "鍦", "涓", "鏄", "寤", "骞", "鏈", "鏃", "鈥",
+    ]
+    marker_hits = sum(text.count(marker) for marker in mojibake_markers)
+    control_hits = sum(1 for ch in text if ord(ch) < 32 and ch not in "\t\n\r")
+    return marker_hits * 20 + control_hits * 10 + text.count("\ufffd") * 50
+
+
+def _decode_response_text(response) -> str:
+    """Decode HTTP response bytes without letting guessed encodings override declarations."""
+    raw = response.content
+    declared = [
+        _charset_from_headers(response.headers),
+        _charset_from_html(raw),
+    ]
+    if raw.startswith(codecs.BOM_UTF8):
+        declared.insert(0, "utf-8-sig")
+
+    seen = set()
+    declared = [enc for enc in declared if enc and not (enc in seen or seen.add(enc))]
+    for enc in declared:
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+
+    candidates = []
+    for enc in [
+        getattr(response, "encoding", None),
+        getattr(response, "apparent_encoding", None),
+        "utf-8",
+        "gb18030",
+        "big5",
+    ]:
+        enc = _normalize_charset(enc)
+        if enc and enc not in candidates:
+            candidates.append(enc)
+
+    decoded = []
+    for enc in candidates:
+        try:
+            text = raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+        decoded.append((_decode_quality_score(text), enc, text))
+
+    if decoded:
+        decoded.sort(key=lambda item: item[0])
+        return decoded[0][2]
+
+    # Every strict decode failed: the page carries a few bad bytes. Keep the
+    # declared charset in the running instead of dropping to UTF-8, and let
+    # the artifact score pick the lossy decode that damages the least text.
+    lossy = []
+    for enc in declared + [enc for enc in candidates if enc not in declared]:
+        try:
+            text = raw.decode(enc, errors="replace")
+        except LookupError:
+            continue
+        lossy.append((_decode_quality_score(text), enc, text))
+    if lossy:
+        lossy.sort(key=lambda item: item[0])
+        return lossy[0][2]
+    return raw.decode("utf-8", errors="replace")
+
+try:
+    from PIL import Image, ImageOps
+    PILLOW_AVAILABLE = True
+except ImportError:
+    PILLOW_AVAILABLE = False
+    if not _HELP_REQUESTED:
+        print("[WARN] Pillow not installed. WebP images will not be converted to PNG.", file=sys.stderr)
+        print("       Run: pip install Pillow", file=sys.stderr)
+
+# ============ Config ============
+CONFIG = {
+    "output_dir": "./projects",
+    "timeout": 30,
+    "insecure": False,
+    "allow_private_hosts": False,
+    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    # Specific content identifiers often found in Chinese CMS (Gov/News)
+    "content_selectors": [
+        {"class_": re.compile(r"tys-main-zt-show", re.I)},
+        {"class_": re.compile(r"tys-main", re.I)},
+        {"class_": "TRS_Editor"},
+        {"class_": "TRS_UEDITOR"},
+        {"class_": "ucontent"},
+        {"class_": "article-content"},
+        {"class_": "news-content"},
+        {"class_": "detail-content"},
+        {"class_": "content-text"},
+        {"class_": "pages_content"},
+        {"class_": "zwgk_content"},
+        {"class_": "content_detail"},
+        {"class_": "text_content"},
+        {"class_": "main-content"},
+        {"class_": "main_content"},
+        {"class_": "view-content"},
+        {"class_": "info-content"},

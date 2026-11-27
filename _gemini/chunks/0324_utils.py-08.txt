@@ -1,0 +1,114 @@
+            raise ValueError(
+                f'SVG transform {name!r} has {len(values)} argument(s); '
+                f'expected {expected}'
+            )
+        operations.append((name, values))
+        number_tokens.extend(tokens)
+        cursor = match.end()
+
+    trailing = transform_str[cursor:]
+    if _TRANSFORM_WHITESPACE_RE.fullmatch(trailing) is None:
+        raise ValueError(
+            f'Invalid SVG transform trailing syntax at offset {cursor}: '
+            f'{trailing!r}'
+        )
+
+    return tuple(operations), tuple(number_tokens)
+
+
+def parse_transform_operations(
+    transform_str: str,
+) -> tuple[tuple[str, tuple[float, ...]], ...]:
+    """Parse one complete supported SVG transform list."""
+    operations, _ = _parse_transform_operations(transform_str)
+    return operations
+
+
+def noncanonical_transform_numbers(transform_str: str) -> tuple[str, ...]:
+    """Return compatible transform numbers generated SVG should normalize."""
+    _, tokens = _parse_transform_operations(transform_str)
+    return tuple(
+        token
+        for token in tokens
+        if _CANONICAL_TRANSFORM_NUMBER_RE.fullmatch(token) is None
+    )
+
+
+def _transform_operations_matrix(
+    operations: tuple[tuple[str, tuple[float, ...]], ...],
+) -> AffineMatrix:
+    matrix = IDENTITY_MATRIX
+    for name, args in operations:
+        if name == 'matrix':
+            local = (args[0], args[1], args[2], args[3], args[4], args[5])
+        elif name == 'translate':
+            local = _translate_matrix(
+                args[0],
+                args[1] if len(args) > 1 else 0.0,
+            )
+        elif name == 'scale':
+            local = _scale_matrix(
+                args[0],
+                args[1] if len(args) > 1 else None,
+            )
+        else:
+            local = _rotate_matrix(
+                args[0],
+                args[1] if len(args) > 2 else None,
+                args[2] if len(args) > 2 else None,
+            )
+        matrix = matrix_multiply(matrix, local)
+    return matrix
+
+
+def parse_transform_matrix(transform_str: str) -> AffineMatrix:
+    """Parse a complete SVG transform list into one affine matrix.
+
+    Unsupported or malformed operations fail closed.  Treating an unknown
+    operation as the identity would silently discard a visible SVG edit.
+    """
+    if not transform_str:
+        return IDENTITY_MATRIX
+    return _transform_operations_matrix(parse_transform_operations(transform_str))
+
+
+def transform_point(matrix: AffineMatrix, x: float, y: float) -> tuple[float, float]:
+    """Apply an SVG affine matrix to a point."""
+    a, b, c, d, e, f = matrix
+    return a * x + c * y + e, b * x + d * y + f
+
+
+def validate_dml_shape_matrix(matrix: AffineMatrix) -> None:
+    """Reject affine shear that a DrawingML shape transform cannot express."""
+    if not all(math.isfinite(value) for value in matrix):
+        raise ValueError('SVG transform produces non-finite matrix values')
+    a, b, c, d, _e, _f = matrix
+    x_length = math.hypot(a, b)
+    y_length = math.hypot(c, d)
+    if not math.isfinite(x_length) or not math.isfinite(y_length):
+        raise ValueError('SVG transform produces non-finite axis lengths')
+    if x_length <= 1e-12 or y_length <= 1e-12:
+        raise ValueError(
+            'SVG zero-scale transform cannot be represented by a visible '
+            'DrawingML shape'
+        )
+    normalized_dot = (
+        (a / x_length) * (c / y_length)
+        + (b / x_length) * (d / y_length)
+    )
+    if not math.isfinite(normalized_dot) or abs(normalized_dot) > 1e-9:
+        raise ValueError(
+            'SVG shear/skew cannot be represented by a DrawingML '
+            'shape transform'
+        )
+
+
+def _svg_element_tag(elem: ET.Element) -> str | None:
+    raw_tag = str(elem.tag)
+    if raw_tag.startswith('{'):
+        namespace, tag = raw_tag[1:].split('}', 1)
+        return tag if namespace == SVG_NS else None
+    return raw_tag
+
+
+def _transform_element_label(elem: ET.Element) -> str:

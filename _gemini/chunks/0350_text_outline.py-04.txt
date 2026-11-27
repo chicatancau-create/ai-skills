@@ -1,0 +1,125 @@
+            f"{_element_label(element)} uses text decoration; materialize the "
+            "decoration separately before Shape Boolean"
+        )
+
+    stroke = _effective_property(chain, "stroke")
+    if stroke is not None and stroke.strip().lower() not in {
+        "",
+        "inherit",
+        "none",
+        "transparent",
+    }:
+        raise ValueError(
+            f"{_element_label(element)} uses a visible text stroke; Shape "
+            "Boolean materializes the filled glyph silhouette only"
+        )
+
+
+def _normalized_direct_text(
+    element: ET.Element,
+    chain: Sequence[ET.Element],
+) -> str:
+    xml_space = "default"
+    for current in chain:
+        try:
+            xml_space = resolve_project_xml_space(current, xml_space)
+        except ValueError as exc:
+            raise ValueError(
+                f"{_element_label(current)} xml:space: {exc}"
+            ) from exc
+    segments = normalize_project_text_segments([
+        (xml_space, element.text or ""),
+    ])
+    return "".join(text for _owner, text in segments)
+
+
+def _resolve_text_style(chain: Sequence[ET.Element]) -> _TextStyle:
+    font_size = 16.0
+    root_font_size = 16.0
+    letter_spacing = 0.0
+    family_value = "sans-serif"
+    weight_value = "normal"
+    style_value = "normal"
+    anchor_value = "start"
+
+    for index, current in enumerate(chain):
+        inline = parse_inline_style(current.get("style"))
+        raw_size = inline.get("font-size", current.get("font-size"))
+        if raw_size is not None and raw_size.strip().lower() != "inherit":
+            relative_base = (
+                root_font_size
+                if raw_size.strip().lower().endswith("rem")
+                else font_size
+            )
+            try:
+                font_size = parse_svg_length(
+                    raw_size,
+                    font_size,
+                    font_size=relative_base,
+                )
+                font_px_to_hpt(font_size)
+            except ValueError as exc:
+                raise ValueError(
+                    f"{_element_label(current)} font-size={raw_size!r}: {exc}"
+                ) from exc
+        if index == 0:
+            root_font_size = font_size
+
+        raw_spacing = inline.get(
+            "letter-spacing",
+            current.get("letter-spacing"),
+        )
+        if raw_spacing is not None and raw_spacing.strip().lower() != "inherit":
+            try:
+                letter_spacing = float(parse_project_letter_spacing(
+                    raw_spacing,
+                    font_size=font_size,
+                ).value)
+            except ValueError as exc:
+                raise ValueError(
+                    f"{_element_label(current)} "
+                    f"letter-spacing={raw_spacing!r}: {exc}"
+                ) from exc
+
+        family_value = _updated_property(
+            current,
+            inline,
+            "font-family",
+            family_value,
+        )
+        weight_value = _updated_property(
+            current,
+            inline,
+            "font-weight",
+            weight_value,
+        )
+        style_value = _updated_property(
+            current,
+            inline,
+            "font-style",
+            style_value,
+        )
+        anchor_value = _updated_property(
+            current,
+            inline,
+            "text-anchor",
+            anchor_value,
+        )
+
+    families = _parse_font_family_stack(family_value)
+    try:
+        parsed_weight = parse_project_font_weight(weight_value)
+        parsed_style = parse_project_font_style(style_value)
+        parsed_anchor = parse_project_text_anchor(anchor_value)
+    except ValueError as exc:
+        raise ValueError(
+            f"{_element_label(chain[-1])} has invalid text typography: {exc}"
+        ) from exc
+    weight = {
+        "normal": 400,
+        "bold": 700,
+    }.get(parsed_weight.canonical)
+    if weight is None:
+        weight = int(parsed_weight.canonical)
+    return _TextStyle(
+        families=families,

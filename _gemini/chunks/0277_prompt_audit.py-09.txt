@@ -1,0 +1,108 @@
+    """Find heuristic near-duplicate paragraph candidates using word shingles."""
+    shingle_size = int(config.get("shingle_words", 4))
+    minimum_words = int(config.get("min_words", 20))
+    minimum_hits = int(config.get("min_shared_shingles", 3))
+    max_frequency = int(config.get("max_shingle_frequency", 24))
+    threshold = float(config.get("near_similarity", 0.82))
+
+    eligible = [item for item in paragraphs if len(item.words) >= minimum_words]
+    shingle_sets: list[set[tuple[str, ...]]] = []
+    inverted: dict[tuple[str, ...], list[int]] = defaultdict(list)
+    for index, paragraph in enumerate(eligible):
+        shingles = {
+            paragraph.words[offset : offset + shingle_size]
+            for offset in range(len(paragraph.words) - shingle_size + 1)
+        }
+        shingle_sets.append(shingles)
+        for shingle in shingles:
+            inverted[shingle].append(index)
+
+    hits: Counter[tuple[int, int]] = Counter()
+    for indices in inverted.values():
+        if len(indices) > max_frequency:
+            continue
+        for left_offset, left in enumerate(indices):
+            for right in indices[left_offset + 1 :]:
+                if eligible[left].path != eligible[right].path:
+                    hits[(left, right)] += 1
+
+    candidates: list[dict[str, Any]] = []
+    for (left, right), shared in hits.items():
+        if shared < minimum_hits:
+            continue
+        first = eligible[left]
+        second = eligible[right]
+        if first.normalized == second.normalized:
+            continue
+        union = shingle_sets[left] | shingle_sets[right]
+        if not union or shared / len(union) < 0.18:
+            continue
+        similarity = SequenceMatcher(
+            None,
+            first.normalized,
+            second.normalized,
+            autojunk=False,
+        ).ratio()
+        if similarity < threshold:
+            continue
+        candidates.append(
+            {
+                "kind": "near",
+                "fingerprint": _duplicate_fingerprint(first.text, second.text),
+                "paths": sorted((first.path, second.path)),
+                "similarity": round(similarity, 4),
+                "left": {"path": first.path, "line": first.line},
+                "right": {"path": second.path, "line": second.line},
+                "preview": first.normalized[:180],
+            }
+        )
+
+    candidates.sort(
+        key=lambda item: (
+            -item["similarity"],
+            item["left"]["path"],
+            item["left"]["line"],
+            item["right"]["path"],
+            item["right"]["line"],
+        )
+    )
+    return candidates, len(candidates)
+
+
+def _clean_link_target(raw: str) -> str:
+    target = raw.strip()
+    if target.startswith("<") and ">" in target:
+        target = target[1 : target.index(">")]
+    elif " " in target:
+        target = target.split(" ", 1)[0]
+    return unquote(target.strip())
+
+
+def extract_references(
+    root: Path,
+    documents: list[Document],
+) -> tuple[list[ReferenceEdge], list[Finding]]:
+    """Extract local Markdown links and report missing targets."""
+    edges: list[ReferenceEdge] = []
+    findings: list[Finding] = []
+
+    for document in documents:
+        if not document.path.endswith(".md"):
+            continue
+        in_fence = False
+        for line_number, line in enumerate(document.text.splitlines(), start=1):
+            if _FENCE_RE.match(line):
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                continue
+            for match in _MARKDOWN_LINK_RE.finditer(line):
+                raw_target = _clean_link_target(match.group(1))
+                if (
+                    not raw_target
+                    or raw_target.startswith("#")
+                    or raw_target.startswith(_EXTERNAL_SCHEMES)
+                    or "${" in raw_target
+                    or "<" in raw_target
+                ):
+                    continue

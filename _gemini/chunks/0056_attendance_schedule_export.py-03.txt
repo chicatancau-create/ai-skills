@@ -1,0 +1,86 @@
+        print("-" * len(header_line))
+        for row in rows[:preview_rows]:
+            line = f"{row[0]:<10}" + "".join(
+                f"{cell:<8}" for cell in row[1:preview_cols + 1]
+            )
+            print(line)
+        if len(date_range) > preview_cols:
+            print(f"   ... 共 {len(date_range)} 天，完整数据见 Excel")
+        if len(rows) > preview_rows:
+            print(f"   ... 共 {len(rows)} 人，完整数据见 Excel")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="考勤排班查询导出（排班表格式）",
+        epilog="执行前必须阅读 attendance-schedule.md",
+    )
+    parser.add_argument("--users", required=True, help="userId 列表，逗号分隔（必填）")
+    parser.add_argument("--start", required=True, help="开始日期 YYYY-MM-DD（必填）")
+    parser.add_argument("--end", required=True, help="结束日期 YYYY-MM-DD（必填）")
+    parser.add_argument("--output", default="", help="输出文件路径（可选）")
+    args = parser.parse_args()
+
+    # ── 解析参数 ──
+    user_ids = [uid.strip() for uid in args.users.split(",") if uid.strip()]
+    if not user_ids:
+        error("--users 不能为空")
+        raise SystemExit(1)
+
+    try:
+        start_dt = parse_datetime_arg(args.start)
+        end_dt = parse_datetime_arg(args.end, end_of_day=True)
+    except ValueError as exc:
+        error(str(exc))
+        raise SystemExit(1) from exc
+
+    start_date = start_dt.strftime(DATE_FMT)
+    end_date = end_dt.strftime(DATE_FMT)
+
+    if end_dt < start_dt:
+        error(f"结束日期 {end_date} 早于开始日期 {start_date}")
+        raise SystemExit(1)
+
+    output_path = args.output or f"attendance_schedule_{start_date}_{end_date}.xlsx"
+
+    log(f"🗓️ 排班查询: {len(user_ids)} 人, {start_date} ~ {end_date}")
+
+    # ── 阶段 1: 查询排班记录（分批） ──
+    records = fetch_all_schedules(user_ids, start_date, end_date)
+    if not records:
+        print(f"⚠️ 未查询到排班记录 ({start_date} ~ {end_date})")
+        return
+
+    # ── 阶段 2: 构建班次名称映射 ──
+    class_map = build_class_name_map(records)
+
+    # ── 阶段 3: 解析员工姓名 ──
+    user_names = resolve_user_names(user_ids)
+
+    # ── 阶段 4: 生成日期范围 & 构建排班表 ──
+    date_range = generate_date_range(start_dt, end_dt)
+    headers, rows = build_schedule_table(
+        records, user_ids, user_names, class_map, date_range,
+    )
+
+    # ── 阶段 5: 输出 Excel ──
+    title = f"排班表  {start_date} 至 {end_date}"
+    subtitle = f"生成时间：{datetime.now().strftime(DATETIME_FMT)}  共 {len(rows)} 人"
+
+    write_excel(
+        output_path,
+        headers,
+        rows,
+        sheet_name="排班表",
+        title=title,
+        subtitle=subtitle,
+    )
+
+    log(f"📄 Excel 已保存: {os.path.abspath(output_path)}")
+
+    # ── 阶段 6: 输出摘要 ──
+    print_summary(rows, date_range, output_path, len(records))
+
+
+if __name__ == "__main__":
+    main()

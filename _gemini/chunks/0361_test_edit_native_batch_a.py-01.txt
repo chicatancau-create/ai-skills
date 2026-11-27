@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Regress Edit Native motion, narration, and notes overlays on small native decks.
+
+Usage: python3 -m unittest tests.test_edit_native_batch_a
+Dependencies: python-pptx and the converter's normal dependencies.
+"""
+
+from __future__ import annotations
+
+import copy
+import io
+import json
+import posixpath
+import sys
+import tempfile
+import unittest
+import wave
+import zipfile
+from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
+from unittest.mock import patch
+from xml.etree import ElementTree as ET
+
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from pptx import Presentation  # noqa: E402
+from pptx.enum.shapes import MSO_SHAPE  # noqa: E402
+from pptx.util import Inches  # noqa: E402
+
+from pptx_animations import create_sequence_timing_xml  # noqa: E402
+import notes_to_audio  # noqa: E402
+from pptx_delivery_check import audit_pptx_delivery  # noqa: E402
+from pptx_to_svg.converter import ConvertOptions, convert_pptx_to_svg  # noqa: E402
+from svg_to_pptx.pptx_package import cli, narration  # noqa: E402
+from svg_to_pptx.pptx_package.discovery import find_notes_files  # noqa: E402
+
+NS = {
+    'p': 'http://schemas.openxmlformats.org/presentationml/2006/main',
+    'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
+    'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
+    'rel': 'http://schemas.openxmlformats.org/package/2006/relationships',
+}
+MINIMAL_TIMING = (
+    '<p:timing><p:tnLst><p:par><p:cTn id="1" dur="indefinite" '
+    'restart="never" nodeType="tmRoot"/></p:par></p:tnLst></p:timing>'
+)
+
+
+def _fragment(xml: str) -> ET.Element:
+    wrapped = '<root ' + ' '.join(f'xmlns:{k}="{v}"' for k, v in NS.items()) + '>'
+    return ET.fromstring(wrapped + xml + '</root>')[0]
+
+
+def _note(archive: zipfile.ZipFile, slide: int) -> tuple[str | None, str]:
+    part = f'ppt/slides/slide{slide}.xml'
+    rels = ET.fromstring(archive.read(f'ppt/slides/_rels/slide{slide}.xml.rels'))
+    for rel in rels:
+        if rel.get('Type', '').endswith('/notesSlide'):
+            target = posixpath.normpath(posixpath.join(posixpath.dirname(part), rel.get('Target')))
+            root = ET.fromstring(archive.read(target))
+            return target, ' '.join(node.text or '' for node in root.findall('.//a:t', NS))
+    return None, ''
+
+
+class EditNativeBatchATests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+
+    def _source(self, *, count: int = 1, timing: str = '', advance: bool = False,
+                notes: tuple[int, ...] = ()) -> Path:
+        prs = Presentation()
+        for number in range(1, count + 1):
+            slide = prs.slides.add_slide(prs.slide_layouts[6])
+            slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(1), Inches(1), Inches(2), Inches(1))
+            if number in notes:
+                slide.notes_slide.notes_text_frame.text = f'Original note for source {number}'
+            transition = _fragment('<p:transition spd="med"><p:random/></p:transition>')
+            if advance:
+                transition.set('advClick', '0')
+                transition.set('advTm', '4200')
+            # python-pptx uses lxml; append through its own parser.
+            from pptx.oxml import parse_xml
+            slide._element.append(parse_xml(ET.tostring(transition)))
+            if timing:
+                slide._element.append(parse_xml(ET.tostring(_fragment(timing))))
+        source = self.root / 'source.pptx'
+        prs.save(source)
+        return source
+
+    def _import(self, source: Path, name: str = 'workspace') -> Path:
+        project = self.root / name
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):

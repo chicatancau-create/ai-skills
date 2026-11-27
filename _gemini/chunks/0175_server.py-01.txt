@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""
+PPT Master - Template and Strategist confirmation UI Server (Steps 3-4)
+
+Lightweight Flask backend for the Default template choice and interactive
+Strategist confirmation page. Stage 1 combines template selection with the
+communication contract; its submit writes ``template_selection.json`` and the
+stage1-confirmed ``result.json`` in one request. After the agent applies the
+choice, the server verifies ``template_install.json``, final Stage 2 confirms the deck
+solution and production plan.
+
+This is the default confirmation surface. The chat fallback is used only when
+the user explicitly requests chat-only confirmation or the browser launch
+fails; it preserves the same staged semantics.
+
+See scripts/docs/confirm_ui.md for the round-trip data contract and schema.
+
+Usage:
+    python3 scripts/confirm_ui/server.py <project_dir>
+
+Examples:
+    python3 scripts/confirm_ui/server.py projects/my-project
+    python3 scripts/confirm_ui/server.py projects/my-project --port 5051
+    python3 scripts/confirm_ui/server.py projects/my-project --no-browser
+    python3 scripts/confirm_ui/server.py projects/my-project --daemon
+    python3 scripts/confirm_ui/server.py projects/my-project --wait-only --wait-stage stage1
+
+Dependencies:
+    flask>=3.0.0
+"""
+
+import argparse
+import atexit
+import hashlib
+import json
+import logging
+import os
+import re
+import signal
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Optional
+
+from flask import Flask, jsonify, request, send_from_directory
+
+# Local — sys.path injection for sibling module (code-style.md §3)
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from console_encoding import configure_utf8_stdio  # noqa: E402
+from language_tags import (  # noqa: E402
+    LanguageTagError,
+    language_base,
+    normalize_language_tag,
+)
+from server_common import (  # noqa: E402
+    claim_lock as _claim_lock,
+    clear_lock as _clear_lock,
+    find_free_port as _find_free_port,
+    lock_pid as _lock_pid,
+    open_preview_browser,
+    popen_detached as _popen_detached,
+    process_alive as _process_alive,
+    read_lock as _read_lock,
+    release_lock as _release_lock,
+    validate_port as _validate_port,
+)
+
+configure_utf8_stdio()
+
+logger = logging.getLogger('confirm_ui')
+
+# Per-project lock file. Lives at <project_path>/.confirm_ui.lock and matches
+# the *.lock entry already in the repo .gitignore. Independent of the live
+# preview lock so the two surfaces never collide.
+LOCK_FILE_NAME = '.confirm_ui.lock'
+
+# Round-trip/session files, all under <project_path>/confirm_ui/.
+CONFIRM_DIR_NAME = 'confirm_ui'
+RECOMMENDATION_STAGE_NAMES = {
+    1: 'recommendations.stage1.json',
+    2: 'recommendations.stage2.json',
+}
+RESULT_NAME = 'result.json'
+SESSION_NAME = 'session.json'
+TEMPLATE_OPTIONS_LABEL = 'recommendations.stage1.json template_options'
+TEMPLATE_SELECTION_NAME = 'template_selection.json'
+TEMPLATE_SCHEMA_VERSION = 1
+
+_PALETTE_ROLES = (
+    'background',
+    'secondary_bg',
+    'primary',
+    'accent',
+    'secondary_accent',
+    'body_text',
+)
+_TYPOGRAPHY_SIZE_ROLES = ('title', 'subtitle', 'annotation')
+_DESIGN_SPEC_DEPTH_VALUES = {'brief', 'complete'}
+_HEX_COLOR_RE = re.compile(r'#?(?:[0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})\Z')
+
+# Static option universe served at /api/catalogs (canvas synced live from config).
+_SKILL_DIR = Path(__file__).resolve().parents[2]
+_TEMPLATES_DIR = _SKILL_DIR / 'templates'
+_CATALOGS_PATH = Path(__file__).resolve().parent / 'static' / 'catalogs.json'
+_ICON_LIBRARY_DIR = _TEMPLATES_DIR / 'icons'
+_AI_IMAGE_COMPARISON_DIR = _SKILL_DIR / 'references' / 'ai-image-comparison'
+_TEMPLATE_LIBRARY_CONFIG = {
+    'brand': ('brands', 'brands_index.json'),
+    'style': ('styles', 'styles_index.json'),
+    'layout': ('layouts', 'layouts_index.json'),
+    'deck': ('decks', 'decks_index.json'),

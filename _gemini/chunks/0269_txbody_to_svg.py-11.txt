@@ -1,0 +1,119 @@
+    bu_char = _child_chain(sources, "a:buChar")
+    if bu_char is not None:
+        ch = bu_char.attrib.get("char", "•")
+        bu_font = _child_chain(sources, "a:buFont")
+        typeface = bu_font.attrib.get("typeface", "") if bu_font is not None else ""
+        if typeface.casefold() == "wingdings" and ch == "l":
+            ch = "●"
+        return f"{ch} "
+    bu_auto = _child_chain(sources, "a:buAutoNum")
+    if bu_auto is not None:
+        start_at = bu_auto.attrib.get("startAt")
+        if start_at is not None:
+            try:
+                autonum_state[level] = int(start_at)
+            except ValueError:
+                autonum_state[level] = 1
+        else:
+            autonum_state[level] = autonum_state.get(level, 0) + 1
+        return _format_auto_number(
+            autonum_state[level],
+            bu_auto.attrib.get("type", "arabicPeriod"),
+        )
+    return ""
+
+
+def _resolve_bullet_fill(
+    sources: tuple[ET.Element | None, ...],
+    palette: ColorPalette | None,
+) -> tuple[str | None, float]:
+    """Resolve an explicit DrawingML bullet color independently of text."""
+    bu_clr = _child_chain(sources, "a:buClr")
+    if bu_clr is None:
+        return None, 1.0
+    color_elem = find_color_elem(bu_clr)
+    color, opacity = resolve_color(color_elem, palette)
+    return color, opacity
+
+
+def _format_auto_number(value: int, kind: str) -> str:
+    lower = kind.lower()
+    if "alphalc" in lower:
+        token = _alpha_number(value, uppercase=False)
+    elif "alphauc" in lower:
+        token = _alpha_number(value, uppercase=True)
+    elif "romanlc" in lower:
+        token = _roman_number(value).lower()
+    elif "romanuc" in lower:
+        token = _roman_number(value).upper()
+    else:
+        token = str(value)
+
+    if "parenboth" in lower:
+        return f"({token}) "
+    if "parenr" in lower:
+        return f"{token}) "
+    if "period" in lower:
+        return f"{token}. "
+    return f"{token} "
+
+
+def _alpha_number(value: int, *, uppercase: bool) -> str:
+    value = max(1, value)
+    chars: list[str] = []
+    while value:
+        value -= 1
+        chars.append(chr(ord("A") + (value % 26)))
+        value //= 26
+    text = "".join(reversed(chars))
+    return text if uppercase else text.lower()
+
+
+def _roman_number(value: int) -> str:
+    value = max(1, min(value, 3999))
+    parts: list[str] = []
+    for n, token in (
+        (1000, "M"), (900, "CM"), (500, "D"), (400, "CD"),
+        (100, "C"), (90, "XC"), (50, "L"), (40, "XL"),
+        (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I"),
+    ):
+        while value >= n:
+            parts.append(token)
+            value -= n
+    return "".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Layout / emission
+# ---------------------------------------------------------------------------
+
+def _has_visible_text(paragraphs: list[TextParagraph]) -> bool:
+    for p in paragraphs:
+        for r in p.runs:
+            # Structured export writes U+200B only to keep a visually blank
+            # placeholder carrier alive in DrawingML. Restore that transport
+            # sentinel to an empty SVG carrier on re-import.
+            if r.text.replace("\u200b", "").strip():
+                return True
+    return False
+
+
+def _collect_text_defs(paragraphs: list[TextParagraph]) -> list[str]:
+    """Return unique text fill defs referenced by parsed runs."""
+    defs: list[str] = []
+    seen: set[str] = set()
+    for para in paragraphs:
+        for run in para.runs:
+            for item in run.defs:
+                if item not in seen:
+                    defs.append(item)
+                    seen.add(item)
+    return defs
+
+
+# ---------------------------------------------------------------------------
+# Word-wrap / text measurement
+# ---------------------------------------------------------------------------
+
+def _is_cjk(ch: str) -> bool:
+    """Check if a character is CJK (Chinese/Japanese/Korean) or full-width."""

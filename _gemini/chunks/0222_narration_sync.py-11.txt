@@ -1,0 +1,86 @@
+        if plan_entries is not None:
+            for entry in plan_entries:
+                if entry.group_id not in state_ids:
+                    raise ValueError(
+                        f'Narration timing plan references a non-animated group: '
+                        f"{slide_name}/{entry.group_id}"
+                    )
+                if entry.cue_number is not None and entry.cue_number > len(cues):
+                    raise ValueError(
+                        f'Narration timing plan "{slide_name}/{entry.group_id}" '
+                        f"references cue {entry.cue_number}, but the SRT has "
+                        f"{len(cues)} cues"
+                    )
+                cue_by_group[entry.group_id] = entry.cue_number
+        else:
+            ordered_group_ids = list(
+                dict.fromkeys(state.group_id for state in states)
+            )
+            cue_by_group = {
+                group_id: index + 1 if index < len(cues) else None
+                for index, group_id in enumerate(ordered_group_ids)
+            }
+
+        animation_value = derived_slide.setdefault("animation", {})
+        if not isinstance(animation_value, dict):
+            raise ValueError(
+                f'Derived animation slide "{slide_name}" animation must be an object'
+            )
+        animation_value["trigger"] = "after-previous"
+        groups_value = derived_slide.setdefault("groups", {})
+        if not isinstance(groups_value, dict):
+            raise ValueError(
+                f'Derived animation slide "{slide_name}" groups must be an object'
+            )
+
+        # Start modes are row-relative; slide completion spans overlapping rows.
+        previous_start_ms = 0
+        previous_row_end_ms = 0
+        timeline_end_ms = 0
+        has_previous_row = False
+        referenced_cues: set[int] = set()
+        seen_groups: set[str] = set()
+        for state in states:
+            first_group_effect = state.group_id not in seen_groups
+            seen_groups.add(state.group_id)
+            cue_number = (
+                cue_by_group.get(state.group_id)
+                if first_group_effect
+                else None
+            )
+            if not has_previous_row:
+                sequence_base_ms = 0
+            elif state.trigger == "with-previous":
+                sequence_base_ms = previous_start_ms
+            else:
+                sequence_base_ms = previous_row_end_ms
+            if cue_number is None:
+                if first_group_effect:
+                    fallback_count += 1
+                delay_ms = state.original_delay_ms
+                actual_start_ms = sequence_base_ms + delay_ms
+            else:
+                anchored_count += 1
+                referenced_cues.add(cue_number)
+                cue_start_ms = cues[cue_number - 1].start_ms
+                desired_start_ms = narration_lead_in_ms + cue_start_ms
+                actual_start_ms = max(desired_start_ms, sequence_base_ms)
+                delay_ms = actual_start_ms - sequence_base_ms
+                drift_ms = actual_start_ms - desired_start_ms
+                if drift_ms > 500:
+                    drift_warnings.append(
+                        f"{slide_name}/{state.group_id}: cue {cue_number} "
+                        f"starts at {_seconds_from_ms(cue_start_ms):.3f}s after "
+                        f"a {_seconds_from_ms(narration_lead_in_ms):.3f}s lead-in; "
+                        f"animation starts at {_seconds_from_ms(actual_start_ms):.3f}s "
+                        f"({state.trigger} drift "
+                        f"{_seconds_from_ms(drift_ms):.3f}s)"
+                    )
+
+            group_value = groups_value.setdefault(state.group_id, {})
+            if not isinstance(group_value, dict):
+                raise ValueError(
+                    f'Derived animation group "{slide_name}/{state.group_id}" '
+                    "must be an object"
+                )
+            if state.effect_index is None:

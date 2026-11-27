@@ -1,0 +1,149 @@
+    assert response.status_code == 401
+
+def test_create_order_empty_items(client, auth_headers):
+    response = client.post("/api/orders", json={"items": []}, headers=auth_headers)
+    assert response.status_code == 422
+```
+
+---
+
+## 2. Database Testing (HIGH)
+
+### Test Isolation Strategies
+
+| Strategy | Speed | Realism | When |
+|----------|-------|---------|------|
+| **Transaction rollback** | ⚡ Fastest | Medium | Default for unit + integration |
+| **Truncation** | Fast | High | When rollback isn't possible |
+| **Test containers** | Slow startup | Highest | CI pipeline, full integration |
+
+**Transaction rollback (recommended default):**
+```typescript
+let tx: Transaction;
+beforeEach(async () => { tx = await db.beginTransaction(); });
+afterEach(async () => { await tx.rollback(); });
+```
+
+**Docker test containers (CI):**
+```yaml
+# docker-compose.test.yml
+services:
+  test-db:
+    image: postgres:16-alpine
+    tmpfs: /var/lib/postgresql/data   # RAM disk for speed
+    environment:
+      POSTGRES_DB: myapp_test
+```
+
+### Test Factories (Not Raw SQL)
+
+```typescript
+// factories/user.factory.ts
+import { faker } from '@faker-js/faker';
+
+export function buildUser(overrides: Partial<User> = {}): CreateUserDTO {
+  return {
+    email: faker.internet.email(),
+    firstName: faker.person.firstName(),
+    role: 'customer',
+    ...overrides,
+  };
+}
+export async function createUser(overrides = {}) {
+  return db.user.create({ data: buildUser(overrides) });
+}
+```
+
+```python
+# factories/user_factory.py
+import factory
+from faker import Faker
+
+class UserFactory(factory.Factory):
+    class Meta:
+        model = User
+    email = factory.LazyAttribute(lambda _: Faker().email())
+    first_name = factory.LazyAttribute(lambda _: Faker().first_name())
+    role = "customer"
+```
+
+---
+
+## 3. External Service Testing (HIGH)
+
+### HTTP-Level Mocking (Not Function Mocking)
+
+**TypeScript (nock):**
+```typescript
+import nock from 'nock';
+
+it('processes payment successfully', async () => {
+  nock('https://api.stripe.com')
+    .post('/v1/charges')
+    .reply(200, { id: 'ch_123', status: 'succeeded', amount: 5000 });
+
+  const result = await paymentService.charge({ amount: 50.00, currency: 'usd' });
+  expect(result.status).toBe('succeeded');
+});
+
+it('handles payment timeout', async () => {
+  nock('https://api.stripe.com').post('/v1/charges').delay(10000).reply(200);
+  await expect(paymentService.charge({ amount: 50, currency: 'usd' }))
+    .rejects.toThrow('timeout');
+});
+```
+
+**Python (responses):**
+```python
+import responses
+
+@responses.activate
+def test_payment_success():
+    responses.post("https://api.stripe.com/v1/charges",
+                   json={"id": "ch_123", "status": "succeeded"}, status=200)
+    result = payment_service.charge(amount=50.00, currency="usd")
+    assert result.status == "succeeded"
+```
+
+### Test Containers for Infrastructure
+
+```typescript
+import { PostgreSqlContainer } from '@testcontainers/postgresql';
+import { RedisContainer } from '@testcontainers/redis';
+
+beforeAll(async () => {
+  const pg = await new PostgreSqlContainer('postgres:16').start();
+  process.env.DATABASE_URL = pg.getConnectionUri();
+  await runMigrations();
+}, 60000);
+```
+
+---
+
+## 4. Contract Testing (MEDIUM-HIGH)
+
+### Consumer-Driven Contracts (Pact)
+
+**Consumer (OrderService calls UserService):**
+```typescript
+it('can fetch user by ID', async () => {
+  await pact.addInteraction()
+    .given('user usr_123 exists')
+    .uponReceiving('GET /users/usr_123')
+    .withRequest('GET', '/api/users/usr_123')
+    .willRespondWith(200, (b) => {
+      b.jsonBody({ data: { id: MatchersV3.string(), email: MatchersV3.email() } });
+    })
+    .executeTest(async (mockserver) => {
+      const user = await new UserClient(mockserver.url).getUser('usr_123');
+      expect(user.id).toBeDefined();
+    });
+});
+```
+
+**Provider verifies in CI:**
+```typescript
+await new Verifier({
+  providerBaseUrl: 'http://localhost:3001',
+  pactBrokerUrl: process.env.PACT_BROKER_URL,
+  provider: 'UserService',

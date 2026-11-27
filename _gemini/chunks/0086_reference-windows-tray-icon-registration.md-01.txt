@@ -1,0 +1,72 @@
+---
+name: reference-windows-tray-icon-registration
+description: Windows 托盘图标注册与取证判据：szTip WCHAR[128]、NIM_ADD=1≠可见、GetRect 要 32B 且 uID 一致；窗口不能 HWND_MESSAGE、uID 必须显式 1，可见性由 HKCU NotifyIconSettings 的 IsPromoted（按真实宿主 exe）决定；隐藏区图标调暗，像素判据用 HSV 色相而非 RGB；GetRect=0 不是注册证据；含溢出面板 UIA 与 runtime pid 归属
+metadata:
+  type: reference
+---
+
+在 Windows 上证明「托盘图标真的出现了」时，以下几条是 2026-11-08 实测钉死的。
+
+## 结构体：szTip 必须是 WCHAR[128]
+
+- `NOTIFYICONDATAW.szTip` 是 **128 个 WCHAR**（256 字节），不是 64。写成 64 时 x64 下
+  `sizeof(struct)` = **856**，正确值 **984**；后面的 `dwState/dwInfoFlags/guidItem` 全部错位。
+- 错位后 `Shell_NotifyIconW(NIM_ADD)` **照样返回 1**，所以「tray_added=true」只能证明调用被接受，
+  不能证明图标或提示可用。**回归判据：`ctypes.sizeof(_NID) == 984` 且 `_NID.szTip.size == 256`**
+  （ctypes 的 `.size` 报的是字节数）。
+- 同理 `ICONINFO` 真布局是 `fIcon/xHotspot/yHotspot/hbmMask/hbmColor`（32 字节，x64）；
+  写成 `fIcon/fMask/...`（24 字节）会让 `CreateIconIndirect` 返回 NULL，`hIcon=0` 时 NIM_ADD 仍成功，
+  外壳摆一个透明空槽。`_hicon` 应在 NULL 时直接抛错，别留不可见的图标。
+
+## Win11 溢出面板：UIA 能打开，但要按下面做
+
+- 溢出按钮在 `Shell_TrayWnd` 的 UIA 树里：`ClassName=SystemTray.NormalButton`，
+  AutomatioId 是 `SystemTrayIcon`，**Name 是「显示隐藏的图标」**（英文系统为 "Show hidden icons"）。
+  按 AutomationId `ShowHiddenIcons` 找会失败，按 Name 正则可靠。
+- **PowerShell 5.1 下 .ps1 必须存成 UTF-8 with BOM**，否则中文正则按 ANSI/GBK 读成乱码，
+  脚本会报「no overflow button」——这是编码问题，不是按钮不存在。
+- Invoke 后要等 **约 1.4 秒**（900ms 不够）再找面板。面板类是
+  `TopLevelWindowForOverflowXamlIsland`（不是旧的 `NotifyIconOverflowWindow`），
+  在 root children 里；面板尺寸约 293×193，可回读每一项的 Name 与 BoundingRectangle。
+- `TrayNotifyWnd` 句柄为 0 属正常；`Shell_NotifyIconGetRect` 返回 `0x80004005` 只在 hWnd/uID 与注册时一致时才有判读意义（见 2026-11-08 更正）。
+- 面板未展开时不要按 `TopLevelWindowForOverflowXamlIsland` 的矩形截图：窗口对象可能已存在，
+  拍到的是背后的应用。判据必须是展开后的截图或展开后回读的 UIA 项。
+
+## 判断「图标到底有没有出现」的分层法
+
+1. 可见托盘：枚举 `Shell_TrayWnd` 下 `SystemTray*` 元素的 Name/Rect，逐个核对（别只数数量）。
+2. 溢出面板：按上面的方法展开后回读 Name 列表。
+3. 颜色断言要先回源码取真值；本机曾把别的应用的 `#00D76B` 绿图标误当目标色。
+4. **股票图标对照**：同一进程同时注册 `LoadIconW(None, IDI_APPLICATION)` 和自绘 HICON，
+   两者都是 `NIM_ADD=1`。若股票图标也不出现，就不是图标构造问题。
+5. **计划任务对照**：用 `schtasks /IT` 以普通用户令牌启动同一探针（先确认 `python.exe` 进程
+   的 SessionId 真的在跑），仍不出现 → 是 Shell/会话侧拒绝新托盘项，不是父进程令牌或应用装配。
+6. 关窗时**按 PID 关闭，不要按标题 `FindWindow("cc-hud")`**：用户可能同时开着旧版实例，
+   按标题会误关他的进程。用运行态 JSON 里记录的 pid，或 `GetWindowThreadProcessId` 核对归属再发 WM_CLOSE。
+
+## 2026-11-08 追加（v4 / GUID / 行为验收）
+
+- **`Shell_NotifyIconGetRect` 要的是 32 字节的 `NOTIFYICONIDENTIFIER`（cbSize/hWnd/uID/GUID），不是 NOTIFYICONDATAW**。
+  传 NID 时 cbSize=984，恒返 **`0x80070057 (E_INVALIDARG)`**，会被误读成"图标不存在"。改对后若仍 `E_FAIL`，
+  先核对 **uID**：GetRect 的 uID 必须与 NIM_ADD 时一致（2026-11-08 根因，见文末）。`NIM_SETVERSION(4)`、`NIF_GUID|NIF_SHOWTIP` 都不改变可见性。
+- **GetRect 不能当"图标存在"的唯一判据**：本机任何新注册都不认；可见性要靠 UIA 清单 + 整条任务栏截图 + 股票图标对照。
+- v4 回调语义变了：左键是 `NIN_SELECT(0x400)` / `NIN_KEYSELECT(0x401)`，右键是 `WM_CONTEXTMENU(0x7B)`；
+  `TRAY_EVT` 映射表必须同时含 0x400/0x401/0x7B，否则 v4 下点击/菜单全哑。
+- x64 字段偏移可用来最后排除结构问题：`hWnd=8, szTip=44, dwState=300, guidItem=956, hBalloonIcon=976, sizeof=984`。
+- **行为可以独立于图标可见性验收**：`PostMessageW(tray_hwnd, 0x801, 0, 0x202)`（`WM_TRAY` + `WM_LBUTTONDOWN`）
+  实测主窗隐藏、圆点出现、再次点击恢复。这条只证明消息泵与隐藏/恢复链路，不证明图标像素。
+- 运行态 JSON 必须带 **pid**，而且这个 pid 是**宿主子进程**的 pid（`.venv` 的 `python.exe` 是启动器，`Popen.pid` ≠ runtime pid）。
+  托盘/窗口探针按 runtime pid 判归属（`GetWindowThreadProcessId(hwnd) == runtime.pid`），关闭时 WM_CLOSE 后等该 pid 退出、
+  再 `taskkill /PID` 兜底；`FindWindow("cc-hud")` 会命中用户旧实例，残留实例还会占住 runtime 让后续门禁卡在 `after_start`。
+- ~~判定本机 Shell 会话不接受任何新托盘项~~（**2026-11-08 当天被推翻，见下节**）：股票图标/计划任务/可见顶层窗对照
+  仍不显示，当时的结论下错了；不要把它当"环境不可修"的依据。
+
+## 2026-11-08 更正：根因是 message-only 窗口 + `uID=0`
+
+同一天继续排查，最小探针（隐藏顶层工具窗、uID=1、延迟 0.6s 再 GetRect）**一次成功**，随后定位到两个真实 bug：
+
+1. **托盘窗口不能用 `HWND_MESSAGE`**。message-only 窗口收不到 `TaskbarCreated` 等广播，Win11 Shell 会静默丢弃图标：
+   `NIM_ADD=1`、GetRect `E_FAIL`、溢出面板无条目。改为隐藏的**顶层工具窗**：
+   `CreateWindowExW(WS_EX_TOOLWINDOW=0x80, class, title, 0, 0,0,0,0, parent=None, ...)`
+   （不 `ShowWindow`，不进 Alt+Tab）。顶层窗在 `webview.start` 之前用主线程创建即可注册成功。
+2. **`NOTIFYICONDATAW.uID` 必须显式赋值**。ctypes 零初始化 → uID=0；`NIM_ADD` 仍返回 1，但 GetRect 查 uID=1

@@ -1,0 +1,82 @@
+            f'<text x="{415 - 300 * column}" y="150" fill="#000000" font-size="20" '
+            'font-family="Arial">OTHER</text>'
+            '</g></svg>'
+        )
+        root[0][0].text = json.dumps(payload)
+        return ET.tostring(root, encoding="unicode")
+
+    def _table_pipeline(self, project: Path, svg: str):
+        import subprocess
+        import sys
+
+        scripts = Path(__file__).resolve().parents[1]
+        output = project / "native.pptx"
+        svg_dir = project / "svg_output"
+        svg_dir.mkdir(parents=True)
+        (svg_dir / "01.svg").write_text(svg, encoding="utf-8")
+        commands = [
+            ["stamp_native_fallbacks.py", str(svg_dir), "--write"],
+            ["svg_quality_checker.py", str(project), "--canonical-authoring", "--stage", "final",
+             "--json", "--quick-generate"],
+            ["svg_to_pptx.py", str(project), "--quick-generate", "--native-charts-and-tables",
+             "-o", str(output)],
+        ]
+        results = []
+        for script, *arguments in commands:
+            result = subprocess.run(
+                [sys.executable, "-B", str(scripts / script), *arguments],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
+            )
+            results.append(result)
+        for result in results[:2]:
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return output, results[-1]
+
+    def test_a06_mixed_runs_pass_stamp_checker_and_native_export_at_any_length(self) -> None:
+        import tempfile
+        import zipfile
+        from xml.etree import ElementTree as ET
+
+        ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+        with tempfile.TemporaryDirectory() as tmp:
+            for length in (1, 10):
+                with self.subTest(length=length):
+                    red_text = "B" * length
+                    output, result = self._table_pipeline(
+                        Path(tmp) / str(length), self._table_svg(red_text)
+                    )
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    with zipfile.ZipFile(output) as package:
+                        slide = ET.fromstring(package.read("ppt/slides/slide1.xml"))
+                    cell = slide.find(".//a:tbl/a:tr/a:tc", ns)
+                    self.assertIsNotNone(cell)
+                    actual = [
+                        (run.find("a:t", ns).text, run.find("a:rPr", ns).get("b"),
+                         run.find("a:rPr/a:solidFill/a:srgbClr", ns).get("val"))
+                        for run in cell.findall(".//a:r", ns)
+                    ]
+                    self.assertEqual(actual, [("AAA", "0", "000000"), (red_text, "1", "FF0000")])
+
+    def test_a06_missing_minority_bold_or_color_still_blocks_native_export(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for mismatch in ("bold", "color", "swapped"):
+                with self.subTest(mismatch=mismatch):
+                    output, result = self._table_pipeline(
+                        Path(tmp) / mismatch, self._table_svg("B", mismatch=mismatch)
+                    )
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("not projected", result.stdout + result.stderr)
+                    self.assertFalse(output.exists())
+
+    def test_a06_header_and_body_run_parity_share_effective_styles(self) -> None:
+        from xml.etree import ElementTree as ET
+        from svg_to_pptx.native_objects import native_object_projection_warnings
+
+        for header, column in ((True, 0), (False, 1)):
+            for length in (1, 10):
+                with self.subTest(header=header, column=column, length=length):
+                    root = ET.fromstring(self._table_svg(
+                        "B" * length, header=header, column=column, split_runs=True
+                    ))

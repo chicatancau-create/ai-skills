@@ -1,0 +1,99 @@
+        for path in authoring_dir.rglob("*.svg")
+        if path.is_file()
+    }
+    if actual_files != expected_files:
+        raise AuthoringRoundtripError(
+            "Authoring manifest/page-plan file roster differs; missing="
+            f"{sorted(expected_files - actual_files)}, "
+            f"extra={sorted(actual_files - expected_files)}"
+        )
+    return tuple(pages), True
+
+
+def _output_documents(
+    pages: tuple[RoundtripPage, ...],
+    documents: dict[str, AuthoringDocument],
+    authoring_dir: Path,
+) -> tuple[AuthoringDocument, ...]:
+    """Bind every output authoring file to its declared source document."""
+    documents_by_slide = {
+        document.source_slide: document
+        for document in documents.values()
+    }
+    output: list[AuthoringDocument] = []
+    for page in pages:
+        source = documents_by_slide[page.source_slide]
+        output.append(AuthoringDocument(
+            name=page.svg_name,
+            source_name=source.name,
+            source_slide=page.source_slide,
+            authoring_path=(authoring_dir / page.svg_name).resolve(),
+            flat_source_path=source.flat_source_path,
+            layered_source_path=source.layered_source_path,
+            initial_authoring_sha256=source.initial_authoring_sha256,
+            source_refs=source.source_refs,
+        ))
+    return tuple(output)
+
+
+def _load_current_assets(
+    project_path: Path,
+    authoring_dir: Path,
+    documents: dict[str, AuthoringDocument],
+) -> tuple[dict[str, VectorAssetRecord], dict[str, Any] | None]:
+    inventory_path = project_path / f"{authoring_dir.name}_vector_asset_inventory.json"
+    if not inventory_path.is_file():
+        return {}, None
+    inventory = _load_json(inventory_path, context="flat vector asset inventory")
+    if inventory.get("schema") != VECTOR_INVENTORY_SCHEMA:
+        raise AuthoringRoundtripError(
+            f"Unsupported vector inventory schema: {inventory.get('schema')!r}"
+        )
+    if inventory.get("icon_namespace") != IMPORTED_ICON_NAMESPACE:
+        raise AuthoringRoundtripError(
+            "Flat authoring vector inventory must use icon_namespace='imported'"
+        )
+    if inventory.get("asset_role") != DECORATION_ASSET_ROLE:
+        raise AuthoringRoundtripError(
+            "Flat authoring vector inventory must use asset_role='decoration'"
+        )
+    assets_raw = inventory.get("assets")
+    if not isinstance(assets_raw, list):
+        raise AuthoringRoundtripError("Vector inventory assets must be an array")
+    icons_root = project_path / "icons"
+    records: dict[str, VectorAssetRecord] = {}
+    for index, raw in enumerate(assets_raw):
+        if not isinstance(raw, dict):
+            raise AuthoringRoundtripError(f"vector assets[{index}] must be an object")
+        values = {
+            name: raw.get(name)
+            for name in (
+                "icon",
+                "asset",
+                "svg",
+                "source_sha256",
+                "asset_sha256",
+            )
+        }
+        if not all(isinstance(value, str) and value for value in values.values()):
+            raise AuthoringRoundtripError(
+                f"vector assets[{index}] is missing a required string field"
+            )
+        if raw.get("role") != DECORATION_ASSET_ROLE:
+            raise AuthoringRoundtripError(
+                f"vector assets[{index}] is not a decoration asset"
+            )
+        icon = str(values["icon"])
+        origin = str(values["svg"])
+        if icon in records:
+            raise AuthoringRoundtripError(f"Duplicate vector asset id: {icon}")
+        if origin not in documents:
+            raise AuthoringRoundtripError(
+                f"Vector asset {icon!r} names unknown document {origin!r}"
+            )
+        asset_path = _resolve_inside(
+            icons_root,
+            str(values["asset"]),
+            context=f"vector asset {icon!r}",
+        )
+        if not asset_path.is_file() or asset_path.suffix.lower() != ".svg":

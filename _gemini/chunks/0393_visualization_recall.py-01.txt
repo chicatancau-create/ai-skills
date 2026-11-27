@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""
+PPT Master - Visualization Candidate Recall
+
+Recall a deterministic chart or table shortlist from semantic tags, or validate
+selected references against the live family catalogs.
+
+Usage:
+    python3 scripts/visualization_recall.py recall --page P03 --tag "time series" --tag "three metrics" --tag "trend"
+    python3 scripts/visualization_recall.py validate chart/line_chart table/record_table
+
+Examples:
+    python3 scripts/visualization_recall.py recall --page P07 --family table \
+        --tag "option comparison" --tag "shared criteria" \
+        --tag "cell values" --limit 6
+    python3 scripts/visualization_recall.py validate table/record_table
+    python3 scripts/visualization_recall.py validate --legacy-bare process_flow
+
+Dependencies:
+    None (only uses the standard library)
+
+See scripts/docs/visualization-recall.md for the planning workflow and output contract.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+import unicodedata
+from typing import Optional
+
+from console_encoding import configure_utf8_stdio
+from visualization_catalog import (
+    LEGACY_STRUCTURE_INTENT_KIND,
+    VISUALIZATION_SVG_KIND,
+    VisualizationCatalogError,
+    VisualizationEntry,
+    load_visualization_entries,
+    resolve_visualization_reference,
+    visualization_families,
+)
+
+configure_utf8_stdio()
+
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_PAGE_RE = re.compile(r"^P\d{2,}$")
+_SKIP_RE = re.compile(r"\bskip\s+(?:if|for)\b", re.IGNORECASE)
+_STOP_WORDS = {
+    "a",
+    "an",
+    "and",
+    "as",
+    "at",
+    "by",
+    "for",
+    "from",
+    "if",
+    "in",
+    "into",
+    "of",
+    "on",
+    "or",
+    "per",
+    "the",
+    "to",
+    "use",
+    "with",
+}
+
+
+def _normalize(text: str) -> str:
+    normalized = unicodedata.normalize("NFKC", text).casefold().replace("_", " ")
+    return " ".join(_TOKEN_RE.findall(normalized))
+
+
+def _stem(token: str) -> str:
+    if len(token) > 5 and token.endswith("ies"):
+        return token[:-3] + "y"
+    if len(token) > 5 and token.endswith("ing"):
+        return token[:-3]
+    if len(token) > 4 and token.endswith("ed"):
+        return token[:-2]
+    if len(token) > 4 and token.endswith("es"):
+        return token[:-2]
+    if len(token) > 3 and token.endswith("s"):
+        return token[:-1]
+    return token
+
+
+def _tokens(text: str) -> set[str]:
+    return {
+        _stem(token)
+        for token in _TOKEN_RE.findall(_normalize(text))
+        if token not in _STOP_WORDS
+    }
+
+
+def _selected_families(family: str) -> tuple[str, ...]:
+    return visualization_families() if family == "all" else (family,)
+
+
+def load_catalog(family: str = "all") -> dict[str, VisualizationEntry]:
+    """Load the selected live family catalogs."""
+    return load_visualization_entries(
+        _selected_families(family),
+    )
+
+
+def _score_candidate(
+    key: str,
+    summary: str,
+    tags: list[str],
+) -> tuple[int, list[str]]:
+    skip_match = _SKIP_RE.search(summary)
+    if skip_match is None:
+        pick_clause, skip_clause = summary, ""
+    else:
+        pick_clause = summary[:skip_match.start()]
+        skip_clause = summary[skip_match.start():]
+    key_text = _normalize(key)
+    pick_text = _normalize(pick_clause)
+    skip_text = _normalize(skip_clause)
+    key_tokens = _tokens(key)
+    pick_tokens = _tokens(pick_clause)
+    skip_tokens = _tokens(skip_clause)
+    score = 0
+    matched_tags: list[str] = []
+
+    for tag in tags:
+        tag_text = _normalize(tag)
+        tag_tokens = _tokens(tag)
+        positive_score = 0
+        negative_score = 0
+        if tag_text and tag_text in key_text:
+            positive_score += 20
+        elif tag_text and tag_text in pick_text:
+            positive_score += 14
+        if tag_text and tag_text in skip_text:
+            negative_score += 12
+
+        for token in tag_tokens:
+            if token in key_tokens:
+                positive_score += 9
+            elif token in pick_tokens:
+                positive_score += 5

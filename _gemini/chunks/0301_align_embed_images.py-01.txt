@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""PPT Master — single-pass image alignment + Base64 embedding.
+
+Replaces the previous three independent finalize_svg steps:
+
+    crop-images   →  for each <image preserveAspectRatio="… slice"/>, crop the
+                     source bitmap to the target aspect ratio at the given
+                     anchor and write to ``images/cropped/`` so the SVG
+                     reference points to a pre-cropped asset.
+    fix-aspect    →  for each <image>, read the source bitmap dimensions and
+                     adjust x/y/width/height so the rendered box matches the
+                     image aspect ratio in PowerPoint SVG rendering paths that
+                     do not honor preserveAspectRatio consistently.
+    embed-images  →  Base64-inline every embeddable external image reference
+                     so ``svg_final/`` remains portable when opened or manually
+                     inserted as an SVG image. EMF/WMF keep the documented
+                     external-reference exception.
+
+Why merge: each step independently parsed + serialized the SVG, each step
+re-read the same bitmap from disk, and the two spatial transforms (crop and
+fit-box) are mutually exclusive yet were sequenced one after the other.
+The fix-aspect default ``preserveAspectRatio = "xMidYMid meet"`` could
+also kick in on rects already cropped by crop-images (whose par was
+already removed), with the only thing keeping it from corrupting the
+geometry being that crop and fix-aspect happened to produce numerically
+equal box dimensions — a brittle accident.
+
+The merged pipeline:
+
+    for image in svg:
+        if href starts with data: → skip (already inline)
+        if href is unresolvable / external URL → skip
+        if href points to EMF/WMF → skip (native PPTX passthrough only)
+        if image belongs to a valid nested crop → preserve source pixels, embed
+        if missing preserveAspectRatio → just embed (do not assume meet)
+        if align == none → just embed (no spatial transform)
+        if mode == slice → crop in memory, embed cropped bytes
+        if mode == meet → adjust x/y/w/h, embed original bytes
+    write SVG once
+
+Bonus: the cropped bitmap is base64-inlined directly without going through
+``images/cropped/``, so that intermediate directory disappears and stale
+crops can no longer accumulate across re-runs.
+"""
+
+from __future__ import annotations
+
+import base64
+import io
+import math
+import os
+import re
+import sys
+from pathlib import Path
+from typing import TYPE_CHECKING
+from xml.etree import ElementTree as ET
+
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from console_encoding import configure_utf8_stdio  # noqa: E402
+from resource_paths import (  # noqa: E402
+    resolve_external_image_reference,
+    svg_data_uri_payload_error,
+    svg_image_payload_error,
+)
+
+configure_utf8_stdio()
+
+if __package__ in {None, ''}:
+    import types
+
+    package = types.ModuleType('svg_finalize')
+    package.__path__ = [str(Path(__file__).resolve().parent)]  # type: ignore[attr-defined]
+    sys.modules.setdefault('svg_finalize', package)
+    __package__ = 'svg_finalize'
+
+# Reuse helpers from the previous standalone modules.
+from .crop_images import crop_image_to_size, get_crop_anchor, parse_preserve_aspect_ratio
+from .embed_images import _optimize_image_bytes, get_mime_type
+from .fix_image_aspect import calculate_fitted_dimensions
+from svg_to_pptx.drawingml.elements import (  # noqa: E402
+    parse_project_nested_svg_crop,
+)
+
+if TYPE_CHECKING:  # pragma: no cover
+    from PIL import Image as PILImage  # noqa: F401
+
+
+SVG_NS = 'http://www.w3.org/2000/svg'
+XLINK_NS = 'http://www.w3.org/1999/xlink'
+
+# PIL save format is named slightly differently from the file extension /
+# MIME type set we expose elsewhere; this map covers the formats we accept.
+_PIL_FORMAT_BY_MIME = {
+    'image/png': 'PNG',
+    'image/jpeg': 'JPEG',
+    'image/gif': 'GIF',

@@ -1,0 +1,85 @@
+outside this guarantee.
+
+The chart importer also accepts the verified column/line/area combo subset,
+canonical four-series OHLC stock charts with shared numeric date caches, area
+charts with numeric date axes, and verified scatter/bubble charts with a closed
+pair of `axes.x` / `axes.y` value axes. Combo primary/secondary plots may retain
+independent category caches and workbook ranges. Both the category/value and XY
+contracts read back the supported kind/position/visibility, label-position,
+number-format, min/max/major-unit, reverse, and major-gridline fields; the native
+writer emits every field in those closed contracts. Scatter style is derived
+from uniform effective series line/marker/smooth state. The normalized XY
+fallback newly consumes only the two major-gridline flags, not the remaining
+axis fields. The importer also accepts radar, safe `of_pie` `serLines`, the
+closed axis/title/legend normalization cases, and bar/column `gapWidth` /
+`overlap`. `gapWidth` must be one integer in `0..500` and `overlap` one integer
+in `-100..100`; both normalize in native output, while malformed, duplicate, or
+out-of-range values disable the native replacement claim in tolerant mode and
+stop strict import. These additions do not expand the normalized
+renderer.
+Safe stock series style may pass the structural gate, while stock series,
+`hiLowLines`, and up-down bar local styling can still normalize under the
+data-object-first contract.
+ChartEx import accepts exactly the validated treemap, sunburst, histogram,
+pareto, box-whisker, waterfall, and funnel data models. Their supported
+hierarchy/category/value/series/subtotal topology round-trips to native output.
+Numeric caches must be non-empty and finite, with canonical non-negative counts
+and indexes and exact contiguous point topology. Source style, axes, labels,
+and binning details may normalize. This is not full `AxisSpec`, arbitrary
+ChartEx import or presentation fidelity, arbitrary stock variants, other
+date-axis chart families, or unlisted axis semantics. ChartEx native output
+still consumes valid payload colors in its color-style part.
+
+Exporter-canonical charts recover canonical solid series/slice colors and exact
+one- or two-paragraph title styling; two paragraphs retain their `title` /
+`subtitle` roles. This is not a general source-chart style round-trip guarantee.
+
+Concrete slide SVGs resolve `<a:fld type="slidenum">` using the presentation's
+`firstSlideNum` display numbering. Standalone master/layout SVGs keep the
+literal field fallback because one shared part can serve multiple slides.
+
+### Maintenance smoke checks
+
+Run these checks from the repository root after changing `pptx_to_svg/` or its
+CLI. They generate every required input under `/tmp`; do not replace them with
+a committed `test_*.py` suite.
+
+#### Healthy generated deck
+
+```bash
+python3 - <<'PY'
+from pptx import Presentation
+from pptx.enum.shapes import MSO_SHAPE
+from pptx.util import Inches
+
+presentation = Presentation()
+slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+shape = slide.shapes.add_shape(
+    MSO_SHAPE.RECTANGLE,
+    Inches(1),
+    Inches(1),
+    Inches(3),
+    Inches(1),
+)
+shape.text = "PPTX import smoke check"
+presentation.save("/tmp/ppt-master-smoke-healthy.pptx")
+PY
+
+python3 "skills/ppt-master/scripts/pptx_to_svg.py" \
+  "/tmp/ppt-master-smoke-healthy.pptx" \
+  --inheritance-mode flat \
+  -o "/tmp/ppt-master-smoke-healthy"
+python3 -c "import json; from pathlib import Path; report = json.loads(Path('/tmp/ppt-master-smoke-healthy/conversion-report.json').read_text()); assert report['summary'] == {'slides': 1, 'warnings': 0}, report['summary']; print('OK: 1 slide, 0 warnings')"
+```
+
+Expected: both commands exit `0`; the assertion prints
+`OK: 1 slide, 0 warnings`.
+
+#### Tolerant/strict color-structure probe
+
+Generate a two-shape PPTX, then add one foreign attribute to the first shape's
+valid `a:srgbClr` node:
+
+```bash
+python3 -c '
+from pathlib import Path

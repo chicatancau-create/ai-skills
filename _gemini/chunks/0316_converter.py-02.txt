@@ -1,0 +1,119 @@
+    except NativePayloadError as exc:
+        raise SvgNativeConversionError(
+            f"{svg_path.name}: invalid native payload reference: {exc}"
+        ) from exc
+
+
+def _require_native_marker_attributes(
+    root: ET.Element,
+    svg_path: Path | str,
+) -> None:
+    """Reject contradictory native marker aliases before conversion."""
+    errors: list[str] = []
+    for elem in root.iter():
+        if elem.tag.rsplit('}', 1)[-1] == 'metadata':
+            continue
+        marker_errors = native_marker_status_errors(elem)
+        if marker_errors:
+            marker_id = elem.get('id') or elem.get('data-name') or '<unnamed>'
+            errors.extend(f'{marker_id}: {error}' for error in marker_errors)
+            continue
+        marker_id = elem.get('id') or elem.get('data-name') or '<unnamed>'
+        kind = native_replacement_kind(elem)
+        if not kind:
+            continue
+        for child in elem:
+            if child.tag.rsplit('}', 1)[-1] != 'metadata':
+                continue
+            try:
+                native_metadata_payload_matches(child, kind)
+            except NativeMarkerAttributeError as exc:
+                errors.append(f'{marker_id}: {exc}')
+    if not errors:
+        return
+    preview = '; '.join(errors[:8])
+    suffix = '' if len(errors) <= 8 else f'; +{len(errors) - 8} more'
+    raise SvgNativeConversionError(
+        f'{Path(svg_path).name}: invalid native replacement metadata: '
+        f'{preview}{suffix}'
+    )
+
+
+def _require_inline_formula_markers(
+    root: ET.Element,
+    svg_path: Path | str,
+) -> None:
+    """Reject malformed inline formula runs before text lowering."""
+    errors = inline_formula_marker_errors(root)
+    if not errors:
+        return
+    preview = '; '.join(errors[:8])
+    suffix = '' if len(errors) <= 8 else f'; +{len(errors) - 8} more'
+    raise SvgNativeConversionError(
+        f'{Path(svg_path).name}: invalid {INLINE_FORMULA_ATTR} marker(s): '
+        f'{preview}{suffix}'
+    )
+
+
+def _require_project_hyperlinks(
+    root: ET.Element,
+    svg_path: Path | str,
+    *,
+    slide_count: int | None,
+) -> None:
+    """Reject hyperlinks that cannot be represented faithfully in PPTX."""
+    errors = project_hyperlink_errors(root, slide_count=slide_count)
+    if not errors:
+        return
+    preview = '; '.join(errors[:8])
+    suffix = '' if len(errors) <= 8 else f'; +{len(errors) - 8} more'
+    raise SvgNativeConversionError(
+        f'{Path(svg_path).name}: invalid SVG hyperlink(s): {preview}{suffix}'
+    )
+
+
+def _native_replacement_enabled(elem: ET.Element, ctx: ConvertContext) -> bool:
+    """Return whether this marker is active under the current export policy."""
+    kind = native_replacement_kind(elem)
+    if kind == 'formula':
+        return True
+    return ctx.native_objects_enabled and kind in {'chart', 'table'}
+
+
+def _contains_enabled_native_replacement(
+    elem: ET.Element,
+    ctx: ConvertContext,
+) -> bool:
+    """Return whether one subtree contains an active native replacement."""
+    return any(
+        descendant.tag.replace(f'{{{SVG_NS}}}', '') != 'metadata'
+        and _native_replacement_enabled(descendant, ctx)
+        for descendant in elem.iter()
+    )
+
+
+def _require_project_freeform_geometry(
+    root: ET.Element,
+    svg_path: Path | str,
+) -> None:
+    """Reject malformed path and points values with one aggregated error."""
+    errors = project_freeform_geometry_errors(root)
+    if not errors:
+        return
+    preview = '; '.join(errors[:8])
+    suffix = '' if len(errors) <= 8 else f'; +{len(errors) - 8} more'
+    raise SvgNativeConversionError(
+        f'{Path(svg_path).name}: invalid project freeform geometry: '
+        f'{preview}{suffix}'
+    )
+
+
+def _require_project_nested_svg_crops(
+    root: ET.Element,
+    svg_path: Path | str,
+) -> None:
+    """Reject nested SVG outside the imported picture-crop transport."""
+    errors = project_nested_svg_crop_errors(root)
+    if not errors:
+        return
+    preview = '; '.join(errors[:8])

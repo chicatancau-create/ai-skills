@@ -1,0 +1,120 @@
+    'bmp': 'BMP',
+    'gif': 'GIF',
+    'jpg': 'JPEG',
+    'png': 'PNG',
+    'tif': 'TIFF',
+    'tiff': 'TIFF',
+    'webp': 'WEBP',
+}
+
+
+def _normalize_project_image_format(raw: str) -> str | None:
+    return _PROJECT_IMAGE_FORMATS.get(raw.strip().lower().lstrip('.'))
+
+
+def _little_uint(data: bytes, offset: int, size: int) -> int:
+    return int.from_bytes(data[offset:offset + size], 'little', signed=False)
+
+
+def _valid_emf_payload(data: bytes) -> bool:
+    """Validate the EMF header and complete bounded record stream."""
+    if len(data) < 88:
+        return False
+    header_size = _little_uint(data, 4, 4)
+    total_size = _little_uint(data, 48, 4)
+    record_count = _little_uint(data, 52, 4)
+    header_palette_entries = _little_uint(data, 68, 4)
+    if (
+        _little_uint(data, 0, 4) != 1
+        or data[40:44] != b' EMF'
+        or header_size < 88
+        or header_size > total_size
+        or total_size != len(data)
+        or record_count < 1
+    ):
+        return False
+
+    offset = 0
+    count = 0
+    last_type = 0
+    last_size = 0
+    while offset < total_size:
+        if offset + 8 > total_size:
+            return False
+        record_type = _little_uint(data, offset, 4)
+        record_size = _little_uint(data, offset + 4, 4)
+        if record_size < 8 or record_size % 4 or offset + record_size > total_size:
+            return False
+        record_end = offset + record_size
+        if count == 0 and (record_type != 1 or record_size != header_size):
+            return False
+        if count > 0 and record_type == 1:
+            return False
+        if record_type == 14:
+            if (
+                record_size < 20
+                or record_end != total_size
+                or _little_uint(data, record_end - 4, 4) != record_size
+            ):
+                return False
+            palette_entries = _little_uint(data, offset + 8, 4)
+            palette_offset = _little_uint(data, offset + 12, 4)
+            if (
+                palette_entries != header_palette_entries
+                or palette_entries and (
+                    palette_offset < 16
+                    or palette_offset + palette_entries * 4 > record_size - 4
+                )
+            ):
+                return False
+        offset = record_end
+        count += 1
+        last_type = record_type
+        last_size = record_size
+    return (
+        offset == total_size
+        # MS-EMF counts all records. LibreOffice-generated EMF files in the
+        # wild count records after the header, so retain that interoperable
+        # spelling while keeping the complete stream bounded.
+        and count in {record_count, record_count + 1}
+        and last_type == 14
+        and last_size >= 20
+    )
+
+
+def _valid_wmf_payload(data: bytes) -> bool:
+    """Validate a standard or placeable WMF header and record stream."""
+    meta_offset = 0
+    if data.startswith(b'\xd7\xcd\xc6\x9a'):
+        if len(data) < 40:
+            return False
+        checksum = 0
+        for offset in range(0, 20, 2):
+            checksum ^= _little_uint(data, offset, 2)
+        if checksum != _little_uint(data, 20, 2):
+            return False
+        meta_offset = 22
+    if len(data) < meta_offset + 24:
+        return False
+    meta_type = _little_uint(data, meta_offset, 2)
+    header_words = _little_uint(data, meta_offset + 2, 2)
+    version = _little_uint(data, meta_offset + 4, 2)
+    total_words = _little_uint(data, meta_offset + 6, 4)
+    max_record_words = _little_uint(data, meta_offset + 12, 4)
+    if (
+        meta_type not in {1, 2}
+        or header_words != 9
+        or version not in {0x0100, 0x0300}
+        or total_words < 12
+        or max_record_words < 3
+    ):
+        return False
+    total_end = meta_offset + total_words * 2
+    if total_end != len(data):
+        return False
+
+    offset = meta_offset + header_words * 2
+    last_function = -1
+    last_record_words = 0
+    observed_max_record_words = 0
+    while offset < total_end:

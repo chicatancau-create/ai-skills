@@ -1,0 +1,94 @@
+                / "_rels"
+                / f"slide{slide_num}.xml.rels"
+            )
+            tree = ET.parse(slide_path)
+            root = tree.getroot()
+            slide_state[slide_num] = {
+                "path": slide_path,
+                "rels": _read_relationships(rels_path),
+                "root": root,
+                "shapes": _top_level_shapes_by_id(root),
+                "timing_shape_ids": _timing_shape_ids(root),
+                "tokens": _trace_chrome_shape_ids(trace_by_slide.get(slide_num)),
+                "tree": tree,
+            }
+
+        common_tokens = set.intersection(*(
+            set(state["tokens"])
+            for state in slide_state.values()
+        ))
+        common_tokens.difference_update(_PAGE_NUMBER_TOKENS)
+        candidates: dict[str, dict[int, str]] = {}
+        for token in sorted(common_tokens):
+            shape_ids_by_slide: dict[int, str] = {}
+            canonical_shapes: set[bytes] = set()
+            for slide_num in slide_nums:
+                state = slide_state[slide_num]
+                shape_ids = state["tokens"].get(token, [])
+                if len(shape_ids) != 1:
+                    break
+                shape_id = shape_ids[0]
+                shape = state["shapes"].get(shape_id)
+                if shape is None or shape_id in state["timing_shape_ids"]:
+                    break
+                if not _shape_relationships_supported(shape, state["rels"]):
+                    break
+                shape_ids_by_slide[slide_num] = shape_id
+                canonical_shapes.add(_canonical_shape_xml(shape, state["rels"]))
+            if len(shape_ids_by_slide) == len(slide_nums) and len(canonical_shapes) == 1:
+                candidates[token] = shape_ids_by_slide
+
+        if not candidates:
+            continue
+
+        # Layout shapes render behind slide-local shapes. Keep visual z-order by
+        # accepting only the identical leading prefix shared by every family page.
+        token_by_shape_id = {
+            slide_num: {
+                shape_ids[slide_num]: token
+                for token, shape_ids in candidates.items()
+            }
+            for slide_num in slide_nums
+        }
+        leading_orders: list[list[str]] = []
+        for slide_num in slide_nums:
+            order: list[str] = []
+            for shape_id in slide_state[slide_num]["shapes"]:
+                token = token_by_shape_id[slide_num].get(shape_id)
+                if token is None:
+                    break
+                order.append(token)
+            leading_orders.append(order)
+        safe_tokens = list(leading_orders[0])
+        for order in leading_orders[1:]:
+            common_length = 0
+            for expected, actual in zip(safe_tokens, order):
+                if expected != actual:
+                    break
+                common_length += 1
+            safe_tokens = safe_tokens[:common_length]
+            if not safe_tokens:
+                break
+        if not safe_tokens:
+            continue
+
+        layout_path = extract_dir / layout_part
+        layout_rels_path = _relationships_path_for_part(extract_dir, layout_part)
+        for token in safe_tokens:
+            shape_ids_by_slide = candidates[token]
+            first_slide = slide_nums[0]
+            first_state = slide_state[first_slide]
+            shape = first_state["shapes"][shape_ids_by_slide[first_slide]]
+            layout_shape = _copy_shape_relationships_to_part(
+                shape,
+                first_state["rels"],
+                layout_rels_path,
+            )
+            _append_shape_to_part(layout_path, layout_shape)
+            promoted_roles += 1
+            for slide_num, shape_id in shape_ids_by_slide.items():
+                state = slide_state[slide_num]
+                shape_to_remove = state["shapes"].get(shape_id)
+                sp_tree = state["root"].find(
+                    f".//{{{PML_NS}}}cSld/{{{PML_NS}}}spTree"
+                )

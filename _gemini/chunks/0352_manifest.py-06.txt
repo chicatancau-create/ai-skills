@@ -1,0 +1,93 @@
+        layout_cache: dict[str, dict[str, Any]] = {}
+        master_cache: dict[str, dict[str, Any]] = {}
+
+        theme_summary = {"colors": {}, "fonts": {}}
+
+        for index, slide_path in enumerate(slide_parts, 1):
+            slide_root = load_xml_from_zip(zf, slide_path)
+            slide_rels = parse_relationships(zf, slide_path)
+
+            layout_path = None
+            for rel in slide_rels.values():
+                if rel["type"] == LAYOUT_REL:
+                    layout_path = rel["target"]
+                    break
+
+            layout_root = load_xml_from_zip(zf, layout_path) if layout_path else None
+            layout_rels = parse_relationships(zf, layout_path) if layout_path else {}
+
+            master_path = None
+            for rel in layout_rels.values():
+                if rel["type"] == MASTER_REL:
+                    master_path = rel["target"]
+                    break
+
+            master_root = load_xml_from_zip(zf, master_path) if master_path else None
+            master_rels = parse_relationships(zf, master_path) if master_path else {}
+
+            theme_path = None
+            for rel in master_rels.values():
+                if rel["type"] == THEME_REL:
+                    theme_path = rel["target"]
+                    break
+            if theme_path and not theme_summary["colors"] and not theme_summary["fonts"]:
+                theme_summary = parse_theme(load_xml_from_zip(zf, theme_path))
+
+            bg_asset = None
+            bg_source = None
+            for label, root, rels in (
+                ("slide", slide_root, slide_rels),
+                ("layout", layout_root, layout_rels),
+                ("master", master_root, master_rels),
+            ):
+                candidate = detect_background_asset(root, rels)
+                if candidate:
+                    bg_asset = candidate
+                    bg_source = label
+                    break
+
+            image_targets = extract_image_targets(slide_root, slide_rels)
+            texts = extract_text_samples(slide_root)
+            shape_count = count_slide_shapes(slide_root)
+            placeholders = extract_placeholders(slide_root)
+            page_type = classify_slide(index, len(slide_parts), texts, len(image_targets), shape_count)
+
+            resolved_bg = copied_assets.get(bg_asset, PurePosixPath(bg_asset).name if bg_asset else None)
+            resolved_images = [
+                copied_assets.get(target, PurePosixPath(target).name)
+                for target in image_targets
+            ]
+
+            if resolved_bg:
+                asset_usage[resolved_bg] += 1
+            for asset_name in resolved_images:
+                asset_usage[asset_name] += 1
+
+            if layout_path:
+                if layout_path not in layout_parent:
+                    layout_parent[layout_path] = master_path
+                    layout_parts.append(layout_path)
+                layout_usage[layout_path].append(index)
+                if layout_path not in layout_cache:
+                    layout_cache[layout_path] = {
+                        "root": layout_root,
+                        "rels": layout_rels,
+                        "master_path": master_path,
+                    }
+            if master_path:
+                if master_path not in master_parts:
+                    master_parts.append(master_path)
+                    master_roots[master_path] = master_root
+                    master_rels_map[master_path] = master_rels
+                    master_theme_path[master_path] = theme_path
+                master_usage[master_path].append(index)
+                if master_path not in master_cache:
+                    master_cache[master_path] = {
+                        "root": master_root,
+                        "rels": master_rels,
+                        "theme_path": theme_path,
+                    }
+
+            slide_records.append(
+                SlideRecord(
+                    index=index,

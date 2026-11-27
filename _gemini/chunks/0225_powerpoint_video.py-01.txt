@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""
+PPT Master - PowerPoint Video Export
+
+Export a narrated PPTX through the installed Windows PowerPoint application and
+wait until its native video encoder finishes.
+
+See workflows/stages/generate-audio.md for the narration handoff.
+
+Usage:
+    python3 scripts/powerpoint_video.py <pptx> [-o <video>]
+    python3 scripts/powerpoint_video.py --check
+
+Examples:
+    python3 scripts/powerpoint_video.py projects/demo/exports/demo_narrated.pptx
+    python3 scripts/powerpoint_video.py deck.pptx -o deck.mp4 --resolution 1080
+
+Dependencies:
+    Windows PowerPoint with the CreateVideo automation API
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+from console_encoding import configure_utf8_stdio
+
+configure_utf8_stdio()
+
+
+_CHECK_SCRIPT = r"""
+$ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
+$powerPoint = $null
+$ownsApplication = $false
+
+try {
+    try {
+        $powerPoint = [Runtime.InteropServices.Marshal]::GetActiveObject(
+            "PowerPoint.Application"
+        )
+    }
+    catch {
+        $powerPoint = New-Object -ComObject PowerPoint.Application
+        $ownsApplication = $true
+    }
+
+    $version = [version]$powerPoint.Version
+    if ($version.Major -lt 16) {
+        throw "PowerPoint $version is older than the supported Office 2016 baseline."
+    }
+    [Console]::Out.WriteLine(
+        "PowerPoint video export available (version {0})." -f $version
+    )
+}
+catch {
+    [Console]::Error.WriteLine(
+        "PowerPoint video export is unavailable: {0}" -f $_.Exception.Message
+    )
+    exit 1
+}
+finally {
+    if ($null -ne $powerPoint) {
+        if ($ownsApplication) {
+            try { $powerPoint.Quit() } catch {}
+        }
+        try {
+            [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject(
+                $powerPoint
+            )
+        }
+        catch {}
+    }
+    [GC]::Collect()
+    [GC]::WaitForPendingFinalizers()
+}
+"""
+
+
+_EXPORT_SCRIPT = r"""
+$ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
+$inputPath = [Environment]::GetEnvironmentVariable("PPT_MASTER_VIDEO_INPUT")
+$outputPath = [Environment]::GetEnvironmentVariable("PPT_MASTER_VIDEO_OUTPUT")
+$resolution = [int][Environment]::GetEnvironmentVariable(
+    "PPT_MASTER_VIDEO_RESOLUTION"
+)
+$framesPerSecond = [int][Environment]::GetEnvironmentVariable(
+    "PPT_MASTER_VIDEO_FPS"
+)
+$quality = [int][Environment]::GetEnvironmentVariable("PPT_MASTER_VIDEO_QUALITY")
+$defaultSlideDuration = [int][Environment]::GetEnvironmentVariable(
+    "PPT_MASTER_VIDEO_DEFAULT_SLIDE_DURATION"
+)
+$timeoutSeconds = [int][Environment]::GetEnvironmentVariable(
+    "PPT_MASTER_VIDEO_TIMEOUT"
+)
+
+$powerPoint = $null
+$presentation = $null
+$ownsApplication = $false
+
+try {
+    try {
+        $powerPoint = [Runtime.InteropServices.Marshal]::GetActiveObject(
+            "PowerPoint.Application"
+        )
+    }
+    catch {
+        $powerPoint = New-Object -ComObject PowerPoint.Application
+        $ownsApplication = $true
+    }
+
+    $version = [version]$powerPoint.Version
+    if ($version.Major -lt 16) {
+        throw "PowerPoint $version is older than the supported Office 2016 baseline."
+    }
+
+    # ReadOnly=-1, Untitled=0, WithWindow=0.
+    $presentation = $powerPoint.Presentations.Open($inputPath, -1, 0, 0)
+    $startMessage = "PowerPoint video export started: {0}p, {1} fps." -f @(
+        $resolution,
+        $framesPerSecond
+    )
+    [Console]::Error.WriteLine($startMessage)
+    $presentation.CreateVideo(
+        $outputPath,
+        $true,
+        $defaultSlideDuration,
+        $resolution,
+        $framesPerSecond,
+        $quality
+    )
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($timeoutSeconds)
+    $nextProgress = [DateTime]::UtcNow.AddSeconds(15)
+    while ($true) {
+        $status = [int]$presentation.CreateVideoStatus
+        if ($status -eq 3) {
+            break
+        }
+        if ($status -eq 4) {

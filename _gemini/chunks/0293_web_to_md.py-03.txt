@@ -1,0 +1,89 @@
+                    sock.bind(self.source_address)
+                # Numeric addresses go straight to connect; no second DNS lookup.
+                sock.connect((str(address), self.port))
+                sys.audit("http.client.connect", self, self.host, self.port)
+                return sock
+            except OSError as exc:
+                error = exc
+                if sock is not None:
+                    sock.close()
+        if isinstance(error, socket.timeout):
+            raise ConnectTimeoutError(self, f"Connection to {self.host} timed out") from error
+        raise NewConnectionError(self, f"Failed to establish a new connection: {error}") from error
+
+
+def _public_http_adapter():
+    """Build isolated pools without patching requests or urllib3 globally."""
+    from urllib3.connection import HTTPConnection, HTTPSConnection
+    from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
+
+    class PublicHTTPConnection(_PublicConnectionMixin, HTTPConnection):
+        pass
+
+    class PublicHTTPSConnection(_PublicConnectionMixin, HTTPSConnection):
+        pass
+
+    class PublicHTTPConnectionPool(HTTPConnectionPool):
+        ConnectionCls = PublicHTTPConnection
+
+    class PublicHTTPSConnectionPool(HTTPSConnectionPool):
+        ConnectionCls = PublicHTTPSConnection
+
+    adapter = requests.adapters.HTTPAdapter()
+    adapter.poolmanager.pool_classes_by_scheme = {
+        "http": PublicHTTPConnectionPool,
+        "https": PublicHTTPSConnectionPool,
+    }
+    return adapter
+
+
+def _validate_response_redirect(response, **kwargs) -> None:
+    """Check requests redirects before its redirect engine sends the next hop."""
+    try:
+        response_url, _ = _validate_public_url(response.url)
+        if response.is_redirect:
+            # Match requests' decoding of the HTTP Location header.
+            location = response.headers["location"].encode("latin1").decode("utf8")
+            _check_url_characters(location)
+            next_url, _ = _validate_public_url(urljoin(response_url, location))
+            response.headers["location"] = next_url
+    except _UnsafeUrlError:
+        response.close()
+        raise
+
+
+def _curl_http_get(url: str, *, headers: dict | None, timeout: int | None,
+                   verify: bool, stream: bool):
+    """Pin each curl hop with CURLOPT_RESOLVE, retaining Chrome impersonation."""
+    cookies = requests.cookies.RequestsCookieJar()
+    headers = requests.structures.CaseInsensitiveDict(headers or {})
+    max_redirects = requests.models.DEFAULT_REDIRECT_LIMIT
+    for redirect_count in range(max_redirects + 1):
+        url, addresses = _validate_public_url(url)
+        curl_options = {}
+        if not CONFIG["allow_private_hosts"]:
+            target = parse_url(url)
+            port = target.port if target.port is not None else (443 if target.scheme == "https" else 80)
+            # IPv6 addresses need brackets in libcurl's host:port:address list.
+            pinned = ",".join(f"[{ip}]" if ip.version == 6 else str(ip) for ip in addresses)
+            curl_options = {CurlOpt.RESOLVE: [f"{target.host}:{port}:{pinned}"], CurlOpt.PROXY: ""}
+        response = curl_requests.get(
+            url, headers=headers, timeout=timeout, verify=verify,
+            impersonate=_CURL_IMPERSONATE, stream=stream,
+            allow_redirects=False, cookies=cookies, curl_options=curl_options, quote=False,
+        )
+        try:
+            _validate_public_url(response.url)
+        except _UnsafeUrlError:
+            response.close()
+            raise
+        if response.status_code not in (301, 302, 303, 307, 308):
+            return response
+        location = response.headers.get("Location")
+        if not location:
+            return response
+        try:
+            _check_url_characters(location)
+            next_url, _ = _validate_public_url(urljoin(response.url, location))
+            if redirect_count >= max_redirects:
+                raise requests.exceptions.TooManyRedirects(

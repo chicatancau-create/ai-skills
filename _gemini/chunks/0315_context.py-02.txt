@@ -1,0 +1,82 @@
+    # SVG group opacity is post-compositing, not an inherited presentation
+    # property. DrawingML has no equivalent group alpha, so native export
+    # approximates it by multiplying this value into each descendant object.
+    opacity_multiplier: float = 1.0
+    # Recursion depth — only the depth==0 (root) context records anim targets.
+    depth: int = 0
+    # Top-level <g id="..."> groups, recorded as (shape_id, svg_id) in z-order.
+    # Used by the PPTX builder to emit per-element object-animation timing.
+    anim_targets: list = field(default_factory=list)
+    # Explicit sidecar group ids may override the legacy chrome-name heuristic.
+    # Explicit structural layer/role/placeholder markers remain non-animatable.
+    animation_group_overrides: frozenset[str] = frozenset()
+    # Text-layout policy for positional tspans: preserve authored line breaks
+    # in one frame, reflow them, or split them into independent frames.
+    text_flow: str = TEXT_FLOW_PRESERVE
+    # Explicit opt-in: replace marked chart/table fallback groups with editable
+    # PowerPoint graphicFrames. Default stays off to preserve SVG output.
+    native_objects_enabled: bool = False
+    # Native PPTX image optimization. Keeps generated decks compact by
+    # downsampling oversized raster assets to their rendered size.
+    image_optimize: bool = True
+    image_max_dimension: int | None = 2560
+    image_sizing: str = 'cap'
+    image_scale: float = 2.0
+    image_quality: int = 85
+    # Optional per-element conversion diagnostics. Shared by child contexts so
+    # callers can inspect native / skipped / unsupported decisions per slide.
+    trace_events: list[dict[str, Any]] | None = None
+    # Optional project theme contract. Matching SVG title/body families emit
+    # DrawingML +mj/+mn tokens instead of fixed typeface names.
+    theme_font_spec: ThemeFontSpec | None = None
+    # Optional project theme-color contract. Exact locked colors are promoted
+    # to context-safe DrawingML scheme slots while local colors stay concrete.
+    theme_color_spec: ThemeColorSpec | None = None
+    # Canonical BCP-47 content language from spec_lock.md. ``None`` preserves
+    # the legacy per-run script heuristic for older projects and lockless quick generation.
+    primary_language: str | None = None
+    # Reuse media relationships when the same image fills multiple text runs.
+    text_image_fill_cache: dict[tuple[str, str], str] = field(default_factory=dict)
+
+    def next_id(self) -> int:
+        """Allocate the next shape ID."""
+        cid = self.id_counter
+        while cid in self.reserved_shape_ids or cid in self.claimed_shape_ids:
+            cid += 1
+        self.id_counter = cid + 1
+        self.claimed_shape_ids.add(cid)
+        return cid
+
+    def claim_shape_id(
+        self,
+        source_id: str | None,
+        source_scope: str | None = None,
+    ) -> int:
+        """Claim a pre-reserved imported shape id, or allocate a fresh one."""
+        if source_id is None:
+            return self.next_id()
+        scope = source_scope or 'slide'
+        key = (scope, source_id)
+        shape_id = self.source_shape_id_map.get(key)
+        if shape_id is None:
+            raise ValueError(
+                f'Unreserved data-pptx-shape-id {source_id!r} in scope {scope!r}'
+            )
+        if shape_id in self.claimed_shape_ids:
+            raise ValueError(
+                f'Duplicate data-pptx-shape-id {source_id!r} in scope {scope!r}'
+            )
+        self.claimed_shape_ids.add(shape_id)
+        return shape_id
+
+    def reference_shape_id(
+        self,
+        source_id: str,
+        source_scope: str | None = None,
+    ) -> int:
+        """Resolve and record a connector target in the imported id space."""
+        scope = source_scope or 'slide'
+        shape_id = self.source_shape_id_map.get((scope, source_id))
+        if shape_id is None:
+            raise ValueError(
+                f'Unknown connector shape reference {source_id!r} in scope {scope!r}'

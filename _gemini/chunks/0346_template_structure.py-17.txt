@@ -1,0 +1,88 @@
+                "data-pptx-placeholder"
+            )
+        if effective_layer and placeholder:
+            raise TemplateStructureError(
+                f"{svg_path.name}: {element_id or tag} cannot be both a static "
+                "structure/background layer and a content placeholder"
+            )
+        if layer == "slide" and not is_background:
+            raise TemplateStructureError(
+                f"{svg_path.name}: data-pptx-layer='slide' is allowed only on a "
+                "direct full-canvas solid background rect"
+            )
+        if (
+            structured
+            and layer in {"master", "layout"}
+            and tag == "g"
+            and not _is_authored_preset_atom(elem)
+            and not is_picture_effect_carrier(elem)
+        ):
+            raise TemplateStructureError(
+                f"{svg_path.name}: {element_id or tag} is a <g> on the {layer} "
+                "layer; Master/Layout fixed elements must be root-level atoms"
+            )
+        if placeholder_idx_raw is not None and not placeholder:
+            raise TemplateStructureError(
+                f"{svg_path.name}: {element_id or tag} has placeholder idx without "
+                "data-pptx-placeholder"
+            )
+        if binding_raw is not None and not placeholder:
+            raise TemplateStructureError(
+                f"{svg_path.name}: {element_id or tag} has placeholder binding "
+                "without data-pptx-placeholder"
+            )
+        if carrier_raw is not None:
+            raise TemplateStructureError(
+                f"{svg_path.name}: {element_id or tag} declares "
+                "data-pptx-carrier on a root child; the marker belongs "
+                "on the direct child inside a placeholder <g>"
+            )
+        if (effective_layer or placeholder) and not element_id:
+            raise TemplateStructureError(
+                f"{svg_path.name}: direct <{tag}> with Layout metadata requires an id"
+            )
+        if editable_raw is not None:
+            if not effective_layer or editable_raw.strip().lower() != "false":
+                raise TemplateStructureError(
+                    f"{svg_path.name}: data-pptx-editable currently supports only "
+                    "'false' on master/layout elements or slide backgrounds"
+                )
+
+        if is_background:
+            order_rank = {"master": 0, "layout": 1, "slide": 2}[effective_layer]
+        elif effective_layer == "master":
+            order_rank = 3
+        elif effective_layer == "layout":
+            order_rank = 4
+        else:
+            order_rank = 5
+        if order_rank < last_order_rank:
+            raise TemplateStructureError(
+                f"{svg_path.name}: {element_id or tag} violates template paint order; "
+                "use Master background, Layout background, Slide background, "
+                "Master shapes, Layout shapes, then Slide content/placeholders. "
+                "Full-canvas solid rects are treated as backgrounds; translucent overlays are not backgrounds"
+            )
+        last_order_rank = order_rank
+
+        placeholder_bounds = _parse_placeholder_bounds(
+            bounds_raw if placeholder else None,
+            svg_path=svg_path,
+            element_id=element_id or tag,
+        )
+        if structured and placeholder and placeholder_bounds is None:
+            raise TemplateStructureError(
+                f"{svg_path.name}: Layout placeholder {element_id!r} requires "
+                "explicit data-pptx-bounds; define the "
+                "reusable frame from the design zone, not the current text bounds"
+            )
+        placeholder_idx = _parse_placeholder_idx(
+            placeholder_idx_raw,
+            svg_path=svg_path,
+            element_id=element_id or tag,
+        )
+
+        placeholder_binding: str | None = None
+        placeholder_carrier_tag: str | None = None
+        if placeholder and structured:
+            if tag != "g":

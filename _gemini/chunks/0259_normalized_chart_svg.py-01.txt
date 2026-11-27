@@ -1,0 +1,141 @@
+"""Deterministic normalized SVG fallback for parsed classic charts.
+
+The renderer is intentionally independent from the native-chart OOXML
+emitter.  It visualizes only data and semantics that ``chart_to_svg`` has
+already accepted, so a rendering failure can never invalidate an otherwise
+valid editable-chart payload.
+"""
+
+from __future__ import annotations
+
+import html
+import math
+import re
+from dataclasses import dataclass
+from datetime import date, timedelta
+from decimal import Decimal, ROUND_HALF_UP
+from typing import Any
+
+
+_DEFAULT_COLORS = (
+    "#4472C4",
+    "#ED7D31",
+    "#A5A5A5",
+    "#FFC000",
+    "#5B9BD5",
+    "#70AD47",
+    "#264478",
+    "#9E480E",
+)
+
+
+@dataclass(frozen=True)
+class SeriesVisualStyle:
+    """Resolved paint used only by the normalized SVG fallback."""
+
+    fill: str | None
+    fill_opacity: float = 1.0
+    stroke: str | None = None
+    stroke_opacity: float = 1.0
+    stroke_width: float = 1.5
+    line_cap: str = "round"
+    marker_fill: str | None = None
+    marker_fill_opacity: float = 1.0
+    marker_stroke: str | None = None
+    marker_stroke_opacity: float = 1.0
+    marker_stroke_width: float = 1.0
+    marker_size: float = 5.0
+
+
+@dataclass(frozen=True)
+class _Rect:
+    x: float
+    y: float
+    w: float
+    h: float
+
+
+def render_normalized_chart_svg(
+    payload: dict[str, Any],
+    styles: list[SeriesVisualStyle],
+) -> str | None:
+    """Render a readable normalized fallback for supported classic charts."""
+    chart_type = str(payload.get("type") or "")
+    if chart_type not in {
+        "area", "bar", "column", "doughnut", "line", "pie",
+        "scatter", "bubble", "combo",
+    }:
+        return None
+
+    try:
+        bounds = _Rect(
+            float(payload["x"]),
+            float(payload["y"]),
+            float(payload["width"]),
+            float(payload["height"]),
+        )
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    if (
+        bounds.w <= 0
+        or bounds.h <= 0
+        or not all(math.isfinite(value) for value in vars(bounds).values())
+    ):
+        return None
+
+    legend_entries = _legend_entries(payload, styles)
+    content, legend_rect, title_parts = _outer_layout(
+        payload,
+        bounds,
+        len(legend_entries),
+    )
+    parts = [*title_parts]
+    if chart_type in {"pie", "doughnut"}:
+        parts.extend(_render_pie(payload, styles, content, chart_type == "doughnut"))
+    elif chart_type == "combo":
+        parts.extend(_render_combo(payload, styles, content))
+    elif chart_type in {"scatter", "bubble"}:
+        parts.extend(_render_xy(payload, styles, content, chart_type))
+    else:
+        parts.extend(_render_category(payload, styles, content, chart_type))
+    if legend_rect is not None:
+        parts.extend(
+            _render_legend(
+                legend_entries,
+                legend_rect,
+                str(payload.get("legend_position") or "b"),
+            )
+        )
+    return "\n".join(part for part in parts if part)
+
+
+def _outer_layout(
+    payload: dict[str, Any],
+    bounds: _Rect,
+    legend_count: int,
+) -> tuple[_Rect, _Rect | None, list[str]]:
+    pad = max(4.0, min(bounds.w, bounds.h) * 0.018)
+    content = _Rect(
+        bounds.x + pad,
+        bounds.y + pad,
+        max(1.0, bounds.w - 2 * pad),
+        max(1.0, bounds.h - 2 * pad),
+    )
+    title_parts: list[str] = []
+    title = _entry_text(payload.get("title"))
+    subtitle = _entry_text(payload.get("subtitle"))
+    if title:
+        title_size = _font_size(
+            _entry_value(payload.get("title"), "font_size"),
+            min(18.0, max(10.0, bounds.h * 0.055)),
+            bounds,
+        )
+        title_y = content.y + title_size
+        title_parts.append(
+            _text(
+                content.x + content.w / 2,
+                title_y,
+                title,
+                size=title_size,
+                anchor="middle",
+                weight="600",

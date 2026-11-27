@@ -1,0 +1,126 @@
+                )
+        try:
+            structured_layout_definition_files(specs, structure_lock)
+        except TemplateStructureError as exc:
+            errors.append(str(exc))
+    return errors
+
+
+def _signature_attr_value(
+    name: str,
+    value: str,
+    *,
+    svg_path: Path | None,
+    asset_identity: bool,
+) -> str:
+    """Normalize portable asset references without weakening visual identity."""
+    if name.rsplit("}", 1)[-1] != "href":
+        return value
+    if asset_identity:
+        if value.startswith("#") or "://" in value:
+            return value
+        if value.startswith("data:"):
+            return "data-sha256:" + hashlib.sha256(
+                value.encode("utf-8")
+            ).hexdigest()
+        if svg_path is None:
+            raise TemplateStructureError(
+                "literal asset comparison requires the source SVG path"
+            )
+        asset_path = (svg_path.parent / value).resolve()
+        if not asset_path.is_file():
+            raise TemplateStructureError(
+                f"{svg_path.name}: mirror asset reference does not resolve: "
+                f"{value!r}"
+            )
+        return "file-sha256:" + _file_sha256(asset_path)
+    if value.startswith("data:") or "://" in value:
+        return value
+    return value.replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def _element_tree_signature(
+    elem: ET.Element,
+    *,
+    include_skin: bool = False,
+    include_text: bool = True,
+    svg_path: Path | None = None,
+    asset_identity: bool = False,
+    ignore_structure_attrs: bool = False,
+    ignore_json_native_preview: bool = False,
+) -> tuple[object, ...]:
+    """Return a stable structural or literal-visual SVG subtree signature."""
+    text = (elem.text or "") if include_text else ""
+    if _local_tag(elem) not in {"text", "tspan"} and not text.strip():
+        text = ""
+    attrs = tuple(sorted(
+        (
+            name,
+            _signature_attr_value(
+                name,
+                value,
+                svg_path=svg_path,
+                asset_identity=asset_identity,
+            ),
+        )
+        for name, value in elem.attrib.items()
+        if (
+            not (
+                ignore_structure_attrs
+                and name.rsplit("}", 1)[-1] in _STRUCTURE_ATTRS
+            )
+            and (
+                include_skin
+                or name.rsplit("}", 1)[-1] not in _TEMPLATE_SKIN_ATTRS
+            )
+        )
+    ))
+    children = (
+        _mirror_comparison_children(elem)
+        if ignore_json_native_preview
+        else tuple(elem)
+    )
+    json_native_marker = (
+        ignore_json_native_preview and _is_json_first_native_marker(elem)
+    )
+    return (
+        elem.tag,
+        attrs,
+        text,
+        tuple(
+            _element_tree_signature(
+                child,
+                include_skin=include_skin,
+                include_text=(
+                    include_text
+                    or (
+                        json_native_marker
+                        and _local_tag(child) == "metadata"
+                    )
+                ),
+                svg_path=svg_path,
+                asset_identity=asset_identity,
+                ignore_structure_attrs=ignore_structure_attrs,
+                ignore_json_native_preview=ignore_json_native_preview,
+            )
+            for child in children
+        ),
+    )
+
+
+def _is_json_first_native_marker(elem: ET.Element) -> bool:
+    """Return whether this element directly owns JSON-first Chart/Table data."""
+    try:
+        replacement_kind = native_replacement_kind(elem)
+    except NativeMarkerAttributeError:
+        return False
+    return (
+        native_json_is_authoritative(elem)
+        and replacement_kind in {"chart", "table"}
+    )
+
+
+def _mirror_comparison_children(elem: ET.Element) -> tuple[ET.Element, ...]:
+    """Exclude only the derived preview below a JSON-first native marker."""
+    if not _is_json_first_native_marker(elem):
+        return tuple(elem)

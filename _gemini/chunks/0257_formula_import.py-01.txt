@@ -1,0 +1,128 @@
+"""Import PPT Master-owned Office Math into canonical SVG formula markers.
+
+The reverse contract is deliberately narrow: accept only the closed OMML
+vocabulary already validated by the native formula compiler, serialize that
+structure to compiler-accepted LaTeX, and build a plain-text SVG preview.
+Unknown third-party OMML remains outside this module's reconstruction claim.
+"""
+
+from __future__ import annotations
+
+from collections import Counter
+from dataclasses import dataclass
+from xml.etree import ElementTree as ET
+
+from svg_to_pptx.native_objects.formula_compiler import (
+    FormulaCompileError,
+    compile_latex_to_inline_omml,
+    compile_latex_to_omml,
+    validate_omml_fragment,
+)
+from svg_to_pptx.native_objects.formula_profile import (
+    ACCENT_COMMANDS,
+    NARY_COMMANDS,
+)
+
+
+MATH_NS = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+DRAWING_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+A14_NS = "http://schemas.microsoft.com/office/drawing/2010/main"
+
+_M = f"{{{MATH_NS}}}"
+_A = f"{{{DRAWING_NS}}}"
+_A14_M = f"{{{A14_NS}}}m"
+_PROPERTY_SUFFIX = "Pr"
+
+_NARY_COMMAND_BY_SYMBOL = {
+    symbol: command
+    for command, (symbol, _category) in NARY_COMMANDS.items()
+}
+_ACCENT_COMMAND_BY_CHARACTER = {
+    character: command
+    for command, character in ACCENT_COMMANDS.items()
+}
+_GROUP_COMMANDS = {
+    ("⏞", "top", "bot"): "overbrace",
+    ("⏟", "bot", "top"): "underbrace",
+    ("→", "bot", "top"): "underrightarrow",
+    ("←", "bot", "top"): "underleftarrow",
+    ("↔", "bot", "top"): "underleftrightarrow",
+    ("→", "top", "bot"): "overrightarrow",
+    ("←", "top", "bot"): "overleftarrow",
+    ("↔", "top", "bot"): "overleftrightarrow",
+}
+_DELIMITER_COMMANDS = {
+    "{": r"\{",
+    "}": r"\}",
+    "⟨": r"\langle",
+    "⟩": r"\rangle",
+    "⌊": r"\lfloor",
+    "⌋": r"\rfloor",
+    "⌈": r"\lceil",
+    "⌉": r"\rceil",
+    "‖": r"\Vert",
+    "⟦": "⟦",
+    "⟧": "⟧",
+}
+_SPACING_LATEX = {
+    "\u200b": r"\!",
+    "\u2009": r"\,",
+    "\u205f": r"\:",
+    "\u2004": r"\;",
+    "\u2002": r"\enspace{}",
+    "\u2003": r"\quad{}",
+    "\u00a0": "~",
+}
+
+
+class FormulaImportError(ValueError):
+    """Raised when source OMML is outside the reversible project contract."""
+
+
+@dataclass(frozen=True)
+class FormulaImport:
+    """Canonical formula source plus a visible SVG-preview representation."""
+
+    latex: str
+    preview: str
+    font_size_px: float
+    color: str
+    align: str
+    language: str
+
+
+def import_formula(math_zone: ET.Element, *, display: bool) -> FormulaImport:
+    """Validate and reconstruct one ``a14:m`` formula zone."""
+    if math_zone.tag != _A14_M:
+        raise FormulaImportError("formula carrier must be one a14:m element")
+    children = [child for child in math_zone if isinstance(child.tag, str)]
+    if len(children) != 1:
+        raise FormulaImportError("a14:m must contain exactly one Office Math root")
+    root = children[0]
+    expected = f"{_M}{'oMathPara' if display else 'oMath'}"
+    if root.tag != expected:
+        kind = "block" if display else "inline"
+        raise FormulaImportError(
+            f"{kind} formula requires m:{expected.rsplit('}', 1)[-1]}"
+        )
+
+    try:
+        canonical = validate_omml_fragment(
+            ET.tostring(root, encoding="unicode", short_empty_elements=True)
+        )
+        validated_root = ET.fromstring(canonical)
+        latex = _serialize_root(validated_root)
+        if display:
+            compile_latex_to_omml(latex)
+        else:
+            compile_latex_to_inline_omml(latex)
+    except (FormulaCompileError, ET.ParseError, RecursionError) as exc:
+        raise FormulaImportError(str(exc)) from exc
+
+    preview = _preview_root(validated_root).strip()
+    if not latex.strip() or not preview:
+        raise FormulaImportError("formula reconstruction produced empty content")
+    font_size_px, color, language = _dominant_run_style(validated_root)
+    return FormulaImport(
+        latex=latex,
+        preview=preview,

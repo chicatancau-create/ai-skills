@@ -1,0 +1,98 @@
+        var candidate = customCandidateSpec("image_strategy");
+        if (!customCandidateBehavior("image_strategy")) return null;
+        if (!candidate || typeof candidate !== "object") candidate = {};
+        candidate = Object.assign({}, candidate, { rendering: "custom" });
+        return normalizedImageStrategy(candidate);
+    }
+
+    function normalizedImageStrategy(candidate) {
+        candidate = candidate || {};
+        var out = {
+            name: localized(candidate, "name") || candidate.name || "",
+            rendering: candidate.rendering || "",
+            visual: localized(candidate, "visual") || "",
+            mood: localized(candidate, "mood") || ""
+        };
+        var behavior = localized(candidate, "behavior") || candidate.behavior || candidate.custom || "";
+        if (behavior) out.behavior = behavior;
+        return out;
+    }
+
+    function comparableImageStrategy(candidate) {
+        var strategy = normalizedImageStrategy(candidate);
+        return {
+            rendering: strategy.rendering || "",
+            visual: strategy.visual || "",
+            mood: strategy.mood || "",
+            behavior: strategy.behavior || ""
+        };
+    }
+
+    function directionCardSummary(candidate) {
+        candidate = candidate || {};
+        var strategy = normalizedImageStrategy(candidate.image_strategy || {});
+        return String(
+            localized(candidate, "note") ||
+            directionBehavior(candidate, "visual_style") ||
+            directionBehavior(candidate, "mode") ||
+            strategy.visual ||
+            strategy.behavior ||
+            ""
+        );
+    }
+
+    function usesCustomImagePlanValue(value) {
+        var ids = (CAT.image_usage || []).map(function (item) { return item.id; });
+        if (Array.isArray(value)) return false;
+        return value && ids.indexOf(value) === -1;
+    }
+
+    function customImagePlanHasAiSignal() {
+        return imageStrategyRecommendationCandidates().length > 0 || !!recId("image_ai_path");
+    }
+
+    function needsGeneratedImagesForUsage(value) {
+        if (Array.isArray(value)) return value.indexOf("ai") >= 0;
+        return value === "ai" || (usesCustomImagePlanValue(value) && customImagePlanHasAiSignal());
+    }
+
+    function selectedImageUsageIds(value) {
+        var validIds = (CAT.image_usage || []).map(function (item) { return item.id; });
+        return normalizeRecIds("image_usage", value).filter(function (id) {
+            return validIds.indexOf(id) >= 0;
+        });
+    }
+
+    function imageUsageNotesRecommendation(rawUsage) {
+        var notes = (REC && REC.image_notes && REC.image_notes.value) ||
+            (REC && REC.image_notes) ||
+            (REC && REC.images && REC.images.notes) ||
+            "";
+        if (!notes && usesCustomImagePlanValue(rawUsage)) notes = rawUsage;
+        return typeof notes === "string" ? notes : "";
+    }
+
+    function defaultImageUsageId() {
+        return firstId(CAT.image_usage);
+    }
+
+    function imageStrategySelectedIndex() {
+        var spec = imageStrategySpec();
+        var direct = spec.candidates || spec.options || [];
+        var idx = direct.length ? Number(spec.selected || 0) : selectedDesignDirectionIndex();
+        if (!isFinite(idx) || idx < 0) idx = 0;
+        return Math.min(
+            Math.floor(idx),
+            Math.max(imageStrategyRecommendationCandidates().length - 1, 0)
+        );
+    }
+
+    // ---- section renderers ----------------------------------------------
+    function renderCanvas(host) {
+        var sec = section(1, "sec_canvas");
+        enumField(sec, CAT.canvas, recOrFirst("canvas", CAT.canvas),
+            function () { return STATE.canvas; },
+            function (v) {
+                STATE.canvas = v;
+                if (!STATE.typography) STATE.typography = { name: "", heading: {}, body: {} };
+                // Canvas changes dimensions only — never silently rewrite font sizes

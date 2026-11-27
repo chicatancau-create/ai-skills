@@ -1,0 +1,70 @@
+        self.assertEqual(xfrm.find("a:off", NS).attrib, xfrm.find("a:chOff", NS).attrib)
+        self.assertEqual(xfrm.find("a:ext", NS).attrib, xfrm.find("a:chExt", NS).attrib)
+        ids = [int(node.get("id")) for node in group.findall(".//p:cNvPr", NS)]
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertEqual(ctx.anim_targets, [(_shape_id(group), "sales-chart")])
+        self.assertNotEqual(_shape_id(group), _shape_id(frame))
+        self.assertEqual(ctx.trace_events[-1]["output_geometry"], "native-object")
+        self.assertEqual(ctx.trace_events[-1]["fidelity"], "native-normalized")
+        self.assertEqual(ctx.trace_events[-1]["shape_id"], _shape_id(group))
+        return group
+
+    def test_classic_companions_keep_text_style_and_union_bounds(self) -> None:
+        payload = _payload(
+            name='Sales & "margin"',
+            title={"text": "Bounded title", "x": 50, "y": 30, "width": 200, "height": 30},
+            caption="Caption",
+            source="Source",
+            notes=[{
+                "text": "Far right note", "x": 520, "y": 100, "width": 100, "height": 24,
+                "font_size": 18, "color": "#C8102E", "bold": True,
+            }],
+            footnote="Footnote",
+        )
+        result, root, ctx = self._convert(_marker(payload))
+        group = self._assert_group(result, root, ctx)
+        self.assertEqual(
+            [node.text for node in group.findall("p:sp/p:txBody//a:t", NS)],
+            ["Bounded title", "Caption", "Source", "Far right note", "Footnote"],
+        )
+        self.assertEqual(result.bounds_emu, tuple(v * EMU_PER_PX for v in (50, 30, 620, 376)))
+        self.assertEqual(group.find("p:nvGrpSpPr/p:cNvPr", NS).get("name"), 'Sales & "margin"')
+        note = group.findall("p:sp", NS)[3]
+        run = note.find("p:txBody/a:p/a:r/a:rPr", NS)
+        self.assertEqual(run.get("sz"), "1350")
+        self.assertEqual(run.get("b"), "1")
+        self.assertEqual(run.find("a:solidFill/a:srgbClr", NS).get("val"), "C8102E")
+        self.assertTrue(all(label.find("p:nvSpPr/p:cNvSpPr", NS).get("txBox") == "1"
+                            for label in group.findall("p:sp", NS)))
+
+    def test_sidecar_timing_targets_whole_group_once(self) -> None:
+        result, root, ctx = self._convert(_marker(_payload(notes=["First", "Second"])))
+        group = self._assert_group(result, root, ctx)
+        targets, _ = _build_sequence_targets(
+            ctx.anim_targets, "slide", {"groups": {"sales-chart": {
+                "effect": "entrance_wipe", "effect_options": {"direction": "right"},
+                "duration": 0.9, "order": 3,
+            }}}, None, {}, 0.5, 0.2, 0, random.Random(0),
+        )
+        self.assertEqual(len(targets), 1)
+        timing = _parse(create_sequence_timing_xml(targets))
+        self.assertEqual(
+            {int(node.get("spid")) for node in timing.findall(".//p:spTgt", NS)},
+            {_shape_id(group)},
+        )
+        self.assertIn('filter="wipe(right)"', ET.tostring(timing, encoding="unicode"))
+        self.assertFalse(timing.findall(".//p:bldP", NS))
+
+    def test_no_emitted_companions_keep_single_frame(self) -> None:
+        for extra in ({}, {"notes": [], "caption": " ", "source": ""},
+                      {"notes": [{"text": " "}], "title": "Internal chart title"}):
+            with self.subTest(extra=extra):
+                result, root, ctx = self._convert(_marker(_payload(**extra)))
+                self.assertEqual(len(root), 1)
+                self.assertEqual(root[0].tag, f"{{{NS['p']}}}graphicFrame")
+                self.assertEqual(ctx.anim_targets, [(_shape_id(root[0]), "sales-chart")])
+                self.assertEqual(result.bounds_emu, tuple(v * EMU_PER_PX for v in (100, 80, 500, 320)))
+
+    def test_chartex_companions_keep_chart_relationship_and_package(self) -> None:
+        for companions in ({}, {"title": "Tree", "subtitle": "Subtitle", "notes": ["Note"]}):
+            with self.subTest(companions=companions):

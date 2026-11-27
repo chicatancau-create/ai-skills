@@ -1,0 +1,111 @@
+            and source_types[0] != destination_types[0]
+        ):
+            errors.append(
+                f'Morph pair "{pair.key}" changes OOXML object type from '
+                f'{source_types[0]} to {destination_types[0]}'
+            )
+
+        transition = slide_transitions.get(pair.destination_slide_number)
+        if (
+            transition is not None
+            and (
+                transition.canonical_effect != "morph"
+                or transition.effect_options.get("morph_by") != "object"
+            )
+        ):
+            errors.append(
+                f'Morph pair "{pair.key}" destination slide '
+                f'{pair.destination_slide_number} does not use Morph by object'
+            )
+
+    declared_names_by_edge: dict[tuple[int, int], set[str]] = {}
+    for pair in expected_pairs:
+        declared_names_by_edge.setdefault(
+            (
+                pair.source_slide_number,
+                pair.destination_slide_number,
+            ),
+            set(),
+        ).add(pair.shape_name)
+    for source_slide_number in sorted(slide_shapes):
+        destination_slide_number = source_slide_number + 1
+        if destination_slide_number not in slide_shapes:
+            continue
+        transition = slide_transitions.get(destination_slide_number)
+        if (
+            transition is None
+            or transition.canonical_effect != "morph"
+        ):
+            continue
+        source_names = {
+            name
+            for name in slide_shapes[source_slide_number]
+            if name.startswith("!!")
+        }
+        destination_names = {
+            name
+            for name in slide_shapes[destination_slide_number]
+            if name.startswith("!!")
+        }
+        declared_names = declared_names_by_edge.get(
+            (source_slide_number, destination_slide_number),
+            set(),
+        )
+        unexpected_names = sorted(
+            (source_names & destination_names) - declared_names
+        )
+        if unexpected_names:
+            errors.append(
+                f"Morph edge {source_slide_number}->{destination_slide_number} "
+                "contains undeclared forced name(s): "
+                + ", ".join(unexpected_names)
+            )
+
+    if errors:
+        raise ValueError("; ".join(dict.fromkeys(errors)))
+
+
+def _validate_package_use_timings(
+    package: zipfile.ZipFile,
+    names: list[str],
+) -> list[str]:
+    errors: list[str] = []
+    required_parts = {
+        PRESENTATION_RELS_PART,
+        CONTENT_TYPES_PART,
+    }
+    missing = sorted(required_parts - set(names))
+    if missing:
+        return ["timed advance is missing package parts: " + ", ".join(missing)]
+
+    rels_root = ET.fromstring(package.read(PRESENTATION_RELS_PART))
+    props_part = _presentation_props_part(rels_root)
+    if props_part is None:
+        return ["presentation relationships do not reference presentation properties"]
+    if props_part not in names:
+        return [f"presentation properties part is missing: {props_part}"]
+
+    props_root = ET.fromstring(package.read(props_part))
+    show_properties = props_root.find(_qn(PML_NS, "showPr"))
+    if (
+        show_properties is None
+        or show_properties.get("useTimings") not in {"1", "true", "on"}
+    ):
+        errors.append(f"{props_part} must set p:showPr@useTimings=1")
+
+    content_root = ET.fromstring(package.read(CONTENT_TYPES_PART))
+    package_part_name = "/" + props_part.lstrip("/")
+    if not any(
+        override.get("PartName") == package_part_name
+        and override.get("ContentType") == PRESENTATION_PROPS_CONTENT_TYPE
+        for override in content_root
+    ):
+        errors.append(f"[Content_Types].xml must declare {props_part}")
+    return errors
+
+
+def validate_slide_transition_structure(slide_root: Any) -> list[str]:
+    """Return logical-carrier and schema-order errors for one slide root."""
+    errors: list[str] = []
+    children = list(slide_root)
+    carriers = transition_carriers(slide_root)

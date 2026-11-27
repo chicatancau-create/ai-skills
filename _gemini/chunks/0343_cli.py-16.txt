@@ -1,0 +1,106 @@
+    if not isinstance(motion.get('animation'), dict):
+        raise ValueError('deck-motion handoff animation must be an object')
+    if not isinstance(motion.get('cli_overrides'), dict):
+        raise ValueError('deck-motion handoff cli_overrides must be an object')
+    return motion
+
+
+def _print_postflight_receipt(receipt: _PostflightReceipt) -> None:
+    """Print the compact completion evidence; keep the full JSON on disk."""
+    print(
+        '  [POSTFLIGHT] '
+        f'status={receipt.status} '
+        f'quality_gate={receipt.quality_gate} '
+        f'slides={receipt.slide_count} '
+        f'warning_categories={len(receipt.warnings)}'
+    )
+    for warning in receipt.warnings:
+        print(f'  [POSTFLIGHT][WARNING] {warning}')
+    print(f'  [PPTX] {receipt.output_path}')
+    print(f'  [REPORT] {receipt.report_path}')
+
+
+def _declared_pptx_structure_mode(project_path: Path) -> str | None:
+    """Return the explicitly locked SVG export mode, if the lock declares one."""
+    lock_path = project_path / 'spec_lock.md'
+    try:
+        content = lock_path.read_text(encoding='utf-8')
+    except OSError:
+        return None
+    section_match = _PPTX_STRUCTURE_SECTION_RE.search(content)
+    if section_match is None:
+        return None
+    mode_match = _PPTX_STRUCTURE_MODE_RE.search(section_match.group(1))
+    return mode_match.group(1).strip().lower() if mode_match else None
+
+
+def _declared_canvas_viewbox(project_path: Path) -> str | None:
+    """Return the project-lock root canvas without inferring from its name."""
+    lock_path = project_path / 'spec_lock.md'
+    try:
+        from update_spec import parse_lock
+
+        lock = parse_lock(lock_path)
+    except (OSError, ValueError):
+        return None
+    canvas = lock.get('canvas', {})
+    value = canvas.get('viewBox')
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+_XML_LANG_ATTR = '{http://www.w3.org/XML/1998/namespace}lang'
+
+
+def _svg_root_language(project_path: Path) -> str | None:
+    """Return the ``lang`` / ``xml:lang`` the first svg_output page declares.
+
+    Quick has no lock; its pages carry the deck language on the root
+    ``<svg lang="...">`` instead.
+    """
+    pages = discover_slide_svgs(project_path / 'svg_output')
+    for page in pages[:1]:
+        try:
+            with open(str(page), 'rb') as page_file:
+                for _event, elem in ET.iterparse(page_file, events=('start',)):
+                    value = elem.get('lang') or elem.get(_XML_LANG_ATTR)
+                    if isinstance(value, str) and value.strip():
+                        try:
+                            return normalize_language_tag(value)
+                        except LanguageTagError as exc:
+                            raise LanguageTagError(
+                                f'{page.name} root lang is invalid: {exc}'
+                            ) from exc
+                    return None
+        except ET.ParseError:
+            return None
+    return None
+
+
+def _declared_primary_language(project_path: Path) -> str | None:
+    """Return the canonical content language: the lock's, else the first page's root lang."""
+    lock_path = project_path / 'spec_lock.md'
+    try:
+        from update_spec import parse_lock
+
+        lock = parse_lock(lock_path)
+    except (OSError, ValueError):
+        lock = {}
+    communication = lock.get('communication', {})
+    value = communication.get('primary_language')
+    if isinstance(value, str) and value.strip():
+        try:
+            return normalize_language_tag(value)
+        except LanguageTagError as exc:
+            raise LanguageTagError(
+                'spec_lock.md communication.primary_language '
+                f'is invalid: {exc}'
+            ) from exc
+    return _svg_root_language(project_path)
+
+
+def _print_structure_contract_error(
+    mode: str | None,
+    *,
+    requested_mode: str | None = None,
+) -> None:
+    """Explain an unsupported mode or a structured-export lock mismatch."""

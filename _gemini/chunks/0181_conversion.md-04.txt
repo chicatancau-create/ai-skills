@@ -1,0 +1,71 @@
+- Standard generation uses these fields as facts and recommendation candidates; it does not inherit source slide coordinates or page order by default.
+- Beautify promotes selected identity/content fields into locked constraints after confirmation and redraws SmartArt meaning with ordinary editable shapes.
+
+## `pptx_to_svg.py`
+
+Reconstruct a PPTX package as editable SVG views by reading OOXML directly.
+
+```bash
+python3 scripts/pptx_to_svg.py deck.pptx --inheritance-mode both
+python3 scripts/pptx_to_svg.py deck.pptx --inheritance-mode layered
+python3 scripts/pptx_to_svg.py deck.pptx --inheritance-mode flat
+python3 scripts/pptx_to_svg.py deck.pptx --strict
+```
+
+| Mode | Output |
+|---|---|
+| `both` (default) | Layered master/layout/slide SVGs under `svg/`, plus self-contained slides under `svg-flat/` |
+| `layered` | Only the layered `svg/` view and inheritance metadata |
+| `flat` | One self-contained slide SVG per page under `svg/` |
+
+Every mode also writes a canonical `animations.json`. Its default transition
+is `none`, so slides without a source transition stay transition-free when the
+workspace is exported again.
+
+For Office pictures that carry both a raster compatibility preview on
+`a:blip` and an editable SVG relationship in `asvg:svgBlip`, import resolves
+the SVG relationship first. The raster relationship is used only when the SVG
+relationship or media part cannot be read. The template manifest uses the same
+relationship preference for asset identity; its existing missing-media gate
+remains strict rather than silently treating the raster preview as the
+template's canonical asset.
+
+Supported `a:hlinkClick` on shape/picture `p:cNvPr` and text `a:rPr` becomes
+the shared SVG `<a href>` form for absolute external URIs and source-roster
+`#slide-N` jumps. A source shape that also has linked inner runs uses the
+importer-only `data-pptx-shape-hyperlink` transport to avoid nested SVG anchors.
+Unsupported click actions produce a diagnostic; strict import stops.
+
+### Import compatibility and recovery boundary
+
+Import is tolerant by default because the source deck is user-owned or comes
+from third-party authoring tools. Recovery happens at the narrowest safe
+boundary: first omit only an unsupported property or feature; if that is not
+possible, replace only the affected object with a visible diagnostic
+placeholder; omit a background without discarding its page. Corrupt ZIP/XML or
+missing required package structure remains fatal because no safe local recovery
+exists. Pass `--strict` for parser development or contract verification when
+the first unsupported/malformed source construct should stop conversion.
+
+Every successful run writes `<output>/conversion-report.json`. Its stable
+top-level fields are `schemaVersion`, `source`, `mode`, `summary`, `artifacts`,
+and `diagnostics`; `artifacts.animationConfig` and
+`artifacts.animationMedia` identify the converter-owned sidecar and transition
+sounds. Each diagnostic records a reason `code`, source `message`, chosen
+`fallback`, package `part_path`, and—when available—`slide_index`, `shape_id`,
+`shape_name`, and `shape_kind`. The command also prints a bounded warning
+summary instead of a raw Python traceback.
+
+In the detailed native-object notes below, “fails closed” or “error” describes
+the native replacement claim or strict mode. Default tolerant deck import
+retains the usable fallback/object and records the degradation; it does not
+discard unrelated shapes, pages, or the entire deck.
+
+Source `p:transition` and `p:timing` nodes are never silently implied by the
+static SVG view. Supported page transitions and finite object-animation
+sequences are reconstructed in `animations.json`; source timing outside either
+closed contract emits `transition-not-reconstructed` or
+`animation-not-reconstructed` with the exact source slide. Direct PPTX
+Fill/Enhance workflows remain the source-preserving route for all other timing;
+`--strict` stops on the first unreconstructed node.
+

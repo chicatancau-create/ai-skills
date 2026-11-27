@@ -1,0 +1,119 @@
+        and math.isclose(abs(scale_y), 1.0, abs_tol=1e-9)
+        and (scale_x < 0 or scale_y < 0)
+        and math.isclose(offset_x, -cx, abs_tol=1e-7)
+        and math.isclose(offset_y, -cy, abs_tol=1e-7)
+    ):
+        return None
+    return value.strip()
+
+
+def _compensate_reflected_group_text(root: ET.Element) -> int:
+    """Keep browser-visible text upright inside imported flipped groups."""
+    parent_by_child = {
+        child: parent
+        for parent in root.iter()
+        for child in parent
+    }
+    reflected_groups: list[tuple[int, ET.Element, str]] = []
+    for element in root.iter():
+        if _local_name(element.tag) != "g":
+            continue
+        transform = _axis_reflection_transform(element.get("transform"))
+        if transform is None:
+            continue
+        depth = 0
+        current = element
+        while current in parent_by_child:
+            depth += 1
+            current = parent_by_child[current]
+        reflected_groups.append((depth, element, transform))
+
+    wrapped = 0
+    for _depth, group, transform in sorted(
+        reflected_groups,
+        key=lambda item: item[0],
+        reverse=True,
+    ):
+        text_elements = [
+            element
+            for element in group.iter()
+            if _local_name(element.tag) == "text"
+        ]
+        for text in text_elements:
+            current_parents = {
+                child: parent
+                for parent in group.iter()
+                for child in parent
+            }
+            parent = current_parents.get(text)
+            if parent is None:
+                continue
+            position = list(parent).index(text)
+            parent.remove(text)
+            wrapper = ET.Element(
+                f"{{{SVG_NS}}}g",
+                {"transform": transform},
+            )
+            wrapper.append(text)
+            parent.insert(position, wrapper)
+            wrapped += 1
+    return wrapped
+
+
+def _sha256_bytes(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    return _sha256_bytes(path.read_bytes())
+
+
+def _load_json(path: Path, *, context: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise MirrorMaterializationError(f"Cannot read {context}: {path}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise MirrorMaterializationError(
+            f"Invalid JSON in {context}: {path}: {exc}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise MirrorMaterializationError(f"{context} must be a JSON object: {path}")
+    return payload
+
+
+def _require_list(value: object, *, context: str) -> list[Any]:
+    if not isinstance(value, list):
+        raise MirrorMaterializationError(f"{context} must be a list")
+    return value
+
+
+def _require_string(value: object, *, context: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise MirrorMaterializationError(f"{context} must be a non-empty string")
+    return value.strip()
+
+
+def _require_boolean(value: object, *, context: str) -> bool:
+    if not isinstance(value, bool):
+        raise MirrorMaterializationError(f"{context} must be a boolean")
+    return value
+
+
+def _resolve_inside(root: Path, relative: str, *, context: str) -> Path:
+    parsed = urlsplit(relative)
+    if parsed.scheme or parsed.netloc or Path(parsed.path).is_absolute():
+        raise MirrorMaterializationError(f"{context} must be a relative path: {relative}")
+    resolved = (root / unquote(parsed.path)).resolve()
+    try:
+        resolved.relative_to(root.resolve())
+    except ValueError as exc:
+        raise MirrorMaterializationError(
+            f"{context} escapes its declared root: {relative}"
+        ) from exc
+    return resolved
+
+
+def _parse_svg(path: Path) -> ET.Element:
+    parser = ET.XMLParser(target=ET.TreeBuilder(insert_comments=True, insert_pis=True))
+    try:

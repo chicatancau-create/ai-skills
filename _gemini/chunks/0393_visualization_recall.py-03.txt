@@ -1,0 +1,123 @@
+                for entry in sorted(entries.values(), key=lambda item: item.key)
+            }
+        else:
+            catalog = {
+                entry.reference: {
+                    "family": entry.family,
+                    "key": entry.key,
+                    "path": entry.display_path,
+                    "summary": entry.summary,
+                }
+                for entry in sorted(
+                    entries.values(),
+                    key=lambda item: (item.family, item.key),
+                )
+            }
+        result["semantic_fallback"] = {
+            "reason": "requested-after-bounded-review",
+            "instruction": (
+                "Semantically compare the page tags with every returned selection rule. "
+                "Choose one exact catalog reference or keep no-template-match; lexical "
+                "overlap is not required in this review."
+            ),
+            "reference_pattern": "family/key",
+            "catalog": catalog,
+        }
+    return result
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        stripped = value.strip()
+        normalized = _normalize(stripped)
+        if not stripped or not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(stripped)
+    return result
+
+
+def _run_recall(args: argparse.Namespace) -> int:
+    page = args.page.upper()
+    if not _PAGE_RE.fullmatch(page):
+        print("Error: --page must match P<NN>, for example P03.", file=sys.stderr)
+        return 2
+
+    tags = _dedupe(args.tag)
+    if not 3 <= len(tags) <= 8:
+        print("Error: recall requires 3-8 distinct non-empty --tag values.", file=sys.stderr)
+        return 2
+
+    result = recall_candidates(
+        page,
+        tags,
+        args.limit,
+        family=args.family,
+        force_semantic_fallback=args.semantic_fallback,
+        legacy_output=args.legacy_output,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def _resolve_validation_value(
+    raw: str,
+    family: str,
+    *,
+    allow_legacy_bare: bool,
+) -> VisualizationEntry:
+    if "/" in raw:
+        return resolve_visualization_reference(raw)
+    if family != "all":
+        return resolve_visualization_reference(f"{family}/{raw}")
+    return resolve_visualization_reference(
+        raw,
+        allow_legacy_bare=allow_legacy_bare,
+    )
+
+
+def _run_validate(args: argparse.Namespace) -> int:
+    selected = _dedupe(args.keys)
+    invalid: list[str] = []
+    valid_entries: list[tuple[str, VisualizationEntry]] = []
+    for value in selected:
+        try:
+            valid_entries.append(
+                (
+                    value,
+                    _resolve_validation_value(
+                        value,
+                        args.family,
+                        allow_legacy_bare=args.legacy_bare,
+                    ),
+                )
+            )
+        except VisualizationCatalogError:
+            invalid.append(value)
+
+    if args.legacy_output:
+        valid: object = sorted(raw for raw, _entry in valid_entries)
+    else:
+        valid = [
+            _validation_payload(entry)
+            for _raw, entry in sorted(
+                valid_entries,
+                key=lambda item: (item[1].kind, item[1].family, item[1].key),
+            )
+        ]
+    result: dict[str, object] = {"invalid": sorted(invalid), "valid": valid}
+    if args.legacy_output:
+        result["resolved"] = [
+            {"input": raw, **_validation_payload(entry)}
+            for raw, entry in sorted(valid_entries, key=lambda item: item[0])
+        ]
+    print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+    if invalid:
+        mapping_name = (
+            "page_charts"
+            if args.legacy_output or args.legacy_bare
+            else "page_visualizations"
+        )
+        print(

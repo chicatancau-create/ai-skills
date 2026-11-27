@@ -1,0 +1,89 @@
+                    .then(function () {
+                    if (payload.promote_tspan) {
+                        el = promoteTspanDom(el, payload.promote_tspan) || el;
+                    } else {
+                        applyElementAttrs(el, attrs);
+                        markCommittedAttrs(el, attrs);
+                    }
+                    refreshGeoInputs(el, panel);
+                    })
+                    .catch(function (err) { showError(t("err_edit") + err.message); });
+            };
+            panel.querySelectorAll('.prop-edit-geo[data-geo="x"], .prop-edit-geo[data-geo="y"]').forEach(function (inp) {
+                inp.addEventListener("change", function () { commitGeo("move"); });
+            });
+            panel.querySelectorAll('.prop-edit-geo[data-geo="w"], .prop-edit-geo[data-geo="h"]').forEach(function (inp) {
+                inp.addEventListener("change", function () { commitGeo("resize"); });
+            });
+        }
+    }
+
+    function stageTextStyleAttr(key, value, encodedTargetIds) {
+        value = normalizeEditableAttrValue(key, value);
+        if ((key === "fill" || key === "stroke") && !isSafeColor(value)) {
+            showError(t("err_edit") + key);
+            return;
+        }
+        var ids;
+        try {
+            ids = JSON.parse(decodeURIComponent(encodedTargetIds || "%5B%5D"));
+        } catch (e) {
+            ids = [];
+        }
+        var targets = ids.map(function (id) {
+            return svgContent.querySelector("#" + CSS.escape(id));
+        }).filter(function (target) {
+            return target && attrOrComputedValue(target, key) !== value;
+        });
+        if (targets.length === 0) return;
+
+        var attrs = {};
+        attrs[key] = value;
+        var jobs = targets.map(function (target) {
+            return stageEditRequest(target.id, { attrs: attrs }).then(function () {
+                target.setAttribute(key, value);
+            });
+        });
+        Promise.all(jobs)
+            .then(function () { updateSelectionPanel(); })
+            .catch(function (err) { showError(t("err_edit") + err.message); });
+    }
+
+    function stageAttr(el, eid, key, value) {
+        value = normalizeEditableAttrValue(key, value);
+        if ((key === "fill" || key === "stroke") && !isSafeColor(value)) {
+            showError(t("err_edit") + key);
+            return;
+        }
+        var attrs = {};
+        attrs[key] = value;
+        stageEditRequest(eid, { attrs: attrs })
+            .then(function () { applyElementAttrs(el, attrs); })
+            .catch(function (err) { showError(t("err_edit") + err.message); });
+    }
+
+    // Tracks every in-flight direct-edit POST so Apply changes can wait for them
+    // to land before /save-all (otherwise a just-sent edit could arrive after the
+    // save and resurrect a pending edit).
+    var inFlightEdits = new Set();
+
+    function drainDirectEdits() {
+        if (inFlightEdits.size === 0) return Promise.resolve();
+        return Promise.allSettled(Array.from(inFlightEdits)).then(function (results) {
+            var failed = results.find(function (r) { return r.status === "rejected"; });
+            if (failed) throw (failed.reason || new Error("direct edit failed"));
+            return drainDirectEdits();
+        });
+    }
+
+    function stageEditRequest(eid, payload, slideName) {
+        // Pin the slide at call time: a queued nudge may fire after the user has
+        // navigated, and must still POST to the slide it was made on, not the
+        // global currentSlide.
+        var slide = slideName || currentSlide;
+        var body = { element_id: eid };
+        if (payload.text !== undefined) body.text = payload.text;
+        if (payload.attrs !== undefined) body.attrs = payload.attrs;
+        if (payload.promote_tspan !== undefined) body.promote_tspan = payload.promote_tspan;
+        var p = fetch("/api/slide/" + encodeURIComponent(slide) + "/edit", {
+            method: "POST",

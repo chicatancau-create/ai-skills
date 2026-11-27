@@ -1,0 +1,99 @@
+    unknown_root_fields = sorted(set(payload) - {"schema", "pages"})
+    if unknown_root_fields:
+        raise AuthoringRoundtripError(
+            "Round-trip page plan has unsupported field(s): "
+            + ", ".join(unknown_root_fields)
+        )
+    if payload.get("schema") != ROUNDTRIP_PAGE_PLAN_SCHEMA:
+        raise AuthoringRoundtripError(
+            "Unsupported round-trip page plan schema: "
+            f"{payload.get('schema')!r}; expected {ROUNDTRIP_PAGE_PLAN_SCHEMA!r}"
+        )
+    raw_pages = payload.get("pages")
+    if not isinstance(raw_pages, list) or not raw_pages:
+        raise AuthoringRoundtripError(
+            "Round-trip page plan pages must be a non-empty array"
+        )
+
+    documents_by_slide = {
+        document.source_slide: document
+        for document in documents.values()
+    }
+    source_count = len(documents_by_slide)
+    pages: list[RoundtripPage] = []
+    seen_svg_names: dict[str, int] = {}
+    for output_index, raw in enumerate(raw_pages, start=1):
+        context = f"page_plan.json pages[{output_index - 1}]"
+        if not isinstance(raw, dict):
+            raise AuthoringRoundtripError(f"{context} must be an object")
+        unknown_fields = sorted(set(raw) - {"source_slide", "svg"})
+        if unknown_fields:
+            raise AuthoringRoundtripError(
+                f"{context} has unsupported field(s): "
+                + ", ".join(unknown_fields)
+            )
+        source_slide = raw.get("source_slide")
+        if (
+            not isinstance(source_slide, int)
+            or isinstance(source_slide, bool)
+            or source_slide < 1
+            or source_slide > source_count
+        ):
+            raise AuthoringRoundtripError(
+                f"{context}.source_slide must be between 1 and {source_count}"
+            )
+        source_document = documents_by_slide[source_slide]
+        svg_value = raw.get("svg", source_document.name)
+        if not isinstance(svg_value, str) or not svg_value:
+            raise AuthoringRoundtripError(
+                f"{context}.svg must be a non-empty authoring SVG filename"
+            )
+        if "\\" in svg_value:
+            raise AuthoringRoundtripError(
+                f"{context}.svg must not contain backslashes: {svg_value!r}"
+            )
+        svg_path_value = Path(svg_value)
+        if (
+            svg_path_value.name != svg_value
+            or svg_path_value.suffix.lower() != ".svg"
+            or svg_value in {".", ".."}
+        ):
+            raise AuthoringRoundtripError(
+                f"{context}.svg must be one authoring-svg-flat SVG filename"
+            )
+        svg_key = svg_value.casefold()
+        if svg_key in seen_svg_names:
+            raise AuthoringRoundtripError(
+                f"{context}.svg repeats {svg_value!r}; already used by output "
+                f"page {seen_svg_names[svg_key]}"
+            )
+        authoring_path = _resolve_inside(
+            authoring_dir,
+            svg_value,
+            context=f"{context}.svg",
+        )
+        if not authoring_path.is_file():
+            raise AuthoringRoundtripError(
+                f"{context}.svg names an unknown authoring SVG file: {svg_value}"
+            )
+        canonical_owner = documents.get(svg_value)
+        if (
+            canonical_owner is not None
+            and canonical_owner.source_slide != source_slide
+        ):
+            raise AuthoringRoundtripError(
+                f"{context}.svg {svg_value!r} belongs to source slide "
+                f"{canonical_owner.source_slide}, not {source_slide}"
+            )
+
+        pages.append(RoundtripPage(
+            output_index=output_index,
+            source_slide=source_slide,
+            svg_name=svg_value,
+            source_svg_name=source_document.name,
+        ))
+        seen_svg_names[svg_key] = output_index
+
+    expected_files = set(documents) | {page.svg_name for page in pages}
+    actual_files = {
+        path.relative_to(authoring_dir).as_posix()

@@ -1,0 +1,98 @@
+        raise MirrorMaterializationError(
+            "Mirror vector inventory must use asset_role='decoration'"
+        )
+    icons_root = workspace / "icons"
+    records: dict[str, VectorAssetRecord] = {}
+    assets = _require_list(
+        inventory.get("assets"),
+        context="vector inventory assets",
+    )
+    if inventory.get("asset_count") != len(assets):
+        raise MirrorMaterializationError("Vector inventory asset_count is stale")
+    for index, raw in enumerate(assets):
+        if not isinstance(raw, dict):
+            raise MirrorMaterializationError(f"vector assets[{index}] must be an object")
+        icon = _require_string(raw.get("icon"), context=f"assets[{index}].icon")
+        asset = _require_string(raw.get("asset"), context=f"assets[{index}].asset")
+        origin = _require_string(raw.get("svg"), context=f"assets[{index}].svg")
+        if raw.get("role") != DECORATION_ASSET_ROLE:
+            raise MirrorMaterializationError(
+                f"Vector asset {icon!r} is not declared as decoration"
+            )
+        if origin not in documents:
+            continue
+        if not icon.startswith(f"{IMPORTED_ICON_NAMESPACE}/"):
+            raise MirrorMaterializationError(
+                f"Vector asset {icon!r} is outside imported/ namespace"
+            )
+        if icon in records:
+            raise MirrorMaterializationError(f"Duplicate vector asset id: {icon}")
+        asset_path = _resolve_inside(
+            icons_root,
+            asset,
+            context=f"vector asset {icon!r}",
+        )
+        if not asset_path.is_file() or asset_path.suffix.lower() != ".svg":
+            raise MirrorMaterializationError(f"Vector asset is missing: {asset_path}")
+        asset_root = _parse_svg(asset_path)
+        if asset_root.get(ASSET_ROLE_ATTRIBUTE) != DECORATION_ASSET_ROLE:
+            raise MirrorMaterializationError(
+                f"Vector asset {icon!r} lacks its decoration role"
+            )
+        expected_sha256 = _require_string(
+            raw.get("asset_sha256"),
+            context=f"vector asset {icon!r} asset_sha256",
+        )
+        actual_sha256 = _sha256_file(asset_path)
+        if actual_sha256 != expected_sha256:
+            raise MirrorMaterializationError(
+                f"Vector asset {icon!r} changed; expected {expected_sha256}, "
+                f"found {actual_sha256}"
+            )
+        refs_raw = _require_list(
+            raw.get("source_refs", []),
+            context=f"vector asset {icon!r} source_refs",
+        )
+        if not all(isinstance(item, str) and item for item in refs_raw):
+            raise MirrorMaterializationError(
+                f"Vector asset {icon!r} source_refs must be strings"
+            )
+        records[icon] = VectorAssetRecord(
+            icon=icon,
+            asset_path=asset_path,
+            origin_document=origin,
+            expected_sha256=expected_sha256,
+            source_refs=tuple(refs_raw),
+        )
+    return records
+
+
+def _source_ref_counts(root: ET.Element) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for element in root.iter():
+        source_ref = element.get(SOURCE_REF_ATTRIBUTE)
+        if source_ref:
+            counts[source_ref] = counts.get(source_ref, 0) + 1
+    return counts
+
+
+def _imported_icon_refs(root: ET.Element) -> set[str]:
+    refs: set[str] = set()
+    for element in root.iter():
+        value = (element.get("data-icon") or "").strip()
+        if not value.startswith(f"{IMPORTED_ICON_NAMESPACE}/"):
+            continue
+        if element.get(ASSET_ROLE_ATTRIBUTE) != DECORATION_ASSET_ROLE:
+            raise MirrorMaterializationError(
+                f"Imported vector {value!r} is not marked as decoration"
+            )
+        refs.add(value)
+    return refs
+
+
+def _validate_source_ref_closure(
+    documents: dict[str, AuthoringDocument],
+    vector_assets: dict[str, VectorAssetRecord],
+) -> set[str]:
+    direct_counts: dict[str, dict[str, int]] = {}
+    referenced_icons: set[str] = set()

@@ -1,0 +1,77 @@
+                            ).append(int(shape_id))
+                        for group_id in sorted(morph_group_ids):
+                            resolved_shape_ids = target_ids_by_group.get(
+                                group_id,
+                                [],
+                            )
+                            if len(resolved_shape_ids) != 1:
+                                raise ValueError(
+                                    f'Morph target "{svg_path.stem}/{group_id}" '
+                                    'must resolve to exactly one Slide-local '
+                                    'PowerPoint shape'
+                                )
+                            morph_shape_ids[
+                                (svg_path.stem, group_id)
+                            ] = resolved_shape_ids[0]
+                    # Order matters: OOXML schema requires <p:transition>
+                    # to precede <p:timing> inside <p:sld>. Both use the same
+                    # </p:sld> string-replace anchor, so transition must be
+                    # injected first and timing second.
+                    packaged_sounds_by_source: dict[Path, tuple[str, str]] = {}
+                    expected_transition_sound = _materialize_transition_sound(
+                        (
+                            animation_resource_root
+                            if animation_resource_root is not None
+                            else svg_files[0].parent.parent
+                        ),
+                        slide_transition_sound_path,
+                        media_files_dict,
+                        rel_entries,
+                        audio_exts_used,
+                        packaged_sounds_by_source,
+                    )
+                    if (
+                        slide_transition is not None
+                        or slide_auto_advance is not None
+                        or expected_transition_sound is not None
+                    ):
+                        transition_fragment = create_transition_xml(
+                            effect=slide_transition,
+                            duration=slide_transition_duration,
+                            advance_after=slide_auto_advance,
+                            effect_options=slide_transition_effect_options,
+                            sound=expected_transition_sound,
+                        )
+                        if transition_fragment:
+                            slide_xml = slide_xml.replace(
+                                '</p:sld>',
+                                '\n' + transition_fragment + '\n</p:sld>',
+                            )
+                        if slide_auto_advance is not None:
+                            package_uses_timings = True
+
+                    expected_animation_duration = slide_animation_duration
+                    expected_animation_trigger = slide_animation_trigger
+                    if (
+                        not animation_hard_disabled
+                        and (slide_animation or explicit_animation_groups)
+                        and anim_targets
+                    ):
+                        seq_targets, mixed_count = _build_sequence_targets(
+                            anim_targets,
+                            svg_path.stem,
+                            slide_cfg,
+                            slide_animation,
+                            slide_animation_cfg,
+                            slide_animation_duration,
+                            slide_animation_stagger,
+                            mixed_animation_offset,
+                            animation_rng,
+                        )
+                        seq_targets = _materialize_animation_sounds(
+                            (
+                                animation_resource_root
+                                if animation_resource_root is not None
+                                else svg_files[0].parent.parent
+                            ),
+                            seq_targets,

@@ -1,0 +1,106 @@
+            if row.trigger_shape_id == row.shape_id:
+                errors.append(
+                    'animation target and trigger shape must differ for shape '
+                    f'{row.shape_id}'
+                )
+            if not row.supported_effects:
+                errors.append(
+                    'unsupported object-animation effect tuple for shape '
+                    f'{row.shape_id}: presetClass={row.preset_class}, '
+                    f'presetID={row.preset_id}, '
+                    f'presetSubtype={row.preset_subtype}, '
+                    f'filter={row.filter_name!r}'
+                )
+    return errors
+
+
+def read_slide_click_dependencies(slide_xml: str | bytes) -> tuple[int, ...]:
+    """Read native click/interactive targets without requiring supported effects."""
+    root = ET.fromstring(slide_xml)
+    targets: set[int] = set()
+    for timing in root.iter(_qn(PML_NS, 'timing')):
+        for node in timing.iter(_qn(PML_NS, 'cTn')):
+            conditions = node.findall(f"{_qn(PML_NS, 'stCondLst')}/{_qn(PML_NS, 'cond')}")
+            interactive = node.get('nodeType') in {'clickEffect', 'interactiveSeq'} or any(
+                condition.get('evt') in {'onClick', 'onDblClick', 'onMouseOver', 'onMouseOut', 'onNext', 'onPrev'}
+                for condition in conditions
+            )
+            if interactive:
+                targets.update(
+                    int(value) for target in node.iter(_qn(PML_NS, 'spTgt'))
+                    if (value := target.get('spid', '')).isdigit()
+                )
+    return tuple(sorted(targets))
+
+
+def read_slide_animation_sequence(
+    slide_xml: str | bytes,
+    *,
+    require_supported_effects: bool = False,
+) -> AnimationSequenceSummary:
+    """Read and validate the logical object-animation sequence from slide XML."""
+    data = slide_xml.encode('utf-8') if isinstance(slide_xml, str) else slide_xml
+    try:
+        root = ET.fromstring(data)
+    except ET.ParseError as exc:
+        raise ValueError(f'invalid slide XML: {exc}') from exc
+    root = _select_supported_timing_branch(root)
+    errors = validate_slide_animation_structure(
+        root,
+        require_supported_effects=require_supported_effects,
+    )
+    row_errors: list[str] = []
+    rows = _animation_rows(
+        root,
+        row_errors,
+        require_behavior_signatures=require_supported_effects,
+    )
+    for error in row_errors:
+        if error not in errors:
+            errors.append(error)
+    if errors:
+        raise ValueError('; '.join(errors))
+    direct_timings = [
+        child for child in list(root)
+        if child.tag == _qn(PML_NS, 'timing')
+    ]
+    audio_targets: list[int] = []
+    for audio in root.iter(_qn(PML_NS, 'audio')):
+        for target in audio.iter(_qn(PML_NS, 'spTgt')):
+            value = target.get('spid')
+            if value and value.isdigit():
+                audio_targets.append(int(value))
+    regular_triggers = {
+        row.trigger for row in rows if row.trigger_shape_id is None
+    }
+    trigger = (
+        next(iter(regular_triggers))
+        if len(regular_triggers) == 1
+        else ('on-click' if rows and not regular_triggers else None)
+    )
+    return AnimationSequenceSummary(
+        timing_count=len(direct_timings),
+        trigger=trigger,
+        rows=tuple(rows),
+        audio_target_ids=tuple(audio_targets),
+    )
+
+
+def validate_generated_animation_xml(
+    slide_xml: str | bytes,
+    targets: Sequence[Sequence[object] | Mapping[str, object]],
+    *,
+    duration: float = 0.3,
+    trigger: str = 'after-previous',
+) -> AnimationSequenceSummary:
+    """Read back one generated sequence and require exact requested semantics."""
+    trigger = normalize_animation_trigger(trigger)
+    default_duration_ms = _seconds_to_ms(
+        duration,
+        'animation duration',
+        allow_zero=False,
+    )
+    normalized_expected = tuple(
+        _normalize_target(target, default_duration_ms, trigger)
+        for target in targets
+    )

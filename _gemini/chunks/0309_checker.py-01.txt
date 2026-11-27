@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""PPT Master SVG quality-check implementation.
+
+Owns SVG, project-contract, template, and report validation. The stable CLI and
+compatibility import surface remain in ``scripts/svg_quality_checker.py``.
+
+Usage:
+    Import through ``svg_quality_checker`` or invoke the stable script.
+
+Examples:
+    from svg_quality_checker import SVGQualityChecker
+
+Dependencies:
+    Standard library plus local PPT Master validation modules.
+"""
+
+import copy
+import hashlib
+import html
+import json
+import math
+import re
+from pathlib import Path
+from collections import Counter, defaultdict
+from typing import Dict, List, Tuple
+from urllib.parse import unquote, urlsplit
+from xml.etree import ElementTree as ET
+
+from native_payloads import NativePayloadError, hydrate_native_payload_refs
+from pptx_workspace import (
+    NATIVE_STRUCTURE_PATH,
+    SOURCE_PPTX_PATH,
+)
+from slide_roster import discover_slide_svgs
+from svg_authoring_contract import canonical_authoring_errors
+from svg_authoring_view import (
+    SEMANTIC_OBJECT_ATTRIBUTE,
+    SEMANTIC_SHAPE_KIND,
+    semantic_shape_text_component,
+)
+
+from . import svg_contracts
+from .xml_support import (
+    SVG_NS,
+    XLINK_NS,
+    element_label as _element_label,
+    local_name as _local_name,
+)
+
+try:
+    from project_utils import (
+        CANVAS_FORMATS,
+        validate_communication_trace,
+        validate_outline_hyperlinks,
+        validate_outline_roster,
+    )
+except ImportError:
+    print("Warning: Unable to import project_utils")
+    CANVAS_FORMATS = {}
+    validate_communication_trace = None
+    validate_outline_hyperlinks = None
+    validate_outline_roster = None
+
+from svg_to_pptx.canvas_contract import (
+    CanvasContractError,
+    parse_project_svg_root,
+    parse_project_viewbox,
+)
+
+try:
+    from project_management.project_specs import (
+        parse_spec_lock as _parse_spec_lock,
+        parse_spec_lock_image_value as _parse_spec_lock_image_value,
+    )
+except ImportError:
+    _parse_spec_lock = None  # spec_lock anchor comparison will be skipped
+    _parse_spec_lock_image_value = None
+
+try:
+    from svg_to_pptx.animation_config import (
+        effective_top_level as _effective_top_level,
+        load_animation_config as _load_animation_config,
+        usable_animation_group_id as _usable_animation_group_id,
+        validate_animation_config as _validate_animation_config,
+        validate_animation_config_errors as _validate_animation_config_errors,
+        validate_transition_config as _validate_transition_config,
+    )
+except ImportError as exc:
+    _effective_top_level = None
+    _load_animation_config = None
+    _validate_animation_config = None
+    _validate_animation_config_errors = None
+    _validate_transition_config = None
+    _animation_config_import_error = str(exc)
+
+    def _usable_animation_group_id(raw: str | None) -> str | None:
+        return raw if raw and raw.strip() else None
+else:
+    _animation_config_import_error = None
+
+try:
+    from svg_to_pptx.drawingml.utils import (
+        IDENTITY_MATRIX as _IDENTITY_MATRIX,
+        PROJECT_PAINT_PROPERTIES as _PAINT_PROPERTIES,
+        PROJECT_TEXT_IMAGE_FILL_ATTR as _TEXT_IMAGE_FILL_ATTR,
+        detect_text_lang as _detect_text_lang,
+        is_cjk_char as _is_cjk_char,
+        matrix_multiply as _matrix_multiply,
+        parse_inline_style as _parse_inline_style,
+        parse_project_geometry_length as _parse_project_geometry_length,
+        parse_project_image_aspect_ratio as _parse_project_image_aspect_ratio,
+        parse_project_opacity as _parse_project_opacity,
+        parse_svg_color as _parse_export_color,
+        parse_svg_length as _parse_svg_length,
+        parse_transform_matrix as _parse_transform_matrix,
+        project_definition_index as _project_definition_index,
+        project_mask_errors as _project_mask_errors,
+        rect_to_dml_xfrm as _rect_to_dml_xfrm,
+        split_project_text_clusters as _split_project_text_clusters,
+        svg_hidden_reason as _svg_hidden_reason,

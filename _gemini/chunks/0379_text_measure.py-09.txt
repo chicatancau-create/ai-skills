@@ -1,0 +1,84 @@
+        bold_roles = sorted(name for name, row in merged_roles.items() if row.get('weight') == 'bold')
+        payload['notes'].append(
+            'rates for ' + ', '.join(bold_roles) + ' are measured at bold weight'
+            if bold_roles else
+            'every role is measured at normal weight; recalibrate a role '
+            'realized as bold deck-wide with --role NAME:FAMILY:SIZE:bold: '
+            'bold widens Latin and digits about 7%, while the bundled advance '
+            'table gives CJK one width for both weights'
+        )
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        rendered_json = json.dumps(payload, ensure_ascii=False, indent=2)
+        output_path.write_text(rendered_json + '\n', encoding='utf-8')
+    except (OSError, ValueError) as exc:
+        message = ' '.join(str(exc).splitlines())
+        print(f'Calibration failed: {message}', file=sys.stderr)
+        return 2
+    if args.json:
+        print(rendered_json)
+    else:
+        sys.stdout.write(_render_calibration_table(payload, include_outline=args.outline))
+    return 0
+
+
+def _add_style_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument('--size', type=_positive_float, required=True)
+    parser.add_argument('--family', default='Calibri')
+    parser.add_argument('--weight', choices=_WEIGHTS, default='normal')
+    parser.add_argument('--letter-spacing', type=_bounded_float, default=0.0)
+    parser.add_argument(
+        '--no-headroom',
+        action='store_true',
+        help='Use the raw estimator instead of DrawingML wrapping headroom.',
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description='Measure, wrap, and calibrate SVG authoring text.'
+    )
+    subparsers = parser.add_subparsers(dest='command', required=True)
+
+    measure = subparsers.add_parser('measure', help='Measure single-line text.')
+    measure.add_argument('text', metavar='TEXT', nargs='*')
+    measure.add_argument('--stdin', action='store_true')
+
+    wrap = subparsers.add_parser('wrap', help='Wrap one paragraph.')
+    wrap.add_argument('text', metavar='TEXT', nargs='?')
+    wrap.add_argument('--stdin', action='store_true')
+    wrap.add_argument('--max-width', type=_positive_float, required=True)
+    wrap.add_argument('--x', type=_bounded_float, required=True)
+    wrap.add_argument('--dy', type=_positive_float, required=True)
+    wrap.add_argument('--y', type=_bounded_float)
+
+    box = subparsers.add_parser('box', help='Calculate text-block bounds.')
+    box.add_argument('text', metavar='TEXT', nargs='*')
+    box.add_argument('--x', type=_bounded_float, required=True)
+    box.add_argument('--y', type=_bounded_float, required=True)
+    box.add_argument('--lines', type=_positive_int, required=True)
+    box.add_argument('--dy', type=_positive_float)
+    box.add_argument('--width', type=_nonnegative_float)
+    box.add_argument('--anchor', choices=('start', 'middle', 'end'), default='start')
+
+    calibrate = subparsers.add_parser('calibrate', help='Calibrate project typography roles.')
+    calibrate.add_argument('project_path', type=Path)
+    calibrate.add_argument('--outline', action='store_true')
+    calibrate.add_argument(
+        '--sample',
+        action='append',
+        default=[],
+        metavar='TEXT',
+        help='Planned text in a non-Latin, non-CJK script (Thai, Devanagari, '
+             'Arabic, Hebrew, Cyrillic, ...) measured as its own rate column; repeatable. The '
+             'design_spec.md outline is scanned for such scripts automatically.',
+    )
+    calibrate.add_argument(
+        '--role',
+        action='append',
+        type=_role_argument,
+        default=[],
+        metavar='NAME:FAMILY:SIZE[:bold]',
+        help='Typography role to calibrate, e.g. body:"Microsoft YaHei":20; '
+             'repeatable. Adds or overrides that role whether or not '
+             'spec_lock.md exists (FAMILY replaces the role\'s font stack).',
+    )

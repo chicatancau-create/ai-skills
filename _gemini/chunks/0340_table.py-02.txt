@@ -1,0 +1,137 @@
+    """Build table paragraph properties with project-aware direction."""
+    attrs = []
+    if emit_align:
+        attrs.append(f'algn="{align}"')
+    if text_uses_rtl(text, language):
+        attrs.append('rtl="1"')
+    suffix = f" {' '.join(attrs)}" if attrs else ''
+    if line_spacing_percent is None:
+        return f'<a:pPr{suffix}/>'
+    spacing = round(line_spacing_percent * 1000)
+    return (
+        f'<a:pPr{suffix}><a:lnSpc><a:spcPct val="{spacing}"/>'
+        '</a:lnSpc></a:pPr>'
+    )
+
+
+def _cell_payload(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    return {"text": "" if value is None else str(value)}
+
+
+_TABLE_CANONICAL_SPAN_KEYS = {
+    "col_span",
+    "row_span",
+}
+_TABLE_UNSUPPORTED_SPAN_KEYS = {
+    "colSpan",
+    "grid_span",
+    "gridSpan",
+    "hMerge",
+    "merge",
+    "merged",
+    "rowSpan",
+    "vMerge",
+}
+_TABLE_TOP_LEVEL_SPAN_KEYS = {
+    "merge_cells",
+    "merged_cells",
+    "merges",
+    "spans",
+}
+_TABLE_MAX_ROWS = 1000
+_TABLE_MAX_COLUMNS = 1000
+
+
+@dataclass(frozen=True)
+class _TableMergeRegion:
+    row: int
+    col: int
+    row_span: int
+    col_span: int
+
+
+@dataclass(frozen=True)
+class _TableBorderSpec:
+    style: str
+    color: str | None = None
+    width: float | None = None
+
+
+@dataclass(frozen=True)
+class _TableRun:
+    text: str
+    bold: bool | None = None
+    italic: bool | None = None
+    underline: bool | None = None
+    strike: bool | None = None
+    color: str | None = None
+    font_size: int | None = None
+    font_family: str | None = None
+    lang: str | None = None
+    alt_lang: str | None = None
+    baseline: int | None = None
+    outline: _TableBorderSpec | None = None
+
+
+@dataclass(frozen=True)
+class _TableParagraph:
+    text: str
+    align: str | None = None
+    runs: tuple[_TableRun, ...] | None = None
+    line_spacing_percent: float | None = None
+
+
+def _table_rows(payload: dict[str, Any]) -> list[list[Any]]:
+    columns = payload.get("columns") or []
+    rows = payload.get("rows") or []
+    if not isinstance(columns, list) or not isinstance(rows, list):
+        raise RuntimeError("Native PPTX table requires columns/rows lists")
+    for idx, row in enumerate(rows, start=1):
+        if not isinstance(row, list):
+            raise RuntimeError(f"Native PPTX table row {idx} must be a list")
+
+    table_rows = [list(columns)] if columns else []
+    table_rows.extend(list(row) for row in rows)
+    return table_rows
+
+
+def _table_cell_paragraphs(
+    cell_data: dict[str, Any],
+) -> tuple[_TableParagraph, ...] | None:
+    if "paragraphs" not in cell_data:
+        return None
+    if "text" in cell_data:
+        raise RuntimeError(
+            "Native PPTX table cell text and paragraphs are mutually exclusive"
+        )
+    raw_paragraphs = cell_data.get("paragraphs")
+    if not isinstance(raw_paragraphs, list) or not raw_paragraphs:
+        raise RuntimeError(
+            "Native PPTX table cell paragraphs must be a non-empty list"
+        )
+
+    paragraphs: list[_TableParagraph] = []
+    for idx, value in enumerate(raw_paragraphs, start=1):
+        if isinstance(value, str):
+            paragraphs.append(_TableParagraph(value))
+            continue
+        if not isinstance(value, dict):
+            raise RuntimeError(
+                f"Native PPTX table paragraph {idx} must be a string or object"
+            )
+        if set(value) - {"text", "runs", "align", "line_spacing_percent"}:
+            raise RuntimeError(
+                "Native PPTX table paragraph "
+                f"{idx} accepts text/runs/align/line_spacing_percent only"
+            )
+        has_text = "text" in value
+        has_runs = "runs" in value
+        if has_text == has_runs:
+            raise RuntimeError(
+                f"Native PPTX table paragraph {idx} requires exactly one of text/runs"
+            )
+        align = value.get("align")
+        if align is not None and align not in {"l", "ctr", "r", "just"}:
+            raise RuntimeError(

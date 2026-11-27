@@ -1,0 +1,113 @@
+                borders = tc_pr.findall(f"a:{border_tag}", NS)
+                if len(borders) > 1:
+                    return True
+                if borders:
+                    try:
+                        _direct_border_payload(borders[0], palette)
+                    except ValueError:
+                        return True
+            solid_fill = tc_pr.find("a:solidFill", NS)
+            if solid_fill is not None:
+                fill = resolve_fill(tc_pr, palette)
+                if (
+                    not fill.attrs
+                    or not fill.attrs.get("fill", "").startswith("#")
+                    or set(fill.attrs) - {"fill", "fill-opacity"}
+                ):
+                    return True
+        tx_body = tc.find("a:txBody", NS)
+        if (
+            _text_body_has_unsupported_formatting(tx_body)
+            or _table_text_has_unsupported_outline(tx_body, palette)
+        ):
+            return True
+    return False
+
+
+def _table_cell_has_unsupported_topology(tc: ET.Element) -> bool:
+    """Accept only the closed optional txBody -> optional tcPr cell sequence."""
+    if any(
+        name not in {"gridSpan", "rowSpan", "hMerge", "vMerge"}
+        for name in tc.attrib
+    ):
+        return True
+    tx_body_tag = f"{{{NS['a']}}}txBody"
+    tc_pr_tag = f"{{{NS['a']}}}tcPr"
+    child_tags = [child.tag for child in tc]
+    child_index = 0
+    if child_tags[:1] == [tx_body_tag]:
+        child_index += 1
+    if child_tags[child_index:child_index + 1] == [tc_pr_tag]:
+        child_index += 1
+    return child_index != len(child_tags)
+
+
+def _text_body_has_unsupported_formatting(tx_body: ET.Element | None) -> bool:
+    if tx_body is None:
+        return False
+    if tx_body.attrib:
+        return True
+
+    body_pr_tag = f"{{{NS['a']}}}bodyPr"
+    list_style_tag = f"{{{NS['a']}}}lstStyle"
+    paragraph_tag = f"{{{NS['a']}}}p"
+    body_tags = [child.tag for child in tx_body]
+    body_index = 0
+    if not body_tags or body_tags[0] != body_pr_tag:
+        return True
+    body_index += 1
+    if body_index < len(body_tags) and body_tags[body_index] == list_style_tag:
+        body_index += 1
+    if body_index == len(body_tags) or any(
+        tag != paragraph_tag for tag in body_tags[body_index:]
+    ):
+        return True
+
+    relationship_prefix = f"{{{NS['r']}}}"
+    forbidden_run_children = {
+        f"{{{NS['a']}}}extLst",
+        f"{{{NS['a']}}}hlinkClick",
+        f"{{{NS['a']}}}hlinkMouseOver",
+    }
+    if any(
+        node.tag in forbidden_run_children
+        or any(name.startswith(relationship_prefix) for name in node.attrib)
+        for node in tx_body.iter()
+    ):
+        return True
+
+    body_pr = tx_body.find("a:bodyPr", NS)
+    if body_pr is None or body_pr.attrib or list(body_pr):
+        return True
+    list_style = tx_body.find("a:lstStyle", NS)
+    if list_style is not None and (list_style.attrib or list(list_style)):
+        return True
+    for paragraph in tx_body.findall("a:p", NS):
+        if paragraph.attrib:
+            return True
+        p_pr_tag = f"{{{NS['a']}}}pPr"
+        run_tag = f"{{{NS['a']}}}r"
+        end_r_pr_tag = f"{{{NS['a']}}}endParaRPr"
+        direct_tags = [child.tag for child in paragraph]
+        paragraph_index = 0
+        if direct_tags[:1] == [p_pr_tag]:
+            paragraph_index += 1
+        while (
+            paragraph_index < len(direct_tags)
+            and direct_tags[paragraph_index] == run_tag
+        ):
+            paragraph_index += 1
+        if (
+            paragraph_index < len(direct_tags)
+            and direct_tags[paragraph_index] == end_r_pr_tag
+        ):
+            paragraph_index += 1
+        if paragraph_index != len(direct_tags):
+            return True
+
+        p_pr = paragraph.find("a:pPr", NS)
+        if p_pr is not None:
+            alignment = p_pr.get("algn")
+            if alignment not in {None, "l", "ctr", "r", "just"}:
+                return True
+            p_pr_tags = [child.tag.rsplit("}", 1)[-1] for child in p_pr]

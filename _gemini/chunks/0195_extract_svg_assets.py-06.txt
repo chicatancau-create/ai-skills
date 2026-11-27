@@ -1,0 +1,105 @@
+            continue
+        for elem in root.iter():
+            if _local(elem.tag) != "use":
+                continue
+            icon_name = elem.get("data-icon")
+            if icon_name and (asset := _icon_asset_for_namespace(icon_name, icon_namespace)):
+                assets.add(asset)
+    return assets
+
+
+def _existing_placeholder_entries(
+    svg_paths: list[Path],
+    icons_dir: Path,
+    icon_namespace: str,
+    known_assets: set[str],
+) -> list[dict]:
+    by_asset: dict[str, dict] = {}
+    for svg_path in svg_paths:
+        try:
+            root = ET.parse(svg_path).getroot()
+        except ET.ParseError:
+            continue
+
+        for elem in root.iter():
+            if _local(elem.tag) != "use":
+                continue
+            icon_name = elem.get("data-icon")
+            if not icon_name:
+                continue
+
+            asset = _icon_asset_for_namespace(icon_name, icon_namespace)
+            if asset is None:
+                continue
+            if elem.get(ASSET_ROLE_ATTRIBUTE) != DECORATION_ASSET_ROLE:
+                raise ValueError(
+                    f"Imported vector placeholder {icon_name!r} must declare "
+                    f"{ASSET_ROLE_ATTRIBUTE}={DECORATION_ASSET_ROLE!r}"
+                )
+            if asset in known_assets:
+                continue
+
+            entry = by_asset.setdefault(
+                asset,
+                {
+                    "svg": svg_path.name,
+                    "svgs": [],
+                    "id": icon_name,
+                    "icon": icon_name,
+                    "asset": asset,
+                    "source": "existing-placeholder",
+                    "role": DECORATION_ASSET_ROLE,
+                    "asset_exists": (icons_dir / asset).exists(),
+                },
+            )
+            if svg_path.name not in entry["svgs"]:
+                entry["svgs"].append(svg_path.name)
+
+    entries: list[dict] = []
+    for asset, entry in sorted(by_asset.items()):
+        asset_path = icons_dir / asset
+        if asset_path.exists():
+            entry["asset_sha256"] = hashlib.sha256(
+                asset_path.read_bytes()
+            ).hexdigest()
+            try:
+                root = ET.parse(asset_path).getroot()
+            except ET.ParseError as exc:
+                raise ValueError(
+                    f"Imported vector asset is invalid SVG XML: "
+                    f"{asset_path}: {exc}"
+                ) from exc
+            else:
+                role = root.get(ASSET_ROLE_ATTRIBUTE)
+                if role != DECORATION_ASSET_ROLE:
+                    raise ValueError(
+                        f"Imported vector asset must declare "
+                        f"{ASSET_ROLE_ATTRIBUTE}={DECORATION_ASSET_ROLE!r}: "
+                        f"{asset_path}"
+                    )
+                entry["drawable_count"] = _drawable_count(root)
+                entry["byte_count"] = _xml_size(root)
+                entry["elements"] = _tag_histogram(root)
+                entry["source_refs"] = _source_references(root)
+                entry["dependencies"] = sorted(
+                    elem_id
+                    for elem in root.iter()
+                    if _local(elem.tag) == "defs"
+                    for child in elem
+                    if (elem_id := child.get("id"))
+                )
+        entries.append(entry)
+    return entries
+
+
+def _load_reusable_assets(inventory_path: Path, icons_dir: Path) -> dict[str, dict]:
+    """Load fingerprinted assets from an earlier extraction inventory."""
+    try:
+        payload = json.loads(inventory_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ValueError(f"reuse inventory not found: {inventory_path}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid reuse inventory JSON: {inventory_path}: {exc}") from exc
+
+    if payload.get("schema") != VECTOR_INVENTORY_SCHEMA:
+        raise ValueError(

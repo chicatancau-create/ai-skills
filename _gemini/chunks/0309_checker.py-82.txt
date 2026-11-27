@@ -1,0 +1,107 @@
+    @staticmethod
+    def _row_status(row: Dict[str, str]) -> str:
+        return row.get('Status', '').strip().lower()
+
+    @staticmethod
+    def _row_layout(row: Dict[str, str]) -> str:
+        # ``Image pattern`` is the current §VIII column; ``Layout pattern`` is
+        # the pre-rename spelling still present in older Design Specs.
+        value = row.get('Image pattern', '').strip()
+        if value:
+            return value
+        return row.get('Layout pattern', '').strip()
+
+    @staticmethod
+    def _row_crop(row: Dict[str, str]) -> str:
+        return row.get('Crop Policy', '').strip().lower()
+
+    @staticmethod
+    def _layout_projection_matches(left: str, right: str) -> bool:
+        """Compare one Strategist recommendation without locking its wording."""
+        left_ids = re.findall(r'#([0-9]+)(?![0-9])', left)
+        right_ids = re.findall(r'#([0-9]+)(?![0-9])', right)
+        if left_ids or right_ids:
+            return left_ids == right_ids
+
+        def normalize(value: str) -> str:
+            return re.sub(r'\s+', ' ', value.replace('`', '')).strip()
+
+        return normalize(left) == normalize(right)
+
+    def _load_project_lock_image_entries(
+        self,
+        project_path: Path,
+    ) -> Tuple[Dict[str, List[Dict[str, str]]], str | None]:
+        """Return parsed image-lock rows keyed by basename."""
+        lock_path = project_path / 'spec_lock.md'
+        if not lock_path.exists():
+            return {}, f"{lock_path} does not exist"
+        if _parse_spec_lock is None:
+            return {}, "spec_lock parser is unavailable"
+        if _parse_spec_lock_image_value is None:
+            return {}, "spec_lock image parser is unavailable"
+        try:
+            lock = _parse_spec_lock(lock_path)
+        except Exception as exc:
+            return {}, f"cannot parse {lock_path}: {exc}"
+
+        entries: Dict[str, List[Dict[str, str]]] = defaultdict(list)
+        legacy_metadata_keys = {
+            'image_rendering',
+            'image_rendering_references',
+            'image_rendering_behavior',
+        }
+        errors: List[str] = []
+        for key, value in lock.get('images', {}).items():
+            if str(key).strip().lower() in legacy_metadata_keys:
+                continue
+            try:
+                parsed = _parse_spec_lock_image_value(str(key), str(value))
+            except ValueError as exc:
+                errors.append(f"images row {key!r} {exc}")
+                continue
+            path_part = parsed['path']
+            filename = Path(path_part).name
+            if not filename:
+                continue
+            entries[filename].append({
+                'key': str(key),
+                'path': path_part,
+                'source': parsed['source'],
+                'pattern': parsed['pattern'],
+                'crop': parsed['crop'],
+                'legacy': parsed['legacy'],
+            })
+        error = (
+            f"{lock_path}: " + "; ".join(errors)
+            if errors
+            else None
+        )
+        return dict(entries), error
+
+    def _load_project_lock_images(self, project_path: Path) -> set[str]:
+        """Return filenames listed under spec_lock.md images."""
+        entries, _error = self._load_project_lock_image_entries(project_path)
+        return set(entries)
+
+    @classmethod
+    def _load_project_svg_image_references(
+        cls,
+        project_path: Path,
+    ) -> Tuple[
+        Dict[Path, Dict[str, set[Path]]],
+        Dict[Path, int],
+        Dict[str, List[Tuple[Path, str, Tuple[str, ...]]]],
+    ]:
+        """Parse rendered image instances, paths, and crop mechanisms."""
+        svg_dir = project_path / 'svg_output'
+        if not svg_dir.exists():
+            return {}, {}, {}
+        out: Dict[Path, Dict[str, set[Path]]] = {}
+        inline_counts: Dict[Path, int] = {}
+        placements: Dict[
+            str,
+            List[Tuple[
+                Path,
+                str,
+                Tuple[str, ...],

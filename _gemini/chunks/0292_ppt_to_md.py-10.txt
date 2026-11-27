@@ -1,0 +1,108 @@
+            filename=cached.filename,
+            manifest_entry=cached.manifest_entry,
+            is_new_asset=False,
+        )
+
+    filename = _asset_filename(image_part, ext, asset_index, used_filenames)
+    output_path = asset_dir / filename
+    output_path.write_bytes(blob)
+    saved = SavedPicture(
+        filename=filename,
+        manifest_entry=_manifest_entry(
+            index=asset_index,
+            filename=filename,
+            image_part=image_part,
+            ext=ext,
+            blob=blob,
+            occurrence=occurrence,
+        ),
+        is_new_asset=True,
+    )
+    asset_cache[cache_key] = saved
+    return saved
+
+
+def _reset_generated_asset_dir(asset_dir: Path) -> None:
+    """Remove a previously generated asset directory."""
+    if not asset_dir.exists():
+        return
+    if not (asset_dir / "image_manifest.json").is_file():
+        for path in asset_dir.iterdir():
+            if path.is_file() and LEGACY_GENERATED_IMAGE_RE.match(path.name):
+                path.unlink()
+        return
+    shutil.rmtree(asset_dir)
+
+
+def extract_notes(slide: object) -> tuple[str, str | None]:
+    """Extract speaker notes text plus any notes-slide access failure."""
+    try:
+        notes_slide = slide.notes_slide
+    except Exception as exc:
+        return "", f"speaker notes read failed ({type(exc).__name__}: {exc})"
+
+    blocks = []
+    for item in iter_leaf_shapes(notes_slide.shapes):
+        shape = item.shape
+        if not getattr(shape, "has_text_frame", False):
+            continue
+        text = text_frame_to_markdown(shape.text_frame, shape)
+        if text:
+            blocks.append(text)
+
+    return "\n\n".join(blocks).strip(), None
+
+
+def convert_presentation_to_markdown(
+    input_path: str,
+    output_path: str | None = None,
+) -> str:
+    """Convert a supported PowerPoint file to Markdown."""
+    input_file = Path(input_path)
+    if not input_file.exists():
+        print(f"[ERROR] File not found: {input_path}")
+        return ""
+
+    suffix = input_file.suffix.lower()
+    if suffix not in SUPPORTED_FORMATS:
+        supported = ", ".join(sorted(SUPPORTED_FORMATS.keys()))
+        print(f"[ERROR] Unsupported format: {suffix}")
+        print(f"   Supported: {supported}")
+        print("   Legacy .ppt files should be resaved as .pptx or exported to PDF first.")
+        return ""
+
+    print(f"[INFO] Converting {SUPPORTED_FORMATS[suffix]}: {input_file.name}")
+
+    if output_path:
+        out_file = Path(output_path)
+    else:
+        out_file = input_file.with_suffix(".md")
+
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    asset_dir = out_file.parent / f"{out_file.stem}_files"
+    _reset_generated_asset_dir(asset_dir)
+
+    presentation = Presentation(str(input_file))
+    conversion_warnings: list[str] = []
+    diagrams_by_slide: dict[int, list[dict[str, object]]] = {}
+    diagram_scan_failures: dict[int, str] = {}
+    try:
+        with zipfile.ZipFile(input_file) as package:
+            for slide_index, slide in enumerate(presentation.slides, 1):
+                slide_part = str(slide.part.partname).lstrip("/")
+                try:
+                    diagrams = read_smartart_diagrams(package, slide_part, slide_index)
+                except (OSError, RuntimeError, zipfile.BadZipFile, ET.ParseError) as exc:
+                    diagrams_by_slide[slide_index] = []
+                    diagram_scan_failures[slide_index] = str(exc)
+                    conversion_warnings.append(
+                        f"Slide {slide_index}: SmartArt scan failed: {exc}"
+                    )
+                    continue
+                diagrams_by_slide[slide_index] = diagrams
+                for diagram in diagrams:
+                    issues = [str(item) for item in diagram.get("warnings", []) if item]
+                    if diagram.get("status") != "ok":
+                        issues.insert(0, f"status={diagram.get('status')}")
+                    if not issues:
+                        continue

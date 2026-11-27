@@ -1,0 +1,117 @@
+        node["depth"] = depth
+        ordered.append(node)
+        for child in children.get(node_id, []):
+            visit(child, depth + 1)
+
+    for root in children.get(None, []):
+        visit(root, 0)
+    for node in sorted(nodes_by_id.values(), key=sort_key):
+        if node["id"] not in visited:
+            visit(node, 0)
+
+    for node in ordered:
+        node.pop("_source_index", None)
+
+    visible_connections = [
+        connection
+        for connection in all_connections
+        if connection["type"] == "parOf"
+        and connection["source_id"] in content_ids
+        and connection["destination_id"] in content_ids
+    ]
+    return ordered, visible_connections, structure_warnings
+
+
+def _read_diagram_container(
+    zf: zipfile.ZipFile,
+    container: ET.Element,
+    *,
+    slide_root: ET.Element,
+    slide_part: str,
+    slide_index: int,
+    order: int,
+    relationships: dict[str, dict[str, str]],
+    relationship_error: str | None,
+    fallback_shape_ids: set[str],
+) -> dict[str, Any]:
+    shape_id, shape_name = _shape_identity(container, order)
+    graphic_data = container.find("a:graphic/a:graphicData", DIAGRAM_NS_MAP)
+    rel_ids = (
+        graphic_data.find("dgm:relIds", DIAGRAM_NS_MAP)
+        if graphic_data is not None
+        else None
+    )
+    parts, diagram_relation_error = _diagram_parts(
+        rel_ids,
+        relationships,
+        slide_part,
+    )
+    data_root, data_error = _read_optional_xml(zf, parts.get("data"))
+    layout_root, layout_error = _read_optional_xml(zf, parts.get("layout"))
+    metadata_warnings = [f"layout:{layout_error}"] if layout_error else []
+    nodes: list[dict[str, Any]] = []
+    connections: list[dict[str, Any]] = []
+    structure_warnings: list[str] = []
+    if data_root is not None:
+        nodes, connections, structure_warnings = _ordered_nodes(data_root)
+
+    status = relationship_error or diagram_relation_error or data_error
+    if status is None and structure_warnings:
+        status = "structure-cycle"
+    persisted_drawing, drawing_warnings = _persisted_drawing_part(
+        zf,
+        parts.get("data"),
+        data_root,
+        slide_part,
+        relationships,
+    )
+    text_items = [node["text"] for node in nodes if node["text"]]
+    return {
+        "diagram_id": f"s{slide_index:02d}_dgm{shape_id}",
+        "kind": "smartart",
+        "shape_id": shape_id,
+        "shape_name": shape_name,
+        "geometry": _container_geometry(container, slide_root),
+        "layout": _layout_info(layout_root, data_root),
+        "root_ids": [node["id"] for node in nodes if node["parent_id"] is None],
+        "nodes": nodes,
+        "connections": connections,
+        "text_items": text_items,
+        "node_count": len(nodes),
+        "text_count": len(text_items),
+        "connection_count": len(connections),
+        "max_depth": max((int(node["depth"]) for node in nodes), default=0),
+        "text_extracted": data_root is not None,
+        "has_persisted_drawing": persisted_drawing is not None,
+        "has_fallback_preview": shape_id in fallback_shape_ids,
+        "status": status or "ok",
+        "warnings": metadata_warnings + structure_warnings + drawing_warnings,
+    }
+
+
+def _failed_diagram(
+    container: ET.Element,
+    *,
+    slide_root: ET.Element,
+    slide_index: int,
+    order: int,
+    error: Exception,
+    fallback_shape_ids: set[str],
+) -> dict[str, Any]:
+    shape_id, shape_name = _shape_identity(container, order)
+    return {
+        "diagram_id": f"s{slide_index:02d}_dgm{shape_id}",
+        "kind": "smartart",
+        "shape_id": shape_id,
+        "shape_name": shape_name,
+        "geometry": _container_geometry(container, slide_root),
+        "layout": {"name": None, "unique_id": None, "categories": []},
+        "root_ids": [],
+        "nodes": [],
+        "connections": [],
+        "text_items": [],
+        "node_count": 0,
+        "text_count": 0,
+        "connection_count": 0,
+        "max_depth": 0,
+        "text_extracted": False,

@@ -1,0 +1,118 @@
+        parent.insert(index + offset, child)
+
+    if promoted:
+        promoted[-1].tail = (promoted[-1].tail or "") + (wrapper_tail or "")
+    else:
+        _append_tail(parent, index, wrapper_tail)
+    return True
+
+
+def _strip_import_attributes(element: ET.Element, stats: ProjectionStats) -> None:
+    for name in list(element.attrib):
+        if name not in AUTHORING_OMITTED_SOURCE_ATTRIBUTES:
+            continue
+        stats.source_attributes[name] += 1
+        del element.attrib[name]
+
+
+def _compact_text_runs(root: ET.Element, stats: ProjectionStats) -> None:
+    """Remove redundant run paint while preserving directly editable text."""
+    for text in root.iter():
+        if _local_name(text.tag) != "text":
+            continue
+        for span in list(text):
+            if _local_name(span.tag) != "tspan":
+                continue
+            for name in list(span.attrib):
+                if (
+                    name in _TSPAN_INHERITED_ATTRIBUTES
+                    and span.get(name) == text.get(name)
+                ):
+                    del span.attrib[name]
+                    stats.inherited_text_attributes_compacted += 1
+
+        if len(text) != 1:
+            continue
+        span = text[0]
+        if (
+            _local_name(span.tag) != "tspan"
+            or span.attrib
+            or len(span)
+            or text.text not in {None, ""}
+            or span.tail not in {None, ""}
+        ):
+            continue
+        text.text = span.text
+        text.remove(span)
+        stats.single_tspans_collapsed += 1
+
+
+def _project_subtree(parent: ET.Element, stats: ProjectionStats) -> None:
+    for child in list(parent):
+        part = child.get("data-pptx-part")
+        tag = _local_name(child.tag)
+
+        if tag == "metadata" and part == "txbody":
+            stats.txbody_metadata += 1
+            _remove_child(parent, child)
+            continue
+
+        if (
+            _is_hidden_geometry_carrier(child)
+            and parent.get(SEMANTIC_OBJECT_ATTRIBUTE) != SEMANTIC_SHAPE_KIND
+        ):
+            stats.hidden_geometry_carriers += 1
+            _remove_child(parent, child)
+            continue
+
+        _project_subtree(child, stats)
+        _strip_import_attributes(child, stats)
+
+        if part == "geometry-preview":
+            child.attrib.pop("data-pptx-part", None)
+            stats.compatibility_normalizations += len(
+                normalize_single_child_group_filters(child)
+            )
+            if _unwrap_preview(parent, child):
+                stats.geometry_preview_wrappers += 1
+        elif part == "geometry-detail":
+            child.attrib.pop("data-pptx-part", None)
+            stats.geometry_detail_markers += 1
+
+
+def _rewrite_asset_reference(value: str, source_dir: Path, output_dir: Path) -> str:
+    if not value or value.startswith("#"):
+        return value
+    parsed = urlsplit(value)
+    if parsed.scheme or parsed.netloc or not parsed.path:
+        return value
+
+    resolved = (source_dir / parsed.path).resolve()
+    try:
+        relative = os.path.relpath(resolved, output_dir).replace(os.sep, "/")
+    except ValueError:
+        relative = resolved.as_uri()
+    return urlunsplit(("", "", relative, parsed.query, parsed.fragment))
+
+
+def _rewrite_asset_references(
+    root: ET.Element,
+    source_dir: Path,
+    output_dir: Path,
+    stats: ProjectionStats,
+) -> None:
+    for element in root.iter():
+        for name in ("href", f"{{{XLINK_NS}}}href"):
+            current = element.get(name)
+            if current is None:
+                continue
+            rewritten = _rewrite_asset_reference(current, source_dir, output_dir)
+            if rewritten != current:
+                element.set(name, rewritten)
+                stats.asset_references_rewritten += 1
+
+
+def _definition_references(element: ET.Element) -> set[str]:
+    references: set[str] = set()
+    for item in element.iter():
+        for name, value in item.attrib.items():

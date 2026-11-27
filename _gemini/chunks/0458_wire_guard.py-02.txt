@@ -1,0 +1,99 @@
+    global _last_start
+    now = time.time()
+    if now - _last_start < START_COOLDOWN:
+        return
+    _last_start = now
+    log("headroom unhealthy -> asking the supervisor to start it")
+    try:
+        subprocess.run([HR, "install", "start"], capture_output=True, text=True, timeout=180)
+    except Exception as e:
+        log("start attempt failed: %s" % e)
+
+
+def check_claude(apply_):
+    mode, attached = cc_mode("claude")
+    J = read_json(CLAUDE)
+    if J is None:
+        return "claude: settings.json unreadable/unparseable"
+    env = J.get("env") or {}
+    cur = env.get("ANTHROPIC_BASE_URL", "")
+    if mode != "proxy" or not attached:
+        return "claude: cc-switch mode=%s attached=%s -> leave alone (user chose direct)" % (mode, attached)
+    if cur == WANT_CLAUDE:
+        return "claude: OK (%s)" % cur
+    if CC_CLAUDE not in cur:
+        return "claude: unexpected BASE_URL %r -> leave alone (not a cc-switch rewrite)" % cur
+    if not apply_:
+        return "claude: NEEDS FIX %s -> %s" % (cur, WANT_CLAUDE)
+    if not healthy():
+        maybe_start_headroom()
+        return "claude: headroom not healthy -> NOT wiring (would black-hole the agent)"
+    b = backup(CLAUDE, "claude")
+    env["ANTHROPIC_BASE_URL"] = WANT_CLAUDE
+    J["env"] = env
+    if write_text(CLAUDE, json.dumps(J, ensure_ascii=False, indent=2) + "\n"):
+        log("claude: rewired %s -> %s (backup %s)" % (cur, WANT_CLAUDE, b))
+        return "claude: FIXED -> %s" % WANT_CLAUDE
+    return "claude: write FAILED (file locked?)"
+
+
+def check_codex(apply_):
+    mode, attached = cc_mode("codex")
+    try:
+        with open(CODEX, encoding="utf-8") as f:
+            txt = f.read()
+    except OSError as e:
+        return "codex: config.toml unreadable: %s" % e
+    m = re.search(r'base_url\s*=\s*"([^"]+)"', txt)
+    cur = m.group(1) if m else ""
+    if mode != "proxy" or not attached:
+        return "codex: cc-switch mode=%s attached=%s -> leave alone (user chose direct)" % (mode, attached)
+    if cur == WANT_CODEX:
+        return "codex: OK (%s)" % cur
+    if CC_CODEX not in cur:
+        return "codex: unexpected base_url %r -> leave alone (not a cc-switch rewrite)" % cur
+    if not apply_:
+        return "codex: NEEDS FIX %s -> %s" % (cur, WANT_CODEX)
+    if not healthy():
+        maybe_start_headroom()
+        return "codex: headroom not healthy -> NOT wiring (would black-hole the agent)"
+    b = backup(CODEX, "codex")
+    new = txt[:m.start(1)] + WANT_CODEX + txt[m.end(1):]
+    if write_text(CODEX, new):
+        log("codex: rewired %s -> %s (backup %s)" % (cur, WANT_CODEX, b))
+        return "codex: FIXED -> %s" % WANT_CODEX
+    return "codex: write FAILED (file locked?)"
+
+
+def tick(apply_):
+    out = [check_claude(apply_), check_codex(apply_)]
+    # The default window is junctions into the library, so a shell delete of the
+    # window destroys the library (happened 2026-11-15 02:04:06).  Keep a mirror
+    # outside the junction graph and repair from it.
+    if apply_:
+        try:
+            import skill_shield
+            for a in skill_shield.tick(verbose=False):
+                log("shield: " + a)
+                out.append("shield: " + a)
+        except Exception as e:
+            out.append("shield: error %s: %s" % (type(e).__name__, e))
+        # The git remotes are the real backup (user: no local backups).  Keep them
+        # current.  Internally debounced to one attempt per 10 min and only when
+        # the tree actually changed, so this is a no-op on most ticks.
+        try:
+            import git_backup
+            for p, n in git_backup.REPOS:
+                if git_backup.sync(p, n):
+                    out.append("backup: %s pushed" % n)
+        except Exception as e:
+            out.append("backup: error %s: %s" % (type(e).__name__, e))
+    return out
+
+
+def main():
+    args = sys.argv[1:]
+    if "--watch" in args:
+        log("watch started (interval %ds, pid %d)" % (INTERVAL, os.getpid()))
+        prev = None
+        while True:

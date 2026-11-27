@@ -1,0 +1,138 @@
+"""SVG element converters: rect, circle, line, path, polygon, polyline, text, image, ellipse."""
+
+from __future__ import annotations
+
+import base64
+import binascii
+import hashlib
+import io
+import math
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+from urllib.parse import unquote_to_bytes
+from xml.etree import ElementTree as ET
+
+from pptx_shapes import (
+    CONNECTOR_PRESET_TYPES,
+    OOXML_COORDINATE_MAX,
+    OOXML_COORDINATE_MIN,
+    get_preset_registry,
+    has_relationship_attributes,
+    load_shape_type_values,
+    validate_ooxml_xfrm,
+)
+from pptx_effects import (
+    EFFECT_REASON_ATTR,
+    EFFECT_STATUS_ATTR,
+    NATIVE_EFFECT_ATTR,
+    NATIVE_EFFECT_SHA256_ATTR,
+    preserved_native_effect_xml,
+)
+from hyperlink_contract import svg_hyperlink_href
+from pptx_to_svg.preset_authoring import AUTHORING_ATTR, AUTHORING_VALUE
+from resource_paths import (
+    resolve_external_image_reference,
+    svg_image_payload_error,
+)
+
+from .context import (
+    TEXT_FLOW_PRESERVE,
+    TEXT_FLOW_SPLIT,
+    ConvertContext,
+    ShapeResult,
+)
+from .hyperlinks import (
+    HYPERLINK_ACTION_KEY,
+    HYPERLINK_RID_KEY,
+    hyperlink_click_xml,
+    hyperlink_run_metadata,
+)
+from .theme_colors import color_node_xml
+from .theme_fonts import theme_font_tokens
+from .text_properties import (
+    drawingml_letter_spacing,
+    normalize_project_text_segments,
+    parse_project_baseline_shift,
+    parse_project_font_style,
+    parse_project_font_weight,
+    parse_project_letter_spacing,
+    parse_project_text_anchor,
+    parse_project_text_decoration,
+    resolve_project_xml_space,
+)
+from .utils import (
+    SVG_NS, XLINK_NS, ANGLE_UNIT, FONT_PX_TO_HUNDREDTHS_PT,
+    PROJECT_IMAGE_ASPECT_RATIO_ANCHORS,
+    px_to_emu, _f, _get_attr, parse_svg_length,
+    svg_length_x, svg_length_y, svg_length_size,
+    ctx_x, ctx_y, ctx_w, ctx_h,
+    rect_to_dml_xfrm,
+    combine_opacity, parse_hex_color, parse_svg_color,
+    resolve_project_text_image_fill, resolve_url_id, get_effective_filter_id,
+    parse_inline_style, parse_font_family, is_cjk_char,
+    detect_text_lang, estimate_text_cluster_widths, font_px_to_hpt,
+    get_font_advances, primary_font_family,
+    resolve_text_run_fonts, split_project_text_clusters,
+    text_has_rtl_characters, text_uses_rtl,
+    is_thick_circle_shorthand, parse_project_geometry_length,
+    is_canonical_project_geometry_length,
+    parse_project_image_aspect_ratio,
+    parse_project_opacity,
+    parse_project_stroke_dasharray,
+    quantize_ooxml_alpha,
+    project_definition_index,
+    svg_hidden_reason,
+    matrix_multiply, parse_transform_matrix, parse_transform_operations,
+    transform_point, _xml_escape,
+)
+from .styles import (
+    build_solid_fill, build_gradient_fill,
+    build_fill_xml, build_stroke_xml, build_effect_xml, classify_filter_effect,
+    get_element_opacity, get_fill_opacity, get_stroke_opacity,
+)
+from .paths import (
+    PathCommand, parse_svg_path, parse_svg_points, svg_path_to_absolute,
+    normalize_path_commands, path_commands_to_drawingml,
+    transform_path_commands,
+)
+
+
+def _resolve_external_image(
+    svg_dir: Path,
+    href: str,
+    resource_root: Path | None = None,
+) -> Path:
+    """Resolve a non-data-URI image href to a file on disk.
+
+    The href is interpreted exactly relative to the owning SVG and must remain
+    inside the project. No root, ``images/``, or template-path guessing occurs.
+    """
+    candidate = resolve_external_image_reference(
+        svg_dir,
+        href,
+        project_root=resource_root,
+    )
+    if candidate is not None:
+        return candidate
+    raise FileNotFoundError(f'External image not found: {href}')
+
+
+_PROJECT_IMAGE_FORMATS = {
+    'bmp': 'bmp',
+    'emf': 'emf',
+    'gif': 'gif',
+    'jpeg': 'jpg',
+    'jpg': 'jpg',
+    'png': 'png',
+    'svg': 'svg',
+    'svg+xml': 'svg',
+    'tif': 'tif',
+    'tiff': 'tiff',
+    'webp': 'webp',
+    'wmf': 'wmf',
+    'x-emf': 'emf',
+    'x-wmf': 'wmf',
+}
+_PIL_IMAGE_FORMATS = {

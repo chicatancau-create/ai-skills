@@ -1,0 +1,106 @@
+    merge_status = _canonical_native_merge_status(rows, len(col_widths))
+    effect_reason = (
+        "unsupported-run-effect-route:table-cell-text"
+        if any(
+            txbody_has_run_effects(tc.find("a:txBody", NS))
+            for tc in tbl.findall(".//a:tc", NS)
+        )
+        else None
+    )
+    if xfrm.rot or xfrm.flip_h or xfrm.flip_v:
+        native_status = "unsupported-native-transform"
+    elif merge_status:
+        native_status = merge_status
+    elif len(rows) > 1000 or len(col_widths) > 1000:
+        native_status = "unsupported-table-size"
+    elif source_geometry_invalid or (
+        any(width <= 0 for width in col_widths)
+        or any(height <= 0 for height in row_heights)
+        or sum(col_widths) <= 0
+        or sum(row_heights) <= 0
+    ):
+        native_status = "unsupported-table-geometry"
+    elif _table_has_unsupported_style(tbl):
+        native_status = "unsupported-table-style"
+    elif (
+        effect_reason
+        or _table_has_unsupported_direct_formatting(tbl, palette)
+    ):
+        native_status = "unsupported-table-direct-formatting"
+    else:
+        native_status = None
+    native_payload = (
+        None if native_status else _native_table_payload(
+            tbl,
+            xfrm,
+            col_widths,
+            row_heights,
+            cells,
+            palette,
+            theme_fonts or {},
+        )
+    )
+
+    body_parts: list[str] = []
+    defs: list[str] = []
+
+    # Pass A: cell backgrounds.
+    for r, row_cells in enumerate(cells):
+        for c, cell in enumerate(row_cells):
+            if cell is None or cell.is_dropped:
+                continue
+            rect_x = col_lefts[c]
+            rect_y = row_tops[r]
+            rect_w = sum(col_widths[c:c + cell.col_span])
+            rect_h = sum(row_heights[r:r + cell.row_span])
+            tcPr = cell.element.find("a:tcPr", NS)
+            fill = _effective_cell_fill(
+                tcPr, table_style, r, palette,
+                id_prefix=f"{id_prefix}fill",
+                id_seq=grad_seq,
+            )
+            defs.extend(fill.defs)
+            attrs = fill.attrs or {"fill": "none"}
+            attr_str = "".join(f' {k}="{v}"' for k, v in attrs.items())
+            body_parts.append(
+                f'<rect x="{fmt_num(rect_x)}" y="{fmt_num(rect_y)}" '
+                f'width="{fmt_num(rect_w)}" height="{fmt_num(rect_h)}"'
+                f'{attr_str}/>'
+            )
+
+    # Pass B: cell text. Cell xfrm uses default tcPr insets if none specified.
+    for r, row_cells in enumerate(cells):
+        for c, cell in enumerate(row_cells):
+            if cell is None or cell.is_dropped:
+                continue
+            tx_body = cell.element.find("a:txBody", NS)
+            if tx_body is None:
+                continue
+            tcPr = cell.element.find("a:tcPr", NS)
+            cell_x = col_lefts[c]
+            cell_y = row_tops[r]
+            cell_w = sum(col_widths[c:c + cell.col_span])
+            cell_h = sum(row_heights[r:r + cell.row_span])
+            cell_xfrm = Xfrm(x=cell_x, y=cell_y, w=cell_w, h=cell_h)
+            text_result = _convert_cell_text(
+                tx_body, tcPr, cell_xfrm, palette, theme_fonts,
+                fallback_run_props=_table_text_run_props(
+                    table_style, r, theme_fonts or {},
+                ),
+                slide_number=slide_number,
+                id_prefix=f"{id_prefix}txt",
+                id_seq=grad_seq,
+                hyperlink_resolver=hyperlink_resolver,
+                strict=strict,
+                diagnostic_sink=diagnostic_sink,
+            )
+            defs.extend(text_result.defs)
+            if text_result.svg:
+                body_parts.append(text_result.svg)
+
+    # Pass C: cell borders. Drawn last so they appear on top of fills/text.
+    for r, row_cells in enumerate(cells):
+        for c, cell in enumerate(row_cells):
+            if cell is None or cell.is_dropped:
+                continue
+            cell_x = col_lefts[c]

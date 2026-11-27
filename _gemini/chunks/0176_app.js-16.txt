@@ -1,0 +1,87 @@
+        _secCounter += 1;
+        var sec = el("div", "section");
+        var head = el("div", "section-head");
+        head.appendChild(el("span", "section-num", String(_secCounter)));
+        head.appendChild(el("span", "section-title", t(titleKey)));
+        if (noteText) head.appendChild(el("span", "section-note", noteText));
+        sec.appendChild(head);
+        return sec;
+    }
+
+    function setSectionNote(sec, text) {
+        var head = sec.querySelector(".section-head");
+        var note = head.querySelector(".section-note");
+        if (!note) {
+            note = el("span", "section-note");
+            head.appendChild(note);
+        }
+        note.textContent = text;
+    }
+
+    // ---- Stage 1 template selection --------------------------------------
+    function normalizeTemplateCandidates(raw, source, kind) {
+        if (!Array.isArray(raw)) return [];
+        return raw.filter(function (candidate) {
+            return candidate && candidate.key != null && String(candidate.key).trim();
+        }).map(function (candidate) {
+            var normalized = Object.assign({}, candidate);
+            normalized.key = String(candidate.key);
+            normalized.source = source;
+            if (kind) normalized.kind = kind;
+            return normalized;
+        });
+    }
+
+    function initTemplateOptions(data) {
+        var library = data && data.library && typeof data.library === "object"
+            ? data.library : {};
+        var defaultMode = data && data.default_mode;
+        if (defaultMode !== "free_design" && defaultMode !== "templates") {
+            throw new Error("template_options.default_mode must be free_design or templates");
+        }
+        var normalized = {
+            options_sha256: data && data.options_sha256,
+            lang: data && data.lang,
+            default_mode: defaultMode,
+            library: {},
+            explicit: [],
+            preselected_keys: Array.isArray(data && data.preselected_keys)
+                ? data.preselected_keys.map(String) : []
+        };
+        TEMPLATE_CANDIDATES = [];
+        TEMPLATE_KINDS.forEach(function (kind) {
+            var candidates = normalizeTemplateCandidates(library[kind], "library", kind);
+            normalized.library[kind] = candidates;
+            TEMPLATE_CANDIDATES = TEMPLATE_CANDIDATES.concat(candidates);
+        });
+        normalized.explicit = normalizeTemplateCandidates(data && data.explicit, "explicit", "");
+        TEMPLATE_CANDIDATES = TEMPLATE_CANDIDATES.concat(normalized.explicit);
+        var candidatesByKey = Object.create(null);
+        TEMPLATE_CANDIDATES.forEach(function (candidate) {
+            if (candidatesByKey[candidate.key]) {
+                throw new Error("Duplicate template option key: " + candidate.key);
+            }
+            candidatesByKey[candidate.key] = candidate;
+        });
+        TEMPLATE_SELECTIONS = emptyTemplateSelections();
+        normalized.preselected_keys.filter(function (key, index, all) {
+            return all.indexOf(key) === index;
+        }).forEach(function (key) {
+            var candidate = candidatesByKey[key];
+            var slot = templateSelectionSlot(candidate);
+            if (!candidate || !slot) {
+                throw new Error("Invalid preselected template key: " + key);
+            }
+            if (slot === "explicit") {
+                if (TEMPLATE_SELECTIONS.explicit.indexOf(candidate.workspace_root) < 0) {
+                    TEMPLATE_SELECTIONS.explicit.push(candidate.workspace_root);
+                }
+                return;
+            }
+            if (TEMPLATE_SELECTIONS[slot] && TEMPLATE_SELECTIONS[slot] !== key) {
+                throw new Error("Multiple preselected templates for slot: " + slot);
+            }
+            TEMPLATE_SELECTIONS[slot] = key;
+        });
+        // Publish options before syncing: expanding an explicit root into its
+        // kinds reads TEMPLATE_OPTIONS, so a preselected root would otherwise

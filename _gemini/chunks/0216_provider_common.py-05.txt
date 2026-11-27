@@ -1,0 +1,113 @@
+        candidate.license_tier == LICENSE_TIER_ATTRIBUTION_REQUIRED
+        and not candidate.author.strip()
+    ):
+        return float("-inf")
+
+    required_misses = missing_required_terms(candidate, request.required_terms)
+    if required_misses:
+        return float("-inf")
+
+    relevance = compute_relevance(candidate, request.query)
+    if relevance == 0.0 and not request.required_terms:
+        return float("-inf")
+
+    score = relevance * 10000.0
+    title_text = _normalize_match_text(candidate.title)
+    compact_title = title_text.replace(" ", "")
+    for group in request.required_terms or ():
+        alternatives = _term_group_alternatives(group)
+        if any(
+            alt in title_text or alt.replace(" ", "") in compact_title
+            for alt in alternatives
+        ):
+            score += 1500.0
+
+    # Penalize infrastructure/transit metadata if the user didn't explicitly ask for it.
+    # This prevents high-res subway station photos from outranking actual tourist landmarks.
+    text = _candidate_text(candidate)
+    query_lower = request.query.lower()
+    infra_terms = [
+        "station", "subway", "metro", "rail", "transit", "airport", "bus",
+        "地铁", "站", "轨道",
+    ]
+
+    if not any(t in query_lower for t in infra_terms):
+        if any(t in text for t in infra_terms):
+            score -= 5000.0
+
+    candidate_orientation = normalize_orientation(candidate.width, candidate.height)
+    requested = (request.orientation or "").strip().lower()
+    if requested:
+        if candidate_orientation == requested:
+            score += 1000.0
+        else:
+            score -= 250.0
+
+    if request.min_width and candidate.width < request.min_width:
+        score -= 500.0
+    if request.min_height and candidate.height < request.min_height:
+        score -= 500.0
+
+    if candidate.license_tier == LICENSE_TIER_NO_ATTRIBUTION:
+        score += 250.0
+
+    # Larger images score higher, but only as a tie-breaker; entity accuracy
+    # and metadata relevance must dominate pixel count.
+    pixel_score = max(candidate.width, 0) * max(candidate.height, 0) / 1000.0
+    score += min(pixel_score, 1500.0)
+    return score
+
+
+def score_review_candidate(
+    candidate: AssetCandidate,
+    request: ImageSearchRequest,
+) -> float:
+    """Score a wider visual-review pool without weakening automatic selection.
+
+    Metadata-verified candidates retain priority. A near match may enter the
+    thumbnail sheet only when at most one required identity group is missing
+    and the candidate still has meaningful relevance to the query that found
+    it. This never authorizes best-only download; ``score_candidate`` remains
+    the automatic-selection gate.
+    """
+    strict_score = score_candidate(candidate, request)
+    if strict_score != float("-inf"):
+        return strict_score + 20000.0
+    if not request.required_terms:
+        return strict_score
+
+    missing = missing_required_terms(candidate, request.required_terms)
+    if len(missing) != 1:
+        return float("-inf")
+
+    discovery_request = replace(
+        request,
+        query=candidate.discovery_query or request.query,
+        required_terms=(),
+    )
+    relevance = compute_relevance(candidate, discovery_request.query)
+    if relevance < 0.5:
+        return float("-inf")
+    relaxed_score = score_candidate(candidate, discovery_request)
+    if relaxed_score == float("-inf"):
+        return relaxed_score
+    return relaxed_score - 5000.0
+
+
+# ---------------------------------------------------------------------------
+# Attribution text
+# ---------------------------------------------------------------------------
+
+
+PROVIDER_DISPLAY_NAMES: dict[str, str] = {
+    "openverse": "Openverse",
+    "wikimedia": "Wikimedia Commons",
+    "pexels": "Pexels",
+    "pixabay": "Pixabay",
+}
+
+
+def build_attribution_text(filename: str, candidate: AssetCandidate) -> str:
+    """Render the canonical attribution string for the manifest.
+
+    Format:

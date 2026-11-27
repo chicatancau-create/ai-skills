@@ -1,0 +1,66 @@
+    if ($targetFacts.Errors.Count -gt 0) {
+      $verdict = 'INCOMPLETE'
+      $reason = 'Some observations failed; missing evidence is not evidence that a right is absent or a repair is safe.'
+    } elseif ($packageTargets.Count -gt 0) {
+      $blocked = @($packageTargets | Where-Object { -not $factsByPath[$_].HasWriteDac })
+      $verdict = if ($needsPrecondition -or $blocked.Count -gt 0) { 'BOTH' } else { 'CULPRIT' }
+      $reason = 'Package allow ACEs were observed. Required access checks determine whether the caller can perform the requested repair; other causes remain possible.'
+    } elseif ($unreadable) {
+      $verdict = 'UNREADABLE'
+      $reason = 'The requested ACL could not be read; its entries and the cause of denial are unknown.'
+    } elseif ($needsPrecondition) {
+      $verdict = 'PRECONDITION'
+      $reason = 'The caller cannot open the requested object with both WRITE_DAC and WRITE_OWNER. The reported allow and deny ACEs are evidence, not an attribution to one rule.'
+    } else {
+      $verdict = 'NOT_THIS_CLASS'
+      $reason = 'No package allow ACE was observed and both required rights are available. Other ACL restrictions and causes of the original failure are not ruled out.'
+    }
+    Write-Line ('VERDICT={0}' -f $verdict)
+    Write-Report decision classify $full $verdict $reason @{ writeDac = $targetFacts.HasWriteDac; writeOwner = $targetFacts.HasWriteOwner; packageObjects = @($packageTargets) }
+
+    if ($Restore) {
+      Restore-SavedDacl -FullPath $full -Record $Restore -Root $AllowRoot
+      continue
+    }
+    if ($targetFacts.Errors.Count -gt 0) {
+      Write-Decision $mode $full refused 'Required observations are incomplete; no repair was attempted for this path.'
+      $refused++
+      break paths
+    }
+
+    # Nothing is changed while a package source or a grant target is out of reach: a
+    # repair that cannot finish would leave the tree half repaired before refusing.
+    foreach ($packagePath in $packageTargets) {
+      $refusal = Get-RepairRefusal -FullPath $packagePath -Root $AllowRoot -AllowEqual
+      if ($refusal) { Write-Line ('REPAIR_REFUSED {0}' -f $refusal); Write-Decision $mode $packagePath refused $refusal; $refused++; break paths }
+      if ($factsByPath[$packagePath].Errors.Count -gt 0) {
+        Write-Decision $mode $packagePath refused 'The ACL observations are incomplete; collateral changes could not be verified.'
+        $refused++
+        break paths
+      }
+    }
+
+    # Missing WRITE_DAC or WRITE_OWNER on a directory in the chain is what stops DSH
+    # from provisioning the workspace grant. One approved run repairs every such
+    # directory, including the authorized root itself.
+    $grantTargets = @($inspectOrder | Where-Object {
+      [System.IO.Directory]::Exists($_) -and $factsByPath[$_].Readable -and $factsByPath[$_].Errors.Count -eq 0 -and
+      ((-not $factsByPath[$_].HasWriteDac) -or (-not $factsByPath[$_].HasWriteOwner)) -and
+      -not (Get-RepairRefusal -FullPath $_ -Root $AllowRoot -AllowEqual)
+    })
+    # Writing a DACL needs WRITE_DAC: refuse a target that lacks it before anything is
+    # changed, instead of failing mid-repair and marking a recovery for an object that
+    # the rollback then cannot restore either.
+    foreach ($object in $grantTargets) {
+      if (-not $factsByPath[$object].HasWriteDac) {
+        Write-Line ('REPAIR_REFUSED {0} needs WRITE_DAC; stop for permission-policy review' -f $object)
+        Write-Decision $mode $object refused 'Effective WRITE_DAC is absent; adding the grant requires that right.'
+        $refused++
+        break paths
+      }
+    }
+    if ($grantTargets.Count -gt 0) {
+      Write-Report decision grant_targets $full selected 'These directories lack effective WRITE_DAC or WRITE_OWNER; each is backed up, then receives a FullControl allow ACE for the current user.' @{ paths = @($grantTargets) }
+    }
+    foreach ($object in $grantTargets) {
+      $grantBefore = $factsByPath[$object]

@@ -1,0 +1,139 @@
+                self.redundant_style_declarations_removed
+            ),
+            "changed_declarations": self.changed_declarations,
+        }
+
+
+@dataclass(frozen=True)
+class _StyleDeclaration:
+    raw: str
+    name: str
+    value: str
+
+
+def _local_name(name: object) -> str:
+    return name.rsplit("}", 1)[-1] if isinstance(name, str) else ""
+
+
+def _is_preset_atom(element: ET.Element) -> bool:
+    """Return whether an element is a helper-owned authored preset group."""
+    return isinstance(element.tag, str) and authored_preset_encoding(element) is not None
+
+
+def _keeps_local_paint(element: ET.Element) -> bool:
+    """Preset atoms and icon references resolve paint from their own attributes."""
+    return _is_preset_atom(element) or (
+        _local_name(element.tag) == "use" and element.get("data-icon") is not None
+    )
+
+
+def is_canonical_presentation_value(
+    value: str,
+    *,
+    property_name: str | None = None,
+) -> bool:
+    """Return whether a value can move to a presentation attribute safely."""
+    normalized = value.strip().lower()
+    context_dependent = False
+    if property_name in {"fill", "stroke"}:
+        outside_urls = _URL_FUNCTION_RE.sub(" ", normalized)
+        tokens = {
+            token for token in re.split(r"[\s,]+", outside_urls)
+            if token
+        }
+        context_dependent = bool(tokens & _CONTEXT_DEPENDENT_VALUES)
+    return (
+        bool(normalized)
+        and normalized not in _CSS_WIDE_VALUES
+        and not context_dependent
+        and not any(
+            token in normalized
+            for token in _UNSAFE_PRESENTATION_VALUE_TOKENS
+        )
+    )
+
+
+def _style_declarations(value: str | None) -> list[_StyleDeclaration] | None:
+    if value is None:
+        return []
+    declarations: list[_StyleDeclaration] = []
+    for raw in value.split(";"):
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        if ":" not in stripped:
+            return None
+        raw_name, raw_value = stripped.split(":", 1)
+        name = raw_name.strip().lower()
+        normalized_value = raw_value.strip()
+        if not name or not normalized_value:
+            return None
+        declarations.append(
+            _StyleDeclaration(
+                raw=stripped,
+                name=name,
+                value=normalized_value,
+            )
+        )
+    return declarations
+
+
+def _style_values(
+    declarations: list[_StyleDeclaration],
+) -> dict[str, str]:
+    return {
+        declaration.name: declaration.value
+        for declaration in declarations
+    }
+
+
+def _write_style(
+    element: ET.Element,
+    declarations: list[_StyleDeclaration],
+) -> None:
+    if declarations:
+        element.set("style", ";".join(item.raw for item in declarations))
+    else:
+        element.attrib.pop("style", None)
+
+
+def _effective_value(
+    element: ET.Element,
+    name: str,
+    parents: dict[ET.Element, ET.Element],
+    cache: dict[tuple[int, str], str | None],
+) -> str | None:
+    key = (id(element), name)
+    if key in cache:
+        return cache[key]
+    declarations = _style_declarations(element.get("style"))
+    if declarations is None:
+        cache[key] = None
+        return None
+    style_value = _style_values(declarations).get(name)
+    if style_value is not None:
+        cache[key] = style_value
+        return style_value
+    attribute_value = element.get(name)
+    if attribute_value is not None:
+        cache[key] = attribute_value
+        return attribute_value
+    parent = parents.get(element)
+    resolved = (
+        _effective_value(parent, name, parents, cache)
+        if parent is not None
+        else None
+    )
+    cache[key] = resolved
+    return resolved
+
+
+def _normalize_root_font_family(
+    root: ET.Element,
+    stats: StyleCompactionStats,
+) -> None:
+    declarations = _style_declarations(root.get("style"))
+    if declarations is None:
+        return
+    style_values = _style_values(declarations)
+    style_family = style_values.get("font-family")

@@ -1,0 +1,107 @@
+def _mirror_ordinary_slide_ids(spec: TemplateSlideSpec) -> set[str]:
+    """Return stable ids that are ordinary Slide content in one mirror page."""
+    try:
+        root = _parse_svg_root(spec.svg_path)
+    except (OSError, ET.ParseError, NativePayloadError) as exc:
+        raise TemplateStructureError(
+            f"{spec.svg_path.name}: unable to inspect mirror page ownership: {exc}"
+        ) from exc
+    inherited_ids = {
+        item.element_id
+        for item in (
+            *spec.master_elements,
+            *spec.layout_elements,
+            *spec.placeholders,
+        )
+    }
+    return {
+        element_id
+        for child in root
+        if _local_tag(child) not in _NON_VISUAL_TAGS
+        if (element_id := (child.get("id") or "").strip())
+        if element_id not in inherited_ids
+    }
+
+
+def _mirror_slide_local_signature(
+    spec: TemplateSlideSpec,
+    protected_ids: set[str],
+) -> tuple[tuple[object, ...], tuple[object, ...]]:
+    """Capture literal mirror visuals that are Slide-local on either page.
+
+    Visible text values and JSON-first native preview children may change, but
+    other element topology, attributes, grouping, paint, geometry, and
+    referenced asset bytes remain literal.
+    Structure metadata may change when adaptive template authoring assigns an
+    evolved Layout identity to the same stable SVG id.
+    """
+    try:
+        root = _parse_svg_root(spec.svg_path)
+        materialize_inline_geometry_properties(root)
+    except (OSError, ET.ParseError, NativePayloadError, GeometryStyleError) as exc:
+        raise TemplateStructureError(
+            f"{spec.svg_path.name}: unable to compare mirror page visuals: {exc}"
+        ) from exc
+    slide_elements: list[ET.Element] = []
+    slide_visuals: list[tuple[object, ...]] = []
+    for child in root:
+        tag = _local_tag(child)
+        if tag in _NON_VISUAL_TAGS:
+            continue
+        element_id = (child.get("id") or "").strip()
+        if element_id and element_id not in protected_ids:
+            continue
+        slide_elements.append(child)
+        slide_visuals.append(
+            _element_tree_signature(
+                child,
+                include_skin=True,
+                include_text=False,
+                svg_path=spec.svg_path,
+                asset_identity=True,
+                ignore_structure_attrs=True,
+                ignore_json_native_preview=True,
+            )
+        )
+    resources = _scope_visual_resources_signature(
+        root,
+        tuple(slide_elements),
+        spec.svg_path,
+        ignore_json_native_preview=True,
+    )
+    return resources, tuple(slide_visuals)
+
+
+def _prototype_placeholder_contract(
+    spec: TemplateSlideSpec,
+) -> tuple[tuple[object, ...], ...]:
+    """Return the strict template placeholder contract without slide content."""
+    return tuple(item.contract_signature() for item in spec.placeholders)
+
+
+def _layout_contract_difference(
+    actual: tuple[TemplateElementSpec, ...],
+    expected: tuple[TemplateElementSpec, ...],
+) -> str:
+    """Describe the smallest actionable difference in a Layout atom roster."""
+    actual_ids = tuple(item.element_id for item in actual)
+    expected_ids = tuple(item.element_id for item in expected)
+    actual_id_set = set(actual_ids)
+    expected_id_set = set(expected_ids)
+    missing = tuple(item for item in expected_ids if item not in actual_id_set)
+    unexpected = tuple(item for item in actual_ids if item not in expected_id_set)
+    details: list[str] = []
+    if missing:
+        details.append(
+            "missing generated Layout element id(s): "
+            + ", ".join(repr(item) for item in missing)
+        )
+    if unexpected:
+        details.append(
+            "unexpected generated Layout element id(s): "
+            + ", ".join(repr(item) for item in unexpected)
+        )
+    if not details and actual_ids != expected_ids:
+        details.append("generated Layout element order differs")
+    if not details:
+        details.append(

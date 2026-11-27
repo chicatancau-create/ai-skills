@@ -1,0 +1,109 @@
+        '--narration-start-floor',
+        type=non_negative_float,
+        default=DEFAULT_NARRATION_START_FLOOR,
+        help=(
+            'Minimum seconds from slide-transition start to narration start; '
+            'set 0 to start immediately after the transition '
+            f'(default: {DEFAULT_NARRATION_START_FLOOR})'
+        ),
+    )
+    parser.add_argument(
+        '--inherit-motion-from',
+        type=str,
+        default=None,
+        metavar='BASE_POSTFLIGHT_REPORT',
+        help=(
+            'For recorded narration, inherit source-bound deck-wide transition, '
+            'animation, and advance settings from a successful base export report'
+        ),
+    )
+
+    raw_argv = list(argv) if argv is not None else sys.argv[1:]
+    legacy_native_objects = '--native-objects' in raw_argv
+    args = parser.parse_args(raw_argv)
+    compatibility_export = args.enable_dangerous_nonconforming_svg_export
+    if legacy_native_objects:
+        print(
+            'Warning: --native-objects is deprecated; use '
+            '--native-charts-and-tables.',
+            file=sys.stderr,
+        )
+    if args.animation_config is not None and not args.animation_config.strip():
+        print(
+            'Error: --animation-config must be a non-empty file path',
+            file=sys.stderr,
+        )
+        return 1
+    if args.inherit_motion_from and not args.recorded_narration:
+        print(
+            'Error: --inherit-motion-from requires --recorded-narration',
+            file=sys.stderr,
+        )
+        return 1
+    if args.inherit_motion_from and args.no_animations:
+        print(
+            'Error: --inherit-motion-from cannot be combined with --no-animations',
+            file=sys.stderr,
+        )
+        return 1
+
+    if compatibility_export:
+        conflicts: list[str] = []
+        if args.roundtrip:
+            conflicts.append('--roundtrip')
+        if args.quick_generate:
+            conflicts.append('--quick-generate')
+        if args.pptx_structure not in {None, 'flat'}:
+            conflicts.append('--pptx-structure must be omitted or flat')
+        if conflicts:
+            print(
+                'Error: --enable-dangerous-nonconforming-svg-export cannot '
+                'be used because ' + ', '.join(conflicts),
+                file=sys.stderr,
+            )
+            return 1
+        print(
+            'Warning: dangerous nonconforming SVG export is enabled. Supported '
+            'compatibility rewrites will run before strict conversion; visual '
+            'fidelity must be reviewed.',
+            file=sys.stderr,
+        )
+
+    if args.roundtrip:
+        conflicts: list[str] = []
+        if args.quick_generate:
+            conflicts.append('--quick-generate')
+        if args.source not in {None, AUTHORING_SVG_FLAT_DIR.as_posix()}:
+            conflicts.append(
+                '-s/--source must be omitted or authoring-svg-flat'
+            )
+        if args.pptx_structure is not None:
+            conflicts.append('--pptx-structure must be omitted')
+        if conflicts:
+            print(
+                "Error: --roundtrip cannot be used because "
+                + ", ".join(conflicts),
+                file=sys.stderr,
+            )
+            return 1
+        args.source = AUTHORING_SVG_FLAT_DIR.as_posix()
+        args.pptx_structure = 'preserve'
+
+    diagnostic_source = args.source not in {None, 'output'}
+
+    if args.quick_generate:
+        conflicts: list[str] = []
+        if args.source not in {None, 'output'}:
+            conflicts.append('--source must be omitted or output')
+        if args.pptx_structure is not None:
+            conflicts.append(
+                '--pptx-structure must be omitted; Quick infers it from svg_output/'
+            )
+        if conflicts:
+            print(
+                "Error: --quick-generate cannot be combined with: "
+                + ", ".join(conflicts),
+                file=sys.stderr,
+            )
+            return 1
+        if not args.with_notes:

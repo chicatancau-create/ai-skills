@@ -1,0 +1,65 @@
+    def test_passthrough_decodes_supported_encodings_without_changing_text(self) -> None:
+        text = "# 中文金额 123.45\r\n\r\nKeep  spaces\tand tabs.\r\n"
+        utf8 = text.encode("utf-8")
+        cases = [
+            ("utf8", utf8, "utf-8"),
+            ("utf8_bom", codecs.BOM_UTF8 + utf8, "utf-8-sig"),
+            ("utf16_le", codecs.BOM_UTF16_LE + text.encode("utf-16-le"), "utf-16"),
+            ("utf16_be", codecs.BOM_UTF16_BE + text.encode("utf-16-be"), "utf-16"),
+            ("gb18030", text.encode("gb18030"), "gb18030"),
+        ]
+        for name, raw, encoding in cases:
+            for suffix in (".txt", ".md"):
+                with self.subTest(encoding=name, suffix=suffix):
+                    source = self.root / f"{name}{suffix}"
+                    output = self.root / f"{name}_{suffix[1:]}_output.md"
+                    source.write_bytes(raw)
+                    result = self._run_cli(str(source), "-o", str(output))
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(self._outputs(result), [output])
+                    self.assertEqual(output.read_bytes(), utf8)
+                    self.assertEqual(source.read_bytes(), raw)
+                    profile = json.loads(output.with_suffix(".conversion_profile.json").read_text(encoding="utf-8"))
+                    if encoding == "utf-8":
+                        self.assertEqual(profile["warnings"], [])
+                    else:
+                        # --json keeps stdout machine-readable; the notice is on stderr.
+                        self.assertIn(encoding, result.stderr)
+                        self.assertIn(encoding, " ".join(profile["warnings"]))
+
+    def test_invalid_passthrough_fails_before_writing_outputs(self) -> None:
+        cases = [
+            bytes(range(256)),
+            b"\x00\x01binary",
+            codecs.BOM_UTF8 + b"\xff",
+            codecs.BOM_UTF16_LE + b"A\x00B",
+            codecs.BOM_UTF16_BE + b"\x00AB",
+        ]
+        for index, raw in enumerate(cases):
+            with self.subTest(raw=raw):
+                source = self.root / f"invalid_{index}.txt"
+                output = self.root / f"output_{index}" / "result.md"
+                source.write_bytes(raw)
+                result = self._run_cli(str(source), "-o", str(output))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("[ERROR]", result.stderr)
+                self.assertEqual(self._outputs(result), [])
+                self.assertFalse(output.parent.exists())
+                self.assertEqual(source.read_bytes(), raw)
+
+    def test_non_utf8_passthrough_requires_a_distinct_output_path(self) -> None:
+        for encoding in ("utf-8-sig", "utf-16", "gb18030"):
+            with self.subTest(encoding=encoding):
+                source = self.root / f"{encoding}.md"
+                raw = "中文原稿\n".encode(encoding)
+                source.write_bytes(raw)
+                result = self._run_cli(str(source))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("-o", result.stderr)
+                self.assertEqual(self._outputs(result), [])
+                self.assertEqual(source.read_bytes(), raw)
+                self.assertFalse(source.with_suffix(".conversion_profile.json").exists())
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""
+PPT Master - Preset Shape SVG Fragment Tool
+
+Browse and inspect DrawingML presets, or print compact canonical native-preset
+SVG groups to stdout for manual insertion into a hand-authored page or
+template.
+
+Usage:
+    python3 scripts/preset_shape_svg.py list [--grouped] [--search QUERY]
+    python3 scripts/preset_shape_svg.py describe PRESET [--compact]
+    python3 scripts/preset_shape_svg.py render PRESET --id ID --frame X Y W H
+    python3 scripts/preset_shape_svg.py render-batch --input FILE_OR_DASH
+
+Examples:
+    python3 scripts/preset_shape_svg.py list --search arrow
+    python3 scripts/preset_shape_svg.py describe rightArrow --compact
+    python3 scripts/preset_shape_svg.py render rightArrow --id next-step \
+        --frame 160 210 320 112 --fill "#2563EB" --stroke none
+    python3 scripts/preset_shape_svg.py render-batch --input shapes.json
+
+Dependencies:
+    None (only uses standard library and local PPT Master modules)
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from typing import Sequence
+
+from console_encoding import configure_utf8_stdio
+from pptx_shapes import CONNECTOR_PRESET_TYPES, FormulaEvaluationError, get_preset_registry
+from pptx_shapes.semantics import get_preset_shape_semantics
+from pptx_to_svg.preset_authoring import render_preset_shape_fragment
+
+
+configure_utf8_stdio()
+
+
+_BATCH_ITEM_FIELDS = frozenset({
+    "preset",
+    "id",
+    "frame",
+    "object_kind",
+    "name",
+    "fill",
+    "fill_opacity",
+    "stroke",
+    "stroke_width",
+    "stroke_opacity",
+    "stroke_linecap",
+    "stroke_linejoin",
+    "filter_id",
+    "adjustments",
+    "adjust",
+})
+
+
+def _batch_adjustments(item: dict[str, object], label: str) -> dict[str, str]:
+    """Accept ``adjustments`` as an object or, like ``render --adjust``, NAME=FORMULA strings."""
+    raw = item.get("adjustments", item.get("adjust", {}))
+    if isinstance(raw, dict):
+        return {str(name): str(formula) for name, formula in raw.items()}
+    if isinstance(raw, str):
+        raw = [raw]
+    if isinstance(raw, list) and all(isinstance(value, str) for value in raw):
+        return _parse_adjustments(raw)
+    raise ValueError(
+        f"{label}.adjustments must be a JSON object keyed by guide name "
+        '({"adj": "val 32000"}) or a list of NAME=FORMULA strings'
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Print one compact canonical DrawingML preset SVG group. "
+            "This tool never writes SVG files or page layouts."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    list_parser = subparsers.add_parser(
+        "list",
+        help="List preset names, optionally filtered by substring.",
+    )
+    list_parser.add_argument(
+        "--search",
+        default="",
+        help=(
+            "Case-insensitive preset-name substring; grouped output also "
+            "searches semantic text."
+        ),
+    )
+    list_parser.add_argument(
+        "--grouped",
+        action="store_true",
+        help=(
+            "Print a compact Office-category and semantic-group index with "
+            "one-line intent summaries and preset names as JSON."
+        ),
+    )
+
+    describe_parser = subparsers.add_parser(
+        "describe",
+        help="Print preset geometry and identity metadata as JSON.",
+    )
+    describe_parser.add_argument("preset", help="DrawingML preset name.")
+    describe_parser.add_argument(
+        "--compact",
+        action="store_true",
+        help=(
+            "Print one flat objective identity view with key geometry facts."
+        ),
+    )
+    describe_parser.add_argument(
+        "--frame",
+        nargs=4,
+        type=float,
+        metavar=("X", "Y", "W", "H"),
+        help=(
+            "Also evaluate the text rectangle for this page frame and print it "

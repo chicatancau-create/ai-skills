@@ -1,0 +1,112 @@
+    """Place word runs into inferred columns and return table rows."""
+    row_groups: list[list[dict[str, object]]] = []
+    for run in sorted(runs, key=lambda item: (float(item["y0"]), float(item["x0"]))):
+        if not row_groups or abs(float(row_groups[-1][0]["y0"]) - float(run["y0"])) > 4:
+            row_groups.append([run])
+        else:
+            row_groups[-1].append(run)
+
+    rows = []
+    for group in row_groups:
+        row = [""] * len(columns)
+        for run in group:
+            center = (float(run["x0"]) + float(run["x1"])) / 2
+            col_index = min(range(len(columns)), key=lambda idx: abs(columns[idx] - center))
+            text = _normalize_table_cell(run["text"])
+            row[col_index] = f"{row[col_index]} {text}".strip() if row[col_index] else text
+        rows.append(row)
+    return rows
+
+
+def _words_to_markdown_table(
+    page: fitz.Page,
+    clip: fitz.Rect,
+) -> tuple[fitz.Rect, str] | None:
+    """Build a simple table from word coordinates inside a clipped region."""
+    words = page.get_text("words", clip=clip)
+    if len(words) < 6:
+        return None
+
+    runs = _merge_word_runs(words)
+    if len(runs) < 6:
+        return None
+
+    columns = _cluster_word_columns(runs)
+    if len(columns) < 3:
+        return None
+
+    rows = _word_runs_to_rows(runs, columns)
+    cleaned_rows = _clean_table_rows(rows)
+    markdown = _rows_to_markdown(cleaned_rows)
+    if not _is_valid_table_markdown(markdown):
+        return None
+
+    x0 = min(float(run["x0"]) for run in runs)
+    y0 = min(float(run["y0"]) for run in runs)
+    x1 = max(float(run["x1"]) for run in runs)
+    y1 = max(float(run["y1"]) for run in runs)
+    return fitz.Rect(x0, y0, x1, y1), markdown
+
+
+def _find_tables_in_clip(
+    page: fitz.Page,
+    clip: fitz.Rect,
+) -> list[object]:
+    """Find text-strategy tables inside a clipped page region."""
+    if clip.height < 20 or clip.width < 80:
+        return []
+    try:
+        return list(page.find_tables(strategy="text", clip=clip))
+    except Exception:
+        return []
+
+
+def find_page_tables(
+    page: fitz.Page,
+    include_top_continuation: bool = False,
+) -> tuple[list[dict[str, object]], bool]:
+    """Find line-detected tables plus caption-guided text tables on one page."""
+    candidates: list[dict[str, object]] = []
+    lines = _extract_text_lines(page)
+    try:
+        for tab in page.find_tables():
+            extended = _extend_ruled_table(page, tab, lines)
+            if extended is None:
+                _add_table_candidate(candidates, tab, "lines")
+                continue
+            bbox, markdown = extended
+            _append_table_markdown_candidate(candidates, bbox, markdown, "lines+text")
+    except Exception:
+        pass
+
+    for rect, text in lines:
+        if not _is_table_caption(text):
+            continue
+        start_y = _caption_table_start_y(rect, lines)
+        bottom_y = _table_region_bottom(page, lines, start_y)
+        clip = fitz.Rect(0, start_y, page.rect.width, bottom_y)
+        for tab in _find_tables_in_clip(page, clip):
+            _add_table_candidate(candidates, tab, "caption-text")
+        word_table = _words_to_markdown_table(page, clip)
+        if word_table:
+            bbox, markdown = word_table
+            _append_table_markdown_candidate(
+                candidates,
+                bbox,
+                markdown,
+                "caption-words",
+                replace_narrow=True,
+            )
+
+    if include_top_continuation:
+        start_y = page.rect.height * 0.08
+        bottom_y = _table_region_bottom(page, lines, start_y)
+        clip = fitz.Rect(0, start_y, page.rect.width, bottom_y)
+        for tab in _find_tables_in_clip(page, clip):
+            _add_table_candidate(candidates, tab, "continuation-text")
+        word_table = _words_to_markdown_table(page, clip)
+        if word_table:
+            bbox, markdown = word_table
+            _append_table_markdown_candidate(
+                candidates,
+                bbox,

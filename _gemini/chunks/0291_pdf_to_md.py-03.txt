@@ -1,0 +1,110 @@
+    broken = len(_BROKEN_LAM_ALEF_RE.findall(markdown))
+    tatweel = markdown.count("\u0640")
+    if broken < 5 and tatweel < arabic // 20:
+        return []
+    return [
+        f"Arabic text layer looks damaged: {broken} reversed lam-alef "
+        f"sequences and {tatweel} tatweel marks in {arabic} Arabic letters; "
+        "words, table cells, and numbers may be out of order or missing "
+        "letters, so check every figure against the PDF itself"
+    ]
+
+
+def detect_list_item(text: str) -> tuple:
+    """Detect if the text is a list item. Returns (is_list, list_type, content)."""
+    text = text.strip()
+
+    ul_patterns = [
+        (rf'^[{_BULLET_GLYPHS}][\s\x00-\x1f]*', '-'),
+        (r'^[-–—]\s+', '-'),
+        (r'^\*\s+', '-'),
+    ]
+    for pattern, marker in ul_patterns:
+        match = re.match(pattern, text)
+        if match:
+            return (True, 'ul', marker + ' ' + text[match.end():])
+
+    # ``83.2%`` at the start of a line is a decimal, not item 83: after a
+    # dot the marker must not be followed by another digit. ``1. 1 职业名称``
+    # (a clause number set with a space, as Chinese standards do) is a
+    # heading path, not item 1 with the text "1 职业名称": a short digit group
+    # right after the marker, followed by a space or CJK, keeps the line as is.
+    ol_pattern = r'^(\d+)(?:[、)]|\.(?!\d)(?!\s*\d{1,2}(?:\.\s*\d+)*[\s\u4e00-\u9fff]))\s*'
+    match = re.match(ol_pattern, text)
+    if match:
+        num = match.group(1)
+        return (True, 'ol', f"{num}. " + text[match.end():])
+
+    return (False, None, text)
+
+
+def remove_page_footer(text: str) -> str:
+    """
+    Remove page number patterns from footers, e.g. 'November 2025 8' or '2025年11月 8'.
+    """
+    # English month + year + page number
+    months_en = r'(?:January|February|March|April|May|June|July|August|September|October|November|December)'
+    pattern_en = rf'\s*{months_en}\s+\d{{4}}\s+\d{{1,3}}\s*$'
+    text = re.sub(pattern_en, '', text, flags=re.IGNORECASE)
+
+    # Chinese format: 2025年11月 8
+    pattern_cn = r'\s*\d{4}年\d{1,2}月\s+\d{1,3}\s*$'
+    text = re.sub(pattern_cn, '', text)
+
+    return text.rstrip()
+
+
+def detect_headers_footers(doc: fitz.Document, threshold_ratio: float = 0.6) -> set[str]:
+    """
+    Detect headers and footers statistically.
+
+    Principle: Headers and footers typically appear at fixed positions (top or bottom)
+    on each page with the same content. We collect top and bottom text from all pages,
+    and if certain text appears more frequently than the threshold, it is treated as noise.
+    """
+    if len(doc) < 3:
+        return set()
+
+    headers = []
+    footers = []
+
+    # Sample first 20 and last 20 pages (avoid processing too slowly)
+    pages_to_scan = list(range(len(doc)))
+    if len(doc) > HEADER_FOOTER_SAMPLE_LIMIT:
+        pages_to_scan = (
+            pages_to_scan[:HEADER_FOOTER_EDGE_SAMPLE_SIZE]
+            + pages_to_scan[-HEADER_FOOTER_EDGE_SAMPLE_SIZE:]
+        )
+
+    for i in pages_to_scan:
+        page = doc[i]
+        rect = page.rect
+        h = rect.height
+
+        # Define top and bottom regions (15% each)
+        top_rect = fitz.Rect(0, 0, rect.width, h * 0.15)
+        bottom_rect = fitz.Rect(0, h * 0.85, rect.width, h)
+
+        # Extract text blocks
+        blocks = page.get_text("blocks")
+        for b in blocks:
+            b_rect = fitz.Rect(b[:4])
+            text = b[4].strip()
+            if not text:
+                continue
+
+            # Simple spatial determination
+            if b_rect.intersects(top_rect):
+                headers.append(text)
+            elif b_rect.intersects(bottom_rect):
+                footers.append(text)
+
+    # Count frequencies
+    noise_texts = set()
+    total_scanned = len(pages_to_scan)
+
+    for collection in [headers, footers]:
+        counter = Counter(collection)
+        for text, count in counter.items():
+            # if text appears in > 60% of scanned pages, mark as noise
+            if count / total_scanned > threshold_ratio:

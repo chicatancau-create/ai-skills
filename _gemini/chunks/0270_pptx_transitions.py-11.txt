@@ -1,0 +1,133 @@
+    context: Any,
+    *,
+    effect: str | None,
+    duration: float,
+    advance_after: float | None,
+    advance_on_click: bool | None,
+    effect_options: Mapping[str, object] | None = None,
+) -> Any | None:
+    normalized_effect, normalized_options = normalize_transition_effect_request(
+        effect,
+        effect_options,
+    )
+    if (
+        normalized_effect is None
+        and advance_after is None
+        and advance_on_click is not False
+    ):
+        return None
+
+    if advance_on_click is not None:
+        if not isinstance(advance_on_click, bool):
+            raise ValueError(
+                "transition advance_on_click must be a boolean or None"
+            )
+    duration_ms = (
+        _seconds_to_ms(
+            duration,
+            "transition duration",
+            allow_zero=False,
+        )
+        if normalized_effect is not None
+        else None
+    )
+    advance_ms = (
+        _seconds_to_ms(
+            advance_after,
+            "transition advance_after",
+            allow_zero=True,
+        )
+        if advance_after is not None
+        else None
+    )
+
+    def build_transition(
+        effect_name: str | None,
+        *,
+        include_duration: bool,
+        options: Mapping[str, object] | None = None,
+    ) -> Any:
+        nsmap = {"p": PML_NS}
+        if include_duration:
+            nsmap["p14"] = P14_NS
+        transition = _new_element(
+            context,
+            _qn(PML_NS, "transition"),
+            nsmap=nsmap,
+        )
+        if include_duration and duration_ms is not None:
+            transition.set(_qn(P14_NS, "dur"), str(duration_ms))
+        if advance_on_click is not None:
+            transition.set("advClick", "1" if advance_on_click else "0")
+        if advance_ms is not None:
+            transition.set("advTm", str(advance_ms))
+        if effect_name is not None:
+            _prefix, namespace, element_name, effect_attrs, _fallback = (
+                _effect_spec(effect_name, options)
+            )
+            child = _new_element(context, _qn(namespace, element_name))
+            for key, value in effect_attrs.items():
+                child.set(key, str(value))
+            transition.append(child)
+        return transition
+
+    if normalized_effect is None:
+        return build_transition(None, include_duration=False)
+
+    prefix, _namespace, _element, _attrs, fallback = _effect_spec(
+        normalized_effect,
+        normalized_options,
+    )
+    if prefix == "p":
+        return build_transition(
+            normalized_effect,
+            include_duration=True,
+            options=normalized_options,
+        )
+
+    carrier = _new_element(
+        context,
+        _qn(MC_NS, "AlternateContent"),
+        nsmap={"mc": MC_NS},
+    )
+    choice = _new_element(
+        context,
+        _qn(MC_NS, "Choice"),
+        nsmap={prefix: TRANSITION_NAMESPACES[prefix]},
+    )
+    choice.set("Requires", prefix)
+    choice.append(
+        build_transition(
+            normalized_effect,
+            include_duration=True,
+            options=normalized_options,
+        )
+    )
+    fallback_node = _new_element(context, _qn(MC_NS, "Fallback"))
+    fallback_node.append(
+        build_transition(fallback or "fade", include_duration=False)
+    )
+    carrier.extend((choice, fallback_node))
+    return carrier
+
+
+def _transition_elements(carrier: Any) -> list[Any]:
+    if carrier.tag == _qn(PML_NS, "transition"):
+        return [carrier]
+    return [
+        element
+        for element in carrier.iter()
+        if element.tag == _qn(PML_NS, "transition")
+    ]
+
+
+def transition_carriers(slide_root: Any) -> list[Any]:
+    """Return root-level direct or AlternateContent transition carriers."""
+    carriers: list[Any] = []
+    for child in list(slide_root):
+        if child.tag == _qn(PML_NS, "transition"):
+            carriers.append(child)
+            continue
+        if child.tag != _qn(MC_NS, "AlternateContent"):
+            continue
+        if _transition_elements(child):

@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+"""Unit tests for source_to_md.py output naming and image-flag routing."""
+
+from __future__ import annotations
+
+import argparse
+import codecs
+import io
+import json
+import subprocess
+import sys
+import tempfile
+import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
+from unittest.mock import Mock, patch
+
+
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+import source_to_md  # noqa: E402
+
+WEB_BACKEND_DIR = SCRIPTS_DIR / "source_to_md"
+if str(WEB_BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(WEB_BACKEND_DIR))
+from web_to_md import is_plain_text_document  # noqa: E402
+import web_to_md  # noqa: E402
+from excel_to_md import _format_cell_value  # noqa: E402
+
+
+def _args(**overrides: object) -> argparse.Namespace:
+    values = dict(
+        images=None,
+        no_images=False,
+        filter_images=False,
+        render_vector_figures=False,
+    )
+    values.update(overrides)
+    return argparse.Namespace(**values)
+
+
+class OutputNamingTests(unittest.TestCase):
+    def test_single_input_extensionless_output_gets_md_suffix(self) -> None:
+        self.assertEqual(
+            source_to_md._dispatch_output_arg(
+                "https://example.com/post", "web", "sources_cf", False, set(),
+            ),
+            "sources_cf.md",
+        )
+        self.assertEqual(
+            source_to_md._dispatch_output_arg(
+                "report.docx", "doc", "notes.markdown", False, set(),
+            ),
+            "notes.markdown",
+        )
+
+    def test_existing_directory_still_keeps_default_name_inside_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result = source_to_md._dispatch_output_arg(
+                "report.docx", "doc", tmp, False, set(),
+            )
+            self.assertEqual(Path(result), Path(tmp) / "report.md")
+
+
+class ImageFlagRoutingTests(unittest.TestCase):
+    def test_downloaded_webp_is_oriented_before_png_conversion(self) -> None:
+        from PIL import Image
+
+        image = Image.new("RGB", (80, 40), "red")
+        exif = image.getexif()
+        exif[274] = 6
+        encoded = io.BytesIO()
+        image.save(encoded, format="WEBP", exif=exif)
+        response = Mock(content=encoded.getvalue(), headers={"Content-Type": "image/webp"})
+        content = web_to_md.BeautifulSoup('<p><img src="photo.webp"/></p>', "html.parser")
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(web_to_md, "_http_get", return_value=response), redirect_stdout(io.StringIO()):
+                count = web_to_md.download_and_rewrite_images(content, "https://example.com/", tmp, "images")
+            self.assertEqual(count, 1)
+            with Image.open(next(Path(tmp).glob("*.png"))) as converted:
+                self.assertEqual(converted.size, (40, 80))
+                self.assertNotIn(274, converted.getexif())
+
+    def test_no_images_is_accepted_for_web_and_pdf(self) -> None:
+        self.assertTrue(
+            source_to_md._validate_pdf_image_flags(
+                _args(no_images=True), ["web", "pdf"],
+            )
+        )
+        self.assertTrue(
+            source_to_md._validate_pdf_image_flags(
+                _args(images="none"), ["web"],
+            )
+        )
+
+    def test_other_image_flags_stay_pdf_only(self) -> None:
+        self.assertFalse(
+            source_to_md._validate_pdf_image_flags(
+                _args(filter_images=True), ["web"],
+            )
+        )
+        self.assertFalse(
+            source_to_md._validate_pdf_image_flags(
+                _args(no_images=True), ["doc"],
+            )
+        )
+
+    def test_no_images_is_a_no_op_for_markdown_and_text(self) -> None:
+        self.assertTrue(
+            source_to_md._validate_pdf_image_flags(
+                _args(no_images=True), ["markdown", "text", "web"],
+            )
+        )
+
+
+class RawTextUrlTests(unittest.TestCase):

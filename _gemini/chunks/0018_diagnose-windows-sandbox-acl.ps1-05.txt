@@ -1,0 +1,61 @@
+function Get-OwnDaclSddl {
+  param([string]$Sddl)
+  # Inherited ACEs follow their parent: repeating them in a saved DACL forces them
+  # back onto the object on restore and stops matching once the parent re-derives
+  # them. Keep the observed control flags so the result still carries the
+  # object's inheritance protection, and keep every ACE the object owns.
+  $flags = [regex]::Match($Sddl, '^D:([A-Z]*)').Groups[1].Value
+  $aces = @([regex]::Matches($Sddl, '\([^()]*\)') | ForEach-Object { $_.Value } | Where-Object { ($_ -split ';')[1] -notmatch 'ID' })
+  return 'D:{0}{1}' -f $flags, ($aces -join '')
+}
+
+function Get-AceSet {
+  param([string]$Sddl)
+  return @([regex]::Matches($Sddl, '\([^()]*\)') | ForEach-Object { $_.Value } | Sort-Object)
+}
+
+function Save-AclBackup {
+  param([string]$FullPath, [string]$Directory, [string]$Root)
+  $fullDirectory = [System.IO.Path]::GetFullPath($Directory)
+  if (-not (Test-Path -LiteralPath $fullDirectory)) {
+    Invoke-ReportedOperation create_backup_directory $fullDirectory 'The requested recovery directory does not exist; create it before writing backup files.' files {
+      New-Item -ItemType Directory -Path $fullDirectory | Out-Null
+    }
+  }
+  $record = Join-Path $fullDirectory ('acl-backup-{0}.json' -f ([guid]::NewGuid().ToString('N')))
+  # The skill's extracted directory expires with its registration. Recovery must
+  # remain runnable from the recovery directory after that registration is gone.
+  $restoreScript = $record + '.ps1'
+  $command = "pwsh -NoProfile -File '{0}' -Path '{1}' -AllowRoot '{2}' -Restore '{3}'" -f
+    $restoreScript.Replace("'", "''"), $FullPath.Replace("'", "''"), ([System.IO.Path]::GetFullPath($Root)).Replace("'", "''"), $record.Replace("'", "''")
+  Write-Report decision backup $FullPath selected 'The recovery record and an independent recovery script are written before the ACL change.' @{ files = @($record, $restoreScript) }
+  Invoke-ReportedOperation backup $FullPath 'Save the original DACL and an independent recovery command before changing permissions.' files {
+    $backupAcl = Get-Acl -LiteralPath $FullPath
+    $observed = $backupAcl.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::Access)
+    @{
+      Path = $FullPath
+      Dacl = Get-OwnDaclSddl -Sddl $observed
+      Protected = $backupAcl.AreAccessRulesProtected
+      Observed = $observed
+    } | ConvertTo-Json | Set-Content -LiteralPath $record -Encoding utf8
+    Copy-Item -LiteralPath $PSCommandPath -Destination $restoreScript
+  }
+  $script:recoveries.Add(@{ path = $FullPath; record = $record; script = $restoreScript; command = $command; attempted = $false; restored = $false })
+  Write-Report observation recovery $FullPath available 'These files can restore the saved DACL; no rollback has been executed.' $script:recoveries[-1]
+  Write-Line ('BACKUP {0} -> {1}' -f $FullPath, $record)
+  Write-Line ('ROLLBACK {0}' -f $command)
+}
+function Restore-SavedDacl {
+  param([string]$FullPath, [string]$Record, [string]$Root)
+  $refusal = Get-RepairRefusal -FullPath $FullPath -Root $Root -AllowEqual
+  if ($refusal) { throw [System.ArgumentException]::new("RESTORE_REFUSED $refusal") }
+  $saved = Invoke-ReportedOperation read_recovery $Record 'Read the recovery record and verify it belongs to the requested path before restoring its DACL.' none {
+    Get-Content -LiteralPath $Record -Raw | ConvertFrom-Json
+  }
+  if ($saved.Path -isnot [string] -or $saved.Path -ine $FullPath -or $saved.Dacl -isnot [string]) {
+    throw [System.ArgumentException]::new('RESTORE_REFUSED backup does not describe the requested path')
+  }
+  if (-not [Dsh.TokenInfo]::HasAccess($FullPath, 0x40000)) { throw 'RESTORE_REFUSED the caller lacks WRITE_DAC' }
+  Invoke-ReportedOperation restore_dacl $FullPath 'Restore the requested backup DACL and inheritance protection, preserving owner and SACL.' acl {
+    [Dsh.TokenInfo]::SetDacl($FullPath, $saved.Dacl)
+  }

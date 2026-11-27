@@ -1,0 +1,130 @@
+    column_edges, row_edges, shape_records, text_records = grid
+    text_cells = _table_text_cells(
+        text_records,
+        table_rows,
+        column_edges,
+        row_edges,
+    )
+    fallback_heights = [
+        row_edges[idx + 1] - row_edges[idx]
+        for idx in range(len(row_edges) - 1)
+    ]
+    non_uniform = (
+        max(fallback_heights) - min(fallback_heights)
+        > max(1.0, max(fallback_heights) * 0.02)
+    )
+    raw_heights = payload.get("row_heights")
+    payload_uniform = not isinstance(raw_heights, list) or not raw_heights or (
+        max(_number(value, "table row height") for value in raw_heights)
+        - min(_number(value, "table row height") for value in raw_heights)
+        <= 1e-6
+    )
+    if non_uniform and payload_uniform:
+        warnings.append(
+            "Native PPTX table fallback row heights are non-uniform, but payload "
+            "row_heights is missing or uniform"
+        )
+
+    header_rows = _table_header_rows(payload, len(table_rows))
+    warnings.extend(
+        _native_table_header_warnings(
+            payload,
+            table_rows,
+            column_edges,
+            row_edges,
+            shape_records,
+            text_cells,
+        )
+    )
+    warnings.extend(
+        _native_table_fill_warnings(
+            table_rows,
+            header_rows,
+            column_edges,
+            row_edges,
+            shape_records,
+        )
+    )
+    table_style = payload.get("style") if isinstance(payload.get("style"), dict) else {}
+    warnings.extend(
+        _native_table_first_column_warnings(
+            table_rows,
+            header_rows,
+            text_cells,
+            style_body_text=_hex_or_none(table_style.get("body_text")),
+        )
+    )
+    warnings.extend(
+        _native_table_body_text_warnings(
+            payload,
+            table_rows,
+            header_rows,
+            text_cells,
+        )
+    )
+    warnings.extend(
+        _native_table_border_topology_warnings(
+            payload,
+            table_rows,
+            column_edges,
+            row_edges,
+            shape_records,
+        )
+    )
+    warnings.extend(
+        _native_table_inset_graphic_warnings(
+            table_rows,
+            header_rows,
+            column_edges,
+            row_edges,
+            shape_records,
+            text_cells,
+        )
+    )
+    return warnings
+
+
+def _weighted_lengths(
+    total: int,
+    count: int,
+    weights: list[Any] | None,
+    *,
+    field_name: str,
+) -> list[int]:
+    if total < count:
+        raise RuntimeError(
+            f"Native PPTX table {field_name} cannot fit {count} positive grid lengths"
+        )
+    if weights is None:
+        base, remainder = divmod(total, count)
+        return [base + (1 if idx < remainder else 0) for idx in range(count)]
+
+    numeric = _table_weights(weights, field_name)
+    largest = max(numeric)
+    normalized = [weight / largest for weight in numeric]
+    normalized_total = sum(normalized)
+    distributable = total - count
+    quotas = [distributable * weight / normalized_total for weight in normalized]
+    extras = [int(quota) for quota in quotas]
+    remainder = distributable - sum(extras)
+    if remainder < 0 or remainder > count:
+        raise RuntimeError(f"Native PPTX table {field_name} allocation overflowed")
+    order = sorted(
+        range(count),
+        key=lambda idx: (quotas[idx] - extras[idx], normalized[idx], -idx),
+        reverse=True,
+    )
+    for idx in order[:remainder]:
+        extras[idx] += 1
+    return [extra + 1 for extra in extras]
+
+
+def _table_weights(weights: list[Any], field_name: str) -> list[float]:
+    numeric = [
+        _number(weight, f"{field_name}[{idx}]")
+        for idx, weight in enumerate(weights, start=1)
+    ]
+    if any(weight < 0 for weight in numeric):
+        raise RuntimeError(f"Native PPTX table {field_name} values must be non-negative")
+    if max(numeric, default=0.0) <= 0:
+        raise RuntimeError(

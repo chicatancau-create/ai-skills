@@ -1,0 +1,78 @@
+        if (!REC || !Object.prototype.hasOwnProperty.call(REC, field)) return fallback;
+        var spec = REC[field];
+        var value = spec && typeof spec === "object" ? spec.value : spec;
+        return typeof value === "boolean" ? value : fallback;
+    }
+
+    function recommendationFieldLocked(field) {
+        return !!(REC && REC[field] && typeof REC[field] === "object" && REC[field].locked === true);
+    }
+
+    // Guaranteed recommendation: the AI's pick, or the first catalog option as a
+    // fallback so an enumerable field ALWAYS shows a badged recommendation.
+    function recOrFirst(field, list) {
+        var r = recId(field);
+        if (r == null || r === "") r = normalizeRecId(field, directionField(field));
+        if (r != null && r !== "") return r;
+        return firstId(list);
+    }
+    // Render an enumerable field: ALL options from the catalog, recommended one
+    // badged, current selection from STATE, plus an optional Custom box. An
+    // AI-authored custom candidate stays fully visible while unselected and
+    // becomes editable only after selection; legacy custom inputs keep their
+    // compact free-text behavior.
+    // `list` is either a flat array of {id,label,desc,dim,viewbox} or a grouped array
+    // of {group, items:[...]}.
+    function enumField(parent, list, recommendedId, getVal, setVal, opts2) {
+        list = list || [];
+        opts2 = opts2 || {};
+        var disabled = opts2.disabled === true;
+        var grouped = list.length && list[0] && list[0].items;
+        var flat = grouped ? list.reduce(function (a, g) { return a.concat(g.items || []); }, []) : list;
+        var ids = flat.map(function (o) { return o.id; });
+        // Optional legacy spectrum: marks several catalog ids with localized
+        // tags and notes instead of one recommendation badge.
+        var spectrum = (opts2.spectrum && opts2.spectrum.length) ? opts2.spectrum : null;
+        var specById = {};
+        if (spectrum) spectrum.forEach(function (s) {
+            if (s && s.id) specById[s.id] = { tag: localized(s, "tag"), note: localized(s, "note") };
+        });
+        var allowCustom = opts2.allowCustom === true;  // only for fields not fully enumerable
+        var aiCustom = opts2.aiCustom || null;
+        var customSentinel = opts2.customSentinel || (aiCustom ? "custom" : "");
+        var customInvalidValues = opts2.customInvalidValues || [];
+        var cur = getVal();
+        var isCustom = cur != null && cur !== "" &&
+            (cur === customSentinel || ids.indexOf(cur) === -1);
+        if (!allowCustom && isCustom && opts2.preserveCustom !== true) {
+            // closed field with an out-of-catalog value → snap to recommended/first
+            cur = ids.indexOf(recommendedId) >= 0 ? recommendedId : ids[0];
+            setVal(cur);
+            isCustom = false;
+        }
+
+        var allChips = [];
+        var customInput = el(aiCustom ? "textarea" : "input", "text-input custom-input");
+        setNaturalInputDirection(customInput);
+        if (opts2.inputClass) customInput.classList.add(opts2.inputClass);
+        if (aiCustom) customInput.rows = aiCustom.rows || 4;
+        else customInput.type = "text";
+        customInput.placeholder = opts2.placeholder || t("custom_placeholder");
+        customInput.style.display = "none";
+        var customPreview = null;
+
+        function customText() {
+            if (!aiCustom) return customInput.value || "";
+            return String(aiCustom.getText ? aiCustom.getText() : (aiCustom.text || ""));
+        }
+
+        function syncAiCustom(selected) {
+            if (!aiCustom || !customPreview) return;
+            var value = customText();
+            customPreview.textContent = value;
+            customPreview.style.display = selected ? "none" : "block";
+            customInput.style.display = selected ? "block" : "none";
+            if (selected && customInput.value !== value) customInput.value = value;
+        }
+
+        function deselect() {

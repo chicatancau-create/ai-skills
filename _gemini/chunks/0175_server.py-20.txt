@@ -1,0 +1,108 @@
+    'content_divergence',
+)
+_PROACTIVE_EXECUTION_DEFAULTS = {
+    'proactive_speaker_notes': True,
+    'proactive_custom_animations': False,
+    'proactive_narration_audio': False,
+}
+_LOCKED_RECOMMENDATIONS_KEY = '_locked_recommendations'
+
+
+def _resolve_proactive_execution_values(
+    source: dict,
+) -> tuple[dict[str, bool], Optional[str]]:
+    """Resolve proactive-execution booleans with backward-compatible defaults."""
+    values = {}
+    for key, default in _PROACTIVE_EXECUTION_DEFAULTS.items():
+        if key not in source:
+            values[key] = default
+            continue
+        raw_value = source[key]
+        if isinstance(raw_value, dict):
+            if 'value' not in raw_value or not isinstance(raw_value['value'], bool):
+                return {}, f'{key}.value must be a boolean'
+            raw_value = raw_value['value']
+        elif not isinstance(raw_value, bool):
+            return {}, f'{key} must be a boolean'
+        values[key] = raw_value
+    return values, None
+
+
+def _normalize_proactive_execution_result(
+    result: dict,
+    defaults: dict[str, bool],
+) -> Optional[str]:
+    """Write the independent raw confirmation booleans to the final result."""
+    values = {}
+    for key, default in defaults.items():
+        value = result.get(key, default)
+        if not isinstance(value, bool):
+            return f'{key} must be a boolean'
+        values[key] = value
+    result.update(values)
+    return None
+
+
+def _merge_confirmed_choices(data: dict, result_file: Path) -> None:
+    """Fold already-confirmed choices into later-stage recommendations."""
+    try:
+        res = _read_result_object(result_file)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return
+    if _result_stage(result_file) != 'stage1':
+        return
+    recommend = data.setdefault('recommend', {})
+    if not isinstance(recommend, dict):
+        recommend = data['recommend'] = {}
+    main_language = _recommendation_language(res)
+    if main_language:
+        try:
+            data['primary_language'] = normalize_language_tag(main_language)
+        except LanguageTagError:
+            # Keep the invalid legacy value visible to the API boundary below,
+            # which returns a user-facing contract error instead of hiding it.
+            data['primary_language'] = main_language
+    for key in _CONTRACT_RECOMMEND_KEYS:
+        if res.get(key) not in (None, ''):
+            recommend[key] = res[key]
+    for key in _CONTRACT_VALUE_KEYS:
+        if key in res:
+            data[key] = {'value': res.get(key) or ''}
+
+
+def _apply_locked_recommendations(
+    result: dict,
+    recommendations_file: Path,
+    previous_result_file: Path,
+    *,
+    carry_previous: bool,
+) -> dict:
+    """Restore profile-locked fields and return locks for staged carry-over."""
+    # This marker is server-owned; never accept a client-supplied carry-over map.
+    result.pop(_LOCKED_RECOMMENDATIONS_KEY, None)
+    locked_values = {}
+    previous = {}
+    if carry_previous:
+        try:
+            previous = _read_result_object(previous_result_file)
+        except (OSError, json.JSONDecodeError, ValueError):
+            previous = {}
+    previous_locks = previous.get(_LOCKED_RECOMMENDATIONS_KEY)
+    if isinstance(previous_locks, dict):
+        locked_values.update(previous_locks)
+    for key in _PROACTIVE_EXECUTION_DEFAULTS:
+        locked_values.pop(key, None)
+
+    try:
+        recommendations = _read_json_object(recommendations_file)
+        recommendations_loaded = True
+    except (OSError, json.JSONDecodeError, ValueError):
+        recommendations = {}
+        recommendations_loaded = False
+
+    # Stage 1 starts a new contract and therefore replaces any stale locks left
+    # by an earlier run. Later stages inherit those locks across server restarts.
+    if recommendations_loaded and _recommendation_stage(recommendations) == 1:
+        locked_values = {}
+    for key, field in recommendations.items():
+        if key in _PROACTIVE_EXECUTION_DEFAULTS:

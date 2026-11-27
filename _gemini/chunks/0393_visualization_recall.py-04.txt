@@ -1,0 +1,88 @@
+            "Error: replace each invalid reference with one returned by recall, or "
+            f"keep no-template-match out of Section VII and {mapping_name} while "
+            "recording the custom fallback in the page's Section IX block.",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
+def _add_family_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--family",
+        choices=("all",) + visualization_families(),
+        default="all",
+        help="Limit candidates to one family (default: all).",
+    )
+
+
+def build_parser(*, legacy_output: bool = False) -> argparse.ArgumentParser:
+    description = (
+        "Recall legacy chart-catalog candidates or validate selected keys."
+        if legacy_output
+        else "Recall visualization candidates or validate selected references."
+    )
+    parser = argparse.ArgumentParser(
+        description=description,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.set_defaults(legacy_output=legacy_output)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    recall = subparsers.add_parser("recall", help="Recall candidates for one page.")
+    recall.add_argument("--page", required=True, help="Planned page key, for example P03.")
+    recall.add_argument(
+        "--tag",
+        action="append",
+        required=True,
+        help="English semantic content-shape tag; repeat 3-8 times.",
+    )
+    recall.add_argument(
+        "--limit",
+        type=int,
+        choices=range(3, 9),
+        default=6,
+        metavar="3..8",
+        help="Candidate count (default: 6).",
+    )
+    recall.add_argument(
+        "--semantic-fallback",
+        action="store_true",
+        help="Include the selected live catalogs after a low-confidence review.",
+    )
+    _add_family_argument(recall)
+    recall.set_defaults(handler=_run_recall)
+
+    validate = subparsers.add_parser("validate", help="Validate selected references.")
+    validate.add_argument("keys", nargs="+", help="One or more keys or family/key references.")
+    validate.add_argument(
+        "--legacy-bare",
+        action="store_true",
+        default=legacy_output,
+        help=(
+            argparse.SUPPRESS
+            if legacy_output
+            else "Allow unqualified keys from an existing legacy page_charts mapping."
+        ),
+    )
+    _add_family_argument(validate)
+    validate.set_defaults(handler=_run_validate)
+    return parser
+
+
+def main(
+    argv: Optional[list[str]] = None,
+    *,
+    legacy_output: bool = False,
+) -> int:
+    parser = build_parser(legacy_output=legacy_output)
+    args = parser.parse_args(argv)
+    try:
+        return args.handler(args)
+    except VisualizationCatalogError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

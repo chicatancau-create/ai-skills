@@ -1,0 +1,108 @@
+            return None
+        name = model.get("orgUserName") or model.get("name") or ""
+        depts = model.get("depts") or []
+        dept_name = depts[0].get("deptName", "") if depts and isinstance(depts[0], dict) else ""
+        # 工号：尝试多个候选字段
+        job_number = (model.get("jobNumber") or model.get("workNumber")
+                      or model.get("empId") or "")
+        # 职位：优先 title/position，回退到 labels 中 groupName=="职务" 的条目
+        title = (model.get("title") or model.get("position")
+                 or _extract_title_from_labels(model.get("labels", [])))
+        return str(uid), UserInfo(
+            name=str(name),
+            dept_name=str(dept_name),
+            job_number=str(job_number),
+            title=str(title),
+        )
+
+    # 回退：扁平格式
+    uid = _first_nonempty(record, ("userId", "userid", "id"))
+    if not uid:
+        return None
+    return str(uid), UserInfo(
+        name=str(_first_nonempty(record, ("name", "userName", "nick")) or ""),
+        dept_name=str(_first_nonempty(record, ("deptName", "dept_name", "department")) or ""),
+        job_number=str(_first_nonempty(record, ("jobNumber", "job_number", "workNumber")) or ""),
+        title=str(_first_nonempty(record, ("title", "position", "jobTitle")) or ""),
+    )
+
+
+def resolve_user_info(user_ids: list[str]) -> dict[str, UserInfo]:
+    """
+    批量获取用户的完整基础信息（姓名、部门、工号、职位）。
+
+    适配 dws contact user get 返回的嵌套 orgEmployeeModel 结构。
+    分批处理（每批20人），失败时不抛错。
+    """
+    if not user_ids:
+        return {}
+
+    info_map: dict[str, UserInfo] = {}
+
+    for i in range(0, len(user_ids), 20):
+        batch = user_ids[i:i + 20]
+        try:
+            result = run_dws(["contact", "user", "get", "--ids", ",".join(batch)])
+            for record in extract_records(result):
+                parsed = _parse_user_record(record)
+                if parsed:
+                    uid_str, info = parsed
+                    info_map[uid_str] = info
+        except DwsCallError as e:
+            log(f"[user-info] 批量 get 失败（batch {i // 20 + 1}）：{e}")
+
+    # 兜底：未解析到的用户填充 userId 作为姓名
+    for uid in user_ids:
+        if uid not in info_map:
+            info_map[uid] = UserInfo(name=uid)
+
+    return info_map
+
+
+def resolve_user_names(user_ids: list[str]) -> dict[str, str]:
+    """
+    给一组 userId 解析姓名映射（向后兼容接口）。
+
+    内部调用 resolve_user_info，只返回 {userId: name} 映射。
+    """
+    info_map = resolve_user_info(user_ids)
+    return {uid: info.name or uid for uid, info in info_map.items()}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Excel 写入
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Excel 样式常量与辅助函数
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 配色（参考钉钉考勤报表风格：青绿标题 + 浅黄表头 + 白色数据区）
+_TITLE_FILL_COLOR = "D5EAEA"       # 浅青绿 — 主标题背景
+_TITLE_FONT_COLOR = "1F6E6E"       # 深青 — 主标题字体
+_SUBTITLE_FILL_COLOR = "DAEEF3"    # 浅蓝 — 副标题（生成时间）背景
+_SUBTITLE_FONT_COLOR = "31708F"    # 深蓝 — 副标题字体
+
+_HEADER_FILL_COLOR = "FFF2CC"      # 浅黄 — 表头背景
+_HEADER_FONT_COLOR = "333333"      # 深灰近黑 — 表头字体
+_DATA_FONT_COLOR = "333333"        # 数据字体颜色
+
+_BORDER_COLOR = "BFBFBF"           # 浅灰 — 单元格边框
+_FONT_NAME = "微软雅黑"
+
+# 日历表人员交替配色（奇数人白底，偶数人浅灰蓝底，便于区分不同人员）
+_CALENDAR_BAND_COLORS = ("FFFFFF", "EDF2F9")
+
+# 考勤结果单元格条件配色（参考钉钉 previewStyleByValue 配置）
+# 规则按优先级排列，首个匹配命中即停止；无 color 键表示不填充背景色。
+import re as _re
+
+_ATTEND_RESULT_STYLE_RULES: list[tuple["_re.Pattern[str]", str | None]] = [
+    # 白底（红字加粗由字体控制）：周末 — POI index 9 WHITE (255,255,255)
+    (_re.compile(r".*(星期六|星期日|星期天)[\s\S]*"), "FFFFFF"),
+    # 浅黄(TAN)：补卡审批通过/举证打卡/加班/外出/假/调休 — POI index 47 (255,204,153)
+    (_re.compile(r".*(补卡审批通过|举证打卡审批通过|加班|外出|假|调休)[\s\S]*"), "FFCC99"),
+    # 浅青(LIGHT_TURQUOISE)：外勤/出差 — POI index 41 (204,255,255)
+    (_re.compile(r".*(外勤|出差)[\s\S]*"), "CCFFFF"),
+    # 浅黄(TAN)：管理员改为正常 — POI index 47 (255,204,153)
+    (_re.compile(r"(?=.*管理员)(?=.*改为正常)^[\s\S]*$"), "FFCC99"),

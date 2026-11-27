@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+"""
+PPT Master - Shape Boolean Core
+
+Resolve closed SVG or text-outline operands into SVG-root-coordinate paths and
+apply PowerPoint-compatible merge-shapes operations without mutating the source.
+Callers insert returned paths at the original z-order under the final semantic
+or structured parent, never under the old transformed ancestor.
+
+Usage:
+    Import render_boolean_svg_fragments from svg_to_pptx.shape_boolean.
+
+Examples:
+    fragment = render_boolean_svg_fragments(
+        "projects/demo/svg_output/slide-01.svg",
+        operation="intersect",
+        source_ids=("shape-a", "shape-b"),
+        output_id="shape-overlap",
+    )
+
+Dependencies:
+    skia-pathops, local PPT Master modules, and uharfbuzz for text operands
+"""
+
+from __future__ import annotations
+
+import math
+import re
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import Any
+from xml.etree import ElementTree as ET
+
+from pptx_to_svg.emu_units import Xfrm
+from pptx_to_svg.preset_authoring import (
+    authored_preset_encoding,
+    validate_authored_preset_group,
+)
+from pptx_to_svg.preset_registry_to_svg import render_preset_geometry
+from pptx_to_svg.preset_svg_markup import attrs_to_xml
+
+from .drawingml.context import AffineMatrix, IDENTITY_MATRIX
+from .drawingml.paths import (
+    PathCommand,
+    normalize_path_commands,
+    parse_svg_path,
+    parse_svg_points,
+    svg_path_to_absolute,
+    transform_path_commands,
+)
+from .drawingml.utils import (
+    format_project_geometry_length,
+    matrix_multiply,
+    parse_inline_style,
+    parse_opacity,
+    parse_project_geometry_length,
+    parse_project_stroke_dasharray,
+    parse_project_stroke_enum,
+    parse_transform_matrix,
+)
+
+
+BOOLEAN_OPERATIONS = frozenset({
+    "combine",
+    "fragment",
+    "intersect",
+    "subtract",
+    "union",
+})
+
+_BOOLEAN_TAGS = frozenset({"circle", "ellipse", "path", "polygon", "rect"})
+_DEFINITION_TAGS = frozenset({
+    "clipPath",
+    "defs",
+    "marker",
+    "mask",
+    "pattern",
+    "symbol",
+})
+_ID_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.:-]*")
+_STYLE_OVERRIDE_ATTRS = (
+    "fill",
+    "fill-opacity",
+    "opacity",
+    "stroke",
+    "stroke-dasharray",
+    "stroke-width",
+    "stroke-opacity",
+    "stroke-linecap",
+    "stroke-linejoin",
+)
+_PRESENTATION_ATTRS = (
+    *_STYLE_OVERRIDE_ATTRS,
+    "vector-effect",
+)
+_ROUNDTRIP_TRANSPORT_ATTRS = frozenset({
+    "data-pptx-custgeom",
+    "data-pptx-custgeom-ref",
+    "data-pptx-geometry-kind",
+    "data-pptx-native",
+    "data-pptx-native-ref",
+    "data-pptx-native-source",
+    "data-pptx-native-status",
+    "data-pptx-part",
+    "data-pptx-shape-id",
+    "data-pptx-shape-scope",
+    "data-pptx-source-ref",
+})
+_RESULT_PRECISION = 6
+_BEZIER_QUARTER_K = 0.5522847498307936
+
+
+def render_boolean_svg_fragments(
+    svg_file: str | Path,
+    *,
+    operation: str,
+    source_ids: Sequence[str],
+    output_id: str,
+    style: Mapping[str, str] | None = None,
+    font_dirs: Sequence[str | Path] = (),
+) -> str:
+    """Return canonical SVG path fragments for one merge-shapes operation.
+
+    The first source is the primary shape: subtract removes all later sources
+    from it, and every result inherits its effective presentation attributes.
+    All transforms are baked into SVG-root coordinates, so callers insert the
+    result at the original z-order under the final semantic or structured
+    parent, never under the old transformed ancestor. Fragment returns
+    top-to-bottom, left-to-right sibling paths named ``<output_id>-1`` onward;
+    every other operation returns one path named exactly ``output_id``.
+    """
+    if not isinstance(operation, str):
+        raise ValueError("Shape Boolean operation must be a string")
+    normalized_operation = operation.strip().lower()
+    if normalized_operation not in BOOLEAN_OPERATIONS:
+        allowed = ", ".join(sorted(BOOLEAN_OPERATIONS))
+        raise ValueError(

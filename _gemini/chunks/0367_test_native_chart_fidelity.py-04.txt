@@ -1,0 +1,91 @@
+            "categories": ["A", "B"],
+            "series": [{"name": "S", "values": [1, 2]}],
+            "style": {"colors": ["#111111"]},
+        }
+        warnings = _native_chart_chrome_warnings(_marker(fallback), payload)
+        self.assertEqual(len(warnings), 2)
+        self.assertIn("point marker(s)", warnings[0])
+        self.assertIn("#C8102E", warnings[1])
+        payload["series"][0]["point_colors"] = [None, "#C8102E"]
+        self.assertEqual(_native_chart_chrome_warnings(_marker(fallback), payload), [])
+
+
+class GapAndFillTests(unittest.TestCase):
+    def test_null_values_leave_gaps_in_the_cache(self) -> None:
+        payload = {
+            "type": "line",
+            "categories": ["A", "B", "C"],
+            "series": [{"name": "S", "values": [1, None, 3]}],
+        }
+        xml = _render(payload)
+        num_cache = xml[xml.index("<c:numCache>"):xml.index("</c:numCache>")]
+        self.assertIn('<c:ptCount val="3"/><c:pt idx="0"><c:v>1</c:v></c:pt><c:pt idx="2">', num_cache)
+        self.assertNotIn('<c:pt idx="1">', num_cache)
+        self.assertIn('<c:dispBlanksAs val="gap"/>', xml)
+
+    def test_all_null_series_is_rejected(self) -> None:
+        payload = {
+            "type": "line",
+            "categories": ["A", "B"],
+            "series": [{"name": "S", "values": [None, None]}],
+        }
+        with self.assertRaises(RuntimeError):
+            _chart_data(payload)
+
+    def test_area_has_no_outline_unless_line_width_is_set(self) -> None:
+        payload = {
+            "type": "area",
+            "categories": ["A", "B"],
+            "series": [{"name": "S", "values": [1, 2], "fill_opacity": 0.14}],
+            "style": {"colors": ["#111111"]},
+        }
+        xml = _render(payload)
+        self.assertIn('<a:alpha val="14000"/>', xml)
+        self.assertIn("<a:ln><a:noFill/></a:ln>", xml[xml.index("<c:ser>"):xml.index("</c:ser>")])
+        payload["series"][0]["line_width"] = 3
+        xml = _render(payload)
+        self.assertIn('<a:ln w="28575">', xml[xml.index("<c:ser>"):xml.index("</c:ser>")])
+
+    def test_area_warnings_report_translucency_and_overlaid_lines(self) -> None:
+        fallback = (
+            '<path d="M0 0 L10 10 L20 0 Z" fill="#111111" fill-opacity="0.14"/>'
+            '<polyline points="0,0 10,10 20,0" fill="none" stroke="#111111"/>'
+        )
+        payload = {
+            "type": "area",
+            "categories": ["A", "B", "C"],
+            "series": [{"name": "S", "values": [1, 2, 1]}],
+        }
+        warnings = _native_chart_chrome_warnings(_marker(fallback), payload)
+        self.assertEqual(len(warnings), 2)
+        self.assertIn("fill-opacity 0.14", warnings[0])
+        self.assertIn('type "combo"', warnings[1])
+
+
+class SpacingTests(unittest.TestCase):
+    def test_explicit_gap_width_and_overlap_are_written(self) -> None:
+        xml = _render(_bar_payload(type="column", gap_width=60, overlap=-20))
+        self.assertIn('<c:gapWidth val="60"/><c:overlap val="-20"/>', xml)
+
+    def test_gap_width_is_read_from_fallback_columns(self) -> None:
+        payload = _bar_payload(
+            type="column",
+            plot_area={"x": 0, "y": 0, "width": 300, "height": 100},
+        )
+        fallback = (
+            '<rect x="20" y="50" width="60" height="50" fill="#111111"/>'
+            '<rect x="120" y="30" width="60" height="70" fill="#111111"/>'
+            '<rect x="220" y="10" width="60" height="90" fill="#111111"/>'
+        )
+        elem = _marker(fallback)
+        chart_data = _chart_data(payload)
+        self.assertEqual(_inferred_bar_gap_width(elem, chart_data), 67)
+        self.assertIn('<c:gapWidth val="67"/>', _render(payload, fallback))
+
+    def test_overlap_is_read_from_clustered_bars(self) -> None:
+        payload = {
+            "type": "bar",
+            "categories": ["A", "B"],
+            "series": [{"name": "S1", "values": [1, 2]}, {"name": "S2", "values": [2, 3]}],
+            "plot_area": {"x": 0, "y": 0, "width": 200, "height": 100},
+        }

@@ -1,0 +1,102 @@
+            "effects": dict(sorted(transition_effects.items())),
+        },
+        "object_animations": {
+            "timing_slide_count": len(timing_slides),
+            "object_animation_slide_count": len(object_animation_slides),
+            "audio_timing_slide_count": len(audio_timing_slides),
+            "timing_slides": timing_slides,
+            "object_animation_slides": object_animation_slides,
+            "audio_timing_slides": audio_timing_slides,
+        },
+    }
+
+
+def _deduplicate_issues(
+    issues: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    seen: set[str] = set()
+    output: list[dict[str, object]] = []
+    for issue in issues:
+        key = json.dumps(issue, ensure_ascii=False, sort_keys=True)
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(issue)
+    return output
+
+
+def audit_pptx_delivery(path: str | Path) -> dict[str, object]:
+    """Return a JSON-safe, read-only delivery audit for one PPTX file."""
+    pptx_path = Path(path).expanduser().resolve()
+    report = _empty_report(pptx_path)
+    errors = report["errors"]
+    advisories = report["advisories"]
+    if not isinstance(errors, list) or not isinstance(advisories, list):
+        raise AssertionError("delivery report issue containers are invalid")
+
+    if not pptx_path.is_file():
+        errors.append(
+            _issue(
+                "file_not_found",
+                f"PPTX file not found: {pptx_path}.",
+            )
+        )
+        return report
+
+    try:
+        with zipfile.ZipFile(pptx_path) as archive:
+            infos = archive.infolist()
+            file_infos = [info for info in infos if not info.is_dir()]
+            names = [info.filename for info in file_infos]
+            name_counts = Counter(names)
+            duplicate_parts = sorted(
+                name for name, count in name_counts.items() if count > 1
+            )
+            info_by_name = {info.filename: info for info in file_infos}
+            part_names = set(info_by_name)
+            canonical_names: dict[str, set[str]] = defaultdict(set)
+            invalid_part_names: list[str] = []
+            for name in part_names:
+                canonical = canonical_opc_part_path(name)
+                if canonical is None:
+                    invalid_part_names.append(name)
+                else:
+                    canonical_names[canonical].add(name)
+            canonical_collisions = sorted(
+                sorted(raw_names)
+                for raw_names in canonical_names.values()
+                if len(raw_names) > 1
+            )
+
+            package = report["package"]
+            if not isinstance(package, dict):
+                raise AssertionError("delivery report package container is invalid")
+            try:
+                corrupt_member = archive.testzip()
+            except (NotImplementedError, RuntimeError) as exc:
+                package["zip_integrity"] = "failed"
+                errors.append(
+                    _issue(
+                        "unsupported_zip_compression",
+                        f"PPTX ZIP members cannot be decoded: {exc}.",
+                    )
+                )
+                report["errors"] = _deduplicate_issues(errors)
+                return report
+            package["zip_integrity"] = (
+                "passed" if corrupt_member is None else "failed"
+            )
+            package["corrupt_member"] = corrupt_member
+            package["duplicate_parts"] = duplicate_parts
+            package["canonical_part_collisions"] = canonical_collisions
+            package["parts"] = {
+                "entries": len(file_infos),
+                "unique": len(part_names),
+                **dict.fromkeys(_PRESENTATION_PART_TYPES, 0),
+                "media": sum(
+                    (canonical_opc_part_path(name) or "").startswith(
+                        "ppt/media/"
+                    )
+                    for name in part_names
+                ),
+            }

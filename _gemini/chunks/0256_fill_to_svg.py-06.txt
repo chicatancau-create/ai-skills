@@ -1,0 +1,109 @@
+        value = Decimal(token[:-1]) / Decimal(100)
+    else:
+        raise ValueError(f"Invalid DrawingML {label}: {raw!r}")
+    if not _OOXML_PERCENTAGE_MIN <= value <= _OOXML_PERCENTAGE_MAX:
+        raise ValueError(f"Invalid DrawingML {label}: {raw!r}")
+    return value
+
+
+def _parse_ooxml_boolean(
+    raw: str | None,
+    *,
+    default: bool,
+    label: str,
+) -> bool:
+    """Parse one W3C XML Schema boolean without permissive aliases."""
+    if raw is None:
+        return default
+    token = raw.strip()
+    if token in {"1", "true"}:
+        return True
+    if token in {"0", "false"}:
+        return False
+    raise ValueError(f"Invalid DrawingML {label}: {raw!r}")
+
+
+def _validate_path_gradient_type(path: ET.Element) -> None:
+    """Require one registered DrawingML path-shade enum value."""
+    path_type = path.get("path", "rect")
+    if path_type not in {"circle", "rect", "shape"}:
+        raise ValueError(
+            f"Unsupported DrawingML path gradient type: {path_type!r}"
+        )
+
+
+def _validate_path_gradient_structure(path: ET.Element) -> None:
+    """Require only the registered path attribute and focus rectangle."""
+    unsupported = sorted(set(path.attrib) - {"path"})
+    children = list(path)
+    fill_to_rect_tag = f"{{{NS['a']}}}fillToRect"
+    has_invalid_payload = (
+        (path.text or "").strip()
+        or any(
+            child.tag != fill_to_rect_tag or (child.tail or "").strip()
+            for child in children
+        )
+    )
+    if unsupported or has_invalid_payload:
+        details = ", ".join(unsupported) if unsupported else "payload"
+        raise ValueError(
+            f"Invalid DrawingML path gradient structure: {details}"
+        )
+
+
+def _resolve_blip_fill(_elem, _palette, _prefix, _seq, _placeholder_hex) -> FillResult:
+    """blipFill on <p:spPr> means a shape filled with an image — handled at
+    pic_to_svg level. For now mark as transparent so the shape's outline
+    still draws and pic_to_svg can layer the image on top.
+    """
+    return FillResult.none_fill()
+
+
+def _resolve_patt_fill(elem: ET.Element, palette: ColorPalette | None,
+                       prefix, seq, placeholder_hex: str | None) -> FillResult:
+    """Pattern fills (<a:pattFill prst="..."/> with fg/bg colors)."""
+    fg = elem.find("a:fgClr", NS)
+    bg = elem.find("a:bgClr", NS)
+    fg_hex, fg_alpha = resolve_color(
+        find_color_elem(fg), palette, placeholder_hex=placeholder_hex,
+    )
+    bg_hex, bg_alpha = resolve_color(
+        find_color_elem(bg), palette, placeholder_hex=placeholder_hex,
+    )
+    if fg_hex is None:
+        return FillResult.inherit()
+
+    prst = elem.attrib.get("prst", "")
+    geom = _pattern_foreground(prst, fg_hex, fg_alpha)
+    if geom is None:
+        # Unsupported preset → degrade to solid fg color so the shape at
+        # least carries the right tone. Round-trip will lose the texture.
+        attrs: dict[str, str] = {"fill": fg_hex}
+        if fg_alpha < 1.0:
+            attrs["fill-opacity"] = format_ooxml_alpha(fg_alpha)
+        return FillResult(attrs=attrs)
+    tile_w, tile_h, fg_svg = geom
+
+    if seq is None:
+        seq = [0]
+    seq[0] += 1
+    pattern_id = f"{prefix}patt{seq[0]}"
+    bg_rect = ""
+    if bg_hex is not None:
+        bg_opacity = (
+            f' fill-opacity="{format_ooxml_alpha(bg_alpha)}"'
+            if bg_alpha < 1.0 else ""
+        )
+        bg_rect = (
+            f'<rect width="{tile_w}" height="{tile_h}" '
+            f'fill="{bg_hex}"{bg_opacity}/>'
+        )
+    # Tag with data attributes so the reverse exporter can rebuild <a:pattFill>
+    # faithfully (preset + fg/bg colors) instead of inferring from path geometry.
+    bg_attr = f' data-pptx-bg="{bg_hex}"' if bg_hex is not None else ""
+    pattern_xml = (
+        f'<pattern id="{pattern_id}" patternUnits="userSpaceOnUse" '
+        f'width="{tile_w}" height="{tile_h}" '
+        f'data-pptx-pattern="{prst}" data-pptx-fg="{fg_hex}"{bg_attr}>'
+        f'{bg_rect}{fg_svg}</pattern>'
+    )

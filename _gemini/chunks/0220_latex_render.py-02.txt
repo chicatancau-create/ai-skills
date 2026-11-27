@@ -1,0 +1,116 @@
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    raise RuntimeError(f"Expected boolean value, got: {value!r}")
+
+
+def _normalize_tolerance(value: Any) -> int:
+    """Normalize the background removal tolerance."""
+    if value is None:
+        return DEFAULT_TRANSPARENT_TOLERANCE
+    tolerance = int(value)
+    if tolerance < 0 or tolerance > 255:
+        raise RuntimeError("transparent_tolerance must be between 0 and 255.")
+    return tolerance
+
+
+def _parse_providers(value: str | list[str] | None) -> list[str]:
+    """Parse and validate a provider chain."""
+    if value is None:
+        providers = DEFAULT_PROVIDERS
+    elif isinstance(value, list):
+        providers = value
+    else:
+        providers = [part.strip() for part in value.split(",") if part.strip()]
+
+    valid = {"codecogs", "quicklatex", "mathpad", "wikimedia"}
+    unknown = [provider for provider in providers if provider not in valid]
+    if unknown:
+        raise RuntimeError(
+            f"Unknown formula provider(s): {', '.join(unknown)}. "
+            f"Available: {', '.join(sorted(valid))}"
+        )
+    if not providers:
+        raise RuntimeError("Provider chain must include at least one provider.")
+    return providers
+
+
+def _request_bytes(req: urllib.request.Request, timeout: int = 30) -> tuple[bytes, str]:
+    """Fetch bytes and return the response content type."""
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read(), resp.headers.get("Content-Type", "")
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise RuntimeError(str(exc)) from exc
+
+
+def _assert_png(data: bytes, provider: str, content_type: str) -> bytes:
+    """Validate PNG response bytes."""
+    if not data.startswith(PNG_SIGNATURE):
+        raise RuntimeError(
+            f"{provider} did not return PNG data (Content-Type: {content_type})"
+        )
+    return data
+
+
+def _build_codecogs_payload(latex: str, dpi: int, color: str | None) -> str:
+    """Build a CodeCogs LaTeX payload."""
+    # CodeCogs documents PNG DPI in the 50-300 range.
+    safe_dpi = min(max(dpi, 50), 300)
+    parts = [rf"\dpi{{{safe_dpi}}}"]
+    if color:
+        parts.append(rf"\fg{{{color}}}")
+    parts.append(latex)
+    return " ".join(parts)
+
+
+def _render_codecogs(
+    latex: str,
+    dpi: int,
+    color: str | None,
+    background: str | None,
+    display: str,
+) -> bytes:
+    """Render one formula through CodeCogs."""
+    payload = _build_codecogs_payload(latex, dpi, color)
+    url = CODECOGS_ENDPOINT + urllib.parse.quote(payload)
+    req = urllib.request.Request(url, headers={"User-Agent": "PPT-Master/1.0"})
+    data, content_type = _request_bytes(req)
+    return _assert_png(data, "codecogs", content_type)
+
+
+def _render_wikimedia(
+    latex: str,
+    dpi: int,
+    color: str | None,
+    background: str | None,
+    display: str,
+) -> bytes:
+    """Render one formula through Wikimedia Mathoid."""
+    formula_type = "inline-tex" if display == "inline" else "tex"
+    payload = urllib.parse.urlencode({"q": latex}).encode("utf-8")
+    check_req = urllib.request.Request(
+        f"{WIKIMEDIA_CHECK_ENDPOINT}/{formula_type}",
+        data=payload,
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": "PPT-Master/1.0",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(check_req, timeout=30) as resp:
+            resp.read()
+            resource = resp.headers.get("x-resource-location")
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise RuntimeError(str(exc)) from exc
+
+    if not resource:
+        raise RuntimeError("missing x-resource-location header")
+
+    render_req = urllib.request.Request(
+        f"{WIKIMEDIA_RENDER_ENDPOINT}/{resource}",
+        headers={"User-Agent": "PPT-Master/1.0"},
+    )

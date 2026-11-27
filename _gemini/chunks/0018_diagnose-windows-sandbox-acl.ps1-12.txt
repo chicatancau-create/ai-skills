@@ -1,0 +1,22 @@
+    changes = @($reports | Where-Object { $_.kind -eq 'action' -and $_.details['effect'] -eq 'acl' -and $_.status -eq 'completed' } | ForEach-Object { @{ operation = $_.operation; path = $_.path } })
+    verifications = @($reports | Where-Object { $_.kind -eq 'verification' } | ForEach-Object { @{ operation = $_.operation; path = $_.path; status = $_.status } })
+    refusals = @($reports | Where-Object { $_.kind -eq 'decision' -and $_.status -eq 'refused' } | ForEach-Object { @{ path = $_.path; reason = $_.reason } })
+    scans = @($reports | Where-Object { $_.operation -eq 'subtree_scan' } | ForEach-Object {
+      @{ path = $_.path; visited = $_.details['visited']; packageSources = @($_.details['packageSources']); truncated = $_.details['truncated']; unreadable = $_.details['unreadable'] }
+    })
+    report = $reportPath
+  }
+  $status = if ($exitCode -ne 0) { 'failed' } elseif ($observationFailures -gt 0) { 'partial' } else { 'completed' }
+  Write-Report summary $mode $currentPath $status 'Operation completion records API execution; verification records the observed result. Only rerunning the original confined operation can confirm its failure is resolved.' @{
+    exitCode = $exitCode; fixed = $fixed; granted = $granted; refused = $refused; restored = $restored
+    operations = @($operations.ToArray()); recoveries = @($recoveries.ToArray()); automaticRollback = $true; observationFailures = $observationFailures
+    rollback = $rollbackStatus; rollbackCommands = $pending; nextAction = $nextAction; scanTruncated = $scanTruncated; report = $reportPath
+  }
+  # Last on stdout, after the summary record: whatever the tool truncates, the tail
+  # still carries the decisions, the report path and the counts.
+  Write-Line ('RECAP ' + ($recap | ConvertTo-Json -Depth 8 -Compress))
+  if ($reportPath) { Write-Line ('REPORT_FILE {0}' -f $reportPath) }
+  Write-Line ('SUMMARY FIXED={0} GRANTED={1} REFUSED={2} RESTORED={3}' -f $fixed, $granted, $refused, $restored)
+  if ($reportWriter) { $reportWriter.Dispose() }
+}
+exit $exitCode

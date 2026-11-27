@@ -1,0 +1,97 @@
+def _apply_explicit_layout_structure(
+    extract_dir: Path,
+    structure: PptxStructureContext,
+    specs: list[TemplateSlideSpec],
+    conversion_traces: list[dict[str, Any]] | None,
+    theme_font_spec: ThemeFontSpec | None,
+    *,
+    use_layout_placeholder_frames: bool = False,
+    public_slide_count: int | None = None,
+    verbose: bool = False,
+) -> tuple[
+    dict[str, str | None],
+    dict[str, tuple[str, ...]],
+    dict[str, str],
+    dict[str, str],
+]:
+    """Materialize explicit SVG master/layout/placeholder metadata into OOXML."""
+    master_parts_by_key = _assign_structured_masters(
+        extract_dir,
+        structure,
+        specs,
+    )
+    states = _template_runtime_slides(extract_dir, specs, conversion_traces)
+    states_by_slide = {state.spec.slide_num: state for state in states}
+    slide_size_emu = _presentation_slide_size_emu(extract_dir)
+
+    expected_backgrounds: dict[str, str | None] = {}
+    expected_shape_rosters: dict[str, tuple[str, ...]] = {}
+    states_by_master: dict[str, list[_TemplateRuntimeSlide]] = {}
+    for state in states:
+        master_part = master_parts_by_key[state.spec.master_key]
+        states_by_master.setdefault(master_part, []).append(state)
+    master_shape_count = 0
+    for master_part, master_states in states_by_master.items():
+        master_path = extract_dir / master_part
+        master_rels_path = _relationships_path_for_part(extract_dir, master_part)
+        expected_backgrounds[master_part] = _extract_slide_background_xml(
+            master_path.read_text(encoding="utf-8")
+        )
+        _clear_master_placeholder_shapes(master_path)
+        master_items = master_states[0].spec.master_elements
+        for item in master_items:
+            background_xml = _move_template_static_shape(
+                master_states,
+                item,
+                master_path,
+                master_rels_path,
+                slide_size_emu,
+                public_slide_count=public_slide_count,
+            )
+            if background_xml is not None:
+                expected_backgrounds[master_part] = background_xml
+            master_shape_count += 1
+
+    specs_by_layout: dict[str, list[TemplateSlideSpec]] = {}
+    for spec in specs:
+        specs_by_layout.setdefault(spec.layout_key, []).append(spec)
+    placeholder_count = 0
+    layout_shape_count = 0
+    created_layout_parts: set[str] = set()
+    layout_parts_by_key: dict[str, str] = {}
+    for layout_key, layout_specs in specs_by_layout.items():
+        layout_states = [states_by_slide[spec.slide_num] for spec in layout_specs]
+        master_parts = {
+            structure.slide_master_part(spec.slide_num) for spec in layout_specs
+        }
+        if len(master_parts) != 1:
+            raise TemplateStructureError(
+                f"Layout {layout_key!r} spans multiple slide masters; use distinct "
+                "layout keys per master"
+            )
+        master_part = next(iter(master_parts))
+        prototype = layout_specs[0]
+        base_target = structure.slide_layout_target(prototype.slide_num)
+        base_layout_part = _resolve_package_target(
+            f"ppt/slides/slide{prototype.slide_num}.xml",
+            base_target,
+        )
+        layout_target, layout_part = _create_custom_layout(
+            extract_dir,
+            master_part,
+            base_layout_part,
+            prototype.layout_name,
+            show_master_shapes=prototype.layout_show_master_shapes,
+        )
+        layout_path = extract_dir / layout_part
+        layout_rels_path = _relationships_path_for_part(extract_dir, layout_part)
+        created_layout_parts.add(layout_part)
+        layout_parts_by_key[layout_key] = layout_part
+
+        placeholder_bindings = {
+            binding.element.element_id: binding
+            for binding in template_placeholder_bindings(prototype)
+        }
+        for item in prototype.elements:
+            if item.layer == "layout":
+                background_xml = _move_template_static_shape(

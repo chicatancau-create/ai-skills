@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""
+PPT Master - PPTX Transition Core
+
+Provide one strict PowerPoint-native transition registry, a compatibility input
+map, and shared OOXML read/write helpers for generated and source-preserving
+round-trip PPTX files.
+See references/animations.md for the public workflow and
+scripts/docs/pptx-transitions.md for the OOXML contract.
+
+Usage:
+    Import from PPT Master PPTX builders and direct-package workflows.
+
+Examples:
+    from pptx_transitions import AdvanceUpdate, EnterUpdate, apply_slide_motion
+
+Dependencies:
+    lxml (preferred for prefix-preserving source-PPTX mutation)
+"""
+
+from __future__ import annotations
+
+import io
+import math
+import posixpath
+import re
+import zipfile
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Iterable, Mapping, MutableMapping
+from xml.etree import ElementTree as ET
+from xml.sax.saxutils import quoteattr
+
+try:
+    from lxml import etree as LET
+except ImportError:
+    LET = None
+
+
+PML_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
+P14_NS = "http://schemas.microsoft.com/office/powerpoint/2010/main"
+P15_NS = "http://schemas.microsoft.com/office/powerpoint/2012/main"
+P159_NS = "http://schemas.microsoft.com/office/powerpoint/2015/09/main"
+MC_NS = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+PACKAGE_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+CONTENT_TYPES_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
+RELATIONSHIPS_NS = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+)
+
+PRESENTATION_PROPS_PART = "ppt/presProps.xml"
+PRESENTATION_RELS_PART = "ppt/_rels/presentation.xml.rels"
+CONTENT_TYPES_PART = "[Content_Types].xml"
+PRESENTATION_PROPS_REL_TYPE = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/presProps"
+)
+PRESENTATION_PROPS_CONTENT_TYPE = (
+    "application/vnd.openxmlformats-officedocument.presentationml.presProps+xml"
+)
+AUDIO_REL_TYPE = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/audio"
+)
+WAV_CONTENT_TYPES = frozenset({"audio/wav", "audio/x-wav"})
+
+DEFAULT_TRANSITION = "fade"
+DEFAULT_TRANSITION_DURATION = 0.4
+MAX_OOXML_MILLISECONDS = 4_294_967_295
+# OOXML stores millisecond values and identifiers (shape ids, time-node ids,
+# preset codes) as xsd:unsignedInt, so both ceilings share one value.
+MAX_OOXML_UNSIGNED_INT = MAX_OOXML_MILLISECONDS
+
+
+_TRANSITION_SPECS: dict[str, dict[str, Any]] = {
+    # PowerPoint-native public ordering is assembled by gallery category below.
+    "fade": {
+        "name": "Fade",
+        "element": "fade",
+        "attrs": {},
+    },
+    "push": {
+        "name": "Push",
+        "element": "push",
+        "attrs": {"dir": "r"},
+    },
+    "wipe": {
+        "name": "Wipe",
+        "element": "wipe",
+        "attrs": {"dir": "r"},
+    },
+    "split": {
+        "name": "Split",
+        "element": "split",
+        "attrs": {"orient": "horz", "dir": "out"},
+    },
+    "cover": {
+        "name": "Cover",
+        "element": "cover",
+        "attrs": {"dir": "r"},
+    },
+    "random": {
+        "name": "Random",
+        "element": "random",
+        "attrs": {},
+    },
+    "blinds": {
+        "name": "Blinds",
+        "element": "blinds",
+        "attrs": {"dir": "vert"},
+    },
+    "checkerboard": {
+        "name": "Checkerboard",
+        "element": "checker",
+        "attrs": {"dir": "horz"},
+    },
+    "comb": {
+        "name": "Comb",
+        "element": "comb",
+        "attrs": {"dir": "horz"},
+    },
+    "cut": {
+        "name": "Cut",
+        "element": "cut",
+        "attrs": {"thruBlk": "0"},
+    },
+    "dissolve": {
+        "name": "Dissolve",
+        "element": "dissolve",
+        "attrs": {},
+    },
+    "random_bars": {
+        "name": "Random Bars",
+        "element": "randomBar",
+        "attrs": {"dir": "vert"},
+    },
+    "zoom": {
+        "name": "Zoom",
+        "prefix": "p14",
+        "element": "warp",

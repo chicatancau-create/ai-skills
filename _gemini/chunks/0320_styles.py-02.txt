@@ -1,0 +1,125 @@
+            f'{color_node_xml(color, theme_color_spec, usage, alpha_xml)}'
+            '</a:gs>'
+        )
+
+    if not stops_xml:
+        return ''
+
+    gs_list = '\n'.join(stops_xml)
+
+    if tag == 'linearGradient':
+        x1 = parse_project_linear_gradient_coordinate(
+            grad_elem.get('x1', '0')
+        )
+        y1 = parse_project_linear_gradient_coordinate(
+            grad_elem.get('y1', '0')
+        )
+        x2 = parse_project_linear_gradient_coordinate(
+            grad_elem.get('x2', '1')
+        )
+        y2 = parse_project_linear_gradient_coordinate(
+            grad_elem.get('y2', '0')
+        )
+
+        angle_rad = math.atan2(y2 - y1, x2 - x1)
+        angle_deg = math.degrees(angle_rad)
+        dml_angle = int((angle_deg % 360) * ANGLE_UNIT)
+
+        return f'''<a:gradFill>
+<a:gsLst>{gs_list}</a:gsLst>
+<a:lin ang="{dml_angle}" scaled="1"/>
+</a:gradFill>'''
+
+    elif tag == 'radialGradient':
+        focus_x = parse_project_gradient_ratio(
+            grad_elem.get('fx', grad_elem.get('cx', '0.5'))
+        )
+        focus_y = parse_project_gradient_ratio(
+            grad_elem.get('fy', grad_elem.get('cy', '0.5'))
+        )
+        if not is_project_radial_focus_point(focus_x, focus_y):
+            raise ValueError(
+                'Radial gradient effective focus must lie within the '
+                'canonical circle centered at 0.5,0.5 with radius 0.5'
+            )
+        focus_l = quantize_ooxml_unit_ratio(focus_x)
+        focus_t = quantize_ooxml_unit_ratio(focus_y)
+        focus_r = 100000 - focus_l
+        focus_b = 100000 - focus_t
+        return f'''<a:gradFill>
+<a:gsLst>{gs_list}</a:gsLst>
+<a:path path="circle">
+<a:fillToRect l="{focus_l}" t="{focus_t}" r="{focus_r}" b="{focus_b}"/>
+</a:path>
+</a:gradFill>'''
+
+    return ''
+
+
+def build_fill_xml(
+    elem: ET.Element,
+    ctx: ConvertContext,
+    opacity: float | None = None,
+    usage: str = "fill",
+) -> str:
+    """Build fill XML for a shape element, with inherited style support."""
+    fill = _get_attr(elem, 'fill', ctx)
+    if fill is None:
+        fill = '#000000'  # SVG default fill is black
+
+    if fill.strip().lower() in ('none', 'transparent'):
+        return '<a:noFill/>'
+
+    ref_id = resolve_url_id(fill)
+    if ref_id and ref_id in ctx.defs:
+        ref_elem = ctx.defs[ref_id]
+        ref_tag = ref_elem.tag.replace(f'{{{SVG_NS}}}', '')
+        if ref_tag == 'pattern':
+            patt_xml = build_pattern_fill(
+                ref_elem,
+                opacity,
+                ctx.theme_color_spec,
+                usage,
+            )
+            if patt_xml:
+                return patt_xml
+            return '<a:noFill/>'
+        return build_gradient_fill(
+            ref_elem,
+            opacity,
+            ctx.theme_color_spec,
+            usage,
+        )
+
+    color, color_alpha = parse_svg_color(fill)
+    if color:
+        return build_solid_fill(
+            color,
+            combine_opacity(opacity, color_alpha),
+            ctx.theme_color_spec,
+            usage,
+        )
+
+    return '<a:noFill/>'
+
+
+def parse_pattern_colors(
+    pattern_elem: ET.Element,
+    opacity: float | None = None,
+) -> tuple[str | None, str | None, float | None, float | None]:
+    """Resolve native pattern colors and alpha from metadata or child paints."""
+    paint_entries = []
+    for child in pattern_elem:
+        tag = child.tag.replace(f'{{{SVG_NS}}}', '')
+        style_values = parse_inline_style(child.get('style'))
+        object_opacity = parse_opacity(
+            style_values.get('opacity') or child.get('opacity')
+        )
+        for paint_attr in ('fill', 'stroke'):
+            paint = style_values.get(paint_attr) or child.get(paint_attr)
+            paint_hex, paint_alpha = parse_svg_color(paint) if paint else (None, 1.0)
+            if paint_hex is None:
+                continue
+            paint_opacity = parse_opacity(
+                style_values.get(f'{paint_attr}-opacity')
+                or child.get(f'{paint_attr}-opacity')

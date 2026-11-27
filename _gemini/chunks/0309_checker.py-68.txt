@@ -1,0 +1,95 @@
+        contextual_values = {}
+        if color_drifts:
+            contextual_values['colors'] = sorted(color_drifts)
+        if font_drifts:
+            contextual_values['font_families'] = sorted(font_drifts)
+        if contextual_values:
+            result['info']['contextual_values'] = contextual_values
+
+        sparse_sizes = {}
+        recurring_sizes = {}
+        for value, local_count in size_drift_counts.items():
+            total_count = (
+                self._undeclared_size_occurrences.get(value, local_count)
+                if self._undeclared_size_counts_ready
+                else local_count
+            )
+            target = (
+                sparse_sizes
+                if total_count <= SPARSE_UNDECLARED_FONT_SIZE_MAX_OCCURRENCES
+                else recurring_sizes
+            )
+            target[value] = total_count
+
+        if sparse_sizes:
+            result['info']['sparse_typography_sizes'] = {
+                value: count for value, count in sorted(sparse_sizes.items())
+            }
+
+        if recurring_sizes:
+            shown = ', '.join(
+                f"{value} ({count} occurrences)"
+                for value, count in sorted(recurring_sizes.items())
+            )
+            size_issue = (
+                f"undeclared font-size {shown} exceeds the sparse-display limit "
+                f"of {SPARSE_UNDECLARED_FONT_SIZE_MAX_OCCURRENCES} occurrences"
+            )
+            if svg_path.parent.name == 'svg_output':
+                result['errors'].append(
+                    "spec_lock typography-size recurrence: "
+                    f"{size_issue}. Structural text must return to its declared "
+                    "role band; a genuinely recurring display treatment needs a "
+                    "justified named role in the Design Spec and spec_lock."
+                )
+            else:
+                result['warnings'].append(
+                    f"spec_lock typography-size recurrence review: {size_issue}"
+                )
+        inherited_parts = []
+        if inherited_colors:
+            inherited_parts.append(f"{len(inherited_colors)} color(s)")
+        if inherited_fonts:
+            inherited_parts.append(f"{len(inherited_fonts)} font-family value(s)")
+        if inherited_sizes:
+            inherited_parts.append(f"{len(inherited_sizes)} font-size value(s)")
+        if inherited_parts:
+            self._append_inherited_info(
+                result,
+                'spec_lock_alignment',
+                f"{', '.join(inherited_parts)} come unchanged from mirror "
+                "prototype and are accepted without expanding spec_lock.md",
+            )
+
+    def _find_image_sources_manifest(self, svg_path: Path) -> Path | None:
+        """Locate image_sources.json for a project SVG.
+
+        Quality checks run primarily on <project>/svg_output/*.svg, but this
+        also supports SVGs checked from project root or svg_final.
+        """
+        bases = (svg_path.parent, svg_path.parent.parent, svg_path.parent.parent.parent)
+        for base in bases:
+            candidate = base / 'images' / 'image_sources.json'
+            if candidate.exists():
+                return candidate
+        return None
+
+    def _load_image_sources_manifest(
+        self,
+        svg_path: Path,
+    ) -> Tuple[Dict, str | None, Path | None]:
+        manifest_path = self._find_image_sources_manifest(svg_path)
+        if manifest_path is None:
+            return {}, None, None
+        payload, error = self._read_image_sources_manifest(manifest_path)
+        return payload, error, manifest_path
+
+    def _read_image_sources_manifest(
+        self,
+        manifest_path: Path,
+    ) -> Tuple[Dict, str | None]:
+        """Read one provenance manifest without accepting damaged state."""
+        if manifest_path in self._source_manifest_cache:
+            return self._source_manifest_cache[manifest_path]
+        try:
+            payload = json.loads(manifest_path.read_text(encoding='utf-8'))

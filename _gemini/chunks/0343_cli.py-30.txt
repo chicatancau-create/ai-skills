@@ -1,0 +1,96 @@
+            args.narration_audio_dir is not None,
+            args.use_narration_timings,
+            args.inherit_motion_from is not None,
+        ))
+        roundtrip_transition_overridden = any((
+            args.no_animations,
+            args.transition is not None,
+            args.transition_duration is not None,
+            args.auto_advance is not None,
+            args.recorded_narration is not None,
+            args.narration_audio_dir is not None,
+            args.use_narration_timings,
+            args.inherit_motion_from is not None,
+        ))
+        roundtrip_transition_replaced = any((
+            args.no_animations,
+            args.transition is not None,
+            args.transition_duration is not None,
+            args.inherit_motion_from is not None,
+        ))
+        roundtrip_animation_overridden = any((
+            args.no_animations,
+            args.animation is not None,
+            args.animation_duration is not None,
+            args.animation_stagger is not None,
+            args.animation_trigger is not None,
+            roundtrip_external_animation_config,
+            args.inherit_motion_from is not None,
+        ))
+        try:
+            roundtrip_slide_patches = _roundtrip_slide_patches(
+                project_path.resolve(),
+                authoring_roundtrip_report,
+                roundtrip_passthrough_slides,
+                roundtrip_pages,
+                changed_resource_pages=changed_resource_pages,
+                force_visual_changed=(
+                    args.image_sizing == 'display'
+                    or args.text_flow != TEXT_FLOW_PRESERVE
+                ),
+                force_motion_changed=roundtrip_motion_overridden,
+                force_transition_changed=roundtrip_transition_overridden,
+                force_transition_replaced=roundtrip_transition_replaced,
+                force_animation_changed=roundtrip_animation_overridden,
+                force_notes_changed=args.no_notes,
+                force_advance_changed=any((
+                    args.auto_advance is not None,
+                    args.recorded_narration is not None,
+                    args.use_narration_timings,
+                    args.inherit_motion_from is not None,
+                )),
+            )
+        except RuntimeError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        try:
+            if roundtrip_page_plan_present:
+                _report_roundtrip_omitted_opaque_payloads(
+                    project_path.resolve(),
+                    roundtrip_pages,
+                )
+            opaque_dependencies = _opaque_roundtrip_slide_dependencies(
+                project_path.resolve()
+            )
+            opaque_dependency_refs = (
+                _opaque_roundtrip_dependency_owner_refs(
+                    project_path.resolve(),
+                    opaque_dependencies,
+                )
+            )
+        except RuntimeError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        blocked_dependencies: dict[int, tuple[int, list[str]]] = {}
+        for page in roundtrip_pages:
+            dependencies = opaque_dependencies.get(page.source_slide)
+            if (
+                not dependencies
+                or page.output_index in roundtrip_passthrough_slides
+            ):
+                continue
+            patch = roundtrip_slide_patches.get(page.output_index)
+            if patch is None:
+                blocked_dependencies[page.output_index] = (
+                    page.source_slide,
+                    dependencies,
+                )
+                continue
+            owner_refs = opaque_dependency_refs.get(page.source_slide, {})
+            affected_refs = patch.edited_ref_ids | patch.deleted_ref_ids
+            affected_paths = {
+                path
+                for source_ref in affected_refs
+                for path in owner_refs.get(source_ref, ())
+            }
+            mapped_paths = {

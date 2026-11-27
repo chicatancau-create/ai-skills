@@ -1,0 +1,108 @@
+        plot.find("c:dLbls", C_NS),
+        palette=palette,
+    )
+    if not data_labels:
+        return
+    if payload["type"] not in {"area", "bar", "column", "line"}:
+        if palette is None or palette.strict:
+            raise _UnsupportedChart("unsupported-chart-data-labels")
+        palette._diagnose(
+            "chart-data-labels-normalized",
+            "Source data-label options are outside the native contract for "
+            f'{payload["type"]} charts',
+            "use the normalized SVG chart label layout",
+        )
+        return
+    try:
+        validate_data_label_position(
+            data_labels.get("position"),
+            payload["type"],
+            payload.get("grouping"),
+        )
+    except RuntimeError:
+        raise _UnsupportedChart("unsupported-chart-data-labels") from None
+    payload["data_labels"] = data_labels
+
+
+def _apply_chart_metadata(
+    payload: dict[str, Any],
+    chart_root: ET.Element,
+    plot_area: ET.Element,
+    plot: ET.Element,
+    *,
+    palette: ColorPalette | None = None,
+    include_plot_labels: bool = True,
+) -> None:
+    """Copy visible classic-chart chrome supported by the native schema."""
+    chart = chart_root.find("c:chart", C_NS)
+    if chart is None:
+        return
+
+    title_element = chart.find("c:title", C_NS)
+    title_entries = _canonical_title_entries(title_element)
+    title = _chart_text(title_element)
+    if title:
+        if title_entries is not None:
+            payload["title"] = title_entries[0]
+            if len(title_entries) == 2:
+                payload["subtitle"] = title_entries[1]
+        else:
+            payload["title"] = title
+
+    legend = chart.find("c:legend", C_NS)
+    if legend is not None:
+        delete = legend.find("c:delete", C_NS)
+        if delete is None or not ooxml_bool(delete.attrib.get("val"), True):
+            position = _element_val(legend.find("c:legendPos", C_NS)) or "r"
+            if position not in {"b", "l", "r", "t"}:
+                raise _UnsupportedChart("unsupported-chart-legend-position")
+            payload["show_legend"] = True
+            payload["legend_position"] = position
+
+    if include_plot_labels:
+        _apply_plot_data_labels(payload, plot, palette=palette)
+
+    axis_titles: dict[str, str] = {}
+    category_axis_nodes = (
+        plot_area.findall("c:catAx", C_NS)
+        + plot_area.findall("c:dateAx", C_NS)
+    )
+    category_titles = [
+        text
+        for axis in category_axis_nodes
+        if (text := _chart_text(axis.find("c:title", C_NS)))
+    ]
+    value_titles = [
+        text
+        for axis in plot_area.findall("c:valAx", C_NS)
+        if (text := _chart_text(axis.find("c:title", C_NS)))
+    ]
+    if payload["type"] == "combo":
+        if len(set(category_titles)) > 1:
+            raise _UnsupportedChart("unsupported-chart-axis-titles")
+        if category_titles:
+            axis_titles["category"] = category_titles[0]
+        for axis in plot_area.findall("c:valAx", C_NS):
+            text = _chart_text(axis.find("c:title", C_NS))
+            if not text:
+                continue
+            position = _element_val(axis.find("c:axPos", C_NS))
+            key = "secondary_value" if position == "r" else "value"
+            if key in axis_titles:
+                raise _UnsupportedChart("unsupported-chart-axis-titles")
+            axis_titles[key] = text
+    elif payload["type"] in {"scatter", "bubble"}:
+        if category_titles:
+            raise _UnsupportedChart("unsupported-chart-axis-titles")
+        titled_value_axes = [
+            (
+                _element_val(axis.find("c:axPos", C_NS)),
+                _chart_text(axis.find("c:title", C_NS)),
+            )
+            for axis in plot_area.findall("c:valAx", C_NS)
+        ]
+        for position, text in titled_value_axes:
+            if not text:
+                continue
+            key = "x" if position in {"b", "t"} else "y"
+            if key in axis_titles:

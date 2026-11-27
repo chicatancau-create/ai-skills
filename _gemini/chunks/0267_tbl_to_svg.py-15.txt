@@ -1,0 +1,123 @@
+    # so source and native reimport payloads stay stable.
+    canonical_hpt = round(size_hpt / 10) * 10
+    return _round_payload_number(hundredths_pt_to_px(canonical_hpt))
+
+
+def _cell_align(tx_body: ET.Element | None) -> str | None:
+    if tx_body is None:
+        return None
+    p_pr = tx_body.find("a:p/a:pPr", NS)
+    align = p_pr.get("algn") if p_pr is not None else None
+    if align in {"l", "ctr", "r", "just"}:
+        return align
+    return None
+
+
+def _cell_valign(tc_pr: ET.Element | None) -> str | None:
+    anchor = tc_pr.get("anchor") if tc_pr is not None else None
+    return {
+        "t": "top",
+        "ctr": "middle",
+        "b": "bottom",
+    }.get(anchor)
+
+
+def _cell_bold(tx_body: ET.Element | None) -> bool | None:
+    for r_pr in _text_run_props_in_priority(tx_body):
+        if r_pr.get("b") is not None:
+            return ooxml_bool(r_pr.get("b"))
+    return None
+
+
+def _cell_borders_payload(
+    tc_pr: ET.Element | None,
+    palette: ColorPalette | None,
+) -> dict[str, dict[str, Any]]:
+    if tc_pr is None:
+        return {}
+    borders: dict[str, dict[str, Any]] = {}
+    for border_tag, side in _DIRECT_BORDER_TAGS.items():
+        ln = tc_pr.find(f"a:{border_tag}", NS)
+        if ln is not None:
+            borders[side] = _direct_border_payload(ln, palette)
+    return borders
+
+
+def _text_run_props_in_priority(tx_body: ET.Element | None) -> list[ET.Element]:
+    if tx_body is None:
+        return []
+    props: list[ET.Element] = []
+    for path in (".//a:r/a:rPr", ".//a:pPr/a:defRPr", ".//a:endParaRPr"):
+        r_pr = tx_body.find(path, NS)
+        if r_pr is not None:
+            props.append(r_pr)
+    return props
+
+
+def _copy_cell_margins(tc_pr: ET.Element | None, cell: dict[str, Any]) -> None:
+    if tc_pr is None:
+        return
+    for source, target in (
+        ("marL", "padding_left"),
+        ("marR", "padding_right"),
+        ("marT", "padding_top"),
+        ("marB", "padding_bottom"),
+    ):
+        if source not in tc_pr.attrib:
+            continue
+        value = _safe_emu_integer(tc_pr.attrib[source])
+        if value is None or value < 0:
+            continue
+        cell[target] = _round_payload_number(emu_to_px(value))
+
+
+def _copy_cell_layout_options(
+    tc_pr: ET.Element | None,
+    cell: dict[str, Any],
+) -> None:
+    """Copy native cell layout semantics not represented by SVG text."""
+    if tc_pr is None:
+        return
+    if tc_pr.get("anchorCtr") is not None:
+        cell["anchor_center"] = ooxml_bool(tc_pr.get("anchorCtr"))
+    horizontal_overflow = tc_pr.get("horzOverflow")
+    if horizontal_overflow is not None:
+        cell["horizontal_overflow"] = horizontal_overflow
+
+
+# ---------------------------------------------------------------------------
+# Cell text & borders
+# ---------------------------------------------------------------------------
+
+def _convert_cell_text(
+    tx_body: ET.Element,
+    tcPr: ET.Element | None,
+    cell_xfrm: Xfrm,
+    palette: ColorPalette | None,
+    theme_fonts: dict[str, str] | None,
+    *,
+    fallback_run_props: tuple[ET.Element, ...],
+    slide_number: int | None,
+    id_prefix: str,
+    id_seq: list[int] | None,
+    hyperlink_resolver: HyperlinkResolver | None,
+    strict: bool,
+    diagnostic_sink: TextDiagnosticSink | None,
+):
+    """Render cell text. PowerPoint's <a:tcPr> can override txBody insets via
+    its own marL/marR/marT/marB attrs; convert_txbody reads from <a:bodyPr>,
+    so we materialise a synthetic bodyPr when tcPr has its own insets. Invalid
+    malformed source font-size and run-color values are removed from a private
+    render copy; they have already been omitted from the native payload and
+    must not crash fallback SVG generation."""
+    render_tx_body = tx_body
+    run_props = [
+        node
+        for node in tx_body.iter()
+        if node.tag in {
+            f"{{{NS['a']}}}defRPr",
+            f"{{{NS['a']}}}endParaRPr",
+            f"{{{NS['a']}}}rPr",
+        }
+    ]
+    if any(

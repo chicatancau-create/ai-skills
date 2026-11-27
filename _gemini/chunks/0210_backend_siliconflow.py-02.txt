@@ -1,0 +1,51 @@
+    data = response.json()
+    images = data.get("images") or []
+    image_url = images[0].get("url") if images else None
+    if not image_url:
+        raise RuntimeError(f"SiliconFlow response missing image URL: {data}")
+
+    path = resolve_output_path(prompt, output_dir, filename, ".png")
+    return download_image(image_url, path)
+
+
+def generate(prompt: str,
+             aspect_ratio: str = "1:1", image_size: str = "1K",
+             output_dir: str = None, filename: str = None,
+             model: str = None, max_retries: int = MAX_RETRIES) -> str:
+    """Generate an image with retries using the SiliconFlow backend."""
+    resolved_model = model or os.environ.get("SILICONFLOW_MODEL") or DEFAULT_MODEL
+    _validate_model(resolved_model)
+    normalized_size = normalize_image_size(image_size)
+    _resolve_size(aspect_ratio, normalized_size)
+    api_key = require_api_key(
+        "SILICONFLOW_API_KEY",
+        message="No API key found. Set SILICONFLOW_API_KEY in the current environment or a .env file.",
+    )
+    base_url = os.environ.get("SILICONFLOW_BASE_URL") or DEFAULT_ENDPOINT
+
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            return _generate_image(
+                api_key=api_key,
+                prompt=prompt,
+                aspect_ratio=aspect_ratio,
+                image_size=normalized_size,
+                output_dir=output_dir,
+                filename=filename,
+                model=resolved_model,
+                base_url=base_url,
+            )
+        except Exception as exc:
+            last_error = exc
+            if is_permanent_error(exc):
+                raise
+            if attempt >= max_retries:
+                break
+            limited = is_rate_limit_error(exc)
+            delay = retry_delay(attempt, rate_limited=limited)
+            label = "Rate limit hit" if limited else f"Error: {exc}"
+            print(f"\n  [WARN] {label}. Retrying in {delay}s...")
+            time.sleep(delay)
+
+    raise RuntimeError(f"Failed after {max_retries + 1} attempts. Last error: {last_error}")

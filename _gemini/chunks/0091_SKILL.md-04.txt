@@ -1,0 +1,80 @@
+   但 `=1` **并非零副作用**：实测 window-size=500 下不传时 `innerWidth=496`，传 `=1` 后变 **492**。所以 `--screenshot` 与 `--dump-dom` 必须带**同一组** flag，否则量到的溢出宽度对应的不是截图里那一屏；结论里要写清带了哪组参数。影响分两类：**显隐类判据不受影响**(同一对照组两种参数逐项相同)，**凡是从 `clientWidth` 减出来的像素量会整体平移**(见下面 `OVER` 基线)。
+
+### 命令
+
+先把被测页面**复制**到运行目录，只在副本 `</body>` 前追加探针块——交付文件本身保持干净。
+
+```bash
+EDGE="/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"   # 路径有空格，整条加引号
+RUN="C:\\Users\\Admin\\AppData\\Local\\Temp\\page-verify-1"
+"$EDGE" --headless --disable-gpu --user-data-dir="$RUN\\ud" \
+  --window-size=1280,900 --force-device-scale-factor=1 --hide-scrollbars \
+  --screenshot="$RUN\\desktop.png" "file:///$RUN/page.html"
+test -s "$RUN/desktop.png" && echo OK || echo "零产物 = 失败(别看退出码)"
+
+"$EDGE" --headless --disable-gpu --user-data-dir="$RUN\\ud" \
+  --window-size=1280,900 --force-device-scale-factor=1 --virtual-time-budget=5000 \
+  --dump-dom "file:///$RUN/page.probe.html" > "$RUN/dump.html"
+```
+
+```python
+import re, html
+d = open(r"C:\Users\Admin\AppData\Local\Temp\page-verify-1\dump.html", encoding="utf-8", errors="replace").read()
+m = re.search(r'<div id="PROBE"[^>]*>([\s\S]*?)</div>', d)
+print(html.unescape(m.group(1)) if m else "EMPTY -> 读取时刻没到, 加大 --virtual-time-budget")
+```
+
+### 探针块(实测可跑)
+
+```html
+<div id="PROBE" hidden></div>
+<script>
+window.__frames = 0; (function f(){ window.__frames++; requestAnimationFrame(f); })();
+setTimeout(function (){
+  var L = [], de = document.documentElement;
+  L.push('T=' + Math.round(performance.now()) + ' FRAME=' + window.__frames);
+  L.push('VW=' + innerWidth + ' CLIENTW=' + de.clientWidth + ' SCROLLW=' + de.scrollWidth + ' OVER=' + (de.scrollWidth - de.clientWidth));
+  var wide = [], all = document.querySelectorAll('*');
+  for (var i = 0; i < all.length; i++){ var r = all[i].getBoundingClientRect();
+    if (r.right > de.clientWidth + 1) wide.push(all[i].tagName + '.' + all[i].className + '@' + Math.round(r.right)); }
+  L.push('WIDE=' + wide.slice(0, 3).join(','));
+  var f = document.querySelector('form');
+  if (f) f.dispatchEvent(new SubmitEvent('submit', {cancelable: true, bubbles: true}));
+  L.push('INVALID=' + document.querySelectorAll('[aria-invalid="true"]').length + ' ERRON=' + document.querySelectorAll('.err.on').length);
+  var t = document.querySelector('button[type="button"]');
+  if (t){ t.click(); L.push('PRESSED=' + t.getAttribute('aria-pressed') + ' TYPE=' + (document.getElementById('pw') || {}).type); }
+  var els = document.querySelectorAll('.reveal'), inv = 0;
+  for (var j = 0; j < els.length; j++){ if (parseFloat(getComputedStyle(els[j]).opacity) < 0.05) inv++; }
+  L.push('INVISIBLE=' + inv + '/' + els.length + ' JSCLASS=' + (document.documentElement.className || '-'));
+  document.getElementById('PROBE').textContent = L.join(' | ');
+}, 2000);
+</script>
+```
+
+校验态必须**程序化触发**才读得到：空提交用 `dispatchEvent(new SubmitEvent(...))`(或 `form.requestSubmit()`)，别指望 dump 里天然有 `aria-invalid`。
+
+### 对照组：这条回路的断言同样要证明会失败
+
+同一套探针，四种页面(均为 `--virtual-time-budget=5000` 下 `T≈2013ms` 取的数)：
+
+| 页面 | INVISIBLE | 判读 |
+|---|---|---|
+| 裸 `opacity:0` + JS 先抛错 | **3/3** | 真缺陷：内容永久不可见 |
+| fail-open 网关 + JS 先抛错 | 0/3 | 正确：没加 `.js` 就一直可见 |
+| fail-open 网关 + 正常 | 0/3 | 健康对照 |
+| fail-open + 正常 + `transition:opacity 700ms` | **3/3** | **测量假象** |
+
+最后一行是这张表存在的理由：虚线时间预算下 rAF 只推进 **1 帧**(`FRAME=1`)，基于 `transition` 的显隐永远停在起始值 `opacity:0` —— 一个完全正确的页面会被判成「全隐藏」。**测显隐前先把动效中和**，在副本 `</head>` 前追加：
+
+```html
+<style>*,*::before,*::after{transition:none!important;animation:none!important}</style>
+```
+
+加上它之后四行结果变成 3/3、0/3、0/3、**0/3** —— 真缺陷与测量假象这才分得开。要看动效本身跑到哪一帧，就别用这条回路，走上面的 CDP 管线。
+
+溢出探针同理要有正向对照：塞一个 `width:600px` 的元素在 500 宽下必须报红，实测 `OVER=104 WIDE=DIV.x@600`；正常页报 `OVER=0 WIDE=`。探针两次都不红 = 探针是死的。`OVER` 是从 `clientWidth` 减出来的，所以它跟着硬规则 5 那组 flag 漂移：同一个 600px 元素在 window-size=500 下，不传 `--force-device-scale-factor` 量到 `CW=496 OVER=104`，传 `=1` 量到 `CW=492 OVER=108`(`WIDE` 两种参数一致)。**判溢出只看 `OVER>0` 与 `WIDE` 有没有内容，不要拿 104 当基线比对**。
+
+### 本回路特有的静默失败
+
+| 症状 | 根因 | 处置 |
+|---|---|---|

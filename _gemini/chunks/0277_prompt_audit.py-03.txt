@@ -1,0 +1,93 @@
+                    f"{label}.accepted repeats field {field_name!r}"
+                )
+            accepted_fields.add(field_name)
+            projection_paths: set[str] = set()
+            for projection_index, projection in enumerate(projections):
+                projection_label = (
+                    f"{accepted_label}.projections[{projection_index}]"
+                )
+                reason = (
+                    projection.get("reason")
+                    if isinstance(projection, dict)
+                    else None
+                )
+                projection_path = (
+                    projection.get("path")
+                    if isinstance(projection, dict)
+                    else None
+                )
+                if (
+                    not isinstance(projection, dict)
+                    or not isinstance(projection_path, str)
+                    or not projection_path.strip()
+                    or projection.get("role") not in _SCHEMA_PROJECTION_ROLES
+                    or not isinstance(projection.get("fingerprint"), str)
+                    or re.fullmatch(
+                        r"[0-9a-f]{12}", projection["fingerprint"]
+                    )
+                    is None
+                    or not isinstance(reason, str)
+                    or not reason.strip()
+                    or "\n" in reason
+                    or "\r" in reason
+                ):
+                    raise AuditError(
+                        f"{projection_label} requires path, role "
+                        "(producer|consumer|reference|compatibility), a 12-hex "
+                        "fingerprint, and a one-line reason"
+                    )
+                if projection_path in projection_paths:
+                    raise AuditError(
+                        f"{accepted_label}.projections repeats path "
+                        f"{projection_path!r}"
+                    )
+                projection_paths.add(projection_path)
+
+    exempt_entries = raw.get("coverage", {}).get("exempt", [])
+    if not isinstance(exempt_entries, list):
+        raise AuditError("coverage.exempt must be an array")
+    for entry in exempt_entries:
+        reason = entry.get("reason") if isinstance(entry, dict) else None
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("glob"), str)
+            or not entry["glob"]
+            or not isinstance(reason, str)
+            or not reason.strip()
+            or "\n" in reason
+            or "\r" in reason
+        ):
+            raise AuditError(
+                "coverage.exempt entries require a non-empty glob and one-line reason"
+            )
+
+    accepted_entries = raw.get("duplicates", {}).get("accepted", [])
+    if not isinstance(accepted_entries, list):
+        raise AuditError("duplicates.accepted must be an array")
+    accepted_identities: set[tuple[str, str, tuple[str, ...]]] = set()
+    for entry in accepted_entries:
+        reason = entry.get("reason") if isinstance(entry, dict) else None
+        paths = entry.get("paths") if isinstance(entry, dict) else None
+        if (
+            not isinstance(entry, dict)
+            or entry.get("kind") not in {"exact", "near"}
+            or not isinstance(entry.get("fingerprint"), str)
+            or re.fullmatch(r"[0-9a-f]{12}", entry["fingerprint"]) is None
+            or not isinstance(paths, list)
+            or not paths
+            or not all(isinstance(item, str) and item.strip() for item in paths)
+            or len(set(paths)) != len(paths)
+            or not isinstance(reason, str)
+            or not reason.strip()
+            or "\n" in reason
+            or "\r" in reason
+        ):
+            raise AuditError(
+                "duplicates.accepted entries require kind, 12-hex fingerprint, "
+                "unique paths, and a one-line reason"
+            )
+        identity = (
+            entry["kind"],
+            entry["fingerprint"],
+            tuple(sorted(paths)),
+        )

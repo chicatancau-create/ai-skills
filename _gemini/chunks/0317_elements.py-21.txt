@@ -1,0 +1,108 @@
+_MONOSPACE_NAME_HINTS = ('mono', 'code', 'courier', 'consol', 'typewriter')
+_MONOSPACE_DEFAULT_ADVANCE_EM = 0.60
+
+
+def _monospace_advance_em(run: dict[str, Any]) -> float | None:
+    """Return the fixed per-character advance of a monospaced run, if any."""
+    family = _run_primary_family(run)
+    if not family:
+        return None
+    advance = _MONOSPACE_ADVANCE_EM.get(family)
+    if advance is not None:
+        return advance
+    if any(hint in family for hint in _MONOSPACE_NAME_HINTS):
+        return _MONOSPACE_DEFAULT_ADVANCE_EM
+    return None
+
+
+def _family_width_factor(run: dict[str, Any]) -> float:
+    if get_font_advances(
+        run.get('font_family'),
+        str(run.get('font_weight', '400')),
+        str(run.get('font_style', 'normal')),
+    ) is not None:
+        return 1.0
+    factors = _WIDE_FAMILY_WIDTH_FACTORS.get(_run_primary_family(run))
+    if factors is None:
+        return 1.0
+    base, caps = factors
+    return base + (caps - base) * _uppercase_fraction([run])
+
+
+def _estimate_run_text_width(run: dict[str, Any]) -> float:
+    """Estimate one run using the metrics actually emitted to DrawingML."""
+    if '_inline_dx' in run:
+        return float(run['_inline_dx'])
+    text = str(run.get('text', ''))
+    font_size_px = (
+        font_px_to_hpt(float(run.get('font_size', 16)))
+        / FONT_PX_TO_HUNDREDTHS_PT
+    )
+    cluster_widths = estimate_text_cluster_widths(
+        text,
+        font_size_px,
+        str(run.get('font_weight', '400')),
+        font_family=run.get('font_family'),
+        font_style=str(run.get('font_style', 'normal')),
+    )
+    clusters = split_project_text_clusters(text)
+    cjk_flags = [any(is_cjk_char(ch) for ch in cluster) for cluster in clusters]
+    monospace_advance = _monospace_advance_em(run)
+    if monospace_advance is not None:
+        # Fixed-pitch faces ignore weight and glyph shape for Latin text.
+        cluster_widths = [
+            width if cjk else monospace_advance * font_size_px
+            for cjk, width in zip(cjk_flags, cluster_widths)
+        ]
+    # The wide-face correction belongs to the Latin typeface only: CJK
+    # clusters draw with the ``ea`` face, so they neither widen with the
+    # family nor count toward its uppercase fraction.
+    latin_factor = _family_width_factor(dict(
+        run,
+        text=''.join(
+            cluster for cluster, cjk in zip(clusters, cjk_flags) if not cjk
+        ),
+    ))
+    cluster_widths = [
+        width if cjk else width * latin_factor
+        for cjk, width in zip(cjk_flags, cluster_widths)
+    ]
+    letter_spacing_px = (
+        drawingml_letter_spacing(
+            float(run.get('letter_spacing', 0.0) or 0.0)
+        )
+        / FONT_PX_TO_HUNDREDTHS_PT
+    )
+    return sum(cluster_widths) + letter_spacing_px * max(len(cluster_widths) - 1, 0)
+
+
+def validate_text_run_advances(runs: list[dict[str, Any]]) -> None:
+    """Reject negative tracking that reverses or collapses one output run."""
+    for run in runs:
+        text = str(run.get('text', ''))
+        letter_spacing = float(run.get('letter_spacing', 0.0) or 0.0)
+        if len(split_project_text_clusters(text)) < 2 or letter_spacing >= 0:
+            continue
+        advance = _estimate_run_text_width(run)
+        if advance > 0:
+            continue
+        snippet = re.sub(r'\s+', ' ', text)
+        raise ValueError(
+            'negative letter-spacing produces a non-positive DrawingML '
+            f'text-run advance for {snippet!r} (advance={advance:g}px)'
+        )
+
+
+def _uppercase_fraction(runs: list[dict[str, Any]]) -> float:
+    """Fraction of cased letters across ``runs`` that are uppercase.
+
+    Caseless scripts (CJK, digits, punctuation) are ignored, so a Chinese or
+    numeric line reports 0.0 and takes the low-caps headroom base.
+    """
+    upper = 0
+    cased = 0
+    for run in runs:
+        for ch in str(run.get('text', '')):
+            if ch.lower() != ch.upper():
+                cased += 1
+                if ch.isupper():

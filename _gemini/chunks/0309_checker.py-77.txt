@@ -1,0 +1,98 @@
+        self._structured_native_slots = sorted({
+            str(item.placeholder)
+            for spec in dependency_specs
+            for item in spec.placeholders
+            if item.placeholder in {'chart', 'table'}
+        })
+        if complete_roster:
+            actual_slides = {spec.slide_num for spec in specs}
+            expected_slides = {
+                reference.slide_num
+                for reference in structure_lock.layouts
+            }
+            expected_slides.update(
+                reference.slide_num
+                for reference in structure_lock.prototypes
+            )
+            self._has_incomplete_page_roster = bool(
+                expected_slides - actual_slides
+            )
+            self._pptx_structure_issues.extend(
+                ('error', message)
+                for message in _template_lock_errors(specs, structure_lock)
+            )
+        else:
+            self._pptx_structure_issues.extend(
+                ('error', message)
+                for message in self._partial_structure_lock_errors(
+                    specs,
+                    structure_lock,
+                )
+            )
+        if _template_prototype_errors is not None:
+            self._pptx_structure_issues.extend(
+                ('error', message)
+                for message in _template_prototype_errors(
+                    specs,
+                    structure_lock,
+                    require_complete_roster=complete_roster,
+                )
+            )
+        self._pptx_structure_issues.extend(
+            ('error', message)
+            for message in self._shared_fixed_layer_errors(specs)
+        )
+        self._pptx_structure_issues.extend(
+            ('warning', message)
+            for message in self._duplicate_layout_key_warnings(specs)
+        )
+
+    @staticmethod
+    def _partial_structure_lock_errors(specs, structure_lock) -> List[str]:
+        """Compare explicitly checked pages without requiring the full roster."""
+        references = {
+            reference.slide_num: reference
+            for reference in structure_lock.layouts
+        }
+        master_names = {
+            master.master_key: master.master_name
+            for master in structure_lock.masters
+        }
+        definitions = {
+            definition.layout_key: definition
+            for definition in structure_lock.layout_definitions
+        }
+        errors: List[str] = []
+        for spec in specs:
+            page = f"P{spec.slide_num:02d}"
+            reference = references.get(spec.slide_num)
+            if reference is None:
+                errors.append(
+                    f"spec_lock.md page_pptx_layouts is missing {page}"
+                )
+                continue
+            definition = definitions.get(reference.layout_key)
+            if definition is None:
+                errors.append(
+                    f"spec_lock.md pptx_layouts is missing Layout "
+                    f"{reference.layout_key!r}"
+                )
+                continue
+            if spec.master_key != definition.master_key:
+                errors.append(
+                    f"{spec.svg_path.name}: data-pptx-master={spec.master_key!r} "
+                    f"does not match spec_lock Layout {reference.layout_key!r} "
+                    f"Master key {definition.master_key!r}"
+                )
+            if spec.layout_key != reference.layout_key:
+                errors.append(
+                    f"{spec.svg_path.name}: data-pptx-layout={spec.layout_key!r} "
+                    f"does not match spec_lock {page} layout key "
+                    f"{reference.layout_key!r}"
+                )
+            if spec.layout_name != definition.layout_name:
+                errors.append(
+                    f"{spec.svg_path.name}: data-pptx-layout-name="
+                    f"{spec.layout_name!r} does not match spec_lock Layout "
+                    f"{reference.layout_key!r} name {definition.layout_name!r}"
+                )

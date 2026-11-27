@@ -1,0 +1,105 @@
+    inherited: str = 'default',
+) -> str:
+    """Resolve the exact project ``xml:space`` value for one text element."""
+    if inherited not in _PROJECT_XML_SPACE_VALUES:
+        raise ValueError(f'invalid inherited xml:space value {inherited!r}')
+    raw = elem.get(_XML_SPACE_ATTRIBUTE)
+    if raw is None:
+        raw = elem.get('xml:space')
+    if raw is None:
+        return inherited
+    if raw not in _PROJECT_XML_SPACE_VALUES:
+        raise ValueError("xml:space must be exactly 'default' or 'preserve'")
+    return raw
+
+
+def normalize_project_text_segments(
+    segments: list[tuple[str, str]],
+) -> list[tuple[int, str]]:
+    """Normalize text whitespace while retaining the source segment owner.
+
+    Each input tuple is ``(effective_xml_space, raw_text)``. The returned
+    tuples are ``(input_index, normalized_text)`` so callers can retain run
+    formatting. Project whitespace follows rendered SVG behavior: tabs and
+    line endings become ordinary spaces; ``default`` runs collapse across
+    element boundaries and lose only overall leading/trailing spaces;
+    ``preserve`` runs retain every resulting ordinary space. Unicode spacing
+    characters such as NBSP are text, not XML whitespace, and remain intact.
+    """
+    output: list[tuple[int, str]] = []
+    pending_default_space: int | None = None
+
+    def append(index: int, text: str) -> None:
+        if not text:
+            return
+        if output and output[-1][0] == index:
+            owner, existing = output[-1]
+            output[-1] = (owner, existing + text)
+        else:
+            output.append((index, text))
+
+    def flush_pending() -> None:
+        nonlocal pending_default_space
+        if pending_default_space is not None and output:
+            append(pending_default_space, ' ')
+        pending_default_space = None
+
+    for index, (xml_space, raw_text) in enumerate(segments):
+        if xml_space not in _PROJECT_XML_SPACE_VALUES:
+            raise ValueError(
+                f'xml:space must be exactly default or preserve; got '
+                f'{xml_space!r}'
+            )
+        text = re.sub(r'[\t\r\n]', ' ', raw_text)
+        for char in text:
+            if xml_space == 'default' and char == ' ':
+                if pending_default_space is None:
+                    pending_default_space = index
+                continue
+            flush_pending()
+            append(index, char)
+
+    # A pending default-mode space is the overall trailing space and is
+    # intentionally discarded. Preserved trailing spaces were emitted inline.
+    return output
+
+
+def _is_unregistered_prefixed_text_property(name: str) -> bool:
+    lowered = name.lower()
+    return (
+        lowered.startswith(('font-', 'text-'))
+        and lowered not in _TEXT_DECLARATION_PROPERTIES
+    )
+
+
+def _format_decimal(value: float) -> str:
+    if abs(value) < 1e-15:
+        return '0'
+    text = f'{value:.15f}'.rstrip('0').rstrip('.')
+    return '0' if text in {'', '-0'} else text
+
+
+def parse_project_font_weight(raw: str) -> ParsedTextProperty:
+    """Parse the closed project font-weight grammar."""
+    if raw in {'normal', 'bold'}:
+        return ParsedTextProperty(raw == 'bold', raw)
+    if raw in {str(value) for value in range(100, 1000, 100)}:
+        return ParsedTextProperty(int(raw) >= 600, raw)
+    aliases = {'medium': '500', 'semibold': '600'}
+    if raw in aliases:
+        canonical = aliases[raw]
+        return ParsedTextProperty(int(canonical) >= 600, canonical, True)
+    raise ValueError(
+        "expected 'normal', 'bold', or an integer weight from 100 through 900"
+    )
+
+
+def parse_project_font_style(raw: str) -> ParsedTextProperty:
+    """Parse the closed project font-style grammar."""
+    if raw not in {'normal', 'italic'}:
+        raise ValueError("expected 'normal' or 'italic'")
+    return ParsedTextProperty(raw == 'italic', raw)
+
+
+def parse_project_text_anchor(raw: str) -> ParsedTextProperty:
+    """Parse the closed project text-anchor grammar."""

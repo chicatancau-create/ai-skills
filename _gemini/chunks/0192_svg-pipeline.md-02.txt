@@ -1,0 +1,70 @@
+text, image, vector, placeholder, icon, source-ref, and source-proxy counts.
+Models read the summary and editable SVGs; they do not read the machine
+manifest. The manifest stores relative source/authoring filenames, source and initial authoring
+hashes, source element paths, and immutable preview hashes for source proxies.
+It deliberately does not copy the opaque payload.
+The layered authoring bundle remains the editable source for template creation;
+the complete imported SVG remains immutable native-payload backing. Final
+`templates/*.svg` files are materialized and validated from that pair. A
+complete-page `authoring-svg-flat/` bundle is the user's editable source for an
+imported-deck round-trip. `pptx_template_import.py` publishes its compact
+layered authoring bundle and decoration inventory in the same transaction as
+its immutable backing. `pptx_to_svg.py --roundtrip` places image media in
+`images/`, decoration-only vectors in `icons/imported/`, cues/audio/video/notes in their named
+directories, opaque payloads in `native-payloads/`, the source package in
+`sources/`, and tool-owned backing/contracts in `analysis/`; `assets/` is
+invalid. `svg_to_pptx.py --roundtrip` always reads `authoring-svg-flat/`,
+restores unchanged source refs from `analysis/roundtrip-svg/`, expands imported
+vector edit units from `icons/imported/`, and retains edits/deletions/new
+content without rewriting the bundle. Unchanged slides and resources pass
+through byte-for-byte. Object comparison includes effective ancestor transforms,
+opacity, inherited styles, and enclosing links; changing a proxy's context also
+fails. When an edited shape's text and text context still match the baseline,
+the materializer restores its relationship-free source `txBody` through the
+existing fingerprint/relationship checks, preserving fields, numbering,
+autofit, language, and text effects. Edited text follows normal conversion.
+A page edit rebuilds that output page; a changed
+materialized or derived resource rebuilds every output page that references it.
+Changed materialized bytes must still match the source package part's extension
+and Content-Type. Resource hrefs resolve exactly relative to the page or
+extracted asset and must remain inside the workspace.
+
+### Round-trip deck page plans
+
+`page_plan.json` is an optional, model-authored file at the root of a
+`pptx_to_svg.py --roundtrip` workspace. Without it, export uses the existing
+identity roster and preserves the no-plan package behavior. With it, the
+`pages` array is the complete output order and may select, reorder, repeat, or
+omit source slides:
+
+```json
+{
+  "schema": "ppt-master.roundtrip-page-plan.v1",
+  "pages": [
+    {"source_slide": 3},
+    {"source_slide": 1, "svg": "intro.svg"},
+    {"source_slide": 3, "svg": "intro_b.svg"}
+  ]
+}
+```
+
+`source_slide` is the one-based source presentation index. `svg` defaults to
+that source slide's canonical imported filename, normally `slide_03.svg`, and
+must name one file directly inside `authoring-svg-flat/`. Each output entry
+must use a different SVG filename. To author independent edits from one source
+page, copy its SVG to a new filename and list that filename on the repeated
+entry. The exporter always compares the copy with the baseline regenerated
+from its declared `source_slide`, so source-ref restoration, proxy checks, and
+edit detection remain source-correct. Every extra authoring SVG must appear in
+the plan; an unknown, duplicate, or cross-owned canonical filename fails.
+
+Move an object between pages before export with the authoring helper:
+
+```bash
+python3 scripts/svg_authoring_view.py <authoring-dir> \
+  --adopt-object <from.svg>:<element-id> --into <target.svg>
+```
+
+The helper appends a copy to the target page, removes its source/native restore
+transport, gives colliding ids fresh local names, inlines any source-owned
+`icons/imported/` vector reference, and refreshes the page-plan-aware summary.

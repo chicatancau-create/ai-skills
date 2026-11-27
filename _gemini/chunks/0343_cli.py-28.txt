@@ -1,0 +1,90 @@
+                    quick_body_px,
+                ) = infer_master_text_style_spec(native_files)
+            except ThemeFontError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                return 1
+            print(
+                "  Quick Master text defaults: "
+                f"title {quick_title_px:g}px, body {quick_body_px:g}px "
+                "(inferred from structured SVG pages)"
+            )
+        if source_themes_path.exists():
+            if quick_template_specs is None:
+                print(
+                    "Warning: templates/source_themes.json is ignored because "
+                    "Quick SVG pages declare no structured Master/Layout contract.",
+                    file=sys.stderr,
+                )
+            else:
+                try:
+                    available_source_themes = load_template_source_themes(
+                        project_path / "templates"
+                    ) or {}
+                except TemplateStructureError as exc:
+                    print(f"Error: {exc}", file=sys.stderr)
+                    return 1
+                used_master_keys = {
+                    spec.master_key for spec in quick_template_specs
+                }
+                missing_source_themes = sorted(
+                    used_master_keys - set(available_source_themes)
+                )
+                if missing_source_themes:
+                    print(
+                        "Error: Quick structured SVG pages reference Master(s) "
+                        "missing from templates/source_themes.json: "
+                        + ", ".join(missing_source_themes),
+                        file=sys.stderr,
+                    )
+                    return 1
+                source_theme_xml_by_master = {
+                    master_key: available_source_themes[master_key]
+                    for master_key in used_master_keys
+                }
+
+    ref_files = native_files
+    authoring_roundtrip_temporary: tempfile.TemporaryDirectory[str] | None = None
+    authoring_roundtrip_report: dict[str, object] | None = None
+    roundtrip_pages: tuple[RoundtripPage, ...] = ()
+    roundtrip_page_plan_present = False
+    roundtrip_page_sources: tuple[int, ...] | None = None
+    if args.roundtrip:
+        authoring_source_dir = project_path / native_source_dir
+        if not is_flat_authoring_bundle(authoring_source_dir):
+            print(
+                "Error: --roundtrip requires authoring-svg-flat/ with "
+                "authoring_manifest.json: "
+                f"{authoring_source_dir}",
+                file=sys.stderr,
+            )
+            return 1
+        authoring_roundtrip_temporary = tempfile.TemporaryDirectory(
+            prefix='.authoring-roundtrip-',
+            dir=project_path.resolve(),
+        )
+        try:
+            materialized = materialize_flat_authoring_roundtrip(
+                project_path.resolve(),
+                authoring_source_dir.resolve(),
+                Path(authoring_roundtrip_temporary.name),
+            )
+        except (AuthoringRoundtripError, OSError) as exc:
+            authoring_roundtrip_temporary.cleanup()
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        native_files = list(materialized.svg_files)
+        ref_files = list(materialized.authoring_files)
+        roundtrip_pages = materialized.pages
+        roundtrip_page_plan_present = materialized.page_plan_present
+        if roundtrip_page_plan_present:
+            roundtrip_page_sources = tuple(
+                page.source_slide
+                for page in roundtrip_pages
+            )
+        authoring_roundtrip_report = materialized.report
+        totals = materialized.report.get('totals')
+        if isinstance(totals, dict):
+            print(
+                "  Authoring round-trip materialized: "
+                f"{len(native_files)} slide(s), "
+                f"{totals.get('unchanged_refs', 0)} unchanged ref(s), "

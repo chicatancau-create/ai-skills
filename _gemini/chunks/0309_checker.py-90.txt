@@ -1,0 +1,87 @@
+                        if deviation is not None and deviation <= 0.02:
+                            continue
+                        actual = raw_aspect or '(implicit xMidYMid meet)'
+                        if deviation is None:
+                            detail = (
+                                "its frame cannot be checked against the source "
+                                "pixel aspect"
+                            )
+                        else:
+                            detail = (
+                                f"its frame distorts the source aspect by "
+                                f"{deviation * 100:.1f}%"
+                            )
+                        self._illustration_issues.append((
+                            'error',
+                            'no_crop_image_fit_mismatch',
+                            f"{svg_path.name}: {filename} is no-crop but its "
+                            f"rendered placement uses "
+                            f"preserveAspectRatio={actual!r} and {detail}; "
+                            "stretching is not a detail crop and remains "
+                            "forbidden.",
+                        ))
+
+                    if has_complete_placement:
+                        continue
+
+                    for raw_aspect, mechanisms, align, mode, _geometry in (
+                        parsed_placements
+                    ):
+                        if align != 'none' and mode != 'meet':
+                            actual = raw_aspect or '(implicit xMidYMid meet)'
+                            self._illustration_issues.append((
+                                'error',
+                                'no_crop_image_fit_mismatch',
+                                f"{svg_path.name}: {filename} is no-crop but "
+                                "this page has no complete placement and uses "
+                                f"preserveAspectRatio={actual!r}; keep at least "
+                                "one unclipped placement with a legal alignment "
+                                "anchor and meet.",
+                            ))
+                        if mechanisms:
+                            self._illustration_issues.append((
+                                'error',
+                                'no_crop_image_clipped',
+                                f"{svg_path.name}: {filename} is no-crop but "
+                                "this page has no complete placement; its "
+                                "rendered placement is affected by "
+                                f"{', '.join(mechanisms)}. Keep at least one "
+                                "unclipped meet placement so every source pixel "
+                                "remains visible.",
+                            ))
+
+        self._check_sourced_image_provenance(
+            rows_by_filename,
+            project_path,
+        )
+
+    def _check_sourced_image_provenance(
+        self,
+        rows_by_filename: Dict[str, Dict[str, str]],
+        project_path: Path,
+    ) -> None:
+        """Require one valid provenance item for every Sourced web row."""
+        sourced = {
+            filename: row
+            for filename, row in rows_by_filename.items()
+            if self._row_acquire(row) == 'web'
+            and self._row_status(row) == 'sourced'
+        }
+        if not sourced:
+            return
+
+        manifest_path = project_path / 'images' / 'image_sources.json'
+        if not manifest_path.exists():
+            self._illustration_issues.append((
+                'error',
+                'image_sources_missing',
+                "Sourced web images are used, but "
+                "images/image_sources.json does not exist.",
+            ))
+            return
+
+        payload, error = self._read_image_sources_manifest(manifest_path)
+        if error:
+            if manifest_path not in self._source_manifest_errors_reported:
+                self._illustration_issues.append((
+                    'error',

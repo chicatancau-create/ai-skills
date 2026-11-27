@@ -1,0 +1,111 @@
+        decoded = _decode_data_image_uri(href)
+        if decoded is None:
+            raise ValueError(
+                'data URI must contain a supported, non-empty image with '
+                'valid encoding and bytes'
+            )
+        img_format, img_data = decoded
+        return ProjectImageSource(img_format, img_data)
+
+    if svg_dir is None:
+        raise ValueError('external image requires an SVG directory context')
+    try:
+        img_path = _resolve_external_image(svg_dir, href, resource_root)
+    except FileNotFoundError as exc:
+        raise ValueError(str(exc)) from exc
+    img_format = _normalize_project_image_format(img_path.suffix)
+    if img_format is None:
+        raise ValueError(
+            f'external image has unsupported file extension {img_path.suffix!r}'
+        )
+    try:
+        img_data = img_path.read_bytes()
+    except OSError as exc:
+        raise ValueError(f'cannot read external image {href!r}: {exc}') from exc
+    if not _valid_project_image_payload(img_format, img_data):
+        raise ValueError(
+            f'external image {href!r} is empty, corrupt, or does not match '
+            f'its {img_path.suffix} extension'
+        )
+    return ProjectImageSource(img_format, img_data)
+
+
+def project_image_errors(
+    root: ET.Element,
+    svg_dir: Path | None,
+    *,
+    allow_template_placeholders: bool = False,
+    resource_root: Path | None = None,
+) -> list[str]:
+    """Return source and frame errors for exact SVG image elements."""
+    errors: list[str] = []
+    for elem in root.iter():
+        if elem.tag.rsplit('}', 1)[-1] != 'image':
+            continue
+        label = _element_contract_label(elem)
+        if elem.tag != f'{{{SVG_NS}}}image':
+            errors.append(
+                f'{label} must use the SVG namespace '
+                f'{SVG_NS!r}'
+            )
+            continue
+        style_values = parse_inline_style(elem.get('style'))
+        for attribute in ('width', 'height'):
+            raw = style_values.get(attribute)
+            if raw is None:
+                raw = elem.get(attribute)
+            if raw is None:
+                errors.append(
+                    f'{label} requires explicit positive {attribute}'
+                )
+                continue
+            try:
+                value = parse_project_geometry_length(raw, attribute)
+            except ValueError:
+                # The shared geometry-length contract owns syntax diagnostics.
+                continue
+            if value <= 0:
+                errors.append(
+                    f'{label} {attribute} must be positive; got {raw!r}'
+                )
+        try:
+            raw_href = _project_image_href(elem)
+        except ValueError as exc:
+            errors.append(f'{label} invalid image source: {exc}')
+            continue
+        if (
+            allow_template_placeholders
+            and '{{' in raw_href
+            and '}}' in raw_href
+        ):
+            continue
+        try:
+            load_project_image_source(elem, svg_dir, resource_root)
+        except ValueError as exc:
+            errors.append(f'{label} invalid image source: {exc}')
+    return sorted(errors)
+
+
+def shape_display_name(elem: ET.Element, fallback: str) -> str:
+    """Name a PowerPoint object after its SVG identity when it has one.
+
+    ``data-pptx-shape-name`` wins, then the SVG ``id`` (or ``data-name``), so
+    the Selection and Animation panes show ``p08-rail-edge`` rather than
+    ``Freeform 9``; unnamed objects keep the positional fallback.
+    """
+    for attribute in ('data-pptx-shape-name', 'id', 'data-name'):
+        value = (elem.get(attribute) or '').strip()
+        if value:
+            return value
+    return fallback
+
+
+def _wrap_shape(
+    shape_id: int, name: str,
+    off_x: int, off_y: int,
+    ext_cx: int, ext_cy: int,
+    geom_xml: str, fill_xml: str, stroke_xml: str,
+    effect_xml: str = '', extra_xml: str = '',
+    rot: int = 0,
+    xfrm_attr: str = '',
+    placeholder_xml: str = '',

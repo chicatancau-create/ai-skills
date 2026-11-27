@@ -1,0 +1,88 @@
+                        pix.save(str(image_path))
+
+                        if prev_was_list:
+                            markdown_content += "\n"
+                        markdown_content += f"![{image_name}]({rel_img_dir}/{image_name})\n\n"
+                        ratio = pix.width / pix.height if pix.width > 0 and pix.height > 0 else None
+                        image_manifest.append({
+                            "index": len(image_manifest) + 1,
+                            "filename": image_name,
+                            "original_filename": image_name,
+                            "asset_kind": "bitmap",
+                            "svg_renderable": True,
+                            "pptx_native_supported": True,
+                            "source_kind": "pdf_vector_figure",
+                            "source_ext": ".png",
+                            "page_index": page_num,
+                            "occurrence_index": img_count + 1,
+                            "pixel_width": pix.width,
+                            "pixel_height": pix.height,
+                            "pixel_ratio": round(ratio, 6) if ratio else None,
+                            "display_ratio": round(ratio, 6) if ratio else None,
+                            "bbox": [
+                                figure_rect.x0,
+                                figure_rect.y0,
+                                figure_rect.x1,
+                                figure_rect.y1,
+                            ],
+                        })
+                        img_count += 1
+                        prev_was_list = False
+                        print(f"  [OK] Rendered vector figure: {image_name}")
+                    except Exception as e:
+                        print(f"  [WARN] Failed to render vector figure: {e}")
+
+        # Flush code block at end of page
+        if prev_was_code:
+            flush_code_block()
+
+    page_count = len(doc)
+    doc.close()
+
+    markdown_content = merge_markdown_continuation_tables(markdown_content)
+    markdown_content = CONTROL_CHARS_RE.sub('', markdown_content)
+    markdown_content = re.sub(r'\n{3,}', '\n\n', markdown_content)
+    markdown_content = markdown_content.strip() + "\n"
+
+    if output_path:
+        os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(markdown_content)
+        if img_dir and image_manifest:
+            (img_dir / "image_manifest.json").write_text(
+                json.dumps(image_manifest, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        warnings = scanned_pdf_warnings(markdown_content, page_count, img_count)
+        warnings += arabic_text_layer_warnings(markdown_content)
+        for warning in warnings:
+            print(f"[WARN] {warning}")
+        profile_path = write_conversion_profile_best_effort(
+            input_path=pdf_path,
+            markdown_path=output_path,
+            converter="pdf_to_md.py",
+            conversion_type="pdf",
+            asset_dir=img_dir,
+            warnings=warnings,
+        )
+        print(f"[OK] Saved Markdown to: {output_path}")
+        if profile_path:
+            print(f"   Wrote conversion profile -> {profile_path}")
+
+    return markdown_content
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the CLI entry point."""
+    parser = argparse.ArgumentParser(
+        description='PDF to Markdown converter (with structure detection and LLM optimization)',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  python pdf_to_md.py book.pdf                    # Convert a single file
+  python pdf_to_md.py book.pdf appendix.pdf       # Convert multiple files
+  python pdf_to_md.py ./pdfs -o ./markdown        # Convert PDFs in a directory
+  python pdf_to_md.py book.pdf -o output.md      # Specify output file
+  python pdf_to_md.py book.pdf --render-vector-figures
+
+Structure detection features:

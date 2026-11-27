@@ -1,0 +1,84 @@
+        date_slices=len(date_slices),
+    )
+    cmn.log(f"[plan] 共 {len(user_batches)} 批 × {len(date_slices)} 个时间片")
+
+    # 4. 拉数据：check record（打卡流水）+ check result（用于关联考勤时间和打卡结果）
+    inspected_result_flag = [False]
+    inspected_record_flag = [False]
+    all_check_results: list[dict] = []
+    all_check_records: list[dict] = []
+
+    for batch_idx, batch in enumerate(user_batches, start=1):
+        for slice_idx, date_slice in enumerate(date_slices, start=1):
+            cmn.log(f"[batch {batch_idx}/{len(user_batches)}] "
+                    f"[slice {slice_idx}/{len(date_slices)}]")
+
+            results = query_check_results(
+                batch, date_slice, stats,
+                inspect=args.inspect, inspected_flag=inspected_result_flag,
+            )
+            all_check_results.extend(results)
+
+            records = query_check_records(
+                batch, date_slice, stats,
+                inspect=args.inspect, inspected_flag=inspected_record_flag,
+            )
+            all_check_records.extend(records)
+
+    cmn.log(f"[data] check result: {len(all_check_results)} 条, "
+            f"check record: {len(all_check_records)} 条")
+
+    if not all_check_records:
+        stats.add_warning("查询完成，但未得到任何打卡流水记录")
+
+    # 5. 获取考勤组信息（通过 group API 反向映射 userId → 考勤组名称）
+    group_name_map = cmn.extract_group_names_from_records(all_check_records, user_ids)
+
+    # 6. 构建明细行（以 check record 为主表，关联 check result 获取考勤时间和打卡结果）
+    detail_rows = build_record_rows(
+        all_check_records, all_check_results, user_info_map, group_name_map,
+    )
+
+    # 7. 写 Excel
+    rows_2d = [[row.get(h, "") for h in ALL_HEADERS] for row in detail_rows]
+    out_name = args.out or cmn.build_output_filename(start, end, suffix="detail")
+
+    title = (
+        f"考勤明细展示  统计日期：{start.strftime(cmn.DATE_FMT)} "
+        f"至 {end.strftime(cmn.DATE_FMT)}"
+    )
+    subtitle = f"报表生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}"
+
+    # 图片嵌入参数：默认开启，--no-images 关闭
+    image_columns = None if args.no_images else IMAGE_COLUMN_NAMES
+    image_size = _parse_image_size(args.image_size)
+
+    try:
+        cmn.write_excel(
+            out_name, ALL_HEADERS, rows_2d,
+            sheet_name="考勤明细",
+            title=title,
+            subtitle=subtitle,
+            image_columns=image_columns,
+            image_size=image_size,
+        )
+    except RuntimeError as exc:
+        cmn.error(str(exc))
+        return 1
+
+    # 8. 摘要
+    cmn.print_summary(
+        granularity_label="明细（打卡流水）",
+        out_path=out_name,
+        user_count=len(user_ids),
+        column_names=CHECK_HEADERS,
+        start=start,
+        end=end,
+        rows_count=len(rows_2d),
+        stats=stats,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

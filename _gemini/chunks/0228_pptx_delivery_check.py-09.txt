@@ -1,0 +1,103 @@
+                ))
+
+            media_infos = [
+                info_by_name[name]
+                for name in sorted(part_names)
+                if (
+                    canonical_opc_part_path(name) or ""
+                ).startswith("ppt/media/")
+            ]
+            embedded_media = [
+                _embedded_part_record(
+                    info,
+                    content_type=_content_type_for_part(
+                        info.filename,
+                        defaults,
+                        overrides,
+                    ),
+                    reference_counts=reference_counts,
+                    relationship_types=relationship_types,
+                )
+                for info in media_infos
+            ]
+            embedded_media.sort(
+                key=lambda item: (
+                    -int(item["bytes"]),
+                    str(item["part"]),
+                )
+            )
+
+            embedded_font_infos = [
+                info_by_name[name]
+                for name in sorted(part_names)
+                if name.startswith("ppt/fonts/")
+                or name.lower().endswith(".fntdata")
+            ]
+            embedded_fonts = [
+                {
+                    "part": info.filename,
+                    "content_type": _content_type_for_part(
+                        info.filename,
+                        defaults,
+                        overrides,
+                    ),
+                    "bytes": info.file_size,
+                    "compressed_bytes": info.compress_size,
+                    "reference_count": reference_counts.get(
+                        canonical_opc_part_path(info.filename) or "",
+                        0,
+                    ),
+                }
+                for info in embedded_font_infos
+            ]
+
+            media_bytes = sum(info.file_size for info in media_infos)
+            media_compressed_bytes = sum(
+                info.compress_size for info in media_infos
+            )
+            total_uncompressed_bytes = sum(
+                info.file_size for info in info_by_name.values()
+            )
+            file_bytes = pptx_path.stat().st_size
+            media = report["media"]
+            if not isinstance(media, dict):
+                raise AssertionError("delivery report media container is invalid")
+            media.update(
+                {
+                    "embedded_count": len(embedded_media),
+                    "external_count": len(external_media),
+                    "embedded": embedded_media,
+                    "external": external_media,
+                    "uncompressed_bytes": media_bytes,
+                    "archive_compressed_bytes": media_compressed_bytes,
+                    "share_of_archive": (
+                        round(media_compressed_bytes / file_bytes, 6)
+                        if file_bytes
+                        else 0.0
+                    ),
+                    "share_of_uncompressed_parts": (
+                        round(media_bytes / total_uncompressed_bytes, 6)
+                        if total_uncompressed_bytes
+                        else 0.0
+                    ),
+                    "top_contributors": embedded_media[:10],
+                }
+            )
+            fonts = report["fonts"]
+            if not isinstance(fonts, dict):
+                raise AssertionError("delivery report fonts container is invalid")
+            fonts["embedded_parts"] = embedded_fonts
+            fonts["declared"] = declared_fonts
+
+            unsafe_members = _archive_member_problems(infos)
+            if unsafe_members:
+                errors.append(
+                    _issue(
+                        "unsafe_package_member",
+                        "PPTX package contains unsafe member paths.",
+                        parts=unsafe_members,
+                    )
+                )
+                relationship_problems: list[str] = []
+            else:
+                with tempfile.TemporaryDirectory(

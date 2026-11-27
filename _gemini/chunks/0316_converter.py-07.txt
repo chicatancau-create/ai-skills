@@ -1,0 +1,119 @@
+    """Remove authoring-only hiding from a semantic geometry carrier clone."""
+    for name in ('visibility', 'display', 'pointer-events'):
+        element.attrib.pop(name, None)
+    style = element.get('style')
+    if style is None:
+        return
+    declarations = [
+        declaration.strip()
+        for declaration in style.split(';')
+        if declaration.strip()
+    ]
+    retained = [
+        declaration
+        for declaration in declarations
+        if declaration.split(':', 1)[0].strip().lower()
+        not in {'display', 'pointer-events', 'visibility'}
+    ]
+    if retained:
+        element.set('style', '; '.join(retained))
+    else:
+        element.attrib.pop('style', None)
+
+
+def _semantic_shape_text_body(
+    shape: ET.Element,
+    ctx: ConvertContext,
+) -> str | None:
+    metadata = _txbody_metadata(shape)
+    if metadata is not None:
+        preserved = _decode_unchanged_txbody(shape, metadata)
+        if preserved is not None:
+            return preserved[0]
+    try:
+        component = semantic_shape_text_component(shape)
+    except ValueError as exc:
+        raise SvgNativeConversionError(str(exc)) from exc
+    if component is None:
+        return None
+    frame = shape.get('data-pptx-frame')
+
+    text = copy.deepcopy(component)
+    text.set('data-pptx-frame', frame)
+    for name in (
+        'data-pptx-shape-id',
+        'data-pptx-shape-name',
+        'data-pptx-shape-scope',
+    ):
+        text.attrib.pop(name, None)
+    result = convert_text(text, ctx)
+    if result is None:
+        raise SvgNativeConversionError(
+            'Semantic shape text component produced no native text body'
+        )
+    match = re.search(r'(<p:txBody>.*?</p:txBody>)', result.xml, re.DOTALL)
+    if match is None:
+        raise SvgNativeConversionError(
+            'Semantic shape text did not compile to a p:txBody'
+        )
+    return match.group(1)
+
+
+def _convert_semantic_shape(
+    shape: ET.Element,
+    ctx: ConvertContext,
+) -> ShapeResult | None:
+    """Compile one normalized semantic SVG shape into one native PPT shape."""
+    if shape.get(SEMANTIC_OBJECT_ATTRIBUTE) != SEMANTIC_SHAPE_KIND:
+        return None
+    carriers = [
+        child
+        for child in shape
+        if child.get('data-pptx-part') == 'geometry'
+        and child.tag.replace(f'{{{SVG_NS}}}', '')
+        in {'circle', 'ellipse', 'line', 'path', 'polygon', 'polyline', 'rect'}
+    ]
+    if len(carriers) != 1:
+        raise SvgNativeConversionError(
+            'Semantic shape requires exactly one direct geometry carrier'
+        )
+    carrier = copy.deepcopy(carriers[0])
+    _make_semantic_geometry_carrier_visible(carrier)
+    for name, value in shape.attrib.items():
+        if (
+            name in {
+                'data-pptx-frame',
+                'data-pptx-geometry-kind',
+                'data-pptx-object',
+                'data-pptx-prst',
+            }
+            or name.startswith('data-pptx-av-')
+        ) and carrier.get(name) is None:
+            carrier.set(name, value)
+    for name in (
+        'data-pptx-shape-id',
+        'data-pptx-shape-name',
+        'data-pptx-shape-scope',
+        'data-name',
+        'data-ph-type',
+        'data-pptx-placeholder-index',
+        'data-pptx-placeholder-size',
+        'data-pptx-placeholder-orientation',
+    ):
+        if carrier.get(name) is None and shape.get(name) is not None:
+            carrier.set(name, str(shape.get(name)))
+    if carrier.get('data-name') is None and shape.get('id'):
+        # The carrier path becomes the native object; keep the group's name.
+        carrier.set('data-name', str(shape.get('id')))
+
+    if shape.get('data-pptx-geometry-kind') == 'custom':
+        for name in (
+            'data-pptx-custgeom',
+            'data-pptx-geometry-kind',
+            'data-pptx-geometry-sha256',
+        ):
+            carrier.attrib.pop(name, None)
+
+    geometry = convert_element(carrier, ctx)
+    if geometry is None:
+        raise SvgNativeConversionError(

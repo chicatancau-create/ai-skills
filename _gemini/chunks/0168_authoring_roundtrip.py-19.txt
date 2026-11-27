@@ -1,0 +1,104 @@
+            _local_name(clone.tag) == "g" and source_ref is None
+            and set(clone.attrib) <= {*INHERITABLE_ATTRS, "style", "opacity", "transform"}
+            and len(clone) > 1
+            and all(_local_name(child.tag) not in {"defs", "metadata"} for child in clone)
+        ):
+            # A context-only wrapper must not merge separate source objects
+            # into one new DrawingML group, which would lose their ownership.
+            resolved = []
+            for child in clone:
+                contextual = ET.Element(clone.tag, clone.attrib)
+                contextual.append(child)
+                resolved.append(contextual)
+            return resolved
+        return [clone]
+
+    baseline_unreferenced = Counter(
+        normalized_authoring_subtree_sha256(child, baseline_assets)
+        for child in baseline_root
+        if _local_name(child.tag) != "defs"
+        and child.get(SOURCE_REF_ATTRIBUTE) is None
+        and _local_name(child.tag) != "use"
+    )
+    output_root = copy.deepcopy(layered_root)
+    for child in list(output_root):
+        output_root.remove(child)
+    _apply_authoring_root_attributes(output_root, current_root)
+    layered_defs_root = copy.deepcopy(layered_root)
+    current_defs_root = copy.deepcopy(current_root)
+    _rebase_resource_references(
+        layered_defs_root,
+        document.layered_source_path.parent,
+        output_path.parent,
+        project_path,
+        recursive=True,
+    )
+    _rebase_resource_references(
+        current_defs_root,
+        document.authoring_path.parent,
+        output_path.parent,
+        project_path,
+        recursive=True,
+    )
+    merged_defs = _merge_defs(
+        layered_defs_root,
+        current_defs_root,
+        include_authoring_changes=defs_changed or bool(edited_refs),
+    )
+    merged_definition_ids = {
+        definition_id
+        for definition in (list(merged_defs) if merged_defs is not None else [])
+        if (definition_id := definition.get("id"))
+    }
+    merged_definition_hashes = {
+        semantic_subtree_sha256(definition)
+        for definition in (list(merged_defs) if merged_defs is not None else [])
+    }
+    for record, asset_root in current_referenced_assets.values():
+        asset_defs = _direct_defs(asset_root)
+        if (
+            record.unchanged
+            or asset_defs is None
+            or not _outer_source_ref_elements(asset_root)
+        ):
+            continue
+        if merged_defs is None:
+            merged_defs = ET.Element(f"{{{SVG_NS}}}defs")
+        for definition in asset_defs:
+            clone = copy.deepcopy(definition)
+            _rebase_resource_references(
+                clone,
+                record.asset_path.parent,
+                output_path.parent,
+                project_path,
+                recursive=True,
+            )
+            definition_id = clone.get("id")
+            definition_hash = semantic_subtree_sha256(clone)
+            if definition_hash in merged_definition_hashes:
+                continue
+            if definition_id and definition_id in merged_definition_ids:
+                raise AuthoringRoundtripError(
+                    f"{document.name} edited vector asset definition id "
+                    f"collides with page definitions: {definition_id!r}"
+                )
+            merged_defs.append(clone)
+            merged_definition_hashes.add(definition_hash)
+            if definition_id:
+                merged_definition_ids.add(definition_id)
+    if merged_defs is not None and list(merged_defs):
+        output_root.append(merged_defs)
+
+    authored_unreferenced = 0
+    expanded_vector_uses = 0
+    for child in current_root:
+        if _local_name(child.tag) == "defs":
+            continue
+        if (
+            child.get(SOURCE_REF_ATTRIBUTE) is None
+            and _local_name(child.tag) != "use"
+        ):
+            child_hash = normalized_authoring_subtree_sha256(
+                child,
+                current_assets,
+            )

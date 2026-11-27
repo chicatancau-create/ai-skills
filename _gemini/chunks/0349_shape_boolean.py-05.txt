@@ -1,0 +1,121 @@
+        if (
+            raw_fill_rule is not None
+            and raw_fill_rule.strip().lower() != "inherit"
+        ):
+            fill_rule = raw_fill_rule.strip().lower()
+    if fill_rule != "nonzero":
+        raise ValueError(
+            f"Shape Boolean source {_element_label(element)} uses "
+            f"fill-rule={fill_rule!r}; use explicit nonzero contour direction"
+        )
+
+
+def _combined_transform(chain: Sequence[ET.Element]) -> AffineMatrix:
+    matrix = IDENTITY_MATRIX
+    for element in chain[1:]:
+        transform = element.get("transform")
+        if transform:
+            matrix = matrix_multiply(
+                matrix,
+                parse_transform_matrix(transform),
+            )
+    return matrix
+
+
+def _materialize_baked_stroke_style(
+    style: Mapping[str, str],
+    matrix: AffineMatrix,
+) -> dict[str, str]:
+    """Keep stroke metrics visually stable after baking a geometry transform."""
+    materialized = dict(style)
+    raw_vector_effect = materialized.get("vector-effect")
+    vector_effect = None
+    if raw_vector_effect is not None:
+        try:
+            vector_effect = parse_project_stroke_enum(
+                "vector-effect",
+                raw_vector_effect,
+            )
+        except ValueError as exc:
+            raise ValueError(
+                f"Shape Boolean primary vector-effect "
+                f"{raw_vector_effect!r} {exc}"
+            ) from exc
+        materialized["vector-effect"] = vector_effect
+
+    stroke = materialized.get("stroke")
+    if not stroke or stroke.strip().lower() in {"none", "transparent"}:
+        return materialized
+    if vector_effect == "non-scaling-stroke":
+        return materialized
+
+    a, b, c, d, _e, _f = matrix
+    scale = math.sqrt(abs(a * d - b * c))
+    if not math.isfinite(scale):
+        raise ValueError(
+            "Shape Boolean primary transform produces a non-finite stroke scale"
+        )
+    if scale == 1.0:
+        return materialized
+
+    raw_width = materialized.get("stroke-width", "1")
+    try:
+        source_width = parse_project_geometry_length(
+            raw_width,
+            "stroke-width",
+        )
+    except ValueError as exc:
+        raise ValueError(
+            f"Shape Boolean primary stroke-width {raw_width!r} {exc}"
+        ) from exc
+    materialized["stroke-width"] = format_project_geometry_length(
+        source_width * scale
+    )
+
+    raw_dasharray = materialized.get("stroke-dasharray")
+    if raw_dasharray is None or raw_dasharray.strip().lower() == "none":
+        return materialized
+    try:
+        parsed_dasharray = parse_project_stroke_dasharray(raw_dasharray)
+    except ValueError as exc:
+        raise ValueError(
+            f"Shape Boolean primary stroke-dasharray {raw_dasharray!r} {exc}"
+        ) from exc
+    if parsed_dasharray is not None:
+        _preset, values = parsed_dasharray
+        materialized["stroke-dasharray"] = " ".join(
+            format_project_geometry_length(value * scale)
+            for value in values
+        )
+    return materialized
+
+
+def _shape_commands(element: ET.Element) -> list[PathCommand]:
+    tag = _local_name(element.tag)
+    if tag == "path":
+        raw_path = element.get("d")
+        if raw_path is None:
+            raise ValueError(f"{_element_label(element)} requires d")
+        commands = normalize_path_commands(
+            svg_path_to_absolute(parse_svg_path(raw_path))
+        )
+        _require_closed_commands(commands, _element_label(element))
+        return commands
+
+    if tag == "polygon":
+        points = parse_svg_points(
+            element.get("points", ""),
+            min_points=3,
+        )
+        commands = [PathCommand("M", [*points[0]])]
+        commands.extend(
+            PathCommand("L", [x, y])
+            for x, y in points[1:]
+        )
+        commands.append(PathCommand("Z", []))
+        return commands
+
+    if tag == "rect":
+        return _rect_commands(element)
+
+    if tag == "circle":

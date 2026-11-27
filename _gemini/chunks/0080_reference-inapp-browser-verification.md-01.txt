@@ -1,0 +1,26 @@
+---
+name: reference-inapp-browser-verification
+description: How to get real-browser UI evidence in this environment — hidden in-app tab limits screenshots, so self-spawn headless Chromium over plain ws/CDP (no Playwright), never attach to a fixed debug port, and set viewports via Emulation not --window-size
+metadata:
+  type: reference
+---
+
+The connected `browser-use` surface in this setup is Qoder's **in-app Browser tab**, which is usually `visibilityState: 'hidden'`. Consequences observed on 2026-09-20:
+
+- `take_screenshot` fails with `NATIVE_BROWSER_VIEWPORT_UNAVAILABLE` while the tab is hidden (structural `take_snapshot` and `evaluate_script` still work).
+- There is **no viewport control** in the exposed tool set, so any acceptance criterion phrased as "compare screenshots at 1280×720 / 1440×900 / 768×1024 / 390×844 / 320px" cannot be met silently — record it as not executed and ask the user to open the tab.
+- What *is* provable headlessly, and is often stronger evidence than a screenshot: computed styles and geometry via `evaluate_script` (resolved token colors, font-size/line-height/weight/letter-spacing, `getBoundingClientRect` for touch targets, `scrollWidth - innerWidth` for overflow, the set of non-`none` `animationName` values, canvas/WebGL counts), plus a real `press_key` Tab to confirm `:focus-visible` styling.
+- `navigate_page` + `fill` + `click` + `take_snapshot` all work on the hidden tab (re-confirmed 2026-09-21 while testing Vue emit/button handlers), so interaction proof does not need a visible window — only pixels do. Pair it with a self-spawned headless Edge `--screenshot` of the same URL for layout.
+- **`click` and `press_key` silently no-op on this hidden tab some of the time** (observed twice 2026-09-21: a checkbox click and a filter-button click returned "Successfully clicked" but changed nothing; `press_key` Enter reached the page once then stopped reaching it). A no-op looks exactly like an app bug — before rewriting any handler, re-fire it with `evaluate_script` (`el.click()`, or set `.value` + dispatch `input` then `keyup`). Script dispatch drove every feature correctly, so treat tool-level click failures as harness noise, and note that DOM reads right after a dispatch are pre-render (Vue updates on nextTick).
+- Caveat found: `press_key` Enter delivers `keydown` to the focused input but the browser's **implicit form submission does not fire**, while Tab's default action does work. Do not report that as an app bug or as a pass — it needs a human at a visible window.
+
+**How to apply:** for UI verification here, lead with measured computed-style/geometry evidence, list what genuinely requires eyes-on screenshots, and never mark a visual acceptance item as done from jsdom tests alone.
+
+## Escaping the hidden tab: launch your own headless browser (2026-09-20)
+
+The screenshot limitation above applies to the `browser-use` MCP surface only. A self-spawned headless Chromium gives real layout, real `getBoundingClientRect`, and working `Page.captureScreenshot` — use it when layout/visual proof matters.
+
+Hard-won constraints on this box:
+
+- **Never attach to a fixed debug port.** Qoder's own in-app headless Chrome already listens on `127.0.0.1:9333` and holds the app's tabs (Code Canvas previews etc.). A harness that probes a hardcoded port will silently attach to *that* browser and navigate the user's app tabs. Launch with `--remote-debugging-port=0` and read the real port from `<your-temp-user-data-dir>/DevToolsActivePort`.
+- **Stable Chrome (137+, here 153) ignores `--load-extension`**, even with `--enable-unsafe-extension-debugging` — the MV3 service worker target never appears. **Edge 153 loads unpacked extensions headlessly** (`--headless=new --load-extension=<dir>`), so prefer Edge for extension E2E and fall back through candidates.

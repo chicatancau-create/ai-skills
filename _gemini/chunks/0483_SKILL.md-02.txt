@@ -1,0 +1,38 @@
+7. **窗口状态在两次调用之间会变**（被最小化到 `-32000,-32000`、丢掉焦点、对话框自动关闭）→ 「激活→等对话框→填路径→回车」必须挤在**同一个进程**里连续完成，拆成多次调用必失败。
+8. **`GetWindowTextW` 不写 `CharSet=CharSet.Unicode` 会得到首字节乱码标题**；自绘标题栏的窗口，`GetWindowText` 返回的常常不是用户看到的那串文字。
+9. **PowerShell 5.1 读无 BOM 的 .ps1 会按 GBK 解码**：脚本里的中文匹配串（如 `'*打开*'`）变成 `鎵撳紑`，永远匹配不到 → 表现为"点了没反应"。含非 ASCII 的 .ps1 **必须 UTF-8 带 BOM + CRLF**。这是本机第一大坑，已在 `~/.dsh/AGENTS.md` 记录。
+10. **`pwsh` 是 Windows PowerShell 5.1**：命令里出现 `$`、配对反斜杠、长 here-string 一律落成文件再跑，不要内联。
+11. 变量名不能叫 `$home` / `$x`（与参数 `$X` 大小写不敏感撞车）等，PowerShell 只读变量赋值会直接报错。
+12. **PrintWindow 抓的是窗口自身内容（含被遮挡部分）**，但鼠标事件发给屏幕最顶层窗口 → 只要动鼠标，就必须先确认像素归属。
+13. 已实测：前台窗口是 A 时，`pwcap` 抓被挡住的窗口 B 拿到的是 B 的真实画面（2026-11-11 验证，零焦点变化）。**所以"看一眼"这件事根本不需要抢前台。**
+
+## 标准工作流
+
+1. `winlist.py` 找目标窗口的 hwnd（按标题子串，注意 4 和 8）。
+2. `pwcap.py <hwnd> shot.png` 取样，`read_image` 看内容 —— **这一步已经能看到界面，不需要动前台**。
+3. 能通过改文件/读文件达成目的，就到此为止（T0）。
+4. 必须点击/发键时：先 `useridle.py` 判一次。
+   - `USER_IDLE` → 直接进 T3 干活（激活→点击→发键），不必逐次申请；每次点击前做命中判定。
+   - `USER_ACTIVE` → **先停**，等它变 idle，或一句话问用户「现在可以动一下界面吗」。
+5. 每次自动化之后用 `pwcap.py` 复判结果；**不要用全屏 ImageGrab 判"有没有变化"**，它会给出假的"没变"。
+6. 干完把界面恢复原样（最小化过的恢复、动过的窗口还回原位）。
+
+## Adobe XD 专项（本机已装 XD 58.0.12.9，UWP 版）
+
+- 启动：`Start-Process 'explorer.exe' -ArgumentList 'shell:AppsFolder\Adobe.XD_pc75e8sa7ep4e!App'`（约 30s 出 Home）
+- 打开文档的可靠路径（**需要动前台，属 T3**）：XD 里先有一个打开的文档 → `^o` → 对话框（标题「打开」、类 `#32770`）→ 点「文件名(N)」输入框 → `^a` → 粘贴完整路径 → `{ENTER}`。完整实现见 `C:\Users\Admin\.dsh\tools\xd\xd-open.ps1`（重启 XD + 打开 + 等文档窗口，含 DPI 感知与激活重试）。
+- `.xd` 的容器格式、生成与改交互**不要在本 skill 里现学**：加载 `xd-authoring` skill（格式规范 `C:\Users\Admin\.dsh\tools\xd\SCHEMA.md`、生成器 `xdgen.py`、加交互 `xdpatch.py`、校验器两个）。一句话：`.xd` 是 zip，交互在 `interactions/interactions.json`，画板注册表在 `resources/graphics/graphicContent.agc` 的 `artboards`（键是 `artboard.ref`，**不是**目录名里的 guid）。
+- 预览窗是 `ApplicationFrameWindow`（标题也是 "Adobe XD"，按标题取会抓错，必须用 hwnd）；被最大化的文档窗压住时点击全落到文档窗 → 要么最小化文档窗，要么**干脆别点，改用 PrintWindow 取证**。
+- 画板标定（预览窗）：窗口 1px 黑边 + 40px 浅灰标题栏，画板从 `y=41` 开始；`x0=9, y0=41, k≈1.2489`（375×667 逻辑 px → 468×833 物理 px）。
+- 真实存在的 `.xd` 样例可以直接改：`xdpatch.py --spec` 只替换 `interactions/interactions.json` 就能给课件加交互，其余 38 个成员字节不动（详见 `xd-authoring` skill）。
+
+## 反模式（踩过，别再犯）
+
+- **为了截图**去激活窗口、置顶、最大化 → 没必要：`pwcap.py` 被遮挡也能抓到。
+- 用户 `USER_ACTIVE` 时还硬去激活窗口/发键 → 这就是用户说的「抢」。
+- 置顶（`HWND_TOPMOST`）盖住用户的窗口 → XAML 应用还清不干净，一盖就赖着。
+- 用 `SendKeys` 打通一切 → 用户在用电脑时会打到他的窗口里。
+- 拆成多次 PowerShell 调用做「激活→找对话框→填路径」→ 窗口状态在中间就变了。
+- 拿 `ImageGrab` 判断点击是否生效 → 得到假阴性。
+- 在没 BOM 的 .ps1 里写中文窗口名做匹配 → 永远匹配不上。
+- 「读不到权限」就写成「不存在」→ 判不了就说判不了。

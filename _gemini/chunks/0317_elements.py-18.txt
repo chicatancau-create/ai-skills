@@ -1,0 +1,122 @@
+            ctx,
+            shape_id, f'Polygon {shape_id}',
+            off_x, off_y, w_emu, h_emu,
+            geom, fill, stroke, effect, xfrm_attr=xfrm_attr,
+        ),
+        bounds_emu=bounds_emu,
+    )
+
+
+def convert_polyline(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
+    """Convert SVG <polyline> to DrawingML custom geometry shape."""
+    preset_geom = _build_preset_geom_from_meta(elem)
+    points = parse_svg_points(elem.get('points', ''), min_points=2)
+
+    commands = [PathCommand('M', [points[0][0], points[0][1]])]
+    for px_, py_ in points[1:]:
+        commands.append(PathCommand('L', [px_, py_]))
+
+    transform = elem.get('transform')
+    if _uses_full_transform(ctx, transform):
+        commands = transform_path_commands(commands, _combined_transform_matrix(ctx, transform))
+        path_xml, min_x, min_y, width, height = path_commands_to_drawingml(
+            commands, 0, 0, 1.0, 1.0,
+        )
+    else:
+        path_xml, min_x, min_y, width, height = path_commands_to_drawingml(
+            commands, ctx.translate_x, ctx.translate_y,
+            ctx.scale_x, ctx.scale_y,
+        )
+
+    if not path_xml:
+        return None
+
+    w_emu = px_to_emu(width)
+    h_emu = px_to_emu(height)
+
+    geom = preset_geom or f'''<a:custGeom>
+<a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/>
+<a:rect l="l" t="t" r="r" b="b"/>
+<a:pathLst><a:path w="{w_emu}" h="{h_emu}">
+{path_xml}
+</a:path></a:pathLst>
+</a:custGeom>'''
+
+    fill_op = get_fill_opacity(elem, ctx)
+    stroke_op = get_stroke_opacity(elem, ctx)
+    fill = build_fill_xml(elem, ctx, fill_op)
+    stroke = build_stroke_xml(elem, ctx, stroke_op)
+
+    shape_id = _claim_element_shape_id(elem, ctx)
+    xfrm_attr = ''
+    off_x = px_to_emu(min_x)
+    off_y = px_to_emu(min_y)
+    bounds_emu = (off_x, off_y, off_x + w_emu, off_y + h_emu)
+    if preset_geom is not None:
+        xfrm = _pathlike_preset_xfrm(
+            elem,
+            ctx,
+            transform,
+            min_x,
+            min_y,
+            width,
+            height,
+        )
+        xfrm_attr, off_x, off_y, w_emu, h_emu, bounds_emu = xfrm
+    return ShapeResult(
+        xml=_wrap_geometry_object(
+            elem,
+            ctx,
+            shape_id, f'Polyline {shape_id}',
+            off_x, off_y, w_emu, h_emu,
+            geom, '<a:noFill/>', stroke, xfrm_attr=xfrm_attr,
+        ),
+        bounds_emu=bounds_emu,
+    )
+
+
+# ---------------------------------------------------------------------------
+# text
+# ---------------------------------------------------------------------------
+
+_SERIF_WIDTH_FAMILIES = {
+    'book antiqua',
+    'cambria',
+    'fangsong',
+    'garamond',
+    'georgia',
+    'kaiti',
+    'palatino',
+    'palatino linotype',
+    'serif',
+    'simsun',
+    'songti',
+    'times',
+    'times new roman',
+}
+
+_TEXTBOX_PADDING_MIN_PX = 0.5
+_TEXTBOX_PADDING_MAX_PX = 2.0
+_TEXTBOX_PADDING_RATIO = 0.04
+# Single-line auto-fit headroom interpolates between a low-caps base and an
+# all-caps ceiling for each script segment of a run. The crude per-char width
+# estimate undercounts capitals most, so all-caps Latin segments need the
+# ceiling to keep wrap-ignoring renderers (LibreOffice) from folding. The
+# serif tier follows the typeface that draws the segment (``latin`` or ``ea``
+# as resolved by parse_font_family), so a CJK segment drawn by Microsoft YaHei
+# never takes the Times New Roman tier of the same stack, and a short serif
+# label cannot force its multiplier onto an otherwise sans-serif line. Values
+# are calibrated against LibreOffice renders of all-caps bold lines, with bases
+# left above mixed-case and CJK render ratios; exact ratios shift with font
+# substitution, so these carry deliberate margin rather than tracking one
+# environment's numbers.
+_TEXT_WIDTH_HEADROOM_BASE = 1.06
+_TEXT_WIDTH_HEADROOM_CAPS = 1.12
+_SERIF_TEXT_WIDTH_HEADROOM_BASE = 1.12
+_SERIF_TEXT_WIDTH_HEADROOM_CAPS = 1.36
+_TEXT_BULLET_MARKERS = {
+    '·': '•',
+    '•': '•',
+    '●': '●',
+    '▪': '▪',
+    '■': '■',

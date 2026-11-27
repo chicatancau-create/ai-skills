@@ -1,0 +1,134 @@
+    start: datetime  # 含
+    end: datetime    # 含
+
+    @property
+    def start_str(self) -> str:
+        return self.start.strftime(DATETIME_FMT)
+
+    @property
+    def end_str(self) -> str:
+        return self.end.strftime(DATETIME_FMT)
+
+    @property
+    def label(self) -> str:
+        return f"{self.start.strftime(DATE_FMT)}~{self.end.strftime(DATE_FMT)}"
+
+
+def parse_datetime_arg(s: str, *, end_of_day: bool = False) -> datetime:
+    """
+    解析用户输入的日期参数，支持：
+      - YYYY-MM-DD                  → 00:00:00 或 23:59:59（取决于 end_of_day）
+      - YYYY-MM-DD HH:mm:ss
+    """
+    s = s.strip()
+    try:
+        return datetime.strptime(s, DATETIME_FMT)
+    except ValueError:
+        pass
+    try:
+        d = datetime.strptime(s, DATE_FMT)
+        if end_of_day:
+            return d.replace(hour=23, minute=59, second=59)
+        return d
+    except ValueError as e:
+        raise ValueError(
+            f"无法解析日期 {s!r}，请使用 YYYY-MM-DD 或 YYYY-MM-DD HH:mm:ss"
+        ) from e
+
+
+def slice_date_range(
+    start: datetime,
+    end: datetime,
+    max_days: int = MAX_DAYS_PER_SLICE,
+) -> list[DateSlice]:
+    """
+    把 [start, end] 切成多个 ≤ max_days 天的小区间。
+
+    每片含起含止；最后一片可能短于 max_days。
+    """
+    if end < start:
+        raise ValueError(f"结束时间 {end} 早于开始时间 {start}")
+
+    slices: list[DateSlice] = []
+    cur_start = start
+    while cur_start <= end:
+        # 这片的最晚结束时间（不超 max_days，且不超 end）
+        cur_end_limit = cur_start + timedelta(days=max_days - 1)
+        cur_end_limit = cur_end_limit.replace(hour=23, minute=59, second=59)
+        cur_end = min(cur_end_limit, end)
+        slices.append(DateSlice(start=cur_start, end=cur_end))
+        # 下一片从次日 00:00 开始
+        next_day = (cur_end + timedelta(seconds=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        cur_start = next_day
+    return slices
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 用户分批
+# ─────────────────────────────────────────────────────────────────────────────
+
+def chunk_users(users: list[str], size: int = MAX_USERS_PER_BATCH) -> list[list[str]]:
+    """把 userId 列表切成每片 ≤ size 的小批。"""
+    if size <= 0:
+        raise ValueError(f"size 必须 > 0，得到 {size}")
+    return [users[i: i + size] for i in range(0, len(users), size)]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# columns 模糊匹配
+# ─────────────────────────────────────────────────────────────────────────────
+
+def match_columns_by_keywords(
+    all_columns: list[dict],
+    keywords: list[str],
+    *,
+    name_keys: tuple[str, ...] = ("name", "columnName", "title", "label"),
+    id_keys: tuple[str, ...] = ("id", "columnId", "code", "key"),
+) -> list[dict]:
+    """
+    在 report columns 返回的字段列表里，按关键词匹配目标字段。
+
+    匹配策略（按优先级）：
+      1. 精确匹配：关键词 == 字段名（优先）
+      2. 子串匹配：关键词是字段名的子串（仅当精确匹配无结果时回退）
+
+    列名严格使用接口返回的原始字段名，不做任何修改。
+    """
+    matched: list[dict] = []
+    matched_ids: set[str] = set()
+    hit_keywords: set[str] = set()
+
+    # 构建 name → (col_dict, cid_str) 索引
+    col_index: list[tuple[str, str, dict]] = []
+    for col in all_columns:
+        name = _first_nonempty(col, name_keys)
+        cid = _first_nonempty(col, id_keys)
+        if not name or cid is None:
+            continue
+        col_index.append((str(name), str(cid), col))
+
+    for kw in keywords:
+        kw_stripped = kw.strip()
+        if not kw_stripped:
+            continue
+
+        # 第一轮：精确匹配
+        exact_hit = False
+        for name, cid_str, col in col_index:
+            if name == kw_stripped and cid_str not in matched_ids:
+                enriched = dict(col)
+                enriched["_column_id"] = cid_str
+                enriched["_column_name"] = name
+                matched.append(enriched)
+                matched_ids.add(cid_str)
+                hit_keywords.add(kw_stripped)
+                exact_hit = True
+                break
+
+        if exact_hit:
+            continue
+
+        # 第二轮：子串匹配（回退），只取第一个命中
+        kw_lower = kw_stripped.lower()

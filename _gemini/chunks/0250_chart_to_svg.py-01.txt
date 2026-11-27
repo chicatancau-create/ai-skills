@@ -1,0 +1,115 @@
+"""Extract native Chart replacement metadata from PPTX chart parts.
+
+The visual chart preview still comes from the existing graphicFrame fallback.
+This module only builds a conservative ``data-pptx-replace-with="chart"``
+payload when the chart XML cache can be mapped to the current chart schema.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import math
+import re
+from dataclasses import dataclass
+from typing import Any
+from xml.etree import ElementTree as ET
+
+from svg_to_pptx.drawingml.utils import parse_font_family
+from svg_to_pptx.native_objects.chart_data import (
+    validate_chart_payload,
+    validate_data_label_position,
+)
+
+from .chartex_to_svg import UnsupportedChartEx, extract_native_chartex_payload
+from .color_resolver import ColorPalette, find_color_elem, resolve_color
+from .emu_units import NS, Xfrm, ooxml_bool
+from .normalized_chart_svg import SeriesVisualStyle, render_normalized_chart_svg
+from .ooxml_loader import OoxmlPackage, PartRef
+
+
+CHART_URI = "http://schemas.openxmlformats.org/drawingml/2006/chart"
+CHARTEX_URI = "http://schemas.microsoft.com/office/drawing/2014/chartex"
+
+C_NS = {
+    **NS,
+    "c": "http://schemas.openxmlformats.org/drawingml/2006/chart",
+    "cx": CHARTEX_URI,
+}
+
+
+@dataclass
+class ChartResult:
+    """Native chart marker payload or a transparent unsupported status."""
+
+    native_payload: dict[str, Any] | None = None
+    native_status: str | None = None
+    normalized_svg: str | None = None
+
+
+class _UnsupportedChart(RuntimeError):
+    """Raised when a chart should keep its visual fallback only."""
+
+    def __init__(self, status: str) -> None:
+        super().__init__(status)
+        self.status = status
+
+
+def extract_native_chart_payload(
+    graphic_data: ET.Element | None,
+    xfrm: Xfrm,
+    slide_part: PartRef,
+    pkg: OoxmlPackage,
+    palette: ColorPalette | None = None,
+) -> ChartResult:
+    """Return native chart metadata for a supported classic or ChartEx chart."""
+    if graphic_data is None:
+        return ChartResult(native_status="unsupported-chart-reference")
+
+    uri = graphic_data.attrib.get("uri", "")
+    if uri == CHARTEX_URI or graphic_data.find("cx:chart", C_NS) is not None:
+        try:
+            payload = extract_native_chartex_payload(
+                graphic_data,
+                xfrm,
+                slide_part,
+                pkg,
+                palette,
+            )
+        except UnsupportedChartEx as exc:
+            return ChartResult(native_status=exc.status)
+        except RuntimeError:
+            return ChartResult(native_status="unsupported-chartex-parse")
+        return ChartResult(native_payload=payload)
+    if uri != CHART_URI:
+        return ChartResult(native_status="unsupported-chart-uri")
+    if xfrm.rot or xfrm.flip_h or xfrm.flip_v:
+        return ChartResult(native_status="unsupported-native-transform")
+
+    chart_ref = graphic_data.find("c:chart", C_NS)
+    if chart_ref is None:
+        return ChartResult(native_status="unsupported-chart-reference")
+    rid = chart_ref.attrib.get(f"{{{NS['r']}}}id")
+    if not rid:
+        return ChartResult(native_status="unsupported-chart-reference")
+
+    chart_path = slide_part.resolve_rel(rid)
+    if not chart_path:
+        return ChartResult(native_status="unsupported-chart-relationship")
+    chart_part = pkg.load_part(chart_path)
+    if chart_part is None:
+        return ChartResult(native_status="unsupported-chart-part")
+
+    try:
+        payload, visual_styles = _payload_from_chart_xml(
+            chart_part.xml,
+            xfrm,
+            palette=palette,
+        )
+        validate_chart_payload(payload)
+    except _UnsupportedChart as exc:
+        return ChartResult(native_status=exc.status)
+    except RuntimeError:
+        return ChartResult(native_status="unsupported-chart-schema")
+    except (TypeError, ValueError, AttributeError):
+        return ChartResult(native_status="unsupported-chart-parse")

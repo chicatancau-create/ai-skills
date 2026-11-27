@@ -1,0 +1,81 @@
+            remain intrinsically native; Chart/Table markers stay off otherwise.
+        animation_group_overrides: Explicit top-level SVG group ids from
+            ``animations.json`` that override the legacy chrome-name fallback.
+            Explicit structural layer/role/placeholder markers remain excluded.
+        theme_font_spec: Optional major/minor theme-font contract. Matching SVG
+            families emit DrawingML theme tokens instead of fixed typefaces.
+        theme_color_spec: Optional context-aware theme-color contract. Exact
+            locked colors emit DrawingML scheme tokens while local colors stay
+            fixed.
+        primary_language: Canonical BCP-47 project content language. ``None``
+            keeps the legacy per-run script heuristic.
+        trace_out: Optional list populated with one per-slide trace dictionary.
+        promote_background: Promote the first eligible full-canvas rectangle
+            into native ``p:bg``. Structured export disables this generic pass
+            and applies its narrower explicit background contract later.
+        dangerous_nonconforming_export: Apply narrowly defined compatibility
+            normalizations before the ordinary strict project preflight.
+            Parsing, resource, conversion, and package failures remain blocking.
+        resource_root: Explicit project boundary for local images and icons.
+            Omit only for direct library calls that require legacy inference.
+
+    Returns:
+        (slide_xml, media_files, rel_entries, anim_targets,
+        package_files, content_type_overrides) where:
+        - slide_xml: Complete slide XML string.
+        - media_files: Dict of {filename: bytes} for media to write.
+        - rel_entries: List of relationship entries to add.
+        - anim_targets: List of (shape_id, svg_id) tuples for top-level
+          semantic groups, in z-order; consumed by the builder's optional
+          per-element object-animation timing emitter.
+        - package_files: Dict of {pptx internal path: bytes} for non-media
+          OOXML parts such as native chart XML and embedded workbooks.
+        - content_type_overrides: Dict of {pptx internal path: content type}
+          for package_files that require [Content_Types].xml overrides.
+    """
+    text_flow = resolve_text_flow(text_flow, merge_paragraphs)
+    svg_path = Path(svg_path)
+    if resource_root is not None:
+        resource_root = Path(resource_root).resolve()
+        try:
+            svg_path.resolve().relative_to(resource_root)
+        except ValueError as exc:
+            raise SvgNativeConversionError(
+                f'{svg_path.name}: SVG source is outside resource root '
+                f'{resource_root}'
+            ) from exc
+    tree = ET.parse(str(svg_path))
+    root = tree.getroot()
+    _hydrate_native_payloads(root, svg_path)
+    try:
+        parse_project_svg_root(
+            root,
+            context=svg_path.name,
+        )
+    except CanvasContractError as exc:
+        raise SvgNativeConversionError(str(exc)) from exc
+    dangerous_normalizations = (
+        normalize_single_child_group_filters(root)
+        if dangerous_nonconforming_export
+        else []
+    )
+    if dangerous_normalizations and verbose:
+        print(
+            '  [DANGEROUS][NORMALIZED] '
+            f'{len(dangerous_normalizations)} single-child group filter(s)'
+        )
+    _require_native_marker_attributes(root, svg_path)
+    _require_inline_formula_markers(root, svg_path)
+    _require_project_hyperlinks(
+        root,
+        svg_path,
+        slide_count=slide_count,
+    )
+    _require_project_nested_svg_crops(root, svg_path)
+    _require_project_clip_paths(root, svg_path)
+    authored_errors = validate_authored_preset_tree(root)
+    if authored_errors:
+        raise SvgNativeConversionError(
+            'Invalid authored preset structure: ' + '; '.join(authored_errors)
+        )
+    # Validate the source contract once, then lower compact groups to the

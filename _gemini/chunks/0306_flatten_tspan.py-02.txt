@@ -1,0 +1,103 @@
+    parts = []
+    for s in el.itertext():
+        if s:
+            parts.append(s)
+    return "".join(parts)
+
+
+def _has_non_xml_whitespace(text: str | None) -> bool:
+    """Return whether text contains content beyond XML layout whitespace."""
+    return bool(text and text.strip(" \t\r\n"))
+
+
+def copy_text_attrs(
+    src_el: ET.Element,
+    dst_el: ET.Element,
+    exclude: set[str] | None = None,
+) -> None:
+    """Copy shared text styling attributes between SVG text elements."""
+    exclude = exclude or set()
+    # Copy style string first
+    if "style" in src_el.attrib and "style" not in exclude:
+        dst_el.set("style", src_el.attrib["style"])
+    for k in TEXT_STYLE_ATTRS:
+        if k in exclude:
+            continue
+        v = src_el.get(k)
+        if v is not None:
+            dst_el.set(k, v)
+    # xml:space preservation
+    xml_space = src_el.get("{http://www.w3.org/XML/1998/namespace}space")
+    if xml_space is not None and "{http://www.w3.org/XML/1998/namespace}space" not in exclude:
+        dst_el.set("{http://www.w3.org/XML/1998/namespace}space", xml_space)
+
+
+PARAGRAPH_MARK_ATTR = "data-paragraph-line-height"
+PARAGRAPH_SPACE_BEFORE_ATTR = "data-paragraph-space-before"
+# Marks a line-break tspan as a SOFT break inside the current paragraph
+# (SVG used dy to simulate text wrapping; the downstream converter should
+# merge its runs into the previous <a:p> rather than start a new one).
+PARAGRAPH_SOFT_BREAK_ATTR = "data-paragraph-soft-break"
+# Marks an authored visual line boundary that remains a hard DrawingML break
+# in the default single-frame preserve mode.
+PARAGRAPH_LINE_BREAK_ATTR = "data-paragraph-line-break"
+INLINE_FORMULA_ATTR = "data-pptx-inline-formula"
+
+# Tolerance for detecting "base line-height" vs "paragraph gap": dy values
+# within ±DY_TOLERANCE_PX of each other are considered the same line-height.
+DY_TOLERANCE_PX = 0.5
+# Cap on dy / base ratio. Anything beyond this (e.g. a 5x gap) is rejected
+# as a real section break that shouldn't merge into one text frame.
+MAX_DY_MULTIPLIER = 3.0
+LIST_MARKER_RE = re.compile(
+    r"^\s*(?:[•·・]\s*|[-–—*]\s+|\d+[.)、]\s+|[（(]\d+[）)]\s*)\S+"
+)
+
+
+def _starts_with_list_marker(line_group: list[ET.Element]) -> bool:
+    """Return True when a visual line starts with an ordered/unordered marker."""
+    text = "".join(collect_text_content(tspan) for tspan in line_group)
+    return bool(LIST_MARKER_RE.match(text))
+
+
+def _positional_tspan_attribute(tspan: ET.Element) -> str | None:
+    """Return the unsupported nested position attribute, if any."""
+    for name in ("x", "y"):
+        if tspan.get(name) is not None:
+            return name
+    raw_dy = tspan.get("dy")
+    dy = parse_first_number(raw_dy) if raw_dy is not None else None
+    if dy is not None and abs(dy) > 1e-6:
+        return "dy"
+    return None
+
+
+def nested_positional_tspan_errors(root: ET.Element) -> list[str]:
+    """Describe nested tspans whose baseline jumps cannot be exported."""
+    errors: list[str] = []
+    for text_el in root.iter(f"{{{SVG_NS}}}text"):
+        text_label = (
+            f"<text id={text_el.get('id')!r}>"
+            if text_el.get("id")
+            else "<text>"
+        )
+        for direct_child in list(text_el):
+            if direct_child.tag != f"{{{SVG_NS}}}tspan":
+                continue
+            for descendant in direct_child.iter(f"{{{SVG_NS}}}tspan"):
+                if descendant is direct_child:
+                    continue
+                attribute = _positional_tspan_attribute(descendant)
+                if attribute is None:
+                    continue
+                errors.append(
+                    f"{text_label} contains a nested <tspan> with {attribute}; "
+                    "move x/y/non-zero dy to a direct child of <text>"
+                )
+    return errors
+
+
+def _build_paragraph_child_view(
+    text_el: ET.Element,
+    is_svg_tag,
+) -> tuple[list[ET.Element], ET.Element | None] | None:

@@ -1,0 +1,92 @@
+    for element in root.iter():
+        source_ref = element.get(SOURCE_REF_ATTRIBUTE)
+        if source_ref is None:
+            continue
+        if source_ref in seen:
+            raise ValueError(f"Duplicate authoring source reference: {source_ref}")
+        reference = by_ref.get(source_ref)
+        if reference is None:
+            raise ValueError(f"Unknown authoring source reference: {source_ref}")
+        seen.add(source_ref)
+        reference.initial_authoring_subtree_sha256 = semantic_subtree_sha256(
+            element,
+            ignored_attributes=frozenset({SOURCE_REF_ATTRIBUTE}),
+        )
+
+    missing = sorted(set(by_ref) - seen)
+    if missing:
+        raise ValueError(
+            "Authoring projection dropped source-referenced object(s): "
+            + ", ".join(missing[:5])
+        )
+
+
+def _fresh_native_fallback_markers(root: ET.Element) -> set[ET.Element]:
+    """Return native markers whose source fallback guard is currently valid."""
+    fresh: set[ET.Element] = set()
+    for element in root.iter():
+        expected = element.get(NATIVE_FALLBACK_SHA256_ATTR)
+        if (
+            expected is None
+            or expected != expected.strip()
+            or _SHA256_RE.fullmatch(expected) is None
+        ):
+            continue
+        if svg_native_fallback_fingerprint(
+            element,
+            document_root=root,
+        ) == expected.lower():
+            fresh.add(element)
+    return fresh
+
+
+@dataclass
+class ProjectionStats:
+    txbody_metadata: int = 0
+    hidden_geometry_carriers: int = 0
+    geometry_preview_wrappers: int = 0
+    geometry_detail_markers: int = 0
+    compatibility_normalizations: int = 0
+    asset_references_rewritten: int = 0
+    coordinate_attributes_compacted: int = 0
+    style_declarations_compacted: int = 0
+    inherited_text_attributes_compacted: int = 0
+    single_tspans_collapsed: int = 0
+    source_object_proxies: int = 0
+    source_object_proxy_bytes: int = 0
+    semantic_shapes: int = 0
+    semantic_tables: int = 0
+    semantic_table_preview_bytes: int = 0
+    unused_definitions_pruned: int = 0
+    source_attributes: Counter[str] = field(default_factory=Counter)
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "txbody_metadata": self.txbody_metadata,
+            "hidden_geometry_carriers": self.hidden_geometry_carriers,
+            "geometry_preview_wrappers": self.geometry_preview_wrappers,
+            "geometry_detail_markers": self.geometry_detail_markers,
+            "compatibility_normalizations": self.compatibility_normalizations,
+            "source_attributes": dict(sorted(self.source_attributes.items())),
+            "asset_references_rewritten": self.asset_references_rewritten,
+            "coordinate_attributes_compacted": self.coordinate_attributes_compacted,
+            "style_declarations_compacted": self.style_declarations_compacted,
+            "inherited_text_attributes_compacted": (
+                self.inherited_text_attributes_compacted
+            ),
+            "single_tspans_collapsed": self.single_tspans_collapsed,
+            "source_object_proxies": self.source_object_proxies,
+            "source_object_proxy_bytes": self.source_object_proxy_bytes,
+            "semantic_shapes": self.semantic_shapes,
+            "semantic_tables": self.semantic_tables,
+            "semantic_table_preview_bytes": self.semantic_table_preview_bytes,
+            "unused_definitions_pruned": self.unused_definitions_pruned,
+        }
+
+    def merge(self, other: "ProjectionStats") -> None:
+        self.txbody_metadata += other.txbody_metadata
+        self.hidden_geometry_carriers += other.hidden_geometry_carriers
+        self.geometry_preview_wrappers += other.geometry_preview_wrappers
+        self.geometry_detail_markers += other.geometry_detail_markers
+        self.compatibility_normalizations += other.compatibility_normalizations
+        self.asset_references_rewritten += other.asset_references_rewritten

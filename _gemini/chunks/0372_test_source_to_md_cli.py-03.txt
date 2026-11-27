@@ -1,0 +1,81 @@
+            ("/abs", "[label](https://example.com/abs)"),
+            ("//cdn.x/y", "[label](https://cdn.x/y)"),
+            ("#frag", "[label](#frag)"),
+            ("mailto:reader@example.com", "[label](mailto:reader@example.com)"),
+            ("tel:+123456789", "[label](tel:+123456789)"),
+            ("javascript:void(0)", "label"),
+            ("JavaScript:void(0)", "label"),
+        ]
+        for href, expected in cases:
+            with self.subTest(href=href):
+                soup = web_to_md.BeautifulSoup(f'<p><a href="{href}">label</a></p>', "html.parser")
+                self.assertEqual(
+                    web_to_md.simple_html_to_markdown_traversal(soup, "https://example.com/a/page"),
+                    expected,
+                )
+
+    def test_process_url_resolves_against_redirect_and_first_base_href(self) -> None:
+        cases = [
+            ("", "https://redirect.example/docs/"),
+            ('<base href="https://base.example/root/">', "https://base.example/root/"),
+            ('<base href="../assets/">', "https://redirect.example/assets/"),
+            ('<base target="_blank"><base href="/first/"><base href="/ignored/">',
+             "https://redirect.example/first/"),
+        ]
+        for base, expected_base in cases:
+            with self.subTest(base=base), tempfile.TemporaryDirectory() as tmp:
+                html = (
+                    f"<html><head><title>Links</title>{base}</head><body>"
+                    '<p><a href="target">target</a> <img src="pic.png" alt="pic"></p>'
+                    "</body></html>"
+                )
+                response = Mock(
+                    content=html.encode("utf-8"),
+                    headers={"Content-Type": "text/html; charset=utf-8"},
+                    encoding="utf-8",
+                    apparent_encoding="utf-8",
+                    url="https://redirect.example/docs/page",
+                )
+                response.raise_for_status.return_value = None
+                output = Path(tmp) / "page.md"
+                with patch.object(web_to_md, "_http_get", return_value=response), redirect_stdout(io.StringIO()):
+                    result = web_to_md.process_url(
+                        "https://original.example/start", str(output), download_images=False,
+                    )
+                self.assertTrue(result[0], result[2])
+                markdown = output.read_text(encoding="utf-8")
+                self.assertIn(f"[target]({expected_base}target)", markdown)
+                self.assertIn(f"![pic]({expected_base}pic.png)", markdown)
+
+
+class SourceCollisionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+
+    def _run_cli(self, *arguments: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "source_to_md.py"), *arguments, "--json"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+
+    def _outputs(self, result: subprocess.CompletedProcess) -> list[Path]:
+        return [
+            Path(json.loads(line)["markdown"])
+            for line in result.stdout.splitlines() if line.startswith("{")
+        ]
+
+    def test_same_stem_batch_preserves_markdown_in_both_orders(self) -> None:
+        for reverse in (False, True):
+            for output_directory in (False, True):
+                with self.subTest(reverse=reverse, output_directory=output_directory):
+                    root = self.root / f"{reverse}_{output_directory}"
+                    root.mkdir()
+                    text_source = root / "same.txt"
+                    markdown_source = root / "same.md"
+                    text_source.write_text("TEXT-SOURCE\n", encoding="utf-8")
+                    markdown_source.write_text("ORIGINAL-MARKDOWN\n", encoding="utf-8")

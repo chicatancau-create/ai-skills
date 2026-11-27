@@ -1,0 +1,65 @@
+        self.assertFalse(group.findall('p:sp/p:spPr/a:xfrm[@rot]', NS))
+
+    def test_single_rect_matrix_matches_direct_geometry_and_skew_stays_rejected(self) -> None:
+        for transform in ('matrix(0 1 -1 0 220 20)', 'matrix(2 0 0 3 10 20)'):
+            with self.subTest(transform=transform):
+                rect = '<rect x="100" y="120" width="80" height="30" {transform}/>'
+                self._svg(rect.format(transform=f'transform="{transform}"'))
+                direct = self._export().find('.//p:sp/p:spPr', NS)
+                self._svg(f'<g transform="{transform}">{rect.format(transform="")}</g>')
+                grouped = self._export().find('.//p:sp/p:spPr', NS)
+                self.assertEqual(ET.tostring(grouped), ET.tostring(direct))
+        for transform in ('matrix(1 0 0.36 1 0 0)', 'skewX(20)'):
+            for body in (
+                '<rect x="100" y="120" width="80" height="30" transform="{transform}"/>',
+                '<g transform="{transform}"><rect x="100" y="120" width="80" height="30"/></g>',
+            ):
+                with self.subTest(transform=transform, body=body):
+                    self._svg(body.format(transform=transform))
+                    with self.assertRaisesRegex(SvgNativeConversionError, 'skew|skewX'):
+                        self._export()
+
+    def test_root_opacity_multiplies_group_and_fill_opacity(self) -> None:
+        for attributes in ('opacity="0.5"', 'style="opacity:0.5"', 'opacity="0.8" style="opacity:0.5"'):
+            for group_opacity, expected in (('1', '50000'), ('0.5', '25000')):
+                with self.subTest(attributes=attributes, group_opacity=group_opacity):
+                    self._svg(
+                        f'<g opacity="{group_opacity}" data-pptx-bounds="50 50 500 300">'
+                        '<rect x="100" y="100" width="200" height="100" fill="#FF0000"/></g>',
+                        attributes,
+                    )
+                    self.assertFalse(self._check()['errors'])
+                    alpha = self._export().find('.//p:sp/p:spPr/a:solidFill/a:srgbClr/a:alpha', NS)
+                    self.assertIsNotNone(alpha)
+                    self.assertEqual(alpha.get('val'), expected)
+        self._svg('<rect width="1280" height="720" fill="#FF0000"/>', 'opacity="0"')
+        self.assertEqual(self._export().find('.//a:alpha', NS).get('val'), '0')
+        self._svg(
+            '<rect x="100" y="100" width="200" height="100" fill="#FF0000"/>',
+            'opacity="0.5" fill-opacity="0.5"',
+        )
+        self.assertEqual(self._export().find('.//a:alpha', NS).get('val'), '25000')
+
+    def _native_gradient(self, alpha: str = '') -> ET.Element:
+        gradient = ET.fromstring(
+            '<linearGradient xmlns="http://www.w3.org/2000/svg" id="g" x1="0" y1="0" x2="1" y2="0">'
+            '<stop offset="0" stop-color="#FF0000"/><stop offset="1" stop-color="#0000FF"/>'
+            '</linearGradient>'
+        )
+        native = ET.fromstring(
+            f'<a:gradFill xmlns:a="{NS["a"]}"><a:gsLst>'
+            f'<a:gs pos="0"><a:srgbClr val="FF0000">{alpha}</a:srgbClr></a:gs>'
+            '<a:gs pos="100000"><a:schemeClr val="accent1"/></a:gs>'
+            '</a:gsLst><a:lin ang="0" scaled="1"/></a:gradFill>'
+        )
+        gradient.attrib.update(native_gradient_metadata(native, gradient))
+        return gradient
+
+    def test_native_gradient_opacity_uses_copy_and_preserves_identity(self) -> None:
+        for source_alpha, expected in (('', '50000'), ('<a:alpha val="33333"/>', '16667')):
+            with self.subTest(source_alpha=source_alpha):
+                gradient = self._native_gradient(source_alpha)
+                original = preserved_native_gradient_xml(gradient)
+                attributes = dict(gradient.attrib)
+                tinted = ET.fromstring(build_gradient_fill(gradient, opacity=0.5))
+                self.assertEqual([n.get('val') for n in tinted.findall('.//a:alpha', NS)], [expected, '50000'])

@@ -1,0 +1,89 @@
+                and '/' not in filename
+                and '\\' not in filename
+                and ':' not in filename
+            )
+            filename_is_canonical = raw_filename in {
+                filename,
+                f"images/{filename}",
+            }
+            if not filename_is_bare or not filename_is_canonical:
+                self._illustration_issues.append((
+                    'error',
+                    'planned_image_invalid_filename',
+                    f"Design Spec §VIII Filename {raw_filename!r} must be "
+                    "a non-empty bare filename or canonical "
+                    "images/<filename> path.",
+                ))
+            elif filename in seen_filenames:
+                self._illustration_issues.append((
+                    'error',
+                    'planned_image_duplicate_filename',
+                    f"Design Spec §VIII repeats Filename {filename!r}; "
+                    "one resource must have one authoritative row.",
+                ))
+            else:
+                seen_filenames.add(filename)
+
+            if current_image_contract and not layout:
+                self._illustration_issues.append((
+                    'error',
+                    'planned_image_missing_pattern',
+                    f"{filename or '(missing filename)'} has an empty Design "
+                    "Spec §VIII Image pattern; preserve one non-empty "
+                    "Strategist recommendation without locking SVG geometry.",
+                ))
+            if current_image_contract and crop not in {'adaptive', 'no-crop'}:
+                self._illustration_issues.append((
+                    'error',
+                    'planned_image_invalid_crop_policy',
+                    f"{filename or '(missing filename)'} has invalid Design "
+                    f"Spec §VIII Crop Policy "
+                    f"{row.get('Crop Policy', '').strip()!r}; use adaptive "
+                    "or no-crop.",
+                ))
+
+            if acquire not in valid_acquisitions:
+                self._illustration_issues.append((
+                    'error',
+                    'planned_image_invalid_acquisition',
+                    f"{filename or '(missing filename)'} has invalid "
+                    f"Acquire Via {row.get('Acquire Via', '').strip()!r}.",
+                ))
+                continue
+            if status not in valid_statuses:
+                self._illustration_issues.append((
+                    'error',
+                    'planned_image_invalid_status',
+                    f"{filename or '(missing filename)'} has invalid "
+                    f"Status {row.get('Status', '').strip()!r}.",
+                ))
+                continue
+            if status in {'pending', 'failed'}:
+                self._illustration_issues.append((
+                    'error',
+                    'planned_image_not_terminal',
+                    f"{filename or '(missing filename)'} has non-terminal "
+                    f"Status {row.get('Status', '').strip()!r}; finish the "
+                    "owning acquisition or mark it Needs-Manual before export.",
+                ))
+            elif status not in terminal_by_acquisition[acquire]:
+                expected = ', '.join(sorted(terminal_by_acquisition[acquire]))
+                self._illustration_issues.append((
+                    'error',
+                    'planned_image_status_mismatch',
+                    f"{filename or '(missing filename)'} uses Acquire Via "
+                    f"{acquire!r} but Status {status!r}; terminal status must "
+                    f"be one of: {expected}.",
+                ))
+
+        if lock_error:
+            self._illustration_issues.append((
+                'error',
+                'image_lock_unreadable',
+                lock_error,
+            ))
+            return
+
+        placed_rows = [
+            row for row in rows
+            if self._row_type(row).lower() not in {'illustration sheet', 'source'}

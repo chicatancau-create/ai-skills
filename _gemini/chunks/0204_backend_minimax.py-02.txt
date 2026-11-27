@@ -1,0 +1,106 @@
+            f"Supported: {supported}"
+        )
+    return dimensions
+
+
+def _extract_image_bytes(payload: dict) -> bytes | None:
+    """Extract inline base64 image bytes from a MiniMax response payload."""
+    data = payload.get("data") or {}
+    image_base64 = data.get("image_base64") or []
+    if image_base64:
+        return base64.b64decode(image_base64[0])
+    return None
+
+
+def _extract_image_url(payload: dict) -> str | None:
+    """Extract the first hosted image URL from a MiniMax response payload."""
+    data = payload.get("data") or {}
+    image_urls = data.get("image_urls") or []
+    if image_urls:
+        return image_urls[0]
+    return None
+
+
+def _generate_image(api_key: str, prompt: str,
+                    aspect_ratio: str = "1:1", image_size: str = "1K",
+                    output_dir: str = None, filename: str = None,
+                    model: str = DEFAULT_MODEL, base_url: str = DEFAULT_ENDPOINT) -> str:
+    """Generate one image with the MiniMax backend."""
+    model = _validate_model(model)
+    width, height = _resolve_dimensions(aspect_ratio, image_size)
+    url = _resolve_url(base_url)
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "width": width,
+        "height": height,
+        "response_format": DEFAULT_RESPONSE_FORMAT,
+        "n": 1,
+    }
+
+    print("[MiniMax Image]")
+    print(f"  Model:        {model}")
+    print(f"  Prompt:       {prompt[:120]}{'...' if len(prompt) > 120 else ''}")
+    print(f"  Aspect Ratio: {aspect_ratio}")
+    print(f"  Resolution:   {width}x{height} (from image_size={image_size})")
+    print()
+    print("  [..] Generating...", end="", flush=True)
+    start = time.time()
+    response = requests.post(url, headers=headers, json=payload, timeout=300)
+    elapsed = time.time() - start
+    print(f"\n  [DONE] Response received ({elapsed:.1f}s)")
+
+    if response.status_code != 200:
+        raise http_error(response, "MiniMax image generation")
+
+    data = response.json()
+    base_resp = data.get("base_resp") or {}
+    if base_resp.get("status_code") not in (None, 0, "0"):
+        raise RuntimeError(f"MiniMax image generation failed: {data}")
+
+    image_bytes = _extract_image_bytes(data)
+    if image_bytes:
+        ext = detect_image_extension(image_bytes) or ".jpeg"
+        path = resolve_output_path(prompt, output_dir, filename, ext)
+        return save_image_bytes(image_bytes, path)
+
+    image_url = _extract_image_url(data)
+    if image_url:
+        # image-01 serves JPEG; save_image_bytes realigns the extension when the
+        # downloaded bytes are a different format.
+        path = resolve_output_path(prompt, output_dir, filename, ".jpeg")
+        return download_image(image_url, path)
+
+    raise RuntimeError(f"MiniMax response missing image data: {data}")
+
+
+def generate(prompt: str,
+             aspect_ratio: str = "1:1", image_size: str = "1K",
+             output_dir: str = None, filename: str = None,
+             model: str = None, max_retries: int = MAX_RETRIES) -> str:
+    """Generate an image with retries using the MiniMax backend."""
+    resolved_model = model or os.environ.get("MINIMAX_MODEL") or DEFAULT_MODEL
+    _validate_model(resolved_model)
+    normalized_size = normalize_image_size(image_size)
+    _resolve_dimensions(aspect_ratio, normalized_size)
+    api_key = require_api_key(
+        "MINIMAX_API_KEY",
+        message="No API key found. Set MINIMAX_API_KEY in the current environment or a .env file.",
+    )
+    base_url = os.environ.get("MINIMAX_BASE_URL") or DEFAULT_ENDPOINT
+
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            return _generate_image(
+                api_key=api_key,
+                prompt=prompt,
+                aspect_ratio=aspect_ratio,
+                image_size=normalized_size,
+                output_dir=output_dir,
+                filename=filename,

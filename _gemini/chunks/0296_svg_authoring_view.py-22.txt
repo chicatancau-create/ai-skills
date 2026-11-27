@@ -1,0 +1,101 @@
+    backup_root = staging_root / "previous"
+    backups: dict[Path, Path | None] = {}
+
+    for index, (target, _) in enumerate(staged):
+        if not os.path.lexists(target):
+            backups[target] = None
+            continue
+        if not force:
+            raise FileExistsError(f"Output file already exists: {target}")
+        if target.is_dir() and not target.is_symlink():
+            raise IsADirectoryError(f"Output target is a directory: {target}")
+
+        backup = backup_root / f"{index:06d}.bak"
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(target, backup, follow_symlinks=False)
+        backups[target] = backup
+
+    created: list[Path] = []
+    published: list[tuple[Path, Path | None]] = []
+    try:
+        for target, _ in staged:
+            _ensure_directory(target.parent, created)
+
+        staging_device = staging_root.stat().st_dev
+        for target, _ in staged:
+            if target.parent.stat().st_dev != staging_device:
+                raise OSError(
+                    f"Cannot atomically publish across filesystems: {target}"
+                )
+            if backups[target] is None and os.path.lexists(target):
+                raise FileExistsError(
+                    f"Output appeared while projections were staged: {target}"
+                )
+
+        for target, staged_file in staged:
+            staged_file.replace(target)
+            published.append((target, backups[target]))
+    except OSError as exc:
+        rollback_errors = _rollback_published_files(published, created)
+        if rollback_errors:
+            details = "; ".join(rollback_errors)
+            raise RuntimeError(
+                f"Batch publish failed ({exc}); rollback was incomplete: {details}"
+            ) from exc
+        raise
+
+
+def project_svg_batch(
+    mapping: list[tuple[Path, Path]],
+    source_root: Path,
+    output_dir: Path,
+    *,
+    force: bool,
+    projection_kind: str,
+    source_proxy_dir: Path | None = None,
+    publish_source_proxies: bool = True,
+) -> list[ProjectionReport]:
+    """Build and publish one complete authoring bundle transactionally."""
+    if source_proxy_dir is not None and _is_within(
+        source_proxy_dir.resolve(),
+        output_dir.resolve(),
+    ):
+        raise ValueError("Source proxy assets must live outside the authoring bundle")
+    rendered = [
+        _render_projection(source, output, source_proxy_dir)
+        for source, output in mapping
+    ]
+    proxy_assets: dict[Path, bytes] = {}
+    for _, _, rendered_assets in rendered:
+        for target, payload in rendered_assets.items():
+            previous = proxy_assets.get(target)
+            if previous is not None and previous != payload:
+                raise ValueError(f"Source proxy collision: {target}")
+            proxy_assets[target] = payload
+    if source_proxy_dir is not None and not publish_source_proxies:
+        for target, payload in proxy_assets.items():
+            if not target.is_file() or target.read_bytes() != payload:
+                raise ValueError(
+                    f"Source proxy asset is missing or stale: {target}"
+                )
+    staging_parent = _nearest_existing_directory(output_dir.parent)
+
+    with tempfile.TemporaryDirectory(
+        prefix=".svg-authoring-view-",
+        dir=staging_parent,
+    ) as temporary:
+        staging_root = Path(temporary)
+        new_root = staging_root / "projected"
+        staged: list[tuple[Path, Path]] = []
+
+        for report, projected, _ in rendered:
+            relative = report.output.relative_to(output_dir)
+            staged_file = new_root / relative
+            staged_file.parent.mkdir(parents=True, exist_ok=True)
+            staged_file.write_bytes(projected)
+            staged.append((report.output, staged_file))
+
+        manifest_path = output_dir / AUTHORING_MANIFEST_NAME
+        staged_manifest = new_root / AUTHORING_MANIFEST_NAME
+        staged_manifest.write_bytes(
+            _authoring_manifest_bytes(

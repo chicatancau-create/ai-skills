@@ -1,0 +1,118 @@
+        measure.append(selector)
+
+    for selector, bounds in _measure_bounds(source, measure).items() if measure else []:
+        resolved[selector] = (bounds, "browser")
+    return {
+        selector: (_padded_bounds(bounds, padding), source_name)
+        for selector, (bounds, source_name) in resolved.items()
+    }
+
+
+def _referenced_ids(elem: ET.Element) -> set[str]:
+    refs: set[str] = set()
+    for item in elem.iter():
+        for attr_name, value in item.attrib.items():
+            refs.update(
+                match.group(2)[1:]
+                for match in _URL_RE.finditer(value)
+                if match.group(2).startswith("#")
+            )
+            if _local(attr_name) == "href" and value.startswith("#") and len(value) > 1:
+                refs.add(value[1:])
+        if item.text:
+            refs.update(
+                match.group(2)[1:]
+                for match in _URL_RE.finditer(item.text)
+                if match.group(2).startswith("#")
+            )
+    return refs
+
+
+def _visual_clone(
+    root: ET.Element,
+    target: ET.Element,
+    parents: dict[ET.Element, ET.Element],
+) -> tuple[ET.Element, set[ET.Element]]:
+    clone = copy.deepcopy(target)
+    included = {target}
+    cursor = target
+    while parents.get(cursor) is not root:
+        ancestor = parents.get(cursor)
+        if ancestor is None or _local(ancestor.tag) != "g":
+            raise SvgPictureError("Selected group is not in the visible SVG tree")
+        unsafe_attrs = [
+            _local(name)
+            for name in ancestor.attrib
+            if not (
+                _local(name) == "id"
+                or _local(name) == "role"
+                or _local(name).startswith("data-")
+                or _local(name).startswith("aria-")
+            )
+        ]
+        semantic_attrs = _semantic_markers(ancestor)
+        if unsafe_attrs or semantic_attrs:
+            details = ", ".join(sorted(set(unsafe_attrs + semantic_attrs)))
+            raise SvgPictureError(
+                "Selected group has a non-neutral ancestor "
+                f"{ancestor.get('id') or '<g>'} ({details}); select that outer group instead"
+            )
+        shell = ET.Element(ancestor.tag, dict(ancestor.attrib))
+        shell.append(clone)
+        clone = shell
+        included.add(ancestor)
+        cursor = ancestor
+    return clone, included
+
+
+def _dependency_elements(
+    root: ET.Element,
+    target: ET.Element,
+    visual: ET.Element,
+    included: set[ET.Element],
+    parents: dict[ET.Element, ET.Element],
+) -> list[ET.Element]:
+    by_id = _index_ids(root)
+    queue = sorted(_referenced_ids(visual))
+    dependencies: list[ET.Element] = []
+    seen: set[str] = set()
+    while queue:
+        ref_id = queue.pop(0)
+        if ref_id in seen:
+            continue
+        seen.add(ref_id)
+        dependency = by_id.get(ref_id)
+        if dependency is None:
+            raise SvgPictureError(f"Referenced SVG definition #{ref_id} does not exist")
+        if dependency in included or _is_descendant(target, dependency):
+            continue
+        dependencies.append(dependency)
+        queue.extend(sorted(_referenced_ids(dependency) - seen))
+
+    dependency_set = set(dependencies)
+    return [
+        dependency
+        for dependency in dependencies
+        if not any(ancestor in dependency_set for ancestor in _ancestors(dependency, parents))
+    ]
+
+
+def _ancestors(
+    elem: ET.Element,
+    parents: dict[ET.Element, ET.Element],
+) -> list[ET.Element]:
+    found: list[ET.Element] = []
+    cursor = elem
+    while cursor in parents:
+        cursor = parents[cursor]
+        found.append(cursor)
+    return found
+
+
+def _data_uri(resource: Path) -> str:
+    try:
+        payload = resource.read_bytes()
+    except OSError as exc:
+        raise SvgPictureError(f"Cannot embed local SVG resource {resource}: {exc}") from exc
+    mime = mimetypes.guess_type(resource.name)[0] or "application/octet-stream"
+    encoded = base64.b64encode(payload).decode("ascii")

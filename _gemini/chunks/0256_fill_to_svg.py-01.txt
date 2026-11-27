@@ -1,0 +1,133 @@
+"""DrawingML fill -> SVG fill conversion.
+
+Handles:
+- <a:solidFill>     -> fill="#XXXXXX" (+ fill-opacity)
+- <a:noFill/>       -> fill="none"
+- <a:gradFill>      -> linearGradient/radialGradient in <defs>, fill="url(#id)"
+- <a:blipFill>      -> handled by pic_to_svg (this module short-circuits)
+
+Returned FillResult is a struct of attribute dict + optional <defs> XML so the
+slide assembler can collect gradient defs without conflicting IDs.
+"""
+
+from __future__ import annotations
+
+import math
+import re
+from dataclasses import dataclass, field
+from decimal import Decimal
+from xml.etree import ElementTree as ET
+
+from pptx_gradients import native_gradient_metadata
+
+from .color_resolver import (
+    COLOR_TAGS,
+    ColorPalette,
+    find_color_elem,
+    resolve_color,
+    resolve_solid_fill_color,
+    validate_no_fill,
+)
+from .emu_units import (
+    ANGLE_UNIT,
+    NS,
+    PERCENT_UNIT,
+    fmt_num,
+    format_ooxml_alpha,
+    format_ooxml_unit_ratio,
+)
+
+
+_OOXML_INTEGER_RE = re.compile(r"[+-]?[0-9]+")
+_OOXML_PERCENT_LITERAL_RE = re.compile(
+    r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)%"
+)
+_OOXML_FULL_CIRCLE = 360 * ANGLE_UNIT
+_OOXML_PERCENTAGE_MIN = Decimal(-(2**31)) / Decimal(PERCENT_UNIT)
+_OOXML_PERCENTAGE_MAX = Decimal(2**31 - 1) / Decimal(PERCENT_UNIT)
+_SVG_RADIAL_FOCUS_TOLERANCE = Decimal(1) / Decimal(PERCENT_UNIT)
+_DRAWINGML_FILL_NAMES = (
+    "noFill",
+    "solidFill",
+    "gradFill",
+    "blipFill",
+    "pattFill",
+    "grpFill",
+)
+_DRAWINGML_FILL_TAGS = {
+    f"{{{NS['a']}}}{name}": name for name in _DRAWINGML_FILL_NAMES
+}
+
+
+@dataclass
+class FillResult:
+    """Resolved fill: SVG attributes to apply + optional <defs> entries."""
+
+    attrs: dict[str, str] = field(default_factory=dict)
+    defs: list[str] = field(default_factory=list)  # XML strings of <linearGradient>/<radialGradient>
+
+    @classmethod
+    def none_fill(cls) -> "FillResult":
+        return cls(attrs={"fill": "none"})
+
+    @classmethod
+    def inherit(cls) -> "FillResult":
+        # No fill resolved — let caller decide whether to default
+        return cls()
+
+
+def resolve_fill(
+    sp_pr: ET.Element | None,
+    palette: ColorPalette | None,
+    *,
+    id_prefix: str = "g",
+    id_seq: list[int] | None = None,
+    placeholder_hex: str | None = None,
+    group_fill: FillResult | None = None,
+) -> FillResult:
+    """Inspect <p:spPr>'s fill children and emit an SVG fill descriptor.
+
+    Args:
+        sp_pr: <p:spPr> or any element that may directly hold a fill child.
+        palette: ColorPalette for scheme color resolution.
+        id_prefix: prefix for generated gradient IDs.
+        id_seq: external counter (single-element list) so callers can share
+            unique gradient IDs across the whole slide.
+
+    Returns:
+        FillResult. If no recognized fill is found, result.attrs is empty —
+        the caller should apply its own default (typically transparent /
+        inherit from the source SVG).
+    """
+    if sp_pr is None:
+        return FillResult.inherit()
+
+    handlers = {
+        "noFill": _resolve_no_fill,
+        "solidFill": _resolve_solid_fill,
+        "gradFill": _resolve_grad_fill,
+        "blipFill": _resolve_blip_fill,
+        "pattFill": _resolve_patt_fill,
+    }
+
+    fill_name = _drawingml_fill_name(sp_pr)
+    fill_elem = sp_pr if fill_name is not None else None
+    if fill_elem is None:
+        fill_children = []
+        for child in sp_pr:
+            child_name = _drawingml_fill_name(child)
+            if child_name is not None:
+                fill_children.append((child, child_name))
+        if len(fill_children) > 1:
+            raise ValueError(
+                "DrawingML container must contain at most one fill"
+            )
+        if not fill_children:
+            return FillResult.inherit()
+        fill_elem, fill_name = fill_children[0]
+
+    if fill_name == "grpFill":
+        if group_fill is None:
+            raise ValueError(
+                "DrawingML grpFill requires a resolved ancestor group fill"
+            )

@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""PPT Master SVG quality-check CLI implementation.
+
+Parses the legacy command-line contract and delegates validation to the checker.
+
+Usage:
+    python3 scripts/svg_quality_checker.py <svg_file_or_project> [options]
+
+Examples:
+    python3 scripts/svg_quality_checker.py projects/demo --stage final --json
+
+Dependencies:
+    Standard library plus local PPT Master validation modules.
+"""
+
+import json
+import sys
+from xml.etree import ElementTree as ET
+from pathlib import Path
+
+from attribution_guard import require_skill_integrity
+from slide_roster import discover_slide_svgs
+
+from .checker import SVGQualityChecker
+
+
+def _first_page_target(target: str) -> str:
+    """Resolve a project/directory target to its first authored SVG page."""
+    path = Path(target)
+    if path.is_file():
+        return str(path)
+    svg_root = path / "svg_output" if (path / "svg_output").is_dir() else path
+    svg_files = discover_slide_svgs(svg_root) if svg_root.is_dir() else []
+    return str(svg_files[0]) if svg_files else target
+
+
+def _early_targets(target: str) -> list[Path]:
+    """Resolve a project/directory target to every authored SVG page so far."""
+    path = Path(target)
+    if path.is_file():
+        return [path]
+    svg_root = path / "svg_output" if (path / "svg_output").is_dir() else path
+    return discover_slide_svgs(svg_root) if svg_root.is_dir() else []
+
+
+def _page_target(target: str, page: str) -> str:
+    """Resolve one requested page while keeping it inside ``svg_output/``."""
+    target_path = Path(target).resolve()
+    svg_root = (
+        target_path
+        if target_path.is_dir() and target_path.name == "svg_output"
+        else target_path / "svg_output"
+    )
+    if not svg_root.is_dir():
+        raise ValueError(
+            "--stage page requires a project or svg_output directory target"
+        )
+    svg_root = svg_root.resolve()
+
+    requested = Path(page)
+    if requested.is_absolute():
+        candidates = [requested]
+    else:
+        candidates = [svg_root / requested]
+        if requested.parts and requested.parts[0] == "svg_output":
+            candidates.append(svg_root.parent / requested)
+        candidates.append(Path.cwd() / requested)
+
+    inside_candidates: list[Path] = []
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        try:
+            resolved.relative_to(svg_root)
+        except ValueError:
+            continue
+        if resolved not in inside_candidates:
+            inside_candidates.append(resolved)
+        if resolved.is_file() and resolved.suffix.casefold() == ".svg":
+            return str(resolved)
+
+    if not inside_candidates:
+        raise ValueError("--page must resolve to a path under svg_output/")
+    candidate = inside_candidates[0]
+    if candidate.suffix.casefold() != ".svg":
+        raise ValueError(f"--page must name an SVG file: {page}")
+    raise ValueError(f"--page SVG does not exist: {page}")
+
+
+def _default_json_report_path(
+    checker: SVGQualityChecker,
+    target: str,
+    stage: str,
+    *,
+    roundtrip: bool = False,
+) -> Path:
+    """Choose a stage-specific report path without overwriting the final gate."""
+    target_path = Path(target)
+    project_path = checker._resolve_project_path(target_path)
+    report_name = {
+        "final": "svg_quality_report.json",
+        "first-page": "svg_quality_first_page_report.json",
+        "early": "svg_quality_early_report.json",
+        "page": "svg_quality_page_report.json",
+    }[stage]
+    if roundtrip:
+        return target_path / "validation" / report_name
+    if (
+        (project_path / "svg_output").is_dir()
+        or (project_path / "design_spec.md").is_file()
+    ):
+        return project_path / "validation" / report_name
+    base = target_path if target_path.is_dir() else target_path.parent
+    return base / report_name
+
+
+def print_usage() -> None:
+    """Print CLI usage information."""
+    print("PPT Master - SVG Quality Check Tool\n")
+    print("Usage:")

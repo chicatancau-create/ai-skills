@@ -1,0 +1,110 @@
+                    "diagram_count": len(slide.get("diagrams", [])),
+                }
+                for slide in slide_library.get("slides", [])
+            ],
+        },
+        "tables": _table_summary(slide_library),
+        "charts": _chart_summary(slide_library),
+        "diagrams": _diagram_summary(slide_library),
+    }
+
+
+SOURCE_INDEX_NAME = "source_profile.json"
+
+
+@contextmanager
+def _source_index_lock(output_dir: Path):
+    """Serialize source-index bundle publication with a persistent lock file."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = output_dir / f"{SOURCE_INDEX_NAME}.lock"
+    with lock_path.open("a+b") as lock_file:
+        if fcntl is not None:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            return
+
+        if msvcrt is not None:
+            lock_file.seek(0, os.SEEK_END)
+            if lock_file.tell() == 0:
+                lock_file.write(b"\0")
+                lock_file.flush()
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            return
+
+        raise RuntimeError(
+            "Cannot safely update source_profile.json: no supported file-lock API"
+        )
+
+
+def _load_source_index(index_path: Path) -> dict[str, Any]:
+    """Load and validate an existing multi-deck source index."""
+    if not index_path.exists():
+        return {}
+    if not index_path.is_file():
+        raise RuntimeError(f"Source index is not a file: {index_path}")
+
+    try:
+        loaded = json.loads(index_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeError) as exc:
+        raise RuntimeError(
+            f"Source index contains invalid JSON and was left unchanged: {index_path}"
+        ) from exc
+    except OSError as exc:
+        raise RuntimeError(f"Cannot read source index: {index_path}: {exc}") from exc
+
+    if not isinstance(loaded, dict) or not isinstance(loaded.get("decks"), list):
+        raise RuntimeError(
+            f"Source index must be a JSON object with a decks array and was left unchanged: "
+            f"{index_path}"
+        )
+    for index, deck in enumerate(loaded["decks"]):
+        if not isinstance(deck, dict):
+            raise RuntimeError(
+                f"Source index decks[{index}] must be an object and was left unchanged: "
+                f"{index_path}"
+            )
+    return loaded
+
+
+def _upsert_source_index_unlocked(
+    output_dir: Path,
+    digest: dict[str, Any],
+) -> Path:
+    index_path = output_dir / SOURCE_INDEX_NAME
+    index = _load_source_index(index_path)
+    stem = digest.get("stem")
+    decks = [d for d in index.get("decks", []) if d.get("stem") != stem]
+    decks.append(digest)
+    decks.sort(key=lambda d: str(d.get("stem", "")))
+    index = {
+        "schema": "pptx_intake_index.v1",
+        "deck_count": len(decks),
+        "decks": decks,
+    }
+    _write_json(index_path, index)
+    return index_path
+
+
+def upsert_source_index(output_dir: Path, digest: dict[str, Any]) -> Path:
+    """Merge one deck digest into the serialized multi-deck source index.
+
+    The index stays the single must-read entry for the Strategist: it inlines every
+    deck's digest under `decks[]`, so a one-deck project is a one-entry index and a
+    multi-deck project lists each source deck self-containedly. Re-importing a deck
+    with the same stem replaces its entry in place.
+    """
+    with _source_index_lock(output_dir):
+        return _upsert_source_index_unlocked(output_dir, digest)
+
+
+def run_intake(pptx_path: Path, output_dir: Path) -> dict[str, Path]:
+    """Write `<stem>.identity.json`, `<stem>.slide_library.json`, and merge the

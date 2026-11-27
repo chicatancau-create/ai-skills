@@ -1,0 +1,112 @@
+        branches = [
+            branch
+            for branch in list(child)
+            if branch.tag in {choice_tag, fallback_tag}
+        ]
+        selected_timing = None
+        for branch in branches:
+            if (
+                branch.tag == choice_tag
+                and 'p14' in (branch.get('Requires') or '').split()
+            ):
+                selected_timing = branch.find(_qn(PML_NS, 'timing'))
+                if selected_timing is not None:
+                    break
+        if selected_timing is None:
+            for branch in branches:
+                selected_timing = branch.find(_qn(PML_NS, 'timing'))
+                if selected_timing is not None:
+                    break
+        if selected_timing is None:
+            continue
+        projected.remove(child)
+        projected.insert(index, copy.deepcopy(selected_timing))
+    return projected
+
+
+def validate_slide_animation_structure(
+    slide_root: ET.Element,
+    *,
+    require_supported_effects: bool = False,
+) -> list[str]:
+    """Return root timing, target, and generated-object structure errors."""
+    errors: list[str] = []
+    if slide_root.tag != _qn(PML_NS, 'sld'):
+        return ['animation validation requires a PresentationML p:sld root']
+    slide_root = _select_supported_timing_branch(slide_root)
+
+    direct_timings = [
+        child for child in list(slide_root)
+        if child.tag == _qn(PML_NS, 'timing')
+    ]
+    all_timings = list(slide_root.iter(_qn(PML_NS, 'timing')))
+    nested_count = len(all_timings) - len(direct_timings)
+    if nested_count:
+        errors.append(
+            f'slide contains {nested_count} nested p:timing element(s); '
+            'timing must be a direct child of p:sld'
+        )
+    if len(direct_timings) > 1:
+        errors.append(
+            f'slide has {len(direct_timings)} root p:timing elements; expected at most 1'
+        )
+    if not direct_timings:
+        return errors
+
+    timing = direct_timings[0]
+    root_children = list(slide_root)
+    timing_index = root_children.index(timing)
+    for required_before in ('cSld', 'clrMapOvr', 'transition'):
+        sibling = next(
+            (
+                child for child in root_children
+                if child.tag == _qn(PML_NS, required_before)
+            ),
+            None,
+        )
+        if sibling is not None and root_children.index(sibling) > timing_index:
+            errors.append(f'p:{required_before} must precede p:timing')
+    extension_list = next(
+        (
+            child for child in root_children
+            if child.tag == _qn(PML_NS, 'extLst')
+        ),
+        None,
+    )
+    if extension_list is not None and root_children.index(extension_list) < timing_index:
+        errors.append('root p:extLst must follow p:timing')
+
+    timing_children = list(timing)
+    timing_name_order = [_local_name(child.tag) for child in timing_children]
+    if 'bldLst' in timing_name_order and 'tnLst' in timing_name_order:
+        if timing_name_order.index('bldLst') < timing_name_order.index('tnLst'):
+            errors.append('p:tnLst must precede p:bldLst')
+
+    parent_map = {
+        child: parent
+        for parent in timing.iter()
+        for child in list(parent)
+    }
+    ctn_ids: list[int] = []
+    for ctn in timing.iter(_qn(PML_NS, 'cTn')):
+        if ctn.get('id') is None:
+            ancestor = parent_map.get(ctn)
+            while ancestor is not None and ancestor is not timing:
+                if ancestor.tag == _qn(PML_NS, 'subTnLst'):
+                    break
+                ancestor = parent_map.get(ancestor)
+            if (
+                ancestor is not None
+                and ancestor.tag == _qn(PML_NS, 'subTnLst')
+            ):
+                continue
+        value = _int_attribute(
+            ctn,
+            'id',
+            'p:cTn@id',
+            errors,
+            maximum=MAX_OOXML_UNSIGNED_INT,
+        )
+        if value is not None:
+            ctn_ids.append(value)
+    duplicates = sorted(

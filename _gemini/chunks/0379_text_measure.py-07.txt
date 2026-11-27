@@ -1,0 +1,97 @@
+            },
+            'longest_planned_line': longest[name],
+        }
+    return {
+        'roles': role_rows,
+        'script_samples': script_samples,
+        'source': source,
+        'generated_at': datetime.now(timezone.utc)
+        .isoformat(timespec='seconds')
+        .replace('+00:00', 'Z'),
+    }
+
+
+def _fallback_notes(
+    roles: dict[str, tuple[str, float]],
+    fallbacks: dict[str, str],
+) -> list[str]:
+    """Flag display-sized roles that inherited body_family by default."""
+    body = roles.get('body')
+    if body is None:
+        return []
+    notes = []
+    for role, fallback in sorted(fallbacks.items()):
+        size = roles[role][1]
+        if fallback == 'body_family' and size >= 2 * body[1]:
+            notes.append(
+                f'role {role} ({_format_number(size)}px, at least twice body) has '
+                f'no {role}_family and uses body_family; declare {role}_family '
+                'if it is display type'
+            )
+    return notes
+
+
+def _render_calibration_table(payload: dict[str, object], *, include_outline: bool) -> str:
+    role_rows = payload['roles']
+    assert isinstance(role_rows, dict)
+    headers = ['role', 'family', 'size', 'CJK ≈chars/100px', 'Latin ≈chars/100px', 'CAPS ≈chars/100px', 'DIGITS ≈chars/100px', 'CITE ≈chars/100px']
+    script_labels = sorted(
+        set(payload.get('script_samples') or {})
+        | {label for row in role_rows.values() for label in row.get('script_clusters_per_100px', {})}
+    )
+    headers.extend(f'{label} ≈clusters/100px' for label in script_labels)
+    if include_outline:
+        headers.append('longest planned line (px, slide, text)')
+    lines = [
+        f'[CALIBRATION] roles: {len(role_rows)} | source: {payload["source"]}',
+        ' | '.join(headers),
+        ' | '.join('---' for _header in headers),
+    ]
+    for name, raw_row in role_rows.items():
+        assert isinstance(raw_row, dict)
+        row = [
+            name,
+            str(raw_row['family']),
+            _format_number(float(raw_row['size'])),
+            f'{raw_row["cjk_chars_per_100px"]:.1f}',
+            f'{raw_row["latin_chars_per_100px"]:.1f}',
+            f'{raw_row["caps_chars_per_100px"]:.1f}',
+            f'{raw_row["digits_chars_per_100px"]:.1f}',
+            f'{raw_row.get("citation_chars_per_100px", 0.0):.1f}',
+        ]
+        script_rates = raw_row.get('script_clusters_per_100px') or {}
+        row.extend(f'{script_rates[label]:.1f}' if label in script_rates else '-' for label in script_labels)
+        if include_outline:
+            planned = raw_row['longest_planned_line']
+            row.append(
+                '-'
+                if planned is None
+                else f'{planned["px"]:.1f}px, {planned["slide"]}, {planned["text"]}'
+            )
+        lines.append(' | '.join(row))
+    for note in payload.get('notes') or []:
+        lines.append(f'[NOTE] {note}')
+    lines.append(
+        '[NOTE] mixed line width ≈ (CJK chars ÷ CJK rate + other chars ÷ Latin '
+        'rate) × 100; spaces and punctuation count as Latin, digits use the '
+        'DIGITS rate.'
+    )
+    if script_labels:
+        lines.append(
+            '[NOTE] a script column (' + ', '.join(script_labels) + ') counts '
+            'grapheme clusters of that script measured from the planned text; '
+            'use it instead of the Latin rate for runs in that script.'
+        )
+    if include_outline:
+        lines.append(
+            '[NOTE] the longest planned line is the §IX wording; a line rewritten '
+            'while authoring (an expanded title, a longer label) is re-estimated '
+            'with the rates — the outline column does not cover it.'
+        )
+    lines.append(
+        '[NOTE] rates ignore letter-spacing and average a mixed-case sample: '
+        'a tracked role (a kicker with letter-spacing) or a display-size line '
+        '(a cover title) is sized per string with measure --letter-spacing, '
+        'not from the table.'
+    )
+    lines.append(

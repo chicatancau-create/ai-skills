@@ -1,0 +1,104 @@
+        text_font_sizes=text_font_sizes,
+        text_letter_spacings=text_letter_spacings,
+    )
+    shapes: list[str] = []
+    converted = 0
+    skipped = 0
+    has_top_level_group = any(
+        effective_top_level(child).tag.replace(f'{{{SVG_NS}}}', '') == 'g'
+        for child in root
+    )
+    background_xml, background_skip_id = (
+        _extract_background_candidate(root, ctx)
+        if promote_background
+        else ('', None)
+    )
+    promoted_backgrounds = 1 if background_xml else 0
+    if background_xml and trace_events is not None:
+        trace_events.append({
+            'tag': 'rect',
+            'decision': 'native-background',
+            'reason': 'promoted-full-canvas-rect-to-bgPr',
+        })
+    # Per-element shape ids of every top-level child, used as an animation
+    # fallback when no <g id="..."> groups are present at the root.
+    fallback_targets: list = []
+
+    for child in root:
+        tag = child.tag.replace(f'{{{SVG_NS}}}', '')
+        if tag == 'defs':
+            continue
+        if id(child) == background_skip_id:
+            continue
+        try:
+            result = convert_element(child, ctx)
+        except SvgNativeConversionError as exc:
+            raise SvgNativeConversionError(f'{svg_path.name}: {exc}') from exc
+        if result:
+            shapes.append(result.xml)
+            converted += 1
+            m = re.search(r'<p:cNvPr id="(\d+)"', result.xml)
+            unit = effective_top_level(child)
+            elem_id = unit.get('id')
+            role = unit.get('data-pptx-role')
+            placeholder = unit.get('data-pptx-placeholder')
+            has_explicit_semantics = role is not None or placeholder is not None
+            structurally_static = unit.get('data-pptx-layer') is not None
+            legacy_chrome = (
+                is_static_page_frame(role, placeholder)
+                if has_explicit_semantics
+                else is_chrome_id(elem_id)
+            )
+            explicit_legacy_override = (
+                elem_id is not None
+                and elem_id in ctx.animation_group_overrides
+            )
+            if (
+                m
+                and not structurally_static
+                and (not legacy_chrome or explicit_legacy_override)
+            ):
+                fallback_targets.append((int(m.group(1)), elem_id or tag))
+        else:
+            if tag not in _NON_VISUAL_TAGS:
+                skipped += 1
+
+    unresolved_connector_targets = sorted(
+        ctx.referenced_shape_ids - ctx.claimed_shape_ids
+    )
+    if unresolved_connector_targets:
+        raise SvgNativeConversionError(
+            'Connector target shape ids were reserved but not restored: '
+            + ', '.join(str(shape_id) for shape_id in unresolved_connector_targets)
+        )
+
+    # Animation target fallback. Semantic <g id="..."> groups are the
+    # preferred anchors (set inside convert_g). When the SVG has none
+    # at the root we fall back to top-level primitives, but only when
+    # the count is reasonable. Presenter-click animation should reveal
+    # semantic blocks, not atomized drawing primitives, so fallback is
+    # intentionally capped at a low count.
+    _ANIM_FALLBACK_CAP = 8
+    if (
+        not has_top_level_group
+        and not ctx.anim_targets
+        and 0 < len(fallback_targets) <= _ANIM_FALLBACK_CAP
+    ):
+        ctx.anim_targets = fallback_targets
+
+    if verbose:
+        promoted = (
+            f', promoted {promoted_backgrounds} background'
+            if promoted_backgrounds else ''
+        )
+        print(f'  Converted {converted} elements, skipped {skipped}{promoted}')
+
+    if trace_out is not None:
+        trace_entry = {
+            'slide_num': slide_num,
+            'svg': str(svg_path),
+            'page_role': root.get('data-pptx-page-role'),
+            'summary': {
+                'converted': converted,
+                'skipped': skipped,
+                'promoted_backgrounds': promoted_backgrounds,

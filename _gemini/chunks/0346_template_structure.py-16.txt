@@ -1,0 +1,100 @@
+    layout_show_master_shapes = _parse_root_boolean(
+        root,
+        "data-pptx-show-master-shapes",
+        svg_path=svg_path,
+    )
+    slide_show_inherited_shapes = _parse_root_boolean(
+        root,
+        "data-pptx-show-inherited-shapes",
+        svg_path=svg_path,
+    )
+    if structured and root.get("data-pptx-layout-kind") is not None:
+        raise TemplateStructureError(
+            f"{svg_path.name}: data-pptx-layout-kind is obsolete; the root "
+            "Master/Layout identity is already final"
+        )
+
+    illegal_root_attrs = sorted(
+        attr for attr in _STRUCTURE_ATTRS
+        if (
+            attr not in {
+                "data-pptx-layout",
+                "data-pptx-layout-name",
+                "data-pptx-master",
+                "data-pptx-master-name",
+                "data-pptx-show-inherited-shapes",
+                "data-pptx-show-master-shapes",
+            }
+            and root.get(attr) is not None
+        )
+    )
+    if illegal_root_attrs:
+        raise TemplateStructureError(
+            f"{svg_path.name}: root <svg> cannot use {', '.join(illegal_root_attrs)}"
+        )
+
+    id_counts: dict[str, int] = {}
+    for elem in root.iter():
+        element_id = elem.get("id")
+        if element_id:
+            id_counts[element_id] = id_counts.get(element_id, 0) + 1
+    duplicate_ids = sorted(element_id for element_id, count in id_counts.items() if count > 1)
+    if duplicate_ids:
+        raise TemplateStructureError(
+            f"{svg_path.name}: duplicate SVG id(s) are not allowed in explicit Layout mode: "
+            + ", ".join(duplicate_ids)
+        )
+
+    elements: list[TemplateElementSpec] = []
+    canvas = _svg_canvas(root)
+    last_order_rank = -1
+    visual_order = 0
+    for elem in root:
+        tag = _local_tag(elem)
+        if tag in _NON_VISUAL_TAGS:
+            continue
+
+        element_id = (elem.get("id") or "").strip()
+        layer_raw = elem.get("data-pptx-layer")
+        layer = (layer_raw or "").strip().lower() or None
+        placeholder_raw = elem.get("data-pptx-placeholder")
+        placeholder = (
+            (placeholder_raw or "").strip().lower() or None
+        )
+        bounds_raw = elem.get("data-pptx-bounds")
+        placeholder_idx_raw = elem.get("data-pptx-idx")
+        binding_raw = elem.get("data-pptx-binding")
+        carrier_raw = elem.get("data-pptx-carrier")
+        editable_raw = elem.get("data-pptx-editable")
+        is_background = _is_full_canvas_solid_rect(elem, canvas, root=root)
+        effective_layer = layer or ("slide" if is_background else None)
+
+        if (
+            elem.get("data-pptx-layout") is not None
+            or elem.get("data-pptx-layout-name") is not None
+            or elem.get("data-pptx-master") is not None
+            or elem.get("data-pptx-master-name") is not None
+            or elem.get("data-pptx-show-inherited-shapes") is not None
+            or elem.get("data-pptx-show-master-shapes") is not None
+        ):
+            raise TemplateStructureError(
+                f"{svg_path.name}: Master/Layout identity and visibility "
+                "attributes belong on the root <svg> only"
+            )
+        if layer and layer not in _LAYERS:
+            raise TemplateStructureError(
+                f"{svg_path.name}: {element_id or tag} has unsupported "
+                f"data-pptx-layer={layer!r}"
+            )
+        if layer_raw is not None and layer is None:
+            raise TemplateStructureError(
+                f"{svg_path.name}: {element_id or tag} has empty data-pptx-layer"
+            )
+        if placeholder and placeholder not in _PLACEHOLDERS:
+            raise TemplateStructureError(
+                f"{svg_path.name}: {element_id or tag} has unsupported "
+                f"data-pptx-placeholder={placeholder!r}"
+            )
+        if placeholder_raw is not None and placeholder is None:
+            raise TemplateStructureError(
+                f"{svg_path.name}: {element_id or tag} has empty "

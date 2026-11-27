@@ -1,0 +1,84 @@
+  if ($trimmed -match '^[A-Za-z]:$') { return 'drive root' }
+  if ($trimmed -ieq ([System.IO.Path]::GetFullPath($env:USERPROFILE).TrimEnd('\'))) { return 'user profile root' }
+  if ($trimmed -ieq ([System.IO.Path]::GetFullPath($env:WINDIR).TrimEnd('\'))) { return 'Windows directory' }
+  foreach ($entry in @(
+    @{ directory = $env:LOCALAPPDATA; child = 'Packages' },
+    @{ directory = $env:ProgramFiles; child = 'WindowsApps' },
+    @{ directory = $env:ProgramW6432; child = 'WindowsApps' }
+  )) {
+    if (-not $entry.directory) { continue }
+    $protected = Get-NormalizedPath (Join-Path $entry.directory $entry.child)
+    if ($trimmed -ieq $protected -or (Test-UnderRoot $trimmed $protected)) { return 'managed application directory' }
+  }
+  return $null
+}
+
+function Test-UnderRoot {
+  param([string]$FullPath, [string]$Root, [switch]$AllowEqual)
+  $r = Get-NormalizedPath $Root
+  $c = Get-NormalizedPath $FullPath
+  if ($AllowEqual -and $c -ieq $r) { return $true }
+  return $c -ine $r -and $c.StartsWith($r.TrimEnd('\') + '\', [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Get-RepairRefusal {
+  param([string]$FullPath, [string]$Root, [switch]$AllowEqual)
+  if (-not (Test-UnderRoot -FullPath $FullPath -Root $Root -AllowEqual:$AllowEqual)) { return "$FullPath is outside -AllowRoot" }
+  $danger = Test-DangerousRoot -FullPath $FullPath
+  if ($danger) { return "$FullPath is a $danger" }
+  # Checking every component also covers a junction used as AllowRoot itself.
+  foreach ($component in (Get-Ancestors -FullPath $FullPath)) {
+    $item = Get-Item -LiteralPath $component -Force
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+      return "$FullPath traverses a reparse point: $component"
+    }
+  }
+  return $null
+}
+
+# A caller that cannot provision a directory also cannot confine a child anywhere
+# under it, so one approved run examines that subtree for explicit package allow
+# ACEs instead of leaving them for a second call. Directories only: DSH grants and
+# traverses directories, and no reparse point or managed application tree is entered.
+function Get-SubtreePackageSources {
+  param([string]$Root, [int]$Limit)
+  $sources = @()
+  $visited = 0
+  $enqueued = 0
+  $failed = 0
+  $truncated = $false
+  $queue = [System.Collections.Generic.Queue[string]]::new()
+  # Unreadable directories are skipped, never guessed at: the caller reports the count.
+  try {
+    foreach ($child in [System.IO.Directory]::EnumerateDirectories($Root)) {
+      if ($enqueued -ge $Limit) { $truncated = $true; break }
+      $queue.Enqueue($child); $enqueued++
+    }
+  } catch [System.UnauthorizedAccessException] { $failed++ }
+  catch [System.IO.IOException] { $failed++ }
+  while ($queue.Count -gt 0) {
+    if ($visited -ge $Limit) { $truncated = $true; break }
+    $current = $queue.Dequeue()
+    $visited++
+    if (Test-DangerousRoot -FullPath $current) { continue }
+    $item = Get-Item -LiteralPath $current -Force -ErrorAction SilentlyContinue
+    if ($null -eq $item) { $failed++; continue }
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+    try {
+      $acl = Get-Acl -LiteralPath $current
+      foreach ($rule in $acl.GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier])) {
+        if ($rule.AccessControlType -eq 'Allow' -and $rule.IdentityReference.Value -match $PACKAGE_SID) { $sources += $current; break }
+      }
+    } catch [System.UnauthorizedAccessException] { $failed++ }
+    catch [System.IO.IOException] { $failed++ }
+    try {
+      foreach ($child in [System.IO.Directory]::EnumerateDirectories($current)) {
+        if ($enqueued -ge $Limit) { $truncated = $true; break }
+        $queue.Enqueue($child); $enqueued++
+      }
+    } catch [System.UnauthorizedAccessException] { $failed++ }
+    catch [System.IO.IOException] { $failed++ }
+  }
+  return [ordered]@{ sources = @($sources); visited = $visited; truncated = $truncated; failed = $failed }
+}
+

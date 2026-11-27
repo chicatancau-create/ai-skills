@@ -1,0 +1,91 @@
+            if not isinstance(image_size, str) or not image_size.strip():
+                raise ValueError(
+                    f"{prefix} field 'image_size' must be a non-empty string"
+                )
+            normalized_size = normalize_image_size(image_size)
+            if normalized_size not in ALL_IMAGE_SIZES:
+                raise ValueError(
+                    f"{prefix} image_size '{image_size}' is invalid. "
+                    f"Valid: {ALL_IMAGE_SIZES}"
+                )
+
+        page_role = item.get("page_role")
+        if page_role is None:
+            missing_page_role += 1
+        elif not isinstance(page_role, str) or page_role not in VALID_PAGE_ROLES:
+            raise ValueError(
+                f"{prefix} page_role '{page_role}' is invalid. "
+                f"Valid: {sorted(VALID_PAGE_ROLES)}"
+            )
+
+        text_policy = item.get("text_policy")
+        if text_policy is None:
+            missing_text_policy += 1
+        elif (
+            not isinstance(text_policy, str)
+            or text_policy not in VALID_TEXT_POLICIES
+        ):
+            raise ValueError(
+                f"{prefix} text_policy '{text_policy}' is invalid. "
+                f"Valid: {sorted(VALID_TEXT_POLICIES)}"
+            )
+
+        image_type = item.get("type")
+        if isinstance(image_type, str) and image_type.strip().lower() in SHEET_TYPE_SPELLINGS:
+            # The resource-row column reads "Illustration Sheet"; the manifest
+            # item omits type. Accept the row spelling as that omission.
+            item.pop("type")
+            image_type = None
+        if image_type is not None:
+            normalized_type = (
+                image_type.strip().lower()
+                if isinstance(image_type, str)
+                else ""
+            )
+            if normalized_type not in VALID_IMAGE_TYPES:
+                raise ValueError(
+                    f"{prefix} type '{image_type}' is invalid. "
+                    f"Valid current/legacy values: {sorted(VALID_IMAGE_TYPES)}"
+                )
+
+        for field in ("model", "alt_text", "purpose"):
+            if field in item and (
+                not isinstance(item[field], str) or not item[field].strip()
+            ):
+                raise ValueError(
+                    f"{prefix} field '{field}' must be a non-empty string when present"
+                )
+        if "last_error" in item and not isinstance(item["last_error"], str):
+            raise ValueError(f"{prefix} field 'last_error' must be a string")
+        has_slice_grid = "slice_grid" in item
+        has_slice_names = "slice_names" in item
+        slice_outputs: list[str] = []
+        if has_slice_grid != has_slice_names:
+            raise ValueError(
+                f"{prefix} fields 'slice_grid' and 'slice_names' must appear together"
+            )
+        if has_slice_grid:
+            slice_grid = item["slice_grid"]
+            grid_match = (
+                re.fullmatch(r"([1-9]\d*)[xX]([1-9]\d*)", slice_grid.strip())
+                if isinstance(slice_grid, str)
+                else None
+            )
+            if grid_match is None:
+                raise ValueError(
+                    f"{prefix} field 'slice_grid' must use positive RxC notation"
+                )
+            slice_names = item["slice_names"]
+            if not isinstance(slice_names, str) or not slice_names.strip():
+                raise ValueError(
+                    f"{prefix} field 'slice_names' must be a non-empty string"
+                )
+            names = [name.strip() for name in slice_names.split(",")]
+            if any(not name for name in names):
+                raise ValueError(
+                    f"{prefix} field 'slice_names' contains an empty name"
+                )
+            rows, cols = map(int, grid_match.groups())
+            if len(names) != rows * cols:
+                raise ValueError(
+                    f"{prefix} field 'slice_names' has {len(names)} names but "

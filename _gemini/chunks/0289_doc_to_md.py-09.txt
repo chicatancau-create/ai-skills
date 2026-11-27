@@ -1,0 +1,102 @@
+        root = ET.fromstring(document_xml)
+    except ET.ParseError:
+        return None
+    charts = list(root.iter(f"{{{CHART_NS}}}chart"))
+    if not charts:
+        return None
+
+    rels = {
+        rel.attrib.get("Id"): rel.attrib.get("Target", "")
+        for rel in rels_root.findall("rel:Relationship", DOCX_NS)
+    }
+    parent_map = {child: parent for parent in root.iter() for child in parent}
+    token_base = uuid.uuid4().hex
+    replacements: dict[str, str] = {}
+    warnings: list[str] = []
+    seen: set[str] = set()
+    for chart in charts:
+        rel_id = chart.get(f"{{{DOCX_NS['r']}}}id")
+        paragraph = parent_map.get(chart)
+        while paragraph is not None and _local_name(paragraph) != "p":
+            paragraph = parent_map.get(paragraph)
+        if not rel_id or rel_id in seen or paragraph is None:
+            continue
+        seen.add(rel_id)
+        name = f"Chart {len(replacements) + 1}"
+        part_name = posixpath.normpath(posixpath.join("word", rels.get(rel_id, ""))).lstrip("/")
+        try:
+            markdown = _docx_chart_markdown(chart_parts[part_name], name)
+        except Exception as exc:  # a malformed cache must not sink the document
+            markdown = f"> [Chart] {name} — data unavailable ({exc.__class__.__name__})"
+        if "data unavailable" in markdown:
+            warnings.append(f"{name} ({part_name}): chart data unavailable")
+        parent = parent_map[paragraph]
+        token = f"MARKDOWNCHART{token_base}{len(replacements):04d}"
+        parent.insert(list(parent).index(paragraph) + 1, _make_text_paragraph(token))
+        replacements[token] = markdown
+    if not replacements:
+        return None
+
+    for prefix, uri in DOCX_NS.items():
+        if prefix != "rel":
+            ET.register_namespace(prefix, uri)
+    patched_xml = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+    tmp = tempfile.NamedTemporaryFile(suffix=".docx", delete=False)
+    tmp.close()
+    out_path = Path(tmp.name)
+    with zipfile.ZipFile(input_file) as zin, \
+            zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            data = patched_xml if item.filename == "word/document.xml" else zin.read(item.filename)
+            zout.writestr(item, data)
+    return out_path, replacements, warnings
+
+
+def _clean_mammoth_markdown(markdown: str) -> str:
+    """Remove Mammoth escapes for punctuation that is safe as literal text."""
+    def _repl(match: re.Match[str]) -> str:
+        char = match.group(1)
+        if char == ".":
+            line_start = markdown.rfind("\n", 0, match.start()) + 1
+            line_prefix = markdown[line_start:match.start()]
+            if re.fullmatch(r"\s*\d+", line_prefix):
+                return match.group(0)
+        return char
+
+    return re.sub(r"\\([.(),:])", _repl, markdown)
+
+
+# ─────────────────────────────────────────────────────────────
+# DOCX → Markdown (mammoth)
+# ─────────────────────────────────────────────────────────────
+
+def _convert_docx(
+    input_file: Path, out_file: Path, warnings: list[str] | None = None,
+) -> str:
+    try:
+        import mammoth
+    except ImportError:
+        print("[ERROR] mammoth not installed. Run: pip install mammoth")
+        return ""
+
+    media_dir, rel_media_dir = _ensure_media_dir(out_file)
+    counter = {"n": 0}
+    occurrences = _docx_image_occurrences(input_file)
+    used_occurrence_indexes: set[int] = set()
+    manifest: list[dict[str, object]] = []
+
+    def _save_image(image):
+        counter["n"] += 1
+        index = counter["n"]
+        with image.open() as stream:
+            image_bytes = stream.read()
+
+        meta = _match_occurrence(
+            occurrences,
+            used_occurrence_indexes,
+            index,
+            image_bytes,
+        )
+        source_ext = meta.get("source_ext") if meta else None
+        ext = _normalize_ext(source_ext if isinstance(source_ext, str) else None)
+        if ext == ".bin":

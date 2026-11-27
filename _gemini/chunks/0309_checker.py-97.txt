@@ -1,0 +1,97 @@
+            print(f"  2. viewBox issues: root viewBox is the canvas authority (see references/canvas-formats.md)")
+            print(
+                "  3. Paint recommendation: generated SVG prefers uppercase "
+                "#RRGGBB plus channel-specific opacity; compatible alternatives "
+                "remain non-blocking"
+            )
+            print(f"  4. foreignObject: Use <text> + <tspan> for manual line breaks")
+            print(f"  5. Font issues: use PPT-safe exported typefaces (e.g. Arial / Consolas, with the CJK face of the deck language)")
+
+    def _carrier_receipt_summary(self) -> Dict:
+        """Aggregate factual per-page carrier receipts for compact review."""
+        receipts = [
+            result.get('info', {}).get('carrier_receipt')
+            for result in self.results
+            if result.get('info', {}).get('carrier_receipt')
+        ]
+        totals = Counter({
+            'text_elements': 0,
+            'image_placements': 0,
+            'icons': 0,
+            'svg_geometry_elements': 0,
+            'preset_shapes': 0,
+            'page_frame_elements': 0,
+            'marker_uses': 0,
+            'inline_emphasis_runs': 0,
+            'gradient_uses': 0,
+            'filter_uses': 0,
+            'text_effects': 0,
+        })
+        pages_with = Counter({
+            'images': 0,
+            'icons': 0,
+            'presets': 0,
+            'charts': 0,
+            'tables': 0,
+            'formulas': 0,
+            'inline_emphasis_runs': 0,
+            'gradient_uses': 0,
+            'filter_uses': 0,
+            'text_effects': 0,
+        })
+        geometry_counts: Counter[str] = Counter()
+        preset_names: Counter[str] = Counter()
+        native_objects: Counter[str] = Counter()
+        image_frame_shares: List[float] = []
+
+        for receipt in receipts:
+            images = receipt['images']
+            geometry = receipt['geometry']
+            native = receipt['native_objects']
+            effects = receipt.get('effects', {})
+            totals['text_elements'] += receipt['text_elements']
+            totals['image_placements'] += images['placements']
+            totals['icons'] += receipt['icons']
+            totals['preset_shapes'] += geometry['preset_shapes']
+            totals['page_frame_elements'] += geometry['page_frame_elements']
+            totals['marker_uses'] += sum(geometry['marker_uses'].values())
+            geometry_counts.update(geometry['svg_elements'])
+            preset_names.update(geometry['preset_names'])
+            native_objects.update(native)
+
+            if images['placements']:
+                pages_with['images'] += 1
+                image_frame_shares.append(images['max_frame_share'])
+            if receipt['icons']:
+                pages_with['icons'] += 1
+            if geometry['preset_shapes']:
+                pages_with['presets'] += 1
+            if native.get('chart'):
+                pages_with['charts'] += 1
+            if native.get('table'):
+                pages_with['tables'] += 1
+            if native.get('formula_block') or native.get('formula_inline'):
+                pages_with['formulas'] += 1
+            for name in (
+                'inline_emphasis_runs',
+                'gradient_uses',
+                'filter_uses',
+                'text_effects',
+            ):
+                count = effects.get(name, 0)
+                totals[name] += count
+                if count > 0:
+                    pages_with[name] += 1
+
+        totals['svg_geometry_elements'] = sum(geometry_counts.values())
+        frame_share_range = (
+            [round(min(image_frame_shares), 4), round(max(image_frame_shares), 4)]
+            if image_frame_shares
+            else []
+        )
+        return {
+            'scope': 'informational-not-a-quota',
+            'pages': len(receipts),
+            'totals': dict(totals),
+            'pages_with': dict(pages_with),
+            'relationship_pages': self._relationship_page_count(),

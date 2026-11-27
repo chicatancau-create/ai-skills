@@ -1,0 +1,104 @@
+            raise AuthoringRoundtripError(f"Vector asset is missing: {asset_path}")
+        try:
+            asset_root = ET.parse(asset_path).getroot()
+        except ET.ParseError as exc:
+            raise AuthoringRoundtripError(
+                f"Vector asset is invalid SVG XML: {asset_path}: {exc}"
+            ) from exc
+        if asset_root.get(ASSET_ROLE_ATTRIBUTE) != DECORATION_ASSET_ROLE:
+            raise AuthoringRoundtripError(
+                f"Vector asset is not declared as decoration: {asset_path}"
+            )
+        records[icon] = VectorAssetRecord(
+            icon=icon,
+            asset_path=asset_path,
+            origin_document=origin,
+            source_sha256=str(values["source_sha256"]),
+            expected_asset_sha256=str(values["asset_sha256"]),
+            actual_asset_sha256=_sha256_file(asset_path),
+        )
+    if inventory.get("asset_count") != len(records):
+        raise AuthoringRoundtripError("Vector inventory asset_count is stale")
+    return records, inventory
+
+
+def _baseline_assets(
+    entries: list[dict[str, Any]],
+    icons_root: Path,
+) -> dict[str, VectorAssetRecord]:
+    records: dict[str, VectorAssetRecord] = {}
+    for index, raw in enumerate(entries):
+        values = {
+            name: raw.get(name)
+            for name in (
+                "icon",
+                "asset",
+                "svg",
+                "source_sha256",
+                "asset_sha256",
+            )
+        }
+        if not all(isinstance(value, str) and value for value in values.values()):
+            raise AuthoringRoundtripError(
+                f"Generated baseline vector asset {index} is incomplete"
+            )
+        if raw.get("role") != DECORATION_ASSET_ROLE:
+            raise AuthoringRoundtripError(
+                f"Generated baseline vector asset {index} is not decoration"
+            )
+        icon = str(values["icon"])
+        asset_path = icons_root / str(values["asset"])
+        try:
+            asset_root = ET.parse(asset_path).getroot()
+        except ET.ParseError as exc:
+            raise AuthoringRoundtripError(
+                f"Generated baseline vector asset is invalid: {asset_path}: {exc}"
+            ) from exc
+        if asset_root.get(ASSET_ROLE_ATTRIBUTE) != DECORATION_ASSET_ROLE:
+            raise AuthoringRoundtripError(
+                f"Generated baseline vector asset lacks decoration role: {asset_path}"
+            )
+        actual_sha = _sha256_file(asset_path)
+        records[icon] = VectorAssetRecord(
+            icon=icon,
+            asset_path=asset_path,
+            origin_document=str(values["svg"]),
+            source_sha256=str(values["source_sha256"]),
+            expected_asset_sha256=actual_sha,
+            actual_asset_sha256=actual_sha,
+        )
+    return records
+
+
+def _generate_baseline_bundle(
+    project_path: Path,
+    source_root: Path,
+    source_proxy_dir: Path,
+    documents: dict[str, AuthoringDocument],
+    inventory: dict[str, Any] | None,
+) -> tuple[tempfile.TemporaryDirectory[str], Path, dict[str, VectorAssetRecord]]:
+    temporary = tempfile.TemporaryDirectory(
+        prefix=".authoring-baseline-",
+        dir=project_path,
+    )
+    baseline_root = Path(temporary.name)
+    mapping = [
+        (document.flat_source_path, baseline_root / document.name)
+        for document in sorted(documents.values(), key=lambda item: item.name)
+    ]
+    try:
+        project_svg_batch(
+            mapping,
+            source_root,
+            baseline_root,
+            force=False,
+            projection_kind="flat",
+            source_proxy_dir=source_proxy_dir,
+            publish_source_proxies=False,
+        )
+        if inventory is None:
+            return temporary, baseline_root, {}
+        min_drawables = inventory.get("min_drawables")
+        min_bytes = inventory.get("min_bytes")
+        min_decoration_bytes = inventory.get("min_decoration_bytes")
+        if not all(

@@ -1,0 +1,103 @@
+            f"Cannot decode native payload store {resolved}: {exc}"
+        ) from exc
+    if not isinstance(document, dict) or document.get("schema") not in {
+        LEGACY_PAYLOAD_STORE_SCHEMA,
+        PAYLOAD_STORE_SCHEMA,
+    }:
+        raise NativePayloadError(
+            f"Unsupported native payload store schema in {resolved}"
+        )
+    if document.get("hash") != "sha256":
+        raise NativePayloadError(
+            f"Unsupported native payload store hash algorithm in {resolved}"
+        )
+    encoded_payloads = document.get("payloads")
+    if not isinstance(encoded_payloads, dict):
+        raise NativePayloadError(
+            f"Native payload store must contain a payload object: {resolved}"
+        )
+
+    payloads: dict[str, bytes] = {}
+    for digest, encoded in encoded_payloads.items():
+        if not isinstance(digest, str) or _SHA256_RE.fullmatch(digest) is None:
+            raise NativePayloadError(
+                f"Native payload store contains an invalid digest key: {digest!r}"
+            )
+        if not isinstance(encoded, str):
+            raise NativePayloadError(
+                f"Native payload {digest} must be a base64 string"
+            )
+        raw = _decode_base64(
+            encoded,
+            context=f"native payload {digest} in {resolved}",
+        )
+        if _sha256(raw) != digest:
+            raise NativePayloadError(
+                f"Native payload {digest} failed content-hash validation"
+            )
+        payloads[digest] = raw
+    schema = document.get("schema")
+    if schema == PAYLOAD_STORE_SCHEMA and "native_records" not in document:
+        raise NativePayloadError(
+            f"Native payload store is missing native_records: {resolved}"
+        )
+    native_records_value = document.get("native_records", {})
+    if schema == PAYLOAD_STORE_SCHEMA and not isinstance(native_records_value, dict):
+        raise NativePayloadError(
+            f"Native payload store must contain a native_records object: {resolved}"
+        )
+    if schema == LEGACY_PAYLOAD_STORE_SCHEMA:
+        native_records_value = {}
+
+    native_records: dict[str, dict[str, str]] = {}
+    for record_id, attributes in native_records_value.items():
+        if (
+            not isinstance(record_id, str)
+            or _NATIVE_RECORD_ID_RE.fullmatch(record_id) is None
+        ):
+            raise NativePayloadError(
+                f"Native payload store contains an invalid record id: {record_id!r}"
+            )
+        if not isinstance(attributes, dict) or not attributes:
+            raise NativePayloadError(
+                f"Native metadata record {record_id} must be a non-empty object"
+            )
+        validated: dict[str, str] = {}
+        for name, value in attributes.items():
+            if (
+                not isinstance(name, str)
+                or not isinstance(value, str)
+                or not _is_native_record_attribute(name)
+            ):
+                raise NativePayloadError(
+                    f"Native metadata record {record_id} contains an unsupported field"
+                )
+            validated[name] = value
+        native_records[record_id] = validated
+
+    store = NativePayloadStore(
+        payloads=payloads,
+        native_records=native_records,
+    )
+    _STORE_CACHE[resolved] = (stat.st_mtime_ns, stat.st_size, store)
+    return store
+
+
+def _payload_for_reference(value: str, svg_path: Path) -> bytes:
+    relative, digest = _parse_reference(value)
+    store_path = _resolve_store_path(svg_path, relative)
+    payload = _load_store(store_path).payloads.get(digest)
+    if payload is None:
+        raise NativePayloadError(
+            f"Native payload {digest} is missing from {store_path}"
+        )
+    return payload
+
+
+def _native_record_for_reference(
+    value: str,
+    svg_path: Path,
+) -> dict[str, str]:
+    if _NATIVE_RECORD_ID_RE.fullmatch(value) is None:
+        raise NativePayloadError(
+            f"Native metadata reference has an invalid record id: {value!r}"

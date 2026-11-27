@@ -1,0 +1,92 @@
+                )
+            except TemplateStructureError as exc:
+                errors.append(str(exc))
+                continue
+            if actual_slide_visual != expected_slide_visual:
+                difference = _mirror_slide_local_difference(
+                    prototype,
+                    spec,
+                    protected_slide_ids,
+                )
+                errors.append(
+                    f"{spec.svg_path.name}: mirror Slide-local non-text visuals "
+                    f"differ from prototype {reference.svg_path.name}; preserve "
+                    "grouping, geometry, paint, effects, and referenced asset "
+                    "identity; only visible text content and JSON-first derived "
+                    "preview children may change"
+                    + (f"; first difference: {difference}" if difference else "")
+                )
+
+        try:
+            expected_layout_structure = _structure_subtree_signature(
+                prototype.svg_path,
+                prototype.layout_elements,
+                include_skin=literal_visual,
+                asset_identity=literal_visual,
+                ignore_json_native_preview=literal_visual,
+            )
+            actual_layout_structure = _structure_subtree_signature(
+                spec.svg_path,
+                spec.layout_elements,
+                include_skin=literal_visual,
+                asset_identity=literal_visual,
+                ignore_json_native_preview=literal_visual,
+            )
+            if literal_visual:
+                expected_placeholder_visual = _structure_subtree_signature(
+                    prototype.svg_path,
+                    prototype.placeholders,
+                    include_skin=True,
+                    include_text=False,
+                    asset_identity=True,
+                    ignore_json_native_preview=True,
+                )
+                actual_placeholder_visual = _structure_subtree_signature(
+                    spec.svg_path,
+                    spec.placeholders,
+                    include_skin=True,
+                    include_text=False,
+                    asset_identity=True,
+                    ignore_json_native_preview=True,
+                )
+            else:
+                expected_placeholder_visual = ()
+                actual_placeholder_visual = ()
+        except TemplateStructureError as exc:
+            errors.append(str(exc))
+            continue
+
+        placeholder_contract_same = (
+            _prototype_placeholder_contract(spec)
+            == _prototype_placeholder_contract(prototype)
+        )
+        layout_contract_same = (
+            spec.layout_show_master_shapes
+            == prototype.layout_show_master_shapes
+            and tuple(item.contract_signature() for item in spec.layout_elements)
+            == tuple(
+                item.contract_signature() for item in prototype.layout_elements
+            )
+            and actual_layout_structure == expected_layout_structure
+        )
+        placeholder_visual_same = (
+            actual_placeholder_visual == expected_placeholder_visual
+        )
+        reusable_contract_same = (
+            placeholder_contract_same
+            and layout_contract_same
+            and placeholder_visual_same
+        )
+
+        reuses_prototype_key = spec.layout_key == prototype.layout_key
+        if adherence == "adaptive" and not reuses_prototype_key:
+            if spec.layout_name == prototype.layout_name:
+                errors.append(
+                    f"{spec.svg_path.name}: adaptive template authoring created "
+                    f"new layout key {spec.layout_key!r} but reused prototype picker "
+                    f"name {prototype.layout_name!r}; assign a new key and name to "
+                    "the evolved Layout contract"
+                )
+            if reusable_contract_same:
+                errors.append(
+                    f"{spec.svg_path.name}: adaptive template authoring changed "

@@ -1,0 +1,54 @@
+        for f in orphans:
+            desc = frontmatter_desc(os.path.join(dst, f))
+            title = f[:-3]
+            add.append("- [%s](%s) — %s" % (title, f, desc) if desc else "- [%s](%s)" % (title, f))
+        if not idx.endswith("\n"):
+            idx += "\n"
+        idx += "\n".join(add) + "\n"
+        changed = True
+    if changed:
+        with open(idx_path, "w", encoding="utf-8", newline="") as f:
+            f.write(idx)
+    # 复检
+    with open(idx_path, encoding="utf-8") as f:
+        final_idx = f.read()
+    final_orphans = [f for f in content_files if f not in index_targets(final_idx)]
+
+    manifest = {}
+    for f in sorted(os.listdir(dst)):
+        p = os.path.join(dst, f)
+        if os.path.isfile(p):
+            manifest[f] = sha256(p)
+    report = {
+        "timestamp": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "source": src,
+        "destination": dst,
+        "source_md_count": len(src_files),
+        "copied": copied,
+        "identical_skipped": len(identical),
+        "index_kept_local": index_kept,
+        "same_name_different_content_NOT_overwritten": conflicts,
+        "orphans_index_appended": orphans,
+        "final_orphan_count": len(final_orphans),
+        "dst_file_count": len(manifest),
+        "manifest_sha256": manifest,
+    }
+    if args.report:
+        os.makedirs(os.path.dirname(os.path.abspath(args.report)), exist_ok=True)
+        with open(args.report, "w", encoding="utf-8", newline="") as f:
+            json.dump(report, f, ensure_ascii=False, indent=2)
+    print("src_md=%d copied=%d identical=%d conflicts=%d orphans_fixed=%d final_orphans=%d dst_files=%d"
+          % (len(src_files), len(copied), len(identical), len(conflicts), len(orphans), len(final_orphans), len(manifest)))
+    if conflicts:
+        print("CONFLICTS (kept local, NOT overwritten): %s" % ", ".join(conflicts))
+    if orphans:
+        print("INDEX APPENDED: %s" % ", ".join(orphans))
+    if final_orphans:
+        print("STILL ORPHAN: %s" % ", ".join(final_orphans))
+        return 5
+    print("OK")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

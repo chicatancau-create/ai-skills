@@ -1,0 +1,119 @@
+    parents: dict[ET.Element, ET.Element],
+) -> list[ExtractionPlan]:
+    plans: list[ExtractionPlan] = []
+    for selector, target in targets.items():
+        bounds, bounds_source = resolved_bounds[selector]
+        name = _validate_asset_name(
+            names.get(selector, _safe_asset_name(source, selector)),
+            selector,
+        )
+        asset_path = images_dir / name
+        href = Path(os.path.relpath(asset_path, output.parent)).as_posix()
+        payload, dependency_ids, embedded = _build_asset(
+            source,
+            resource_root,
+            root,
+            target,
+            bounds,
+            parents,
+        )
+        plans.append(
+            ExtractionPlan(
+                selector=selector,
+                asset_path=asset_path,
+                href=href,
+                bounds=bounds,
+                bounds_source=bounds_source,
+                asset_bytes=payload,
+                dependency_ids=dependency_ids,
+                embedded_resources=embedded,
+            )
+        )
+    asset_paths = [plan.asset_path for plan in plans]
+    if len(set(asset_paths)) != len(asset_paths):
+        raise SvgPictureError("Generated or overridden asset filenames must be unique")
+    return plans
+
+
+def _check_outputs(
+    source: Path,
+    output: Path,
+    inventory: Path,
+    plans: list[ExtractionPlan],
+    overwrite: bool,
+) -> None:
+    if output != source and output.exists() and not overwrite:
+        raise SvgPictureError(f"Output SVG exists; pass --overwrite to replace it: {output}")
+    if inventory.exists() and not overwrite:
+        raise SvgPictureError(f"Inventory exists; pass --overwrite to replace it: {inventory}")
+    for plan in plans:
+        if not plan.asset_path.exists():
+            continue
+        if plan.asset_path.read_bytes() != plan.asset_bytes and not overwrite:
+            raise SvgPictureError(
+                f"Picture asset exists with different bytes; pass --overwrite: {plan.asset_path}"
+            )
+
+
+def _replace_targets(
+    targets: dict[str, ET.Element],
+    plans: list[ExtractionPlan],
+    parents: dict[ET.Element, ET.Element],
+) -> None:
+    for plan in plans:
+        target = targets[plan.selector]
+        parent = parents[target]
+        index = list(parent).index(target)
+        parent.remove(target)
+        parent.insert(index, _replacement_image(target, plan.bounds, plan.href))
+
+
+def _inventory_payload(
+    source: Path,
+    resource_root: Path,
+    output: Path,
+    images_dir: Path,
+    plans: list[ExtractionPlan],
+) -> bytes:
+    payload = {
+        "schema": "svg_picture_asset_inventory.v1",
+        "sourceSvg": str(source),
+        "resourceRoot": str(resource_root),
+        "rewrittenSvg": str(output),
+        "imagesDir": str(images_dir),
+        "items": [
+            {
+                "selector": plan.selector,
+                "asset": str(plan.asset_path),
+                "href": plan.href,
+                "bounds": [
+                    plan.bounds.x,
+                    plan.bounds.y,
+                    plan.bounds.width,
+                    plan.bounds.height,
+                ],
+                "boundsSource": plan.bounds_source,
+                "sha256": hashlib.sha256(plan.asset_bytes).hexdigest(),
+                "dependencyIds": plan.dependency_ids,
+                "embeddedResources": plan.embedded_resources,
+            }
+            for plan in plans
+        ],
+    }
+    return (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+
+
+def _write_outputs(
+    tree: ET.ElementTree,
+    output: Path,
+    inventory: Path,
+    images_dir: Path,
+    plans: list[ExtractionPlan],
+    inventory_bytes: bytes,
+) -> None:
+    images_dir.mkdir(parents=True, exist_ok=True)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    inventory.parent.mkdir(parents=True, exist_ok=True)
+    for plan in plans:
+        plan.asset_path.write_bytes(plan.asset_bytes)
+    ET.indent(tree, space="  ")

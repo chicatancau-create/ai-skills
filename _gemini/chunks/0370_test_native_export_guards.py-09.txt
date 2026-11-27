@@ -1,0 +1,75 @@
+        for first in ('<tspan dx="10">A</tspan>', '<tspan dx="10"/><tspan>A</tspan>'):
+            with self.subTest(first=first):
+                self._svg(
+                    f'<text x="100" y="120">{first}<tspan x="100" dy="30">B</tspan></text>',
+                    'font-family="Arial" font-size="20"',
+                )
+                texts = [t.text for t in self._export().findall('.//a:t', NS)]
+                self.assertEqual(texts, ['\u00a0', 'A', 'B'])
+
+    def test_inline_dx_survives_split_and_preserved_lines(self) -> None:
+        for text_flow in ('split', 'preserve', 'reflow'):
+            with self.subTest(text_flow=text_flow):
+                self._svg(
+                    '<text x="100" y="120"><tspan x="100">Alpha</tspan><tspan dx="10">Beta</tspan>'
+                    '<tspan x="100" dy="30">Gamma</tspan><tspan dx="-5">Delta</tspan></text>',
+                    'font-family="Arial" font-size="20"',
+                )
+                xml, *_ = convert_svg_to_slide_shapes(self.svg_path, resource_root=self.root, text_flow=text_flow)
+                slide = ET.fromstring(xml)
+                self.assertEqual(sum(n.text == '\u00a0' for n in slide.findall('.//a:t', NS)), 2)
+                self.assertEqual(len(slide.findall('.//p:sp', NS)), 2 if text_flow == 'split' else 1)
+                if text_flow == 'preserve':
+                    self.assertEqual(len(slide.findall('.//a:br', NS)), 1)
+
+    def test_line_starter_dx_is_consumed_once_and_small_dy_still_splits(self) -> None:
+        self._svg(
+            '<text x="100" y="120"><tspan x="100" dx="10">A</tspan>'
+            '<tspan x="100" dx="-5" dy="30">B</tspan></text>',
+            'font-family="Arial" font-size="20"',
+        )
+        positioned = ET.tostring(self._export())
+        self._svg(
+            '<text x="110" y="120">A</text><text x="95" y="150">B</text>',
+            'font-family="Arial" font-size="20"',
+        )
+        self.assertEqual(positioned, ET.tostring(self._export()))
+        tree = ET.ElementTree(ET.fromstring(
+            '<svg xmlns="http://www.w3.org/2000/svg"><text x="100" y="120">A<tspan dy="-4">B</tspan>'
+            '</text></svg>'
+        ))
+        self.assertTrue(flatten_text_with_tspans(tree))
+        self.assertEqual([n.get('y') for n in tree.getroot()], ['120', '116'])
+
+
+class NotesDiscoveryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.notes_dir = self.root / 'notes'
+        self.notes_dir.mkdir()
+
+    def test_filename_notes_win_in_both_glob_orders(self) -> None:
+        exact = self.notes_dir / '01_intro.md'
+        legacy = self.notes_dir / 'slide01.md'
+        exact.write_text('EXACT FILENAME NOTE\n', encoding='utf-8')
+        legacy.write_text('LEGACY INDEX NOTE\n', encoding='utf-8')
+        for order in ([exact, legacy], [legacy, exact]):
+            with self.subTest(order=[path.name for path in order]):
+                stderr = io.StringIO()
+                with patch.object(Path, 'glob', return_value=iter(order)), redirect_stderr(stderr):
+                    notes = find_notes_files(self.root, [self.root / '01_intro.svg'])
+                self.assertEqual(notes, {'01_intro': 'EXACT FILENAME NOTE'})
+                self.assertEqual(len(stderr.getvalue().splitlines()), 1)
+                self.assertIn('01_intro.svg', stderr.getvalue())
+                self.assertIn(str(exact), stderr.getvalue())
+
+    def test_legacy_notes_still_match_by_slide_index(self) -> None:
+        (self.notes_dir / 'slide01.md').write_text('LEGACY INDEX NOTE\n', encoding='utf-8')
+        self.assertEqual(
+            find_notes_files(self.root, [self.root / '01_intro.svg']),
+            {'01_intro': 'LEGACY INDEX NOTE'},
+        )
+
+    def test_one_file_matching_both_modes_does_not_warn(self) -> None:

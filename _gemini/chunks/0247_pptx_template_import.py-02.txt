@@ -1,0 +1,115 @@
+        action="store_true",
+        help=(
+            "Only extract analysis manifests, semantic resources, and the "
+            "source-package bundle, without exporting slides to SVG"
+        ),
+    )
+    parser.add_argument(
+        "--embed-images",
+        action="store_true",
+        help="Inline images as data: URIs instead of writing files to images/",
+    )
+    parser.add_argument(
+        "--inheritance-mode",
+        choices=("both", "layered", "flat"),
+        default="layered",
+        help=(
+            "How to render master/layout shapes for slide SVGs. "
+            "'layered' (default): emit the canonical svg/ tree with master, "
+            "layout, and slide-local files plus svg/inheritance.json. "
+            "'both': also emit svg-flat/ with self-contained per-slide "
+            "verification files. In this mode svg/ still holds the layered "
+            "renderings (template designers see master/layout/slide as "
+            "separate files). 'flat': emit only projection-only, "
+            "self-contained slide SVGs in svg/. Imported-deck round-trip "
+            "uses the separate authoring-svg-flat/ contract."
+        ),
+    )
+    return parser.parse_args()
+
+
+def _managed_resource_paths(output_dir: Path) -> set[Path]:
+    """Read the previous manifest's exact semantic-resource roster."""
+    manifest_path = template_manifest_path(output_dir)
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return set()
+    if not isinstance(manifest, dict):
+        return set()
+    resources = manifest.get("resources")
+    if isinstance(resources, dict) and isinstance(resources.get("items"), list):
+        paths: set[Path] = set()
+        allowed_roots = {
+            "audio",
+            "images",
+            "native-payloads",
+            "sounds",
+            "video",
+        }
+        for item in resources["items"]:
+            if not isinstance(item, dict):
+                return set()
+            value = item.get("workspacePath")
+            if not isinstance(value, str):
+                return set()
+            path = Path(value)
+            if (
+                path.drive
+                or path.anchor
+                or path.is_absolute()
+                or not path.parts
+                or ".." in path.parts
+                or path.parts[0] not in allowed_roots
+            ):
+                return set()
+            paths.add(path)
+        return paths
+
+    return set()
+
+
+def main() -> int:
+    """CLI entry point: write the PPTX reference workspace to disk."""
+    args = parse_args()
+    pptx_path = Path(args.pptx_file).expanduser().resolve()
+    if not pptx_path.exists():
+        print(f"Error: file does not exist: {pptx_path}")
+        return 1
+    if pptx_path.suffix.lower() != ".pptx":
+        print(f"Error: expected a .pptx file, got: {pptx_path.name}")
+        return 1
+
+    output_dir = (
+        Path(args.output).expanduser().resolve()
+        if args.output
+        else pptx_path.with_name(f"{pptx_path.stem}_template_import")
+    )
+
+    if args.skip_manifest and args.manifest_only:
+        print("Error: --skip-manifest and --manifest-only cannot be used together")
+        return 1
+
+    try:
+        reject_removed_workspace_layout(output_dir)
+    except RuntimeError as exc:
+        print(f"Error: {exc}")
+        return 1
+    previous_resources = _managed_resource_paths(output_dir)
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging_root = Path(tempfile.mkdtemp(
+        prefix=f".{output_dir.name}.import-",
+        dir=output_dir.parent,
+    ))
+    staged_dir = staging_root / "generated"
+    staged_dir.mkdir()
+
+    try:
+        manifest = None
+        native_structure = None
+        manifest_path = staged_dir / _MANIFEST_NAME
+        if not args.skip_manifest:
+            try:
+                manifest = build_manifest(
+                    pptx_path,
+                    staged_dir,

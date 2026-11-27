@@ -1,0 +1,100 @@
+            target.pop(key, None)
+        for map_key in ("axis_titles", "axisTitles"):
+            drop_map_keys(target, map_key, axis_keys + root_keys)
+        style = mutable_style(target)
+        if style is not None:
+            for key in root_keys:
+                style.pop(key, None)
+            for map_key in ("axis_titles", "axisTitles"):
+                drop_map_keys(style, map_key, axis_keys + root_keys)
+        messages.append(
+            f"omitted native chart axis_titles.{field_name} {text!r} "
+            "because it is not visible in the fallback"
+        )
+
+    style = payload.get("style") if isinstance(payload.get("style"), dict) else {}
+    show_legend = payload.get("show_legend", style.get("show_legend", False))
+    if show_legend:
+        legend_texts = _legend_candidate_texts(payload)
+        missing_legend = [
+            text for text in legend_texts if text not in fallback_texts
+        ]
+        if missing_legend:
+            mutable_payload()["show_legend"] = False
+            sample = ", ".join(repr(text) for text in missing_legend)
+            messages.append(
+                "omitted native chart legend because these expected labels are "
+                f"missing from the fallback: {sample}"
+            )
+
+    return output, messages
+
+
+def _legend_candidate_texts(payload: dict[str, Any]) -> list[str]:
+    series_values: list[str] = []
+    category_values: list[str] = []
+    categories = payload.get("categories")
+    if isinstance(categories, list):
+        category_values.extend(str(item) for item in categories if str(item).strip())
+    series = payload.get("series")
+    if isinstance(series, list):
+        for item in series:
+            if isinstance(item, dict) and item.get("name") is not None:
+                series_values.append(str(item.get("name")))
+    plots = payload.get("plots")
+    if isinstance(plots, list):
+        for plot in plots:
+            if not isinstance(plot, dict):
+                continue
+            plot_series = plot.get("series")
+            if not isinstance(plot_series, list):
+                continue
+            for item in plot_series:
+                if isinstance(item, dict) and item.get("name") is not None:
+                    series_values.append(str(item.get("name")))
+    chart_type = _compact_key(payload.get("type") or payload.get("chart_type") or "")
+    category_legend_types = {"pie", "doughnut", "donut", "ofpie", "pieofpie", "barofpie"}
+    values = category_values if chart_type in category_legend_types else series_values
+    normalized: list[str] = []
+    for value in values:
+        text = _normalized_fallback_text(value)
+        if text:
+            normalized.append(text)
+    return normalized
+
+
+def _native_chart_style_color_warnings(
+    elem: ET.Element,
+    payload: dict[str, Any],
+) -> list[str]:
+    inferred = _fallback_chart_colors(elem)
+    fields = {
+        "text_color": (
+            "text_color", "textColor", "label_color", "labelColor",
+            "font_color", "fontColor",
+        ),
+        "axis_color": (
+            "axis_color", "axisColor", "axis_line_color", "axisLineColor",
+        ),
+        "grid_color": (
+            "grid_color", "gridColor", "gridline_color", "gridlineColor",
+        ),
+    }
+    warnings: list[str] = []
+    for field_name, aliases in fields.items():
+        raw = _chart_style_value(payload, *aliases)
+        if raw is None:
+            continue
+        payload_color = _hex_or_none(raw)
+        fallback_color = inferred[field_name]
+        if (
+            payload_color is None
+            or fallback_color is None
+            or payload_color == fallback_color
+        ):
+            continue
+        message = (
+            f"Native PPTX chart style.{field_name} #{payload_color} differs "
+            f"from fallback dominant {field_name} #{fallback_color}; set "
+            f"style.{field_name} to #{fallback_color} or repaint the fallback "
+            f"so #{payload_color} is its dominant {field_name}"

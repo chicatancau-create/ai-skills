@@ -1,0 +1,113 @@
+            match = re.search(pattern, text_content)
+            if match:
+                date = match.group(1).replace(
+                    "年", "-").replace("月", "-").replace("日", "")
+                break
+
+    if not date:
+        # Try URL matching
+        # Only a plausible year and month: a handle or record number such as
+        # ".../10665/379812/..." is not May 3798.
+        match = re.search(r"(?<!\d)((?:19|20)\d{2})(0[1-9]|1[0-2])[\/_](?:t\d+_)?", url)
+        if match:
+            date = f"{match.group(1)}-{match.group(2)}"
+        else:
+            match = re.search(r"(?<!\d)((?:19|20)\d{2})[-\/](0[1-9]|1[0-2])[-\/](\d{2})", url)
+            if match:
+                date = f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
+
+    # 4. Description
+    description = (
+        metas.get("description") or
+        metas.get("og:description") or
+        metas.get("twitter:description") or
+        ""
+    )
+
+    # 5. Author/Source
+    author = metas.get("author") or metas.get("article:author")
+    if not author:
+        # Try common patterns
+        source_patterns = [
+            r"来源[：:]\s*([^\s<]+)",
+            r"发布(?:单位|机构)[：:]\s*([^\s<]+)"
+        ]
+        for pattern in source_patterns:
+            match = re.search(pattern, soup.get_text())
+            if match:
+                author = match.group(1)
+                break
+
+    return {
+        "title": title or metas.get("og:title") or "Untitled",
+        "date": date or "",
+        "description": description,
+        "author": author or "",
+        "source_url": url
+    }
+
+
+def find_main_content(soup: BeautifulSoup) -> Tag | None:
+    """Find the most likely main content container in a page."""
+    # 1. Clean up first (remove known clutter)
+    for tag in soup(["script", "style", "nav", "header", "footer", "aside", "noscript", "iframe"]):
+        tag.decompose()
+
+    best_element = None
+    max_score = 0
+
+    # 2. Strategy A: Check specific classes/ids
+    for selector in CONFIG["content_selectors"]:
+        if "name" in selector:
+            # Tag name match (article, main)
+            elements = soup.find_all(selector["name"])
+        else:
+            # Class or ID match
+            elements = soup.find_all(attrs=selector)
+
+        for el in elements:
+            # Score based on text length and chinese character count
+            text = el.get_text(strip=True)
+            length = len(text)
+            if length < 100:
+                continue
+
+            chinese_count = len(re.findall(r'[\u4e00-\u9fa5]', text))
+            score = length + (chinese_count * 2)
+
+            if score > max_score:
+                max_score = score
+                best_element = el
+
+    # 3. Strategy B: If no specific container found, look for dense text areas with paragraphs
+    if not best_element or max_score < 200:
+        for div in soup.find_all("div"):
+            p_count = len(div.find_all("p", recursive=False))
+            # recursive=False ensures we don't just pick the top-level body by accident
+            # but sometimes content is nested deep
+            if p_count == 0:
+                # Check if it has lots of text even without p tags (br tags?)
+                pass
+
+            text = div.get_text(strip=True)
+            if len(text) > 200 and p_count >= 1:
+                # Recalculate deep score
+                chinese_count = len(re.findall(r'[\u4e00-\u9fa5]', text))
+                score = len(text) + (chinese_count * 2) + (p_count * 50)
+                if score > max_score:
+                    max_score = score
+                    best_element = div
+
+    # Fallback to body
+    return best_element if best_element else soup.body
+
+
+def element_to_markdown(element: Tag | NavigableString | None) -> str:
+    """Recursively convert a BeautifulSoup node to Markdown."""
+    if element is None:
+        return ""
+
+    if isinstance(element, NavigableString):
+        text = str(element).strip()
+        return text if text else ""
+

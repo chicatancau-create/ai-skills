@@ -1,0 +1,93 @@
+                f"{totals.get('edited_refs', 0)} edited ref(s), "
+                f"{totals.get('deleted_refs', 0)} deleted ref(s)"
+            )
+        if roundtrip_page_plan_present:
+            print(
+                "  Round-trip page plan: "
+                f"{len(roundtrip_pages)} output page(s) from "
+                f"{len(set(roundtrip_page_sources or ()))} source slide(s)"
+            )
+
+    changed_resources_by_page: dict[int, frozenset[str]] = {}
+    if args.roundtrip:
+        if roundtrip_manifest is None:
+            print("Error: Round-trip manifest is missing", file=sys.stderr)
+            return 1
+        try:
+            changed_resources_by_page = _changed_roundtrip_resource_pages(
+                roundtrip_resources,
+                roundtrip_manifest,
+                roundtrip_pages,
+            )
+        except RuntimeError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+    changed_resource_pages = frozenset(changed_resources_by_page)
+
+    roundtrip_passthrough_slides: set[int] = set()
+    roundtrip_slide_patches: dict[int, RoundtripSlidePatch] = {}
+    roundtrip_passthrough_overridden = any((
+        args.no_notes,
+        args.no_animations,
+        args.transition is not None,
+        args.transition_duration is not None,
+        args.auto_advance is not None,
+        args.animation is not None,
+        args.animation_duration is not None,
+        args.animation_stagger is not None,
+        args.animation_trigger is not None,
+        args.animation_config is not None,
+        args.recorded_narration is not None,
+        args.narration_audio_dir is not None,
+        args.use_narration_timings,
+        args.inherit_motion_from is not None,
+        args.image_sizing == 'display',
+        args.text_flow != TEXT_FLOW_PRESERVE,
+    ))
+    if args.roundtrip and not roundtrip_passthrough_overridden:
+        try:
+            roundtrip_passthrough_slides = _roundtrip_passthrough_candidates(
+                project_path.resolve(),
+                native_files,
+                roundtrip_pages,
+                source_dir=args.source or native_source_dir,
+                authoring_report=authoring_roundtrip_report,
+                changed_resource_pages=changed_resource_pages,
+            )
+        except RuntimeError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        if roundtrip_passthrough_slides:
+            print(
+                "  Source slide passthrough: "
+                f"{len(roundtrip_passthrough_slides)}/{len(native_files)} "
+                "slide(s) retain original XML and relationships"
+            )
+        if authoring_roundtrip_report is not None:
+            authoring_roundtrip_report['source_slide_passthrough'] = {
+                'count': len(roundtrip_passthrough_slides),
+                'slides': sorted(roundtrip_passthrough_slides),
+            }
+    if args.roundtrip:
+        roundtrip_external_animation_config = False
+        if args.animation_config is not None:
+            requested_animation_config = Path(args.animation_config)
+            if not requested_animation_config.is_absolute():
+                requested_animation_config = (
+                    project_path / requested_animation_config
+                )
+            roundtrip_external_animation_config = (
+                requested_animation_config.resolve()
+                != (project_path / 'animations.json').resolve()
+            )
+        roundtrip_motion_overridden = any((
+            args.no_animations,
+            args.transition is not None,
+            args.transition_duration is not None,
+            args.auto_advance is not None,
+            args.animation is not None,
+            args.animation_duration is not None,
+            args.animation_stagger is not None,
+            args.animation_trigger is not None,
+            args.animation_config is not None,
+            args.recorded_narration is not None,

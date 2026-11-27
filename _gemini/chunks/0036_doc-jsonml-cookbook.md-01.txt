@@ -1,0 +1,100 @@
+# JSONML Cookbook
+
+> 本文档提供 `dws doc create/update --content-format jsonml` 和 `dws doc block insert/update --content-format jsonml` 的**完整可用范例**。
+> 所有示例均基于真实文档 serialize 输出验证。节点结构详细定义见 [doc-jsonml-schema.md](./doc-jsonml-schema.md)。
+> 合法节点类型和属性的权威参考为 `wukong/products/jsonml-schema-v2.json`。
+
+## 决策型文档骨架范例（doc create 用）
+
+以下是一个"方案对比汇报"的完整 JSONML 文件内容，展示摘要 callout + 彩色表格 + 状态高亮。
+**可直接复制到 `/tmp/<name>.json` 后用 `dws doc create --name "..." --content-file /tmp/<name>.json --content-format jsonml` 创建。**
+
+```json
+["root", {},
+  ["container", {"subType": "colorBlocks", "metadata": {"bgcolor": "#E8F5E9", "border": "left"}},
+    ["p", {}, ["span", {"data-type": "text"},
+      ["span", {"data-type": "leaf", "bold": true, "sz": 14, "szUnit": "pt"}, "✅ 推荐方案 A：上线快、依赖已有流程"]
+    ]],
+    ["p", {}, ["span", {"data-type": "text"},
+      ["span", {"data-type": "leaf"}, "主要风险：权限配置需补 ｜ 决策时限：本周五前"]
+    ]]
+  ],
+  ["h2", {}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "方案对比"]]],
+  ["table", {"colsWidth": [120, 200, 200]},
+    ["tr", {},
+      ["tc", {"fill": "#F5F5F5"}, ["p", {}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf", "bold": true}, "维度"]]]],
+      ["tc", {"fill": "#E8F5E9"}, ["p", {}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf", "bold": true}, "方案 A（推荐）"]]]],
+      ["tc", {}, ["p", {}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf", "bold": true}, "方案 B"]]]]
+    ],
+    ["tr", {},
+      ["tc", {}, ["p", {}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "上线周期"]]]],
+      ["tc", {}, ["p", {}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf", "color": "#2E7D32"}, "1 周"]]]],
+      ["tc", {}, ["p", {}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "3 周"]]]]
+    ],
+    ["tr", {},
+      ["tc", {}, ["p", {}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "风险"]]]],
+      ["tc", {}, ["p", {}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "低"]]]],
+      ["tc", {}, ["p", {}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf", "color": "#C62828"}, "高：需新流程审批"]]]]
+    ]
+  ],
+  ["h2", {}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "下一步"]]],
+  ["p", {}, ["span", {"data-type": "text"},
+    ["span", {"data-type": "leaf"}, "• "],
+    ["span", {"data-type": "leaf", "highlight": "#FFF9C4"}, "待确认"],
+    ["span", {"data-type": "leaf"}, " @负责人 完成权限配置"]
+  ]]
+]
+```
+
+**设计要点**：
+- 根节点固定 `"root"`，不是 `"body"`
+- 摘要用 `container`（callout），`metadata.bgcolor` 选浅绿表示"推荐结论"
+- 表格用 `table → tr → tc`（无 th/td），表头底色用 `tc` 的 `"fill"` 属性
+- 关键数据着色用 leaf 的 `"color"`（绿=好 / 红=风险）
+- 状态标记用 leaf 的 `"highlight"`（黄=待确认、绿=完成、红=阻塞）
+- uuid 可全部省略——CLI normalize 自动补充
+
+## ⚠️ JSONML 结构严格约束（生成时必须遵守）
+
+每个节点是一个 JSON 数组：`[tagName, attributes?, ...children]`
+
+- **第一个元素**是字符串，表示标签名（如 `"p"`, `"h1"`, `"span"`, `"container"`）
+- **第二个元素**（可选）是一个 JSON 对象，表示属性（如 `{"uuid": "abc"}`）。如果无属性，可以直接进入子节点
+- **随后的元素**是子节点，可以是纯字符串（仅限 leaf span 内），也可以是另一个 JSONML 数组
+- **所有 `[` 必须有对应 `]`，所有 `{` 必须有对应 `}`，数组元素之间用 `,` 分隔，最后一个元素后不加 `,`**
+
+常见 LLM 生成错误（务必避免）：
+
+| 错误类型 | 示例 | 后果 |
+|---------|------|------|
+| 缺少闭合 `]` | `["p", {}, ["span", ...]` | JSON 解析失败 |
+| 多余逗号 | `["p", {},]` | JSON 解析失败 |
+| 缺少逗号 | `["p", {} ["span"]]` | JSON 解析失败 |
+| 引号不匹配 | `["p", {"uuid": "abc}]` | JSON 解析失败 |
+
+## 文本节点格式（最重要）
+
+钉钉文档的文本是**三层结构**，不是裸字符串：
+
+```json
+["p", {"uuid": "xxx"},
+  ["span", {"data-type": "text"},
+    ["span", {"data-type": "leaf"}, "文本内容"]
+  ]
+]
+```
+
+- **text 容器**：`["span", {"data-type": "text"}, ...leaves]` — 包裹所有文本 leaf
+- **leaf 节点**：`["span", {"data-type": "leaf", ...格式属性}, "文字"]` — 实际文本，可带 bold/italic 等
+- 一个 block 节点只有一个 text 容器，但可以有多个 leaf（不同格式的文字片段）
+
+**简写**：无格式纯文本可以省略格式属性：
+```json
+["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "纯文本"]]
+```
+
+## 核心规则
+
+1. **每个 block 节点应有 uuid**：`["tag", {"uuid": "唯一ID"}, ...children]`
+   - insert 时可以自行生成任意唯一字符串，后端会自动分配正式 uuid
+   - update 时 uuid **必须**与 `--block-id` 一致

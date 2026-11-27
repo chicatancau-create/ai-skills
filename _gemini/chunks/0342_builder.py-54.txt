@@ -1,0 +1,104 @@
+                if isinstance(group_value, dict) else []
+            )
+            if isinstance(cfg.get('order'), int)
+            and not isinstance(cfg.get('order'), bool)
+        ]
+        if explicit:
+            current_order = max(current_order, max(explicit))
+        inherited_orders.append(current_order)
+    for idx, (sid, svg_id) in enumerate(anim_targets):
+        group_value = groups_cfg.get(svg_id, {})
+        if not isinstance(group_value, dict):
+            raise ValueError(
+                f'animations.json group "{svg_id}" must be an object'
+            )
+        group_path = (
+            f'slides[{json.dumps(slide_name, ensure_ascii=False)}]'
+            f'.groups[{json.dumps(svg_id, ensure_ascii=False)}]'
+        )
+        effect_entries = animation_group_effect_entries(
+            group_value,
+            path=group_path,
+        )
+        for effect_idx, (effect_path, effect_cfg) in enumerate(effect_entries):
+            raw_effect = effect_cfg.get('effect')
+            if raw_effect is not None:
+                normalized_effect = normalize_animation_effect(
+                    raw_effect,
+                    allow_none=True,
+                    allow_modes=True,
+                )
+            else:
+                normalized_effect = None
+            if 'effect' in effect_cfg and normalized_effect is None:
+                continue
+            if animation is None and normalized_effect is None:
+                continue
+            order_value = effect_cfg.get('order')
+            order = order_value if order_value is not None else inherited_orders[idx]
+            if order_value is not None and (
+                isinstance(order, bool)
+                or not isinstance(order, int)
+                or order <= 0
+            ):
+                raise ValueError(
+                    f'animations.json {effect_path}.order must be '
+                    'a positive integer'
+                )
+            effect_entry = dict(effect_cfg)
+            effect_entry['_shape_id'] = sid
+            effect_entry['_effect'] = normalized_effect
+            effect_entry['_effect_raw'] = raw_effect
+            ordered.append(
+                (
+                    order,
+                    idx,
+                    effect_idx,
+                    svg_id,
+                    effect_path,
+                    effect_entry,
+                )
+            )
+
+    ordered.sort(key=lambda item: (item[0], item[1], item[2]))
+
+    seq_targets: list[dict[str, Any]] = []
+    resolved_group_modes: list[str | None] = []
+    main_sequence_count = 0
+    for seq_idx, (
+        _order,
+        _original_idx,
+        _effect_idx,
+        _svg_id,
+        effect_path,
+        group_cfg,
+    ) in enumerate(ordered):
+        shape_id = int(group_cfg['_shape_id'])
+        raw_effect = group_cfg.get('_effect')
+        resolved_group_modes.append(
+            raw_effect if raw_effect in ('auto', 'mixed', 'random') else None
+        )
+        if raw_effect in ('auto', 'mixed', 'random'):
+            effect = pick_animation_effect(
+                str(raw_effect), seq_idx, mixed_animation_offset, group_id=_svg_id,
+                rng=animation_rng,
+            )
+            effect_options: dict[str, object] = {}
+        else:
+            effect = str(raw_effect or pick_animation_effect(
+                animation, seq_idx, mixed_animation_offset, group_id=_svg_id,
+                rng=animation_rng,
+            ))
+            request_effect = (
+                group_cfg.get('_effect_raw')
+                if group_cfg.get('_effect_raw') is not None
+                else effect
+            )
+            option_value = (
+                group_cfg.get('effect_options')
+                if group_cfg.get('_effect_raw') is not None
+                else animation_cfg.get('effect_options')
+            )
+            effect, effect_options = normalize_animation_effect_request(
+                request_effect,
+                option_value,

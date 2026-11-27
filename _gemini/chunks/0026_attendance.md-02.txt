@@ -1,0 +1,104 @@
+    --schedules '[{"userId":"user001","classId":123,"workDate":"2026-04-22","checkBeginTime":"09:00","checkEndTime":"18:00"}]' \
+    --yes
+Flags:
+      --group-id string   考勤组（必填，传入考勤组ID）
+      --schedules string  排班记录 JSON 数组（必填）
+      --yes               跳过确认提示
+```
+
+为排班制考勤组导入排班记录。`--schedules` 为 JSON 数组，每条记录包含：
+- `userId`: 员工ID
+- `classId`: 班次ID
+- `workDate`: 工作日期（YYYY-MM-DD），如 2026-04-22
+- `checkBeginTime`: 开始打卡时间
+- `checkEndTime`: 结束打卡时间
+- `isRest`: 是否休息日 Y/N（可选）
+
+#### AI 调用 `schedule import` 的二次确认流程
+
+`schedule import` 是写操作，会为考勤组导入或变更员工排班。AI 调用时必须按以下流程执行，不得在未确认的情况下直接导入：
+
+1. **识别写操作**：用户表达“导入排班 / 设置排班 / 安排排班 / 给员工排班 / 批量排班”等意图时，命中 `schedule import`。
+2. **收集必要参数**：必须明确 `--group-id` 和 `--schedules`，并确认排班记录中的 `userId`、`classId`、`workDate`、`checkBeginTime`、`checkEndTime`、`isRest` 等字段。
+3. **展示导入摘要并反问确认**：向用户展示考勤组 ID、导入员工数量、涉及日期范围、班次 ID 列表，以及排班记录明细摘要，并询问是否确认执行导入。
+4. **用户确认后再执行导入**：只有用户明确确认后，才可以执行 `dws attendance schedule import ... --format json`。
+
+确认话术示例：
+
+```text
+即将导入排班记录，请确认：
+- 考勤组 ID：<GROUP_ID>
+- 员工数量：<USER_COUNT>
+- 日期范围：<START_DATE> ~ <END_DATE>
+- 班次 ID：<CLASS_IDS>
+- 排班明细：
+  - <USER_ID>：<WORK_DATE> <CHECK_BEGIN_TIME>-<CHECK_END_TIME>，班次 <CLASS_ID>
+
+是否确认执行导入？
+```
+
+如用户明确要求跳过确认，或命令中明确包含全局 `--yes`，可跳过二次确认。
+
+### 获取排班记录
+
+**禁止直接调用 `dws attendance schedule get`。必须先 `read_file` 读取 [attendance-schedule.md](./attendance-schedule.md) 后按其中的「排班查询导出工作流」执行。**
+
+- 任何"查询排班"、"查看排班"、"XX考勤组的排班"、"X月份的排班"场景，**一律走 attendance-schedule.md 工作流**，由脚本 `attendance_schedule_export.py` 统一处理
+- 脚本自动处理：分批查询（超 20 人自动分批）、userId→姓名转换、classId→班次名称转换、排班表格式 Excel 输出
+- 违反后果：人数多时接口超时/报错、输出裸 userId 和 classId 用户看不懂、无排班表格式
+- **此处不提供 `schedule get` 的 Usage/Flags，防止绕过工作流直接拼命令。完整参数由 attendance-schedule.md 工作流中的脚本内部使用。**
+
+### 查询当前用户可管理的所有班次详情
+```
+Usage:
+  dws attendance class search [flags]
+Example:
+  dws attendance class search
+  dws attendance class search --query "早班" --filter-type MINE_OWN
+  dws attendance class search --page 1 --limit 50
+Flags:
+      --filter-type string   班次类型: ALL 全部班次 / MINE_OWN 我负责的 (可选)
+      --query string         班次名称关键字, 模糊搜索 (可选)
+      --page int             页码, 从 1 开始 (可选, 默认 1)
+      --limit int            每页条数, 最大 200 (可选, 默认 20)
+```
+
+### 查询班次详情
+```
+Usage:
+  dws attendance class get [flags]
+Example:
+  dws attendance class get --class-id 1170996821
+Flags:
+      --class-id int   班次 ID (必填)
+```
+
+根据班次 ID 查询该班次的完整详细信息。班次 ID 可从 `class search` 返回结果中提取，也有可能来源于用户手动输入。
+
+### 创建班次 (写场景接口，必须走二次确认流程)
+**强制执行流程**：此命令为写操作，Agent 调用时必须遵守以下流程：
+1. 先向用户展示待执行操作的完整参数摘要，包括班次名称、上下班时间、休息时段等
+2. 使用 `ask_human` 或返回待确认状态，等待用户明确确认
+3. 用户确认后，再传全局 `--yes` 执行命令
+
+**禁止未经用户确认直接执行或自动添加 `--yes`。**
+```
+Usage:
+  dws attendance class create [flags]
+Example:
+  dws attendance class create --name "早班" --class-vo '{"sections":[{"times":[{"checkType":"OnDuty","checkTime":"08:00","across":0},{"checkType":"OffDuty","checkTime":"17:00","across":0}]}]}' --timeout 10
+  # 带休息时段（12:00-13:00 午休）
+  dws attendance class create --name "测试CLI" --class-vo '{"sections":[{"times":[{"checkType":"OnDuty","checkTime":"09:00","across":0},{"checkType":"OffDuty","checkTime":"18:00","across":0}]}],"setting":{"topRestTimeList":[{"checkType":"OnDuty","checkTime":"12:00","across":0},{"checkType":"OffDuty","checkTime":"13:00","across":0}]}}' --timeout 10
+Flags:
+      --name string      班次名称 (必填)
+      --owner string     班次负责人 userId (可选)
+      --class-vo string  完整 TopAtClassVO JSON 字符串, 包含 sections 等复杂子对象 (必填)
+```
+
+创建一个新班次。`--name` 和 `--class-vo`（包含 `sections`）必填。`sections` 定义班次的上下班时间段，支持多段上下班，每段包含 `times` 数组（有且只能有两个对象：上班+下班）。由于保存班次耗时较久，建议加 `--timeout 10`。
+
+`checkTime` 字段统一使用 "HH:mm" 格式（如 "09:00"、"17:30"），CLI 自动转换为服务端所需格式。
+
+`--class-vo` 支持字段：
+- `name`(string, 必填) `owner`(string, 可选)
+- `sections`([]object, 必填): 每个对象含 `times`([]object)，每个 time 含 `checkType`(OnDuty/OffDuty, 必填) `checkTime`("HH:mm", 必填) `across`(0/1, 必填) `freeCheck`(bool) `beginMin`(number, -1不限制) `endMin`(number, -1不限制)

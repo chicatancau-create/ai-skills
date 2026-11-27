@@ -1,0 +1,109 @@
+    current_items: List[str] = []
+
+    def _flush_block() -> None:
+        nonlocal current_block_key, current_items
+        if current_block_key is not None:
+            out[current_block_key] = tuple(current_items)
+            current_block_key = None
+            current_items = []
+
+    for line in block.splitlines():
+        if line.startswith("placeholders:"):
+            in_section = True
+            continue
+        if not in_section:
+            continue
+
+        # End of section: dedent to a non-key line.
+        if line and not line.startswith(" "):
+            _flush_block()
+            in_section = False
+            continue
+
+        if current_block_key is not None:
+            m = item_re.match(line)
+            if m:
+                value = m.group(1).strip().strip('"').strip("'")
+                if value:
+                    current_items.append(value)
+                continue
+            # Block ended.
+            _flush_block()
+
+        if empty_re.match(line):
+            key = empty_re.match(line).group(1)
+            out[key] = ()
+            continue
+
+        m = inline_re.match(line)
+        if m:
+            key, raw = m.group(1), m.group(2)
+            items = [p.strip().strip('"').strip("'") for p in raw.split(",")]
+            out[key] = tuple(item for item in items if item)
+            continue
+
+        m = block_header_re.match(line)
+        if m:
+            current_block_key = m.group(1)
+            current_items = []
+            continue
+
+    _flush_block()
+    return out
+
+
+class SVGQualityChecker:
+    """SVG quality checker"""
+
+    # Default placeholder convention per page-type prefix. This is a *hint*,
+    # not a hard contract: templates may define their own placeholder vocabulary
+    # via `placeholders:` in design_spec.md frontmatter (see
+    # references/template-designer.md §4). Missing default placeholders surface
+    # as warnings, never errors — designers may legitimately swap
+    # `{{THANK_YOU}}` for `{{CLOSING_MESSAGE}}`, omit `{{DATE}}` when irrelevant,
+    # or build content variants with bespoke slot vocabularies.
+    #
+    # Variants reuse the parent type's expectation (`03a_content_two_col.svg`
+    # is matched by the same `content` rules as `03_content.svg`).
+    #
+    # Keys are page-type tokens, not numbered stems: template numbering is
+    # presentation order within one template and shifts when the optional
+    # TOC page is present (`02_chapter` in a four-page roster, `03_chapter`
+    # in a five-page roster with `02_toc`), so the defaults must apply to
+    # both spellings.
+    DEFAULT_PLACEHOLDER_CONVENTION = {
+        "cover": ("{{TITLE}}",),  # only the title is universally expected
+        "chapter": ("{{CHAPTER_TITLE}}",),
+        "toc": (),  # TOC layouts vary too widely to assert anything
+        "content": ("{{PAGE_TITLE}}",),
+        "ending": (),  # ending pages legitimately use varied vocabularies
+    }
+
+    def __init__(
+        self,
+        *,
+        template_mode: bool = False,
+        quick_generate: bool = False,
+        canonical_authoring: bool = False,
+    ):
+        self.template_mode = template_mode
+        self._image_pixel_sizes: Dict[Path, Tuple[int, int]] = {}
+        self.scan_banner = True
+        self.quick_generate = quick_generate
+        self.canonical_authoring = canonical_authoring
+        self.results = []
+        self._roundtrip_source_fingerprint: Dict[str, object] | None = None
+        self.summary = {
+            'total': 0,
+            'passed': 0,
+            'warnings': 0,
+            'errors': 0
+        }
+        self.issue_types = defaultdict(int)
+        # spec_lock anchor comparison state (populated only when
+        # _parse_spec_lock is available and a spec_lock.md is found near the SVG)
+        self._lock_cache: Dict[Path, Dict] = {}
+        self._anchor_value_summary: Dict[str, Dict[str, set]] = {
+            'colors': defaultdict(set),
+            'fonts': defaultdict(set),
+            'sizes': defaultdict(set),

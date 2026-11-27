@@ -1,0 +1,76 @@
+def main(argv: Optional[list[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
+    input_path = args.input.resolve()
+    if not input_path.exists():
+        print(
+            json.dumps(
+                {"error": f"Input does not exist: {input_path}"},
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        return 1
+
+    paths = _svg_files(input_path)
+    if not paths:
+        print(
+            json.dumps(
+                {"error": f"No SVG files found under {input_path}"},
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        return 1
+
+    staged: list[tuple[Path, str]] = []
+    totals = CoordinateCompactionStats()
+    bytes_before = 0
+    bytes_after = 0
+    try:
+        for path in paths:
+            original = path.read_text(encoding="utf-8")
+            ET.fromstring(original)
+            compacted, stats = compact_svg_text(
+                original,
+                compact_native_frames=not args.keep_native_frames,
+            )
+            totals.merge(stats)
+            before = len(original.encode("utf-8"))
+            after = len(compacted.encode("utf-8"))
+            bytes_before += before
+            bytes_after += after
+            if compacted != original:
+                staged.append((path, compacted))
+    except (OSError, UnicodeDecodeError, ET.ParseError, ValueError) as exc:
+        print(
+            json.dumps({"error": str(exc)}, ensure_ascii=False),
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.inplace:
+        try:
+            for path, payload in staged:
+                _write_atomic(path, payload)
+        except OSError as exc:
+            print(
+                json.dumps({"error": str(exc)}, ensure_ascii=False),
+                file=sys.stderr,
+            )
+            return 1
+
+    print(json.dumps({
+        "input": str(input_path),
+        "inplace": args.inplace,
+        "files_scanned": len(paths),
+        "files_changed": len(staged),
+        "bytes_before": bytes_before,
+        "bytes_after": bytes_after,
+        "bytes_saved": bytes_before - bytes_after,
+        "coordinates": totals.as_dict(),
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,117 @@
+    return audio_starts, timeline_ms
+
+
+def _require_numpy() -> Any:
+    try:
+        import numpy as np
+    except ImportError as exc:
+        raise RuntimeError(
+            "Exported-video timeline calibration requires numpy. "
+            "Install it with: python3 -m pip install numpy"
+        ) from exc
+    return np
+
+
+def _decode_audio_envelopes(path: Path, ffmpeg_path: str) -> tuple[Any, Any]:
+    """Decode the first audio stream and return 1 ms and 10 ms RMS envelopes."""
+    np = _require_numpy()
+    command = [
+        ffmpeg_path,
+        "-v",
+        "error",
+        "-i",
+        str(path),
+        "-map",
+        "0:a:0",
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        str(_ALIGNMENT_SAMPLE_RATE),
+        "-f",
+        "s16le",
+        "-",
+    ]
+    result = subprocess.run(command, capture_output=True, check=False)
+    if result.returncode != 0:
+        details = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"Unable to decode audio with ffmpeg: {path}\n{details}")
+
+    samples = np.frombuffer(result.stdout, dtype="<i2")
+    samples_per_frame = _ALIGNMENT_SAMPLE_RATE // _ALIGNMENT_FINE_HZ
+    usable_sample_count = len(samples) // samples_per_frame * samples_per_frame
+    if usable_sample_count < samples_per_frame * 500:
+        raise ValueError(f"Audio is too short for subtitle calibration: {path}")
+
+    frames = (
+        samples[:usable_sample_count]
+        .astype(np.float32)
+        .reshape(-1, samples_per_frame)
+    )
+    fine = np.sqrt(np.mean(frames * frames, axis=1) + 1e-12)
+    fine = np.log1p(120 * fine)
+    smooth_width = max(1, _ALIGNMENT_FINE_HZ // 200)
+    fine = np.convolve(
+        fine,
+        np.ones(smooth_width, dtype=np.float64) / smooth_width,
+        mode="same",
+    ).astype(np.float64)
+
+    coarse_count = len(fine) // _ALIGNMENT_COARSE_FACTOR
+    coarse = fine[
+        :coarse_count * _ALIGNMENT_COARSE_FACTOR
+    ].reshape(coarse_count, _ALIGNMENT_COARSE_FACTOR).mean(axis=1)
+    return fine, coarse
+
+
+def _best_correlation(search: Any, template: Any) -> tuple[int, float]:
+    """Return the best normalized-correlation index for one search window."""
+    np = _require_numpy()
+    if len(search) < len(template):
+        raise ValueError("Video alignment search window is shorter than its template")
+
+    centered_template = template - template.mean()
+    template_norm = float(np.linalg.norm(centered_template))
+    if template_norm <= 1e-9:
+        raise ValueError("Narration audio has no usable variation for video alignment")
+
+    numerators = np.correlate(search, centered_template, mode="valid")
+    prefix = np.concatenate(([0.0], np.cumsum(search, dtype=np.float64)))
+    squared_prefix = np.concatenate(
+        ([0.0], np.cumsum(search * search, dtype=np.float64))
+    )
+    width = len(template)
+    window_sums = prefix[width:] - prefix[:-width]
+    window_squared_sums = squared_prefix[width:] - squared_prefix[:-width]
+    window_variances = np.maximum(
+        window_squared_sums - (window_sums * window_sums / width),
+        1e-18,
+    )
+    scores = numerators / (np.sqrt(window_variances) * template_norm)
+    best_index = int(np.argmax(scores))
+    return best_index, float(scores[best_index])
+
+
+def _alignment_template_bounds(
+    fine_envelope: Any,
+    cues: list[SubtitleCue] | None,
+) -> tuple[int, int]:
+    duration_ms = len(fine_envelope)
+    if cues:
+        start_ms = min(cues[0].start_ms, max(0, duration_ms - 500))
+        cue_end_ms = min(cues[-1].end_ms, duration_ms)
+    else:
+        start_ms = 0
+        cue_end_ms = duration_ms
+    end_ms = min(duration_ms, start_ms + _ALIGNMENT_TEMPLATE_MAX_MS)
+    end_ms = min(end_ms, max(start_ms + 1000, cue_end_ms))
+    if end_ms - start_ms < 500:
+        raise ValueError("Narration cue range is too short for video alignment")
+    return start_ms, end_ms
+
+
+def _locate_audio_start(
+    video_fine: Any,
+    video_coarse: Any,
+    audio_fine: Any,
+    audio_coarse: Any,

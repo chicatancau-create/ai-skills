@@ -1,0 +1,95 @@
+                    conversion_warnings.append(
+                        f"Slide {slide_index}, {diagram.get('shape_name') or diagram.get('diagram_id')}: "
+                        f"SmartArt content {'; '.join(issues)}"
+                    )
+    except (OSError, RuntimeError, zipfile.BadZipFile, ET.ParseError) as exc:
+        conversion_warnings.append(f"SmartArt package scan failed: {exc}")
+        for slide_index in range(1, len(presentation.slides) + 1):
+            diagrams_by_slide.setdefault(slide_index, [])
+            diagram_scan_failures.setdefault(slide_index, str(exc))
+
+    lines = [
+        f"# {input_file.stem}",
+        "",
+        f"- Source: `{input_file.name}`",
+        f"- Total slides: {len(presentation.slides)}",
+        "",
+    ]
+
+    image_count = 0
+    image_ref_count = 0
+    asset_dir_used = False
+    image_manifest: list[dict[str, object]] = []
+    asset_cache: dict[str, SavedPicture] = {}
+    used_filenames: set[str] = set()
+
+    for slide_index, slide in enumerate(presentation.slides, 1):
+        lines.append(f"## Slide {slide_index}")
+        lines.append("")
+
+        blocks = []
+        slide_diagrams = diagrams_by_slide.get(slide_index, [])
+        diagrams_by_shape_id = {
+            str(diagram.get("shape_id")): diagram
+            for diagram in slide_diagrams
+            if diagram.get("shape_id") is not None
+        }
+        emitted_diagram_ids: set[str] = set()
+        emitted_chart_relationship_ids: set[str] = set()
+        for item in iter_leaf_shapes(slide.shapes):
+            shape = item.shape
+
+            if getattr(shape, "has_table", False):
+                table_md = table_to_markdown(shape.table, shape)
+                if table_md:
+                    blocks.append(table_md)
+                continue
+
+            shape_id = str(getattr(shape, "shape_id", ""))
+            diagram = diagrams_by_shape_id.get(shape_id)
+            if diagram is not None:
+                blocks.append(smartart_to_markdown(diagram))
+                emitted_diagram_ids.add(str(diagram.get("diagram_id")))
+                continue
+
+            is_picture_shape = shape.shape_type in {
+                MSO_SHAPE_TYPE.PICTURE,
+                MSO_SHAPE_TYPE.LINKED_PICTURE,
+            }
+            image_part, image_error = _image_part_for_shape(shape)
+            if image_error is not None:
+                shape_name = getattr(shape, "name", "") or "unnamed shape"
+                warning = f"Slide {slide_index}, {shape_name}: {image_error}"
+                conversion_warnings.append(warning)
+                print(f"[WARN] ppt_to_md: {warning}", file=sys.stderr)
+            has_shape_image = is_picture_shape or image_part is not None
+            if has_shape_image:
+                image_ref_count += 1
+                next_image_index = image_count + 1
+                asset_dir.mkdir(parents=True, exist_ok=True)
+                saved_picture = (
+                    save_picture(
+                        shape,
+                        image_part,
+                        asset_dir,
+                        slide_index,
+                        next_image_index,
+                        asset_cache,
+                        used_filenames,
+                    )
+                    if image_part is not None
+                    else None
+                )
+                if saved_picture is None:
+                    if is_picture_shape:
+                        blocks.append(f"> [Image] {getattr(shape, 'name', 'Picture')}")
+                        continue
+                else:
+                    if saved_picture.is_new_asset:
+                        image_count = next_image_index
+                        image_manifest.append(saved_picture.manifest_entry)
+                    asset_dir_used = True
+                    image_markdown = (
+                        f"![Slide {slide_index} Image {image_ref_count}]"
+                        f"({asset_dir.name}/{saved_picture.filename})"
+                    )

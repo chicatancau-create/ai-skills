@@ -1,0 +1,80 @@
+            picker.addEventListener("input", function () {
+                if (textInput) textInput.value = picker.value;
+            });
+            picker.addEventListener("change", function () {
+                stageAttr(el, eid, key, picker.value);
+            });
+        });
+        panel.querySelectorAll(".prop-edit-color-text").forEach(function (textInput) {
+            var key = textInput.getAttribute("data-key");
+            var picker = panel.querySelector('input.prop-edit-color[data-key="' + key + '"]');
+            textInput.addEventListener("change", function () {
+                var v = textInput.value.trim();
+                if (picker) picker.value = normalizeHexForPicker(v);
+                stageAttr(el, eid, key, v);
+            });
+        });
+
+        panel.querySelectorAll(".prop-edit-text-style-color").forEach(function (picker) {
+            var key = picker.getAttribute("data-key");
+            var textInput = panel.querySelector('.prop-edit-text-style[data-key="' + key + '"]');
+            picker.addEventListener("input", function () {
+                if (textInput) textInput.value = picker.value;
+            });
+            picker.addEventListener("change", function () {
+                if (textInput) textInput.value = picker.value;
+                stageTextStyleAttr(key, picker.value, picker.getAttribute("data-target-ids"));
+            });
+        });
+        panel.querySelectorAll(".prop-edit-text-style").forEach(function (input) {
+            input.addEventListener("change", function () {
+                var key = input.getAttribute("data-key");
+                var value = normalizeEditableAttrValue(key, input.value);
+                if (!value) return;
+                stageTextStyleAttr(key, value, input.getAttribute("data-target-ids"));
+            });
+        });
+
+        panel.querySelectorAll(".prop-edit-attr, .prop-edit-attr-area").forEach(function (input) {
+            var key = input.getAttribute("data-key");
+            input.addEventListener("change", function () {
+                stageAttr(el, eid, key, normalizeEditableAttrValue(key, input.value));
+            });
+        });
+
+        // Geometry: position (move) + size (resize), folded into the transform.
+        if (panel.querySelector(".prop-edit-geo")) {
+            var readGeo = function (k) {
+                var inp = panel.querySelector('.prop-edit-geo[data-geo="' + k + '"]');
+                return inp ? parseFloat(inp.value) : NaN;
+            };
+            var commitGeo = function (mode) {
+                var rb;
+                try { rb = computeRenderBox(el); } catch (e) { return; }
+                var newM;
+                var attrs = null;
+                if (mode === "move") {
+                    var nx = readGeo("x"), ny = readGeo("y");
+                    if (isNaN(nx) || isNaN(ny)) return;
+                    if (Math.abs(nx - rb.x) < 1e-6 && Math.abs(ny - rb.y) < 1e-6) return;
+                    attrs = attrsForMove(el, nx - rb.x, ny - rb.y);
+                    if (!attrs) newM = matrixAfterMove(el, rb, nx, ny);
+                } else {
+                    var nw = readGeo("w"), nh = readGeo("h");
+                    if (isNaN(nw) || isNaN(nh) || nw <= 0 || nh <= 0 || rb.w <= 0 || rb.h <= 0) {
+                        showError(t("err_edit") + "size");
+                        return;
+                    }
+                    if (Math.abs(nw - rb.w) < 1e-6 && Math.abs(nh - rb.h) < 1e-6) return;
+                    newM = matrixAfterResize(el, rb, nw, nh);
+                }
+                if (!attrs) {
+                    var tstr = matrixToString(newM);
+                    if (!tstr) {
+                        showError(t("err_edit") + "transform");
+                        return;
+                    }
+                    attrs = { transform: tstr };
+                }
+                var payload = mode === "move" ? payloadForMovedElement(el, attrs) : { attrs: attrs };
+                stageEditRequest(eid, payload)

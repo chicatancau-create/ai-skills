@@ -1,0 +1,119 @@
+        help="Replace an existing narration_animations.json",
+    )
+
+    subtitles = subparsers.add_parser(
+        "subtitles",
+        help="merge page-local SRT using timings read from a narrated PPTX",
+    )
+    subtitles.add_argument("project_path", help="Project directory")
+    subtitles.add_argument(
+        "--pptx",
+        required=True,
+        help=(
+            "Final narrated PPTX whose recorded timing values define the "
+            "timeline; relative paths are resolved under the project"
+        ),
+    )
+    subtitles.add_argument(
+        "--subtitle-dir",
+        default=None,
+        help="Page-local SRT directory; default: <project>/audio",
+    )
+    subtitles.add_argument(
+        "--video",
+        default=None,
+        help=(
+            "PowerPoint-exported video whose audio track calibrates page starts; "
+            "relative paths are resolved under the project"
+        ),
+    )
+    subtitles.add_argument(
+        "--audio-dir",
+        default=None,
+        help=(
+            "Page-local narration audio used with --video; "
+            "default: <project>/audio"
+        ),
+    )
+    subtitles.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="Merged SRT output; default: <project>/audio/total.srt",
+    )
+    subtitles.add_argument(
+        "--force",
+        action="store_true",
+        help="Replace an existing merged SRT",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    project_path = Path(args.project_path).resolve()
+    if not project_path.is_dir():
+        parser.error(f"Project path does not exist: {project_path}")
+
+    try:
+        if args.command == "fingerprint":
+            subtitle_dir = _project_path(
+                project_path,
+                args.subtitle_dir,
+                Path("audio"),
+            )
+            slide_names = _page_subtitle_names(subtitle_dir)
+            for slide_name in slide_names:
+                _parse_srt(subtitle_dir / f"{slide_name}.srt")
+            print(_subtitle_fingerprint(slide_names, subtitle_dir))
+            return 0
+
+        if args.command == "animations":
+            canonical_path = _project_path(
+                project_path,
+                args.animation_config,
+                Path("animations.json"),
+            )
+            plan_path = _project_path(
+                project_path,
+                args.plan,
+                Path("narration_timing.json"),
+            )
+            subtitle_dir = _project_path(
+                project_path,
+                args.subtitle_dir,
+                Path("audio"),
+            )
+            audio_dir = _project_path(
+                project_path,
+                args.audio_dir,
+                Path("audio"),
+            )
+            output_path = _project_path(
+                project_path,
+                args.output,
+                Path("narration_animations.json"),
+            )
+            result = rebuild_animations(
+                project_path,
+                canonical_path=canonical_path,
+                plan_path=plan_path,
+                subtitle_dir=subtitle_dir,
+                audio_dir=audio_dir,
+                output_path=output_path,
+                narration_padding=args.narration_padding,
+                narration_start_floor=args.narration_start_floor,
+                force=args.force,
+            )
+            print(f"Narration animation config written: {output_path}")
+            print(
+                f"Slides: {result.slide_count}; groups: {result.group_count}; "
+                f"SRT-anchored: {result.anchored_count}; "
+                f"canonical-delay fallback: {result.fallback_count}; "
+                f"SVG fallback slides: {result.svg_fallback_slide_count}; "
+                f"unused cues: {result.ignored_cue_count}"
+            )
+            return 0
+
+        pptx_path = _project_input_path(project_path, args.pptx).resolve()

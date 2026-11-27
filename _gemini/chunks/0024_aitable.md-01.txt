@@ -1,0 +1,75 @@
+# AI表格 (aitable) 命令参考
+
+> **渐进式文档**：本文件为路由层（索引 + 意图判断），各命令的详细参数、示例和踩坑说明在 [aitable/](./aitable/) 目录下按需加载。
+
+## 文档地址 (URI)
+
+| 资源 | URI 格式 |
+|------|----------|
+| Base 文档 | `https://alidocs.dingtalk.com/i/nodes/{baseId}` |
+| 模板预览 | `https://docs.dingtalk.com/table/template/{templateId}` |
+
+> **操作后请返回文档 URI**：每次执行 base list/search/create/get 操作后，从返回数据中提取 `baseId`，拼接为 `https://alidocs.dingtalk.com/i/nodes/{baseId}` 返回给用户。
+> 补充：如果 URL 不是来自 `aitable` 命令返回，而是用户直接贴的原始 `alidocs` URL，先按 [链接规范](../url-patterns.md#alidocs-url-类型探测流程) probe，确认是 `able` 后再按 AI 表格处理。
+
+## 命令索引表
+
+### base (Base 管理)
+
+| 命令 | 用途 | 必填参数 | 路由提醒 |
+|------|------|----------|----------|
+| `base list` | 列出最近访问的 Base | — | 仅返回最近访问过的，优先用 `base search` |
+| `base search` | 搜索 Base；不传关键词时列出最近 Base | — | 可选 `--query`；不传时走 list_bases |
+| `base get` | 获取 Base 信息（含 tables 列表） | `--base-id` | 用户给 URL 时提取末尾 ID |
+| `base create` | 创建 Base | `--name` | 创建后直接用返回的 baseId |
+| `base copy` | 复制 Base 到目标文件夹 | `--base-id` `--target-folder-id` | 目标必须是 `dws doc folder create/list` 返回的文档文件夹 `nodeId`；不要传钉盘数字 `dentryId`，也不要用手工新建 base/table 代替 |
+| `base update` | 更新 Base 名称 | `--base-id` `--name` | — |
+| `base delete` | 删除 Base | `--base-id` | 不可逆 |
+
+### table (数据表管理)
+
+| 命令 | 用途 | 必填参数 | 路由提醒 |
+|------|------|----------|----------|
+| `table get` | 获取表结构（字段+视图目录） | `--base-id` | 不传 `--table-ids` 返回全部表 |
+| `table create` | 创建数据表 | `--base-id` `--name` | `--fields` 可选；不传时创建空字段表 |
+| `table update` | 重命名表 | `--base-id` `--table-id` `--name` | — |
+| `table delete` | 删除表 | `--base-id` `--table-id` | 不可逆 |
+
+### field (字段管理) → 详见 [aitable-field.md](./aitable/aitable-field.md)、[field-properties](./aitable/aitable-field-properties.md)
+
+| 命令 | 用途 | 必填参数 | 路由提醒 |
+|------|------|----------|----------|
+| `field get` | 获取字段完整配置 | `--base-id` `--table-id` | 按需展开少量字段 |
+| `field create` | 创建字段 | `--base-id` `--table-id` + (`--name --type` 或 `--fields`) | 支持单字段/批量模式 |
+| `field update` | 更新字段名/配置 | `--base-id` `--table-id` `--field-id` | 不可变更字段类型 |
+| `field delete` | 删除字段 | `--base-id` `--table-id` `--field-id` | 不可逆 |
+
+### record (记录管理)
+
+| 命令 | 用途 | 必读 reference | 路由提醒 |
+|------|------|----------------|----------|
+| `record query` | 查询/搜索记录 | [aitable-record-query.md](./aitable/aitable-record-query.md) | 先 `table get` 拿 fieldId；`--all` 自动翻页；filters 结构见 reference |
+| `record get` | 按 ID 取记录（`record query --record-ids` 的窄别名） | [aitable-record-query.md](./aitable/aitable-record-query.md) | 已知 recordId 时首选；必填 `--record-ids`（单次最多 100 条）；未暴露 filters/sort/query/cursor/limit |
+| `record create` | 新增记录 | [aitable-record-create.md](./aitable/aitable-record-create.md) | cells key 必须是 fieldId 不是字段名；单次最多 100 条 |
+| `record update` | 更新记录（每条独立 cells） | [aitable-record-update.md](./aitable/aitable-record-update.md) | 需先 query 拿 recordId；只传需改字段；`--records` 是 `[{recordId,cells},...]` 数组；同一组值批量更新也用此命令展开 records |
+| `record delete` | 删除记录 | [aitable-record-delete.md](./aitable/aitable-record-delete.md) | 不可逆，需先 query 确认 |
+
+### view (视图管理)
+
+| 命令 | 用途 | 必填参数 | 路由提醒 |
+|------|------|----------|----------|
+| `view get` | 获取视图配置 | `--base-id` `--table-id` | 不传 `--view-ids` 返回全部视图 |
+| `view list` | 列出全部视图（`view get` 不传 `--view-ids` 的别名） | `--base-id` `--table-id` | 与 `view get` 完全等价；只需视图列表时优先 |
+| `view create` | 创建视图 | `--base-id` `--table-id` `--view-type` | 类型: Grid/Kanban/Gantt/Calendar/Gallery/FormDesigner；可选 `--name` 指定视图名称（未传时自动生成）、`--config` 传初始配置 JSON |
+| `view update` | 更新视图（**调整字段顺序的入口**） | `--base-id` `--table-id` `--view-id` | `visibleFieldIds` 重排字段顺序 |
+| `view delete` | 删除视图 | `--base-id` `--table-id` `--view-id` | 不可删最后一个/锁定视图 |
+
+> **"移动字段/调整字段顺序"** 在 AI 表格里没有 `field reorder` 命令，必须通过 `view update --config '{"visibleFieldIds":[...]}'` 完成。
+
+> **view update --config 支持的 key 白名单**（传入其他 key 会报错）：
+> - `visibleFieldIds` — 视图可见字段列表及顺序（首列字段必须保留在第一位）
+> - `filter` — 筛选规则**数组**（⚠️ 注意是数组 `[...]`，不是对象 `{...}`）
+> - `sort` — 排序规则**数组**
+> - `group` — 分组规则**数组**
+> - `fieldWidths` — 列宽映射（仅 Grid 视图有效）
+>

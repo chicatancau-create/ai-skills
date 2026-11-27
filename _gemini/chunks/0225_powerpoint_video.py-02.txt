@@ -1,0 +1,133 @@
+            throw "PowerPoint reported that video creation failed."
+        }
+        if ([DateTime]::UtcNow -ge $deadline) {
+            throw "PowerPoint video creation exceeded the ${timeoutSeconds}-second timeout."
+        }
+        if ([DateTime]::UtcNow -ge $nextProgress) {
+            [Console]::Error.WriteLine("PowerPoint video export is still running.")
+            $nextProgress = [DateTime]::UtcNow.AddSeconds(15)
+        }
+        Start-Sleep -Milliseconds 1000
+    }
+
+    if (-not (Test-Path -LiteralPath $outputPath)) {
+        throw "PowerPoint reported success but did not create the output file."
+    }
+    $outputFile = Get-Item -LiteralPath $outputPath
+    if ($outputFile.Length -le 0) {
+        throw "PowerPoint created an empty video file."
+    }
+
+    [Console]::Out.WriteLine($outputFile.FullName)
+}
+catch {
+    $errorMessage = (
+        "PowerPoint video export failed: {0} " +
+        "Close any PowerPoint dialog and retry."
+    ) -f $_.Exception.Message
+    [Console]::Error.WriteLine($errorMessage)
+    exit 1
+}
+finally {
+    if ($null -ne $presentation) {
+        try { $presentation.Close() } catch {}
+        try {
+            [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject(
+                $presentation
+            )
+        }
+        catch {}
+    }
+    if ($null -ne $powerPoint) {
+        if ($ownsApplication) {
+            try { $powerPoint.Quit() } catch {}
+        }
+        try {
+            [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject(
+                $powerPoint
+            )
+        }
+        catch {}
+    }
+    [GC]::Collect()
+    [GC]::WaitForPendingFinalizers()
+}
+"""
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Export a PPTX with Windows PowerPoint's native video encoder and "
+            "wait for completion."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("pptx", nargs="?", help="Input PPTX file.")
+    parser.add_argument(
+        "-o",
+        "--output",
+        help="Output .mp4 or .wmv path. Default: beside the PPTX as .mp4.",
+    )
+    parser.add_argument(
+        "--resolution",
+        type=int,
+        default=1080,
+        help="Vertical video resolution in pixels (default: 1080).",
+    )
+    parser.add_argument(
+        "--fps",
+        type=int,
+        default=30,
+        help="Frames per second, from 1 to 60 (default: 30).",
+    )
+    parser.add_argument(
+        "--quality",
+        type=int,
+        default=85,
+        help="PowerPoint encoder quality, from 1 to 100 (default: 85).",
+    )
+    parser.add_argument(
+        "--default-slide-duration",
+        type=int,
+        default=5,
+        help="Fallback seconds for slides without recorded timings (default: 5).",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=7200,
+        help="Maximum seconds to wait for PowerPoint (default: 7200).",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Replace an existing output video.",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Check whether compatible Windows PowerPoint automation is available.",
+    )
+    return parser
+
+
+def _find_powershell() -> str | None:
+    """Return the local Windows PowerShell executable."""
+    return shutil.which("powershell.exe") or shutil.which("powershell")
+
+
+def _run_powershell(script: str, *, env: dict[str, str], timeout: int) -> int:
+    """Run an encoded PowerShell automation script."""
+    executable = _find_powershell()
+    if executable is None:
+        print(
+            "PowerPoint video export requires Windows PowerShell. "
+            "Install or restore powershell.exe, then retry.",
+            file=sys.stderr,
+        )
+        return 1
+
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    try:
+        completed = subprocess.run(

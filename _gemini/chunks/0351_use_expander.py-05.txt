@@ -1,0 +1,108 @@
+            for attr, value in list(elem.attrib.items()):
+                if attr in {'href', f'{{{XLINK_NS}}}href'} and value.startswith('#'):
+                    ref_id = value[1:]
+                    if ref_id in id_map:
+                        elem.set(attr, f'#{id_map[ref_id]}')
+                    continue
+                rewritten = _URL_REF_RE.sub(
+                    lambda match: f'url(#{id_map.get(match.group(1), match.group(1))})',
+                    value,
+                )
+                if rewritten != value:
+                    elem.set(attr, rewritten)
+
+    @staticmethod
+    def _build_wrapper(use_elem: ET.Element) -> ET.Element:
+        """Create an inheriting group for use styles and instance geometry."""
+        wrapper = ET.Element(_qualified_tag(use_elem, 'g'))
+        skipped = {
+            'href', f'{{{XLINK_NS}}}href',
+            'x', 'y', 'width', 'height', 'preserveAspectRatio', 'transform',
+        }
+        for attr, value in use_elem.attrib.items():
+            if attr not in skipped:
+                wrapper.set(attr, value)
+
+        x = _numeric_length(use_elem, 'x', 0.0) or 0.0
+        y = _numeric_length(use_elem, 'y', 0.0) or 0.0
+        transforms = []
+        use_transform = use_elem.get('transform', '').strip()
+        if use_transform:
+            transforms.append(use_transform)
+        if x or y:
+            transforms.append(f'translate({_fmt_number(x)} {_fmt_number(y)})')
+        if transforms:
+            wrapper.set('transform', ' '.join(transforms))
+        return wrapper
+
+
+def expand_local_use_references(root: ET.Element) -> int:
+    """Expand static same-document ``<use href="#id">`` references."""
+    return _LocalUseExpander(root).expand()
+
+
+def validate_local_use_references(root: ET.Element) -> list[str]:
+    """Return expansion errors without mutating the caller's SVG tree."""
+    try:
+        expand_local_use_references(copy.deepcopy(root))
+    except UseExpansionError as exc:
+        return [str(exc)]
+    return []
+
+
+def expand_local_use_references_in_file(svg_path: Path) -> int:
+    """Expand local use references in one SVG file in place."""
+    tree = ET.parse(str(svg_path))
+    count = expand_local_use_references(tree.getroot())
+    if count:
+        ET.register_namespace('', SVG_NS)
+        ET.register_namespace('xlink', XLINK_NS)
+        tree.write(str(svg_path), encoding='unicode', xml_declaration=False)
+    return count
+
+
+def _import_embed_icons():
+    """Lazy import so svg_to_pptx doesn't hard-require svg_finalize at import time."""
+    scripts_dir = Path(__file__).resolve().parent.parent
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    from svg_finalize import embed_icons  # type: ignore
+    return embed_icons
+
+
+def _build_replacement_g(
+    use_elem: ET.Element,
+    icons_dir: Path,
+    embed_icons_mod,
+) -> ET.Element:
+    """Resolve a single ``<use data-icon="...">`` into an expanded ``<g>``.
+
+    Invalid or unresolved project-local references are blocking input errors.
+    """
+    ET.register_namespace('', SVG_NS)
+    ET.register_namespace('xlink', XLINK_NS)
+    use_str = ET.tostring(use_elem, encoding='unicode')
+    attrs = embed_icons_mod.parse_use_element(use_str)
+    if 'icon' not in attrs:
+        raise UseExpansionError('Icon placeholder has no data-icon identifier')
+
+    try:
+        icon_path, _base_size = embed_icons_mod.resolve_icon_path(
+            attrs['icon'], icons_dir,
+        )
+    except ValueError as exc:
+        raise UseExpansionError(str(exc)) from exc
+    if not icon_path.exists():
+        raise UseExpansionError(
+            f'Project-local icon is not prepared: {attrs["icon"]}'
+        )
+
+    color = attrs.get('fill', '#000000')
+    elements, style, base_size = embed_icons_mod.extract_paths_from_icon(
+        icon_path, color,
+    )
+    if not elements:
+        raise UseExpansionError(
+            f'Project-local icon has no renderable geometry: {attrs["icon"]}'
+        )
+

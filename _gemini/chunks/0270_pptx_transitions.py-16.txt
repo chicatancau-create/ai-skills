@@ -1,0 +1,120 @@
+                            f"replace policy wrote invalid {effect} {name} attribute"
+                        )
+    elif enter.policy == "none":
+        if after.effect is not None or after.fallback_effect is not None:
+            errors.append("none policy retained a visual transition")
+        if (
+            after.sound_relationship_id is not None
+            or after.fallback_sound_relationship_id is not None
+        ):
+            errors.append("none policy retained a transition sound")
+
+    preserved_click = (
+        before.advance_on_click
+        if before.advance_on_click is not None
+        else True
+    )
+    preserved_after = (
+        before.advance_after_ms / 1000
+        if before.advance_after_ms is not None
+        else None
+    )
+    expected_click, expected_after = _resolve_advance(
+        advance,
+        preserved_click=preserved_click,
+        preserved_after=preserved_after,
+    )
+    actual_click = (
+        after.advance_on_click
+        if after.advance_on_click is not None
+        else True
+    )
+    actual_after_ms = after.advance_after_ms
+    expected_after_ms = (
+        _seconds_to_ms(
+            expected_after,
+            "transition advance_after",
+            allow_zero=True,
+        )
+        if expected_after is not None
+        else None
+    )
+    if actual_click != expected_click or actual_after_ms != expected_after_ms:
+        errors.append("transition advance read-back does not match the requested mode")
+    if advance.mode != "preserve":
+        for carrier in transition_carriers(slide_root):
+            for transition in _transition_elements(carrier):
+                branch_click = _bool_attribute(transition, "advClick", True)
+                branch_after_ms = _int_attribute(transition, "advTm")
+                if (
+                    branch_click != expected_click
+                    or branch_after_ms != expected_after_ms
+                ):
+                    errors.append(
+                        "transition fallback advance does not match the requested mode"
+                    )
+                    break
+
+    if errors:
+        raise ValueError("; ".join(errors))
+
+
+def apply_slide_motion(
+    slide_root: Any,
+    *,
+    enter: EnterUpdate,
+    advance: AdvanceUpdate,
+) -> bool:
+    """Apply and immediately read back one resolved transition update."""
+    before = read_slide_transition(slide_root)
+    uses_timings = _apply_slide_motion_unchecked(
+        slide_root,
+        enter=enter,
+        advance=advance,
+    )
+    _validate_applied_motion(
+        slide_root,
+        before=before,
+        enter=enter,
+        advance=advance,
+    )
+    return uses_timings
+
+
+def _xml_declaration(source: str) -> str:
+    match = re.match(r"\s*(<\?xml[^?]*\?>)", source)
+    return match.group(1) if match else ""
+
+
+def _serialize_lxml_like(root: Any, source: str) -> str:
+    body = LET.tostring(root, encoding="unicode", pretty_print=False)
+    declaration = _xml_declaration(source)
+    return f"{declaration}\n{body}" if declaration else body
+
+
+def namespace_bindings(xml_data: str | bytes) -> dict[str, str]:
+    """Return source prefix bindings without changing the document."""
+    data = xml_data.encode("utf-8") if isinstance(xml_data, str) else xml_data
+    bindings: dict[str, str] = {}
+    for _event, (prefix, uri) in ET.iterparse(
+        io.BytesIO(data),
+        events=("start-ns",),
+    ):
+        bindings[prefix or ""] = uri
+    return bindings
+
+
+def register_source_namespaces(xml_data: str | bytes) -> dict[str, str]:
+    """Register source prefixes before stdlib ElementTree re-serialization."""
+    bindings = namespace_bindings(xml_data)
+    for prefix, uri in bindings.items():
+        if prefix == "xml":
+            continue
+        try:
+            ET.register_namespace(prefix, uri)
+        except (AttributeError, ValueError):
+            continue
+    return bindings
+
+
+def parse_source_xml(xml_data: str | bytes) -> ET.Element:

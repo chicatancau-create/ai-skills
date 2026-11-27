@@ -1,0 +1,74 @@
+        '--mime-type', mime_type,
+        '--format', 'json',
+    ]
+    result = run_dws(dws_args)
+    if not result:
+        return None
+
+    status = result.get('status', '')
+    if status != 'success':
+        error = result.get('error', {})
+        print(f"错误：准备上传失败: {error.get('message', json.dumps(error, ensure_ascii=False))}", file=sys.stderr)
+        return None
+
+    data = result.get('data', {})
+    upload_url = data.get('uploadUrl', '')
+    file_token = data.get('fileToken', '')
+
+    if not upload_url or not file_token:
+        print(f"错误：返回数据缺少 uploadUrl 或 fileToken: {json.dumps(data, ensure_ascii=False)}", file=sys.stderr)
+        return None
+
+    # 步骤 2: PUT 文件到 OSS
+    print(f"步骤 2/3: 上传文件到 OSS...", file=sys.stderr)
+    if not upload_to_oss(upload_url, file_path, mime_type):
+        return None
+
+    # 步骤 3: 返回 fileToken
+    print(f"步骤 3/3: 上传完成！", file=sys.stderr)
+    output = {
+        "fileToken": file_token,
+        "fileName": file_name,
+        "size": file_size,
+        "mimeType": mime_type,
+    }
+
+    return output
+
+
+def main():
+    if any(arg in ('-h', '--help') for arg in sys.argv[1:]):
+        print(__doc__)
+        return
+
+    if len(sys.argv) != 3:
+        print(__doc__)
+        print('用法:')
+        print('  python upload_attachment.py <baseId> <filePath>')
+        print()
+        print('示例:')
+        print('  python upload_attachment.py G1DKw2zgV2bEk6PMSBooNxlEVB5r9YAn ./report.pdf')
+        print()
+        print('然后在 record create 中使用返回的 fileToken:')
+        print('  dws aitable record create --base-id <BASE_ID> --table-id <TABLE_ID> \\')
+        print('    --records \'[{"cells":{"fldAttachId":[{"fileToken":"ft_xxx"}]}}]\' --format json')
+        sys.exit(1)
+
+    base_id = sys.argv[1]
+    file_path = sys.argv[2]
+
+    if not validate_resource_id(base_id):
+        print('错误：无效的 baseId 格式', file=sys.stderr)
+        sys.exit(1)
+
+    result = upload_attachment(base_id, file_path)
+    if result is None:
+        sys.exit(1)
+
+    # 正常输出到 stdout（JSON 格式，方便解析）
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    sys.exit(0)
+
+
+if __name__ == '__main__':
+    main()

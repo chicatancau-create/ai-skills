@@ -1,0 +1,106 @@
+                "Linked image relationship cannot be resolved; embed the image in PowerPoint first"
+            )
+        return PictureResult()
+
+    target: str | None = None
+    img_bytes: bytes | None = None
+    failures: list[str] = []
+    for rel_id in relationship_ids:
+        candidate = slide_part.resolve_rel(rel_id)
+        if not candidate:
+            failures.append(f"{rel_id}: unresolved")
+            continue
+        candidate_bytes = pkg.read_media(candidate)
+        if candidate_bytes is None:
+            failures.append(f"{rel_id}: missing {candidate}")
+            continue
+        if Path(candidate).suffix.lower() == ".svg" and not _is_valid_svg_media(candidate_bytes):
+            failures.append(f"{rel_id}: invalid SVG media {candidate}")
+            continue
+        target = candidate
+        img_bytes = candidate_bytes
+        break
+    if target is None or img_bytes is None:
+        details = "; ".join(failures)
+        error_type = (
+            LinkedImageResolutionError
+            if external_linked
+            else MediaResolutionError
+        )
+        raise error_type(
+            f"No embedded image relationship can be read in {slide_part.path}: {details}"
+        )
+
+    filename = (asset_name_map or {}).get(target, pkg.media_filename(target))
+    filename, img_bytes = _normalize_office_media(filename, img_bytes)
+    tile_source_bytes = img_bytes
+    diagnostics = list(_unsupported_blip_effect_diagnostics(blip))
+    filename, img_bytes, effect_diagnostics = _apply_blip_image_effects(
+        filename,
+        img_bytes,
+        blip,
+    )
+    diagnostics.extend(effect_diagnostics)
+    opacity_attr, opacity_diagnostics = _blip_opacity_attr(blip)
+    diagnostics.extend(opacity_diagnostics)
+    if strict and diagnostics:
+        details = "; ".join(item.message for item in diagnostics)
+        raise ValueError(f"Cannot reproduce DrawingML picture effects: {details}")
+    href = _build_href(filename, img_bytes, media_subdir, embed_inline)
+
+    # srcRect: l/t/r/b in 1/100000ths (so 50000 = 50%).
+    src_rect = blip_fill_elem.find("a:srcRect", NS)
+    crop = _parse_src_rect(src_rect)
+
+    # A tile larger than its frame is visually a crop, not a stretch. Preserve
+    # that common PowerPoint background construction through the same nested
+    # SVG transport used for srcRect. True repeated patterns retain the legacy
+    # plain-image fallback because native export has no registered tile subset.
+    tile = blip_fill_elem.find("a:tile", NS)
+    if crop is None and tile is not None:
+        crop = _single_cover_tile_crop(
+            tile,
+            blip_fill_elem,
+            xfrm,
+            tile_source_bytes,
+        )
+
+    if crop is None:
+        # Plain unclipped image
+        svg = (
+            f'<image href="{href}" x="{fmt_num(xfrm.x)}" y="{fmt_num(xfrm.y)}" '
+            f'width="{fmt_num(xfrm.w)}" height="{fmt_num(xfrm.h)}" '
+            f'preserveAspectRatio="none"{opacity_attr}/>'
+        )
+    else:
+        # Crop expressed as a unit-rectangle viewBox on a nested <svg>.
+        vb_l, vb_t, vb_w, vb_h = crop
+        svg = (
+            f'<svg x="{fmt_num(xfrm.x)}" y="{fmt_num(xfrm.y)}" '
+            f'width="{fmt_num(xfrm.w)}" height="{fmt_num(xfrm.h)}" '
+            f'viewBox="{fmt_num(vb_l, 5)} {fmt_num(vb_t, 5)} '
+            f'{fmt_num(vb_w, 5)} {fmt_num(vb_h, 5)}" '
+            f'preserveAspectRatio="none" overflow="hidden">'
+            f'<image href="{href}" x="0" y="0" width="1" height="1" '
+            f'preserveAspectRatio="none"{opacity_attr}/>'
+            f"</svg>"
+        )
+
+    media: dict[str, bytes] = {}
+    if not embed_inline:
+        media[filename] = img_bytes
+    return PictureResult(
+        svg=svg,
+        media=media,
+        diagnostics=tuple(diagnostics),
+        external_linked=external_linked,
+    )
+
+
+def convert_picture(
+    pic_elem: ET.Element,
+    xfrm: Xfrm,
+    slide_part: PartRef,
+    pkg: OoxmlPackage,
+    *,
+    media_subdir: str = "images",

@@ -1,0 +1,84 @@
+        var item = slideListEl.querySelector('.slide-item[data-name="' + cssAttr(name) + '"]');
+        selectSlide(name, item || undefined);
+    }
+
+    function cssAttr(value) {
+        return String(value).replace(/"/g, '\\"');
+    }
+
+    function updateNavLabel() {
+        if (!navCounterEl) return;
+        var total = slideNames.length;
+        if (total === 0 || !currentSlide) {
+            navCounterEl.textContent = t("nav_empty");
+            if (navNameEl) navNameEl.textContent = "";
+        } else {
+            var idx = currentSlideIndex();
+            navCounterEl.textContent = t("nav_counter", { current: idx + 1, total: total });
+            if (navNameEl) navNameEl.textContent = currentSlide;
+        }
+        var idx2 = currentSlideIndex();
+        var hasCurrent = idx2 >= 0;
+        if (navFirstBtn) navFirstBtn.disabled = !hasCurrent || idx2 === 0;
+        if (navPrevBtn)  navPrevBtn.disabled  = !hasCurrent || idx2 <= 0;
+        if (navNextBtn)  navNextBtn.disabled  = !hasCurrent || idx2 >= total - 1;
+        if (navLastBtn)  navLastBtn.disabled  = !hasCurrent || idx2 >= total - 1;
+    }
+
+    // ================================================================
+    //  1.  loadSlides  -- GET /api/slides
+    // ================================================================
+    function loadSlides() {
+        return fetch("/api/slides")
+            .then(function (res) { return res.json(); })
+            .then(function (data) {
+                slideListEl.innerHTML = "";
+                var slides = data.slides || [];
+                slideNames = slides.map(function (s) { return s.name; });
+
+                if (slides.length === 0) {
+                    var empty = document.createElement("div");
+                    empty.className = "slide-list-empty";
+                    empty.textContent = liveMode
+                        ? t("empty_waiting_slides")
+                        : t("empty_no_slides");
+                    slideListEl.appendChild(empty);
+                    if (!currentSlide) {
+                        svgPlaceholder.style.display = "block";
+                        svgPlaceholder.textContent = liveMode
+                            ? t("placeholder_live_ready")
+                            : t("empty_no_slides");
+                        svgContent.style.display = "none";
+                    }
+                    updateNavLabel();
+                    updatePendingStatus();
+                    return;
+                }
+
+                var currentExists = false;
+                var currentReady = false;
+                var currentMtimeChanged = false;
+                slides.forEach(function (s) {
+                    if (s.name === currentSlide) {
+                        currentExists = true;
+                        currentReady = s.ok !== false;
+                        // Compare against the mtime we recorded when we last rendered this slide.
+                        var lastSeen = slideMtimes[s.name];
+                        if (lastSeen !== undefined && s.mtime && s.mtime !== lastSeen) {
+                            currentMtimeChanged = true;
+                        }
+                    }
+                    // Track every slide's mtime for the next poll (only update non-current here;
+                    // currentSlide's mtime is updated by selectSlide so we can detect drift).
+                    if (s.name !== currentSlide && s.mtime !== undefined) {
+                        slideMtimes[s.name] = s.mtime;
+                    }
+
+                    var item = document.createElement("div");
+                    item.className = "slide-item" + (s.name === currentSlide ? " active" : "");
+                    if (s.ok === false) {
+                        item.className += " slide-error";
+                        item.title = t("slide_error_tooltip") + (s.error || "");
+                    }
+                    item.setAttribute("data-name", s.name);
+

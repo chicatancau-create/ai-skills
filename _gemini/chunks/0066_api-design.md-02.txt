@@ -1,0 +1,133 @@
+| Query params | camelCase or snake_case (be consistent) | `?sortBy=createdAt` |
+| Headers | Train-Case | `X-Request-Id` |
+
+**Python exception:** If your entire stack is Python/snake_case, you MAY use `snake_case` in JSON — but be **consistent across all endpoints**.
+
+```
+✅ GET /users          ❌ GET /users/
+✅ GET /reports/annual  ❌ GET /reports/annual.json
+✅ POST /users          ❌ POST /users/create
+```
+
+---
+
+## 3. HTTP Methods & Status Codes (CRITICAL)
+
+### Method Semantics
+
+| Method | Semantics | Idempotent | Safe | Request Body |
+|--------|-----------|-----------|------|-------------|
+| GET | Read | ✅ | ✅ | ❌ Never |
+| POST | Create / Action | ❌ | ❌ | ✅ Always |
+| PUT | Full replace | ✅ | ❌ | ✅ Always |
+| PATCH | Partial update | ❌* | ❌ | ✅ Always |
+| DELETE | Remove | ✅ | ❌ | ❌ Rarely |
+
+### Status Code Quick Reference
+
+**Success:**
+
+| Code | When | Response Body |
+|------|------|--------------|
+| 200 OK | GET, PUT, PATCH success | Resource / result |
+| 201 Created | POST created resource | Created resource + `Location` header |
+| 202 Accepted | Async operation started | Job ID / status URL |
+| 204 No Content | DELETE success, PUT with no body | None |
+
+**Client Errors:**
+
+| Code | When | Key Distinction |
+|------|------|-----------------|
+| 400 Bad Request | Malformed syntax | Can't even parse |
+| 401 Unauthorized | Missing / invalid auth | "Who are you?" |
+| 403 Forbidden | Authenticated, no permission | "I know you, but no" |
+| 404 Not Found | Resource doesn't exist | Also use to hide 403 |
+| 409 Conflict | Duplicate, version mismatch | State conflict |
+| 422 Unprocessable | Valid syntax, failed validation | Semantic errors |
+| 429 Too Many Requests | Rate limit hit | Include `Retry-After` |
+
+**Server Errors:** 500 (unexpected), 502 (upstream fail), 503 (overloaded), 504 (upstream timeout)
+
+---
+
+## 4. Error Handling (HIGH)
+
+### Standard Error Envelope (RFC 9457)
+
+Every error response uses this format:
+
+```json
+{
+  "type": "https://api.example.com/errors/insufficient-funds",
+  "title": "Insufficient Funds",
+  "status": 422,
+  "detail": "Account balance $10.00 is less than withdrawal $50.00.",
+  "instance": "/transactions/txn_abc123",
+  "request_id": "req_7f3a8b2c",
+  "errors": [
+    { "field": "amount", "message": "Exceeds balance", "code": "INSUFFICIENT_BALANCE" }
+  ]
+}
+```
+
+### Multi-Language Implementation
+
+**TypeScript (Express):**
+```typescript
+class AppError extends Error {
+  constructor(
+    public readonly title: string,
+    public readonly status: number,
+    public readonly detail: string,
+    public readonly code: string,
+  ) { super(detail); }
+}
+
+// Middleware
+app.use((err, req, res, next) => {
+  if (err instanceof AppError) {
+    return res.status(err.status).json({
+      type: `https://api.example.com/errors/${err.code}`,
+      title: err.title, status: err.status,
+      detail: err.detail, request_id: req.id,
+    });
+  }
+  res.status(500).json({ title: 'Internal Error', status: 500, request_id: req.id });
+});
+```
+
+**Python (FastAPI):**
+```python
+from fastapi import Request
+from fastapi.responses import JSONResponse
+
+class AppError(Exception):
+    def __init__(self, title: str, status: int, detail: str, code: str):
+        self.title, self.status, self.detail, self.code = title, status, detail, code
+
+@app.exception_handler(AppError)
+async def app_error_handler(request: Request, exc: AppError):
+    return JSONResponse(status_code=exc.status, content={
+        "type": f"https://api.example.com/errors/{exc.code}",
+        "title": exc.title, "status": exc.status,
+        "detail": exc.detail, "request_id": request.state.request_id,
+    })
+```
+
+### Iron Rules
+
+```
+✅ Return RFC 9457 error envelope for ALL errors
+✅ Include request_id in every error response
+✅ Return per-field validation errors in `errors` array
+
+❌ Never expose stack traces in production
+❌ Never return 200 for errors
+❌ Never swallow errors silently
+```
+
+---
+
+## 5. Authentication & Authorization (HIGH)
+
+```

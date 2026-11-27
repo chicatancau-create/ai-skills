@@ -1,0 +1,118 @@
+            )
+        )
+    return tuple(handles)
+
+
+def _parse_connections(
+    container: ET.Element | None,
+) -> tuple[ConnectionSiteDefinition, ...]:
+    if container is None:
+        return ()
+    connections = []
+    for element in container:
+        if _local_name(element.tag) != "cxn":
+            raise PresetShapeDataError(
+                f"Unexpected connection-site element: {_local_name(element.tag)!r}"
+            )
+        connections.append(
+            ConnectionSiteDefinition(
+                angle=_required_attribute(element, "ang"),
+                position=_parse_position(element),
+            )
+        )
+    return tuple(connections)
+
+
+def _parse_text_rectangle(
+    element: ET.Element | None,
+) -> TextRectangleDefinition | None:
+    if element is None:
+        return None
+    return TextRectangleDefinition(
+        left=_required_attribute(element, "l"),
+        top=_required_attribute(element, "t"),
+        right=_required_attribute(element, "r"),
+        bottom=_required_attribute(element, "b"),
+    )
+
+
+def _parse_paths(
+    container: ET.Element | None,
+    shape_name: str,
+) -> tuple[ShapePathDefinition, ...]:
+    if container is None:
+        raise PresetShapeDataError(f"Preset {shape_name!r} has no path list")
+    paths = []
+    for element in container:
+        if _local_name(element.tag) != "path":
+            raise PresetShapeDataError(
+                f"Unexpected path-list element: {_local_name(element.tag)!r}"
+            )
+        paths.append(
+            ShapePathDefinition(
+                coordinate_width=element.attrib.get("w"),
+                coordinate_height=element.attrib.get("h"),
+                fill=element.attrib.get("fill", "norm"),
+                stroke=_parse_boolean(element.attrib.get("stroke"), default=True),
+                extrusion_ok=_parse_boolean(
+                    element.attrib.get("extrusionOk"),
+                    default=True,
+                ),
+                commands=tuple(_parse_path_command(command) for command in element),
+            )
+        )
+    if not paths:
+        raise PresetShapeDataError(f"Preset {shape_name!r} has an empty path list")
+    return tuple(paths)
+
+
+def _parse_path_command(element: ET.Element) -> PathCommandDefinition:
+    name = _local_name(element.tag)
+    expected_points = _PATH_COMMAND_ARITY.get(name)
+    if expected_points is None:
+        raise PresetShapeDataError(f"Unsupported preset path command: {name!r}")
+    if name == "arcTo":
+        parameters = tuple(
+            _required_attribute(element, attribute)
+            for attribute in ("wR", "hR", "stAng", "swAng")
+        )
+        return PathCommandDefinition(name=name, parameters=parameters)
+    points = tuple(
+        child for child in element if _local_name(child.tag) == "pt"
+    )
+    if len(points) != expected_points:
+        raise PresetShapeDataError(
+            f"Path command {name!r} expects {expected_points} points, "
+            f"found {len(points)}"
+        )
+    parameters = tuple(
+        coordinate
+        for point in points
+        for coordinate in (
+            _required_attribute(point, "x"),
+            _required_attribute(point, "y"),
+        )
+    )
+    return PathCommandDefinition(name=name, parameters=parameters)
+
+
+def _parse_position(parent: ET.Element) -> PointExpression:
+    positions = [
+        child for child in parent if _local_name(child.tag) == "pos"
+    ]
+    if len(positions) != 1:
+        raise PresetShapeDataError(
+            f"{_local_name(parent.tag)!r} must contain exactly one position"
+        )
+    return PointExpression(
+        x=_required_attribute(positions[0], "x"),
+        y=_required_attribute(positions[0], "y"),
+    )
+
+
+def _find_child(parent: ET.Element, local_name: str) -> ET.Element | None:
+    matches = [child for child in parent if _local_name(child.tag) == local_name]
+    if len(matches) > 1:
+        raise PresetShapeDataError(
+            f"Preset contains duplicate {local_name!r} elements"
+        )

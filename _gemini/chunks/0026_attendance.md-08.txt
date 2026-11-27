@@ -1,0 +1,78 @@
+                                               Agent 调用时传入前必须已完成 ask_human 二次确认
+```
+
+调用 MCP 工具 save_self_setting 更新保存个人规则设置，请求体封装在 `RuleMcpSaveSelfSettingRequest` 中。`settingScene` 必填；MCP 入参 `userId` 必填，CLI 的 `--user` 也必填，必须显式传入目标用户 ID。认证信息 `corpId` 和 `opUserId` 由当前登录上下文自动注入，无需手动传入。
+
+`selfsetting save` 必须按 `--setting-scene` 传入对应场景的字段，且至少一个字段有值：
+- `checkRemind`: `checkRemindSetting`、`checkRemindUserOnDuty`、`checkRemindUserOffDuty`、`enableOndutyCheckRemindOfPc`、`enableOffdutyCheckRemindOfPc`
+- `fastCheck`: `ondutyCheckType`、`offdutyCheckType`、`ondutyRemindStartMin`、`ondutyRemindEndMin`、`offdutyRemindStartMin`、`offdutyRemindEndMin`、`fastCheckLateNeedConfirm`、`canUpdateOffDuty`、`voiceRemindSwitch`、`vibrationRemindSwitch`
+- `checkResultNotify`: `checkResultMsg`
+- `lackRemind`: `lackSendTodoMsg`、`lackRemindUser`
+- `personalAttendStatNotify`: `personDailyReportSwitch`、`personWeekReportType`、`personMonthReportType`
+- `bossAttendStatNotify`: `bossPushStartMin`、`bossWeekReportType`、`bossMonthReportType`
+
+返回 `ServiceResult`，包含 `success`、`code`、`message`、`result`。其中 `result` 为 boolean，表示保存是否成功。
+
+#### 强制执行流程：Agent 调用 `selfsetting save`
+
+`selfsetting save` 是写操作，会修改用户个人规则设置。Agent 调用时 **必须按以下流程执行**，**禁止**在未确认的情况下直接提交：
+
+1. **识别写操作**：用户表达“更新个人规则设置 / 保存打卡提醒 / 修改极速打卡 / 关闭缺卡提醒 / 开启打卡结果通知 / 设置个人考勤统计通知 / 设置团队考勤统计通知”等意图时，命中 `selfsetting save`。
+2. **收集必要参数**：必须明确 `--user`、`--setting-scene`，以及对应场景下将要修改的字段和值。
+3. **前置查询当前设置**：执行 `dws attendance selfsetting get --setting-scene <SCENE> --user <USER_ID> --format json`，获取当前配置，用于确认目标用户和当前值。
+4. **展示待写入数据并等待确认**：向用户展示目标用户、设置场景、要更新的字段、当前值、新值和最终命令参数摘要。必须调用 `ask_human` 或返回待确认状态，并等待用户明确确认。
+5. **用户确认后再执行保存**：**只有用户明确确认后**，才可以追加全局 `--yes` 执行 `dws attendance selfsetting save ... --yes --format json`。
+
+确认话术示例：
+
+```text
+即将更新个人考勤规则设置，请确认：
+- 用户 ID：<USER_ID>
+- 设置场景：checkResultNotify
+- 修改内容：
+  - 打卡结果通知(checkResultMsg)：关闭 → 开启
+
+是否确认执行更新？
+```
+
+禁止在未获得用户明确确认前执行保存；禁止为了推进流程自动添加全局 `--yes`。即使用户在最初需求中表达“直接改/不用问”，Agent 也必须先通过 `ask_human` 或待确认状态展示完整参数摘要并获得明确确认后，才允许追加 `--yes` 执行。
+
+### 查询全局规则设置（仅管理员）
+```
+Usage:
+  dws attendance globalsetting get [flags]
+Example:
+  dws attendance globalsetting get --scope 企业 --setting-scene checkRemind --format json
+  dws attendance globalsetting get --scope 全公司 --setting-scene bossAttendStatNotify --format json
+Flags:
+      --setting-scene string   查询设置项: checkRemind/fastCheck/checkResultNotify/lackRemind/personalAttendStatNotify/bossAttendStatNotify (必填)
+      --scope string           全局范围确认，必须明确输入：企业/全公司/所有人（必填）
+```
+
+调用 MCP 工具 `query_global_setting` 查询全局规则设置，请求体封装在 `RuleMcpQueryGlobalSettingRequest` 中。`settingScene` 必填；CLI 必须通过 `--scope` 明确输入 `企业`、`全公司` 或 `所有人`，用于确认查询的是全局范围。认证信息 `corpId` 和 `opUserId` 由当前登录上下文自动注入，无需手动传入。该接口仅管理员可以调用。
+
+返回 `ServiceResult`，包含 `success`、`code`、`message`、`result`。`result` 常见字段包括：
+- `checkRemindCorp`: 打卡提醒企业总开关
+- `checkRemindPcCorp`: 打卡提醒 PC 端企业总开关
+- `fastCheckCorp`: 极速打卡企业总开关
+- `enableCheckCertPush`: 打卡结果通知企业总开关
+- `lackRemindCorp`: 缺卡提醒企业总开关
+- `enablePersonalDailyReport`: 个人考勤统计通知日报企业总开关
+- `enablePersonalWeeklyReport`: 个人考勤统计通知周报企业开关，钉邮渠道
+- `enablePersonalWeeklyReportCard`: 个人考勤统计通知周报企业开关，工作通知渠道
+- `enablePersonalMonthlyReport`: 个人考勤统计通知月报企业总开关
+- `bossDailyReportType`: 团队考勤统计通知日报发送渠道类型，0 全关闭，1 开启
+- `bossWeeklyReportType`: 团队考勤统计通知周报发送渠道类型，0 全关闭，1 工作通知，2 钉邮，3 工作通知和钉邮
+- `bossMonthlyReportType`: 团队考勤统计通知月报发送渠道类型，0 全关闭，1 工作通知，2 钉邮，3 工作通知和钉邮
+
+### 更新保存全局规则设置（写场景接口，仅管理员，必须走二次确认流程）
+**强制执行流程**：此命令为写操作，Agent 调用时必须先向用户展示待执行操作的完整参数摘要，等待用户明确确认后，才能追加 `--yes` 执行。
+
+```
+Usage:
+  dws attendance globalsetting save [flags]
+Example:
+  dws attendance globalsetting save --scope 企业 --setting-scene checkRemind --check-remind-corp=true --yes --format json
+  dws attendance globalsetting save --scope 全公司 --setting-scene fastCheck --fast-check-corp=false --yes --format json
+  dws attendance globalsetting save --scope 所有人 --setting-scene bossAttendStatNotify --boss-daily-report-type 1 --boss-weekly-report-type 3 --yes --format json
+Flags:

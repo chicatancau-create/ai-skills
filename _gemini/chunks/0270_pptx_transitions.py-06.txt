@@ -1,0 +1,117 @@
+NATIVE_TRANSITIONS: dict[str, dict[str, Any]] = {}
+for _category in TRANSITION_CATEGORIES:
+    for _key in _TRANSITION_KEYS_BY_CATEGORY[_category]:
+        if _key in NATIVE_TRANSITIONS:
+            raise RuntimeError(f"duplicate native transition key: {_key}")
+        _spec = dict(_TRANSITION_SPECS[_key])
+        _spec["category"] = _category
+        _spec["effectOptions"] = _TRANSITION_EFFECT_OPTIONS.get(_key, {})
+        NATIVE_TRANSITIONS[_key] = _spec
+if set(NATIVE_TRANSITIONS) != set(_TRANSITION_SPECS):
+    raise RuntimeError("native transition gallery categories are incomplete")
+if len(NATIVE_TRANSITIONS) != 48:
+    raise RuntimeError(
+        f"native transition gallery count changed: {len(NATIVE_TRANSITIONS)}"
+    )
+for _key, _spec in NATIVE_TRANSITIONS.items():
+    _options = _spec["effectOptions"]
+    _unknown_options = set(_options) - set(TRANSITION_EFFECT_OPTION_FIELDS)
+    if _unknown_options:
+        raise RuntimeError(
+            f"native transition {_key!r} has unknown effect option(s): "
+            + ", ".join(sorted(_unknown_options))
+        )
+    for _option_name, _option_spec in _options.items():
+        if _option_spec.get("type") not in {"enum", "boolean"}:
+            raise RuntimeError(
+                f"native transition {_key!r} option {_option_name!r} "
+                "must be enum or boolean"
+            )
+        _values = _option_spec.get("values")
+        if not isinstance(_values, dict) or not _values:
+            raise RuntimeError(
+                f"native transition {_key!r} option {_option_name!r} "
+                "must define values"
+            )
+        if _option_spec.get("default") not in _values:
+            raise RuntimeError(
+                f"native transition {_key!r} option {_option_name!r} "
+                "has an unknown default"
+            )
+
+NATIVE_TRANSITION_KEYS = tuple(NATIVE_TRANSITIONS)
+# Retained as a module-level compatibility name for existing imports. New code
+# should use ``NATIVE_TRANSITIONS`` to distinguish the native registry from
+# accepted legacy input names.
+CANONICAL_TRANSITIONS = NATIVE_TRANSITIONS
+
+TRANSITION_ALIASES: dict[str, str] = {
+    "strips": "wipe",
+    "circle": "shape",
+    "diamond": "shape",
+    "newsflash": "flash",
+    "plus": "shape",
+    "pull": "uncover",
+    "wedge": "clock",
+    "wheel": "clock",
+}
+LEGACY_TRANSITION_KEYS = tuple(TRANSITION_ALIASES)
+TRANSITION_ALIAS_OPTIONS: dict[str, dict[str, object]] = {
+    "strips": {"direction": "right"},
+    "circle": {"shape": "circle"},
+    "diamond": {"shape": "diamond"},
+    "plus": {"shape": "plus"},
+    "wedge": {"style": "wedge"},
+    "wheel": {"style": "clockwise"},
+}
+TRANSITIONS: dict[str, dict[str, Any]] = dict(NATIVE_TRANSITIONS)
+for _alias, _canonical_key in TRANSITION_ALIASES.items():
+    TRANSITIONS[_alias] = NATIVE_TRANSITIONS[_canonical_key]
+
+TRANSITION_NAMESPACES = {
+    "p": PML_NS,
+    "p14": P14_NS,
+    "p15": P15_NS,
+    "p159": P159_NS,
+}
+
+for _prefix, _uri in (
+    *TRANSITION_NAMESPACES.items(),
+    ("mc", MC_NS),
+    ("r", RELATIONSHIPS_NS),
+):
+    try:
+        ET.register_namespace(_prefix, _uri)
+    except (AttributeError, ValueError):
+        pass
+
+
+@dataclass(frozen=True)
+class EnterUpdate:
+    """Describe how the current slide's visual transition enters."""
+
+    policy: str = "replace"
+    effect: str | None = DEFAULT_TRANSITION
+    duration: float = DEFAULT_TRANSITION_DURATION
+    effect_options: Mapping[str, object] | None = None
+
+
+@dataclass(frozen=True)
+class AdvanceUpdate:
+    """Describe how the current slide advances to the next slide."""
+
+    mode: str = "preserve"
+    after: float | None = None
+
+
+@dataclass(frozen=True)
+class TransitionSummary:
+    """Read-back summary of one slide's logical transition slot."""
+
+    carrier: str
+    logical_count: int
+    effect: str | None = None
+    effect_namespace: str | None = None
+    fallback_effect: str | None = None
+    fallback_effect_namespace: str | None = None
+    duration_ms: int | None = None

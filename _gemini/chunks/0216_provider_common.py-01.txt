@@ -1,0 +1,124 @@
+"""Shared primitives for web image providers.
+
+This module is the single home for everything that all four providers
+(Openverse / Wikimedia / Pexels / Pixabay) need:
+
+- License tier classification (the central abstraction of this module)
+- Search request / asset candidate dataclasses
+- Query simplification for keyword-based image APIs
+- Candidate scoring
+- Attribution text builder
+- Small helpers (orientation, json path, etc.)
+
+Provider-specific code (API URLs, payload shape, parse_results) lives in
+the corresponding provider_<name>.py module and only imports from here.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from console_encoding import configure_utf8_stdio  # noqa: E402
+
+configure_utf8_stdio()
+
+if __name__ == "__main__":
+    print(__doc__)
+    print("This is an internal helper module used by image_search.py and the four web image providers.")
+    raise SystemExit(0 if any(arg in {"-h", "--help", "help"} for arg in sys.argv[1:]) else 1)
+
+import re
+from dataclasses import dataclass, field, replace
+from typing import Any, Optional
+
+
+# ---------------------------------------------------------------------------
+# Project-wide constants
+# ---------------------------------------------------------------------------
+
+USER_AGENT = "PPTMaster/1.0 (https://github.com/hugohe3/ppt-master)"
+
+
+# ---------------------------------------------------------------------------
+# License tier classification
+# ---------------------------------------------------------------------------
+#
+# Every accepted candidate is classified into exactly one of two tiers:
+#
+#   "no-attribution"        -> No on-slide credit needed (CC0, PD, Pexels,
+#                              Pixabay). Default search target.
+#   "attribution-required"  -> CC BY / CC BY-SA. Executor must add an
+#                              inline credit text element on the slide.
+#
+# Anything else (CC BY-NC, CC BY-ND, all-rights-reserved, unknown) returns
+# None and the candidate is rejected outright.
+
+LICENSE_TIER_NO_ATTRIBUTION = "no-attribution"
+LICENSE_TIER_ATTRIBUTION_REQUIRED = "attribution-required"
+
+# Tokens that mark a license as "no attribution required".
+NO_ATTRIBUTION_TOKENS: tuple[str, ...] = (
+    "cc0",
+    "public domain",
+    "publicdomain",
+    "creativecommons.org/publicdomain/",
+    "pexels license",
+    "pixabay content license",
+    "pixabay license",
+)
+
+# Tokens that mark a license as "attribution required".
+ATTRIBUTION_REQUIRED_TOKENS: tuple[str, ...] = (
+    "cc by",
+    "cc-by",
+    "by-sa",
+    "by sa",
+    "creativecommons.org/licenses/by/",
+    "creativecommons.org/licenses/by-sa/",
+)
+
+# Tokens that disqualify a candidate entirely.
+REJECTED_TOKENS: tuple[str, ...] = (
+    "by-nc",
+    "by nc",
+    "noncommercial",
+    "non-commercial",
+    "by-nd",
+    "by nd",
+    "no derivatives",
+    "noderivatives",
+    "all rights reserved",
+)
+
+
+# Canonical display forms for license names. Different providers report
+# the same license with different capitalization (Openverse: "cc0",
+# Wikimedia: "Public domain"); the Executor renders these as on-slide
+# text, so a normalized form prevents inconsistent credits.
+_LICENSE_NAME_CANON: dict[str, str] = {
+    "cc0": "CC0",
+    "cc 0": "CC0",
+    "public domain": "Public Domain",
+    "publicdomain": "Public Domain",
+    "pdm": "Public Domain",
+    "pexels license": "Pexels License",
+    "pixabay content license": "Pixabay Content License",
+    "pixabay license": "Pixabay Content License",
+}
+
+# CC license short-name pattern used to canonicalize "cc by 4.0" → "CC BY 4.0".
+_CC_PATTERN = re.compile(
+    r"^\s*cc[\s-]+(by(?:[\s-]+(?:sa|nc|nd))*)\s*([0-9.]*)\s*$",
+    re.IGNORECASE,
+)
+
+
+def normalize_license_name(name: str) -> str:
+    """Return a canonical display form for a license name.
+
+    Maps common aliases to a consistent capitalization so the on-slide

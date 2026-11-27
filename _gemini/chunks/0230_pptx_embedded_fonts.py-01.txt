@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+"""Validated sidecar contract for source PPTX embedded fonts.
+
+The SVG projection keeps text editable, so an imported deck's embedded font
+parts must travel beside the SVG workspace instead of being flattened into
+glyph outlines.  This module owns the small manifest used by both conversion
+directions and rejects stale, incomplete, or path-escaping payloads.
+"""
+
+from __future__ import annotations
+
+import base64
+import binascii
+import hashlib
+import json
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from xml.etree import ElementTree as ET
+
+
+PML_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
+REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+FONT_REL_TYPE = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/font"
+)
+FONT_CONTENT_TYPE = "application/x-fontdata"
+FONT_BUNDLE_DIR = PurePosixPath("native-payloads/embedded-fonts")
+FONT_MANIFEST_PATH = FONT_BUNDLE_DIR / "manifest.json"
+_FONT_STYLE_TAGS = frozenset({"regular", "bold", "italic", "boldItalic"})
+
+
+class EmbeddedFontError(ValueError):
+    """Reject an unsafe or incomplete embedded-font sidecar."""
+
+
+@dataclass(frozen=True)
+class EmbeddedFontPart:
+    """One relationship-addressed source font payload."""
+
+    relationship_id: str
+    filename: str
+    payload: bytes
+
+
+@dataclass(frozen=True)
+class EmbeddedFontBundle:
+    """Presentation font-list XML plus all referenced font parts."""
+
+    font_list_xml: bytes
+    parts: tuple[EmbeddedFontPart, ...]
+
+
+def _local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _font_relationship_ids(root: ET.Element) -> tuple[str, ...]:
+    """Return every embedded-font relationship id in document order."""
+    if root.tag != f"{{{PML_NS}}}embeddedFontLst":
+        raise EmbeddedFontError(
+            "Embedded font metadata root must be p:embeddedFontLst"
+        )
+    relationship_ids: list[str] = []
+    for font in list(root):
+        if font.tag != f"{{{PML_NS}}}embeddedFont":
+            raise EmbeddedFontError(
+                "Embedded font list may contain only p:embeddedFont entries"
+            )
+        descriptor = font.find(f"{{{PML_NS}}}font")
+        if descriptor is None or not descriptor.attrib.get("typeface", "").strip():
+            raise EmbeddedFontError(
+                "Each embedded font entry requires a non-empty p:font typeface"
+            )
+        for child in list(font):
+            name = _local_name(child.tag)
+            if name == "font":
+                continue
+            if name not in _FONT_STYLE_TAGS or child.tag != f"{{{PML_NS}}}{name}":
+                raise EmbeddedFontError(
+                    f"Unsupported embedded font list child: {name}"
+                )
+            if list(child) or set(child.attrib) != {f"{{{REL_NS}}}id"}:
+                raise EmbeddedFontError(
+                    f"Embedded font slot {name} must contain only one r:id"
+                )
+            relationship_id = child.attrib[f"{{{REL_NS}}}id"].strip()
+            if not relationship_id:
+                raise EmbeddedFontError(
+                    f"Embedded font slot {name} has an empty r:id"
+                )
+            if relationship_id not in relationship_ids:
+                relationship_ids.append(relationship_id)
+    if not relationship_ids:
+        raise EmbeddedFontError("Embedded font list has no font payload slots")
+    return tuple(relationship_ids)
+
+
+def _validate_bundle(bundle: EmbeddedFontBundle) -> ET.Element:
+    """Validate XML/part correspondence and return the parsed font list."""
+    try:
+        root = ET.fromstring(bundle.font_list_xml)
+    except ET.ParseError as exc:
+        raise EmbeddedFontError(
+            f"Embedded font list XML is malformed: {exc}"
+        ) from exc
+    relationship_ids = _font_relationship_ids(root)
+    parts_by_id: dict[str, EmbeddedFontPart] = {}
+    filenames: set[str] = set()

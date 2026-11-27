@@ -1,0 +1,100 @@
+            raise ValueError(
+                'animation sequence offset exceeds the OOXML millisecond '
+                f'limit at target {len(offsets) + 1}: {start_ms}'
+            )
+        offsets.append(start_ms)
+        previous_start_ms = start_ms
+        previous_duration_ms = target.playback_duration_ms
+        has_previous = True
+    return offsets
+
+
+def _build_mixed_main_steps(
+    targets: Sequence[AnimationTarget],
+    next_id: int,
+) -> tuple[str, int]:
+    """Build one mainSeq containing mixed per-row PowerPoint Start modes."""
+    offsets = _main_target_offsets(targets)
+    groups: list[list[tuple[AnimationTarget, int]]] = []
+    for target, offset_ms in zip(targets, offsets):
+        if not groups or target.trigger == 'on-click':
+            groups.append([])
+        groups[-1].append((target, offset_ms))
+
+    rendered_groups: list[str] = []
+    for group in groups:
+        group_id = next_id
+        next_id += 1
+        first_target = group[0][0]
+        if first_target.trigger == 'on-click':
+            group_conditions = '<p:cond delay="indefinite"/>'
+        else:
+            group_conditions = (
+                '<p:cond delay="indefinite"/>'
+                '<p:cond evt="onBegin" delay="0"><p:tn val="2"/></p:cond>'
+            )
+        rendered_rows: list[str] = []
+        for target, offset_ms in group:
+            wrapper_id = next_id
+            row_id = next_id + 1
+            row_xml, next_id = _build_animation_row_xml(
+                target,
+                target.trigger,
+                row_id,
+                next_id + 2,
+            )
+            wrapper_offset_ms = offset_ms - target.delay_ms
+            rendered_rows.append(f'''<p:par>
+                  <p:cTn id="{wrapper_id}" fill="hold">
+                    <p:stCondLst><p:cond delay="{wrapper_offset_ms}"/></p:stCondLst>
+                    <p:childTnLst><p:par>{row_xml}</p:par></p:childTnLst>
+                  </p:cTn>
+                </p:par>''')
+        rows_xml = '\n                '.join(rendered_rows)
+        rendered_groups.append(f'''<p:par>
+                <p:cTn id="{group_id}" fill="hold">
+                  <p:stCondLst>{group_conditions}</p:stCondLst>
+                  <p:childTnLst>
+                    {rows_xml}
+                  </p:childTnLst>
+                </p:cTn>
+              </p:par>''')
+    return '\n              '.join(rendered_groups), next_id
+
+
+def create_sequence_timing_xml(
+    targets: list,
+    duration: float = 0.3,
+    trigger: str = 'after-previous',
+) -> str:
+    """Generate a multi-target object-animation sequence.
+
+    Args:
+        targets: list of (shape_id, delay_ms, animation_name) or
+            (shape_id, delay_ms, animation_name, duration_seconds) tuples, in
+            the order they should play. ``delay_ms`` is the gap before
+            this element starts relative to its Start mode. Mapping targets
+            may set an independent ``trigger``; otherwise they inherit the
+            function-level ``trigger``. A target with ``trigger_shape_id``
+            must use ``on-click`` and runs in an interactive sequence.
+        duration: per-element animation duration in seconds. Instantaneous
+            native presets retain their PowerPoint-authored duration.
+        trigger: PowerPoint-standard Start mode for each element.
+            ``'after-previous'`` — first element fires on slide entry,
+            rest chain after the previous one with ``delay_ms`` spacing
+            (default).
+            ``'on-click'`` — one presenter click per element.
+            ``'with-previous'`` — all elements start together on slide
+            entry.
+
+    Returns:
+        A ``<p:timing>`` element string. Returns an empty string when
+        ``targets`` is empty.
+    """
+    trigger = normalize_animation_trigger(trigger)
+    default_dur_ms = _seconds_to_ms(
+        duration,
+        'animation duration',
+        allow_zero=False,
+    )
+    if targets is None or isinstance(targets, (str, bytes)):

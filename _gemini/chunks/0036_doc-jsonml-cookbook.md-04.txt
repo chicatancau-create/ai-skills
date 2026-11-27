@@ -1,0 +1,105 @@
+- `type` — 平台标识（`bilibili` / `youku` / `mp4` 等）
+- `poster` — 封面图 URL
+
+## 卡片 (card)
+
+群名片 / 应用卡片等富交互卡片。`cardType` 决定渲染形态，`metadata` 内容随类型变化。
+
+```bash
+# 群名片
+dws doc block insert --node <DOC_ID> --content-format jsonml \
+  --element '["card", {"uuid": "cd1", "cardType": "groupChatCard", "metadata": {"id": "63953109506", "name": "测试组", "inviteUrl": "https://qr.dingtalk.com/...", "expires": 1810865989}}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, ""]]]'
+```
+
+> 注意：服务端 serialize 出来的 card 通常带一个空的 span/leaf 占位子节点，建议保留以避免反序列化差异。
+
+## 目录 (toc)
+
+目录块 attrs 上必带 4 个字段：`title` / `mode` / `styles` / `content`。如果不知道怎么填，**最简方式**是先在 web 端插入一个 toc，然后 `block list --content-format jsonml` 把现成结构拿下来改。
+
+```bash
+dws doc block insert --node <DOC_ID> --content-format jsonml --element '
+["toc", {
+  "uuid": "toc1",
+  "title": "目录",
+  "mode": "outline",
+  "styles": {
+    "global": {"maxLevel": 5, "bgColor": "#F0EBF7", "css": {}},
+    "title": {"font": "DingTalk JinBuTi", "color": "#6940A5", "numbering": true, "css": {"fontWeight": "normal"}},
+    "item": {"symbol": "disc", "css": {}}
+  },
+  "content": []
+}]'
+```
+
+**关键 attrs**：
+- `mode` — `outline`（大纲）/ `column`（分栏）
+- `styles.global.maxLevel` — 最大显示层级
+- `content` — 目录条目数组；**留空数组即可**，服务端会基于文档 heading 自动重建
+
+## 引用块 (refblock)
+
+引用另一文档的内容片段。`refblock` 像容器一样包子节点。
+
+```bash
+dws doc block insert --node <DOC_ID> --content-format jsonml --element '
+["refblock", {"uuid": "rb1", "docKey": "OTHER_DOC_NODE_ID", "refblockUUID": "BLOCK_UUID_IN_OTHER_DOC"},
+  ["p", {"uuid": "rb1p1"}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "（引用预览内容，服务端会回填）"]]]
+]'
+```
+
+**关键 attrs**：
+- `docKey` — 被引用文档的 nodeId
+- `refblockUUID` — 被引用块的 uuid
+
+> 引用块的子节点是「快照」，真实内容由服务端按 docKey/refblockUUID 拉取覆写。
+
+## 表格单元格嵌套块 (tableCell with nested blocks)
+
+`tc` 的子节点是**块级节点**（不仅是 `p`）。可以塞多个段落、列表、代码块、甚至嵌套表格。
+
+```bash
+# 单元格内含多段落 + 代码块
+dws doc block insert --node <DOC_ID> --content-format jsonml --element '
+["table", {"uuid": "tbn1", "colsWidth": [400]},
+  ["tr", {"uuid": "tbn1r1"},
+    ["tc", {"uuid": "tbn1c1", "colSpan": 1, "rowSpan": 1},
+      ["p", {"uuid": "tbn1p1"}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "标题段落"]]],
+      ["p", {"uuid": "tbn1p2", "list": {"listId": "tbn1list", "level": 0, "isOrdered": false}}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "列表项 1"]]],
+      ["p", {"uuid": "tbn1p3", "list": {"listId": "tbn1list", "level": 0, "isOrdered": false}}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "列表项 2"]]],
+      ["code", {"uuid": "tbn1code", "syntax": "bash", "code": "echo hello"}]
+    ]
+  ]
+]'
+```
+
+**规则**：
+- `tc` 子节点 **必须是块节点数组**，不能直接放 `span` 或裸字符串
+- 至少包含一个 `["p", {...}, ...]`（即使空也要），否则单元格无法渲染光标
+- 单元格可嵌套 `table`，但嵌套时务必保证内层每个 `tc` 也满足上述规则
+
+## Update 操作注意事项
+
+1. **uuid 必须与 --block-id 一致**
+2. Update 是**整块替换**，不是 patch — 需提供完整节点结构
+3. 推荐流程：先 `block list --content-format jsonml --block-id <ID>` 获取当前结构，修改后写回
+
+```bash
+# 典型 update 流程
+# 1. 获取当前结构
+dws doc block list --node <DOC_ID> --content-format jsonml --block-id <BLOCK_ID>
+
+# 2. 修改后写回（uuid 不变）
+dws doc block update --node <DOC_ID> --block-id <BLOCK_ID> --content-format jsonml \
+  --element '["p", {"uuid": "<BLOCK_ID>"}, ["span", {"data-type": "text"}, ["span", {"data-type": "leaf"}, "修改后的内容"]]]'
+```
+
+## 常见错误
+
+| 错误写法 | 问题 | 正确写法 |
+|---------|------|---------|
+| `["p", {}, "文字"]` | 裸字符串。validator 会报 `段落子节点不能是裸字符串`；默认 normalize 会自动包成右侧形式（打印 `[FIX]` 行） | `["p", {}, ["span", {"data-type":"text"}, ["span", {"data-type":"leaf"}, "文字"]]]` |
+| `["p", {}, ["text", {}, "文字"]]` | `text` 是历史 inline tag，validator 不报错但服务端实际渲染的 canonical 形式是 span/leaf；为与 `doc read` 输出一致，建议改写 | 同上，用 span + data-type |
+| `["callout", {}, ...]` | 不存在 callout tag | `["container", {"subType": "colorBlocks", ...}, ...]` |
+| `["list", {}, ...]` | 不存在 list tag | `["p", {"list": {...}}, ...]` |
+| `["blockquote", {}, ...]` | 不存在 blockquote tag | `["p", {"quote": true}, ...]` |

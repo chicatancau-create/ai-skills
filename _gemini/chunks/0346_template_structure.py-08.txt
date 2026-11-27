@@ -1,0 +1,97 @@
+            "must omit structured template mappings"
+        )
+    if any(key == "layout_strategy" for key, _value in structure_rows):
+        raise TemplateStructureError(
+            "spec_lock.md pptx_structure.layout_strategy is obsolete; SVG pages "
+            "must declare their final structured Master/Layout contract directly"
+        )
+
+    source_rows = [
+        value for key, value in structure_rows if key == "source_template"
+    ]
+    contract_rows = [
+        value for key, value in structure_rows if key == "native_structure"
+    ]
+    source_template = None
+    native_structure = None
+    if mode == "preserve":
+        if len(source_rows) != 1 or len(contract_rows) != 1:
+            raise TemplateStructureError(
+                "spec_lock.md preserve mode requires exactly one '- source_template:' "
+                "row and one '- native_structure:' row"
+            )
+        source_template = _portable_project_file(
+            project_path,
+            source_rows[0],
+            "source_template",
+            ".pptx",
+        )
+        native_structure = _portable_project_file(
+            project_path,
+            contract_rows[0],
+            "native_structure",
+            ".json",
+        )
+    elif source_rows or contract_rows:
+        raise TemplateStructureError(
+            "spec_lock.md source_template/native_structure rows are allowed only "
+            "when pptx_structure.mode is preserve"
+        )
+
+    masters: list[PptxMasterReference] = []
+    seen_master_keys: set[str] = set()
+    for master_key, raw_name in master_rows:
+        master_name = raw_name.strip()
+        if not _MASTER_KEY_RE.fullmatch(master_key):
+            raise TemplateStructureError(
+                f"spec_lock.md has invalid Master key {master_key!r}; use 1-64 "
+                "characters, start with an ASCII letter or digit, and use only "
+                "ASCII letters, digits, dots, underscores, or hyphens"
+            )
+        if master_key in seen_master_keys:
+            raise TemplateStructureError(
+                f"spec_lock.md pptx_masters repeats Master key {master_key!r}"
+            )
+        if not master_name:
+            raise TemplateStructureError(
+                f"spec_lock.md Master {master_key!r} has an empty name"
+            )
+        seen_master_keys.add(master_key)
+        masters.append(PptxMasterReference(master_key, master_name))
+
+    if mode == "structured":
+        if not master_rows:
+            raise TemplateStructureError(
+                "spec_lock.md structured mode requires a non-empty pptx_masters section"
+            )
+    elif master_section_present:
+        raise TemplateStructureError(
+            "spec_lock.md pptx_masters is allowed only when "
+            "pptx_structure.mode is structured"
+        )
+
+    prototypes: list[PptxPrototypeReference] = []
+    seen_prototype_slides: set[int] = set()
+    template_dir = (project_path / "templates").resolve()
+    template_replication_mode = _template_replication_mode(template_dir)
+    if mode != "structured" and prototype_section_present:
+        raise TemplateStructureError(
+            "spec_lock.md page_layouts section is allowed only when pptx_structure.mode "
+            "is structured"
+        )
+    for page_key, raw_value in prototype_rows:
+        page_match = _LOCK_PAGE_RE.fullmatch(page_key)
+        if not page_match or int(page_match.group(1)) <= 0:
+            raise TemplateStructureError(
+                f"spec_lock.md page_layouts key {page_key!r} must be P<NN>"
+            )
+        slide_num = int(page_match.group(1))
+        if slide_num in seen_prototype_slides:
+            raise TemplateStructureError(
+                f"spec_lock.md page_layouts repeats page P{slide_num:02d}"
+            )
+        seen_prototype_slides.add(slide_num)
+        raw_basename = raw_value.strip()
+        basename, svg_path = _template_svg_path(
+            template_dir,
+            raw_basename,

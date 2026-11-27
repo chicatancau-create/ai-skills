@@ -1,0 +1,116 @@
+                f"Native PPTX table {label} font_family must be a string"
+            )
+        font_family = value["font_family"].strip()
+        if not font_family or "," in font_family:
+            raise RuntimeError(
+                f"Native PPTX table {label} font_family must be one typeface"
+            )
+
+    languages: dict[str, str | None] = {}
+    for field in ("lang", "alt_lang"):
+        raw = value.get(field)
+        if raw is None:
+            languages[field] = None
+            continue
+        if not isinstance(raw, str) or not raw.strip():
+            raise RuntimeError(
+                f"Native PPTX table {label} {field} must be a non-empty string"
+            )
+        languages[field] = raw.strip()
+
+    baseline: int | None = None
+    if value.get("baseline_percent") is not None:
+        baseline_percent = _number(
+            value["baseline_percent"],
+            f"table {label} baseline_percent",
+        )
+        if not -100 <= baseline_percent <= 100:
+            raise RuntimeError(
+                f"Native PPTX table {label} baseline_percent must be in [-100, 100]"
+            )
+        baseline = round(baseline_percent * 1000)
+
+    outline: _TableBorderSpec | None = None
+    if value.get("outline") is not None:
+        outline = _table_border_override(value["outline"], "text outline")
+
+    return _TableRun(
+        text=text,
+        bold=booleans["bold"],
+        italic=booleans["italic"],
+        underline=booleans["underline"],
+        strike=booleans["strike"],
+        color=color,
+        font_size=font_size,
+        font_family=font_family,
+        lang=languages["lang"],
+        alt_lang=languages["alt_lang"],
+        baseline=baseline,
+        outline=outline,
+    )
+
+
+def _table_span_value(
+    cell_data: dict[str, Any],
+    key: str,
+    *,
+    row_idx: int,
+    col_idx: int,
+) -> int:
+    value = cell_data.get(key, 1)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise RuntimeError(
+            f"Native PPTX table cell R{row_idx}C{col_idx} {key} must be a "
+            "positive JSON integer"
+        )
+    return value
+
+
+def _merge_covered_cell_is_blank(value: Any) -> bool:
+    if value is None or value == "":
+        return True
+    if not isinstance(value, dict):
+        return False
+    if set(value) - {"merge_continuation", "text"}:
+        return False
+    if (
+        "merge_continuation" in value
+        and value["merge_continuation"] is not True
+    ):
+        return False
+    return value.get("text") in {None, ""}
+
+
+def _resolve_table_merge_layout(
+    payload: dict[str, Any],
+    table_rows: list[list[Any]],
+    col_count: int,
+) -> dict[tuple[int, int], _TableMergeRegion]:
+    for key in _TABLE_TOP_LEVEL_SPAN_KEYS:
+        if key in payload:
+            raise RuntimeError(
+                f"Native PPTX table uses unsupported top-level merged-cell field: {key}"
+            )
+
+    owners: dict[tuple[int, int], _TableMergeRegion] = {}
+    for row_idx, row in enumerate(table_rows, start=1):
+        for col_idx, cell in enumerate(row, start=1):
+            if isinstance(cell, dict):
+                used_keys = sorted(
+                    key for key in _TABLE_UNSUPPORTED_SPAN_KEYS if key in cell
+                )
+                if used_keys:
+                    keys = ", ".join(used_keys)
+                    raise RuntimeError(
+                        f"Native PPTX table cell R{row_idx}C{col_idx} uses "
+                        f"unsupported merged-cell field(s): {keys}; use row_span/col_span "
+                        "on the merge anchor"
+                    )
+
+            position = (row_idx - 1, col_idx - 1)
+            owner = owners.get(position)
+            if owner is not None:
+                if isinstance(cell, dict) and any(
+                    key in cell for key in _TABLE_CANONICAL_SPAN_KEYS
+                ):
+                    raise RuntimeError(

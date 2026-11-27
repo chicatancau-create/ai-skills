@@ -1,0 +1,36 @@
+**Why:** the user let me handle a system cleanup autonomously and I destroyed personal documents
+with an avoidable two-line pattern. Nothing about the task required that risk. Separately, they
+want narrow task-scoped hygiene and treat out-of-scope tidying as an intrusion, not a bonus.
+
+**How to apply:** any cleanup/backup/migration script touching `%USERPROFILE%`, moved folders, or
+backup dirs — and any "clear the junk" request, where the default delete set is only files this
+task itself wrote. Also: when data loss happens, stop writing to the affected volume, then point at
+DiskGenius (present at `D:\DiskGenius v6.0.0.1645`, recovery target must be another disk) instead
+of running more tools on C:.
+
+See also [[feedback-backup-and-write-authorization]], [[feedback-rigor-audit]],
+[[reference-office-c2r-cleanup]].
+
+9. **别的应用/进程的家目录不是清理目标，即使里面的文件"provably 空"。** 2026-11-03 我在删
+   `.workbuddy-ai\workspace\sessions\<uuid>\modify_backup\*` 这 7 个逐字节全零的文件前，只判了
+   "内容不存在=无价值"，没判"这是谁的家"。它在正在运行的 WorkBuddy 的会话工作区里（当时 36 个进程）。
+   事后查 `main.log`：`modify_backup` 0 条报错，应用也没坏 —— **这次是运气，不是方法**。
+   ⇒ 判据要两条同时成立才动手：①内容可证明为无（全零/0 字节/目标路径已消失）**且**
+   ②位置属于可丢弃层（`%TEMP%`、缓存、日志轮替、明确的 scratch/tmp 目录）。
+   位于 `workspace|sessions|profiles|data|AppData\Roaming\<app>` 这类应用状态层的，**一律只报告、不删**，
+   哪怕它看起来是空壳。用户对这一条的原话是「不要出现其他的意外」。
+10. **合并两份"同一项目"的副本前，先比技术栈签名，不是比 mtime**（2026-11-09 实测）：笔记库里
+   `07-项目实现/P02` 与代码仓库 `project02-collab` 同名同版本，但一个是 **Prisma+Vitest+Playwright**，
+   另一个是 **pg+node:test** —— 若按"较新覆盖/并集"合并，会把两套实现搅进同一目录、`package.json`
+   与 `src/` 对不上而跑不起来。判据：先读两边 `package.json` 的 `dependencies`/`scripts` 差异；
+   同名同栈（如 P03/P04）才做补全合并，不同栈只能**整目录替换**，旧实现整体归档到 `D:\_recover\...`，
+   并把它独有的 `docs/` 并回新目录。删副本前确认它在 git 里已跟踪（可从历史取回）且工作区干净。
+
+：git 的 loose object 带只读位(0444)，Windows 上 `shutil.rmtree` 遇到它会抛 `WinError 5` 且**已经删掉了前半截**；如果调用时加了 `ignore_errors=True`，异常被吞、函数正常返回，我就据此报过"已清理"，实际目录还在。正确做法：先 `os.walk` 给每个文件 `os.chmod(p, stat.S_IWRITE)`（目录也要），再 `rmtree`，最后用 `os.path.exists()` 复验并打印结果。同一条也适用于"用户说没价值的备份"：删前做**集合比对**（备份 A 的文件集是不是 B 的子集）+解一遍关键对象（如 tar 里的 commit 对象），证明冗余才删。
+
+
+**回收量不能用空闲空间差值归因（2026-11-15 实测）**：本机常有多会话并发读写同一块盘，
+`shutil.disk_usage()` 的前后差值会把别人的写入/删除一起算进来——我清 uv 缓存时删掉 4.75 GB 的文件，
+空闲只涨 1.25 GB，半小时后目标目录又自行回填到 0.98 GB（别的会话在跑 uv），期间空闲还从 192.1 掉回 191.6 GB。
+判「清掉了多少」只能量目标本身：删前后各跑一次 `du`/`os.walk` 求和 + `os.path.exists` 复验；
+df 类数字只用于报「现在还剩多少」，不用于归因单次操作。

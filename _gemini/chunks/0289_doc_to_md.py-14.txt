@@ -1,0 +1,102 @@
+# IPYNB → Markdown (nbconvert)
+# ─────────────────────────────────────────────────────────────
+
+def _convert_ipynb(input_file: Path, out_file: Path) -> str:
+    try:
+        import nbformat
+        from nbconvert import MarkdownExporter
+        from nbconvert.writers import FilesWriter
+    except ImportError:
+        print("[ERROR] nbconvert not installed. Run: pip install nbconvert")
+        return ""
+
+    # Pre-process cell-level markdown attachments: nbconvert leaves
+    # `attachment:<name>` references intact but doesn't write the files.
+    # Extract them into our outputs dict so FilesWriter picks them up.
+    nb = nbformat.read(str(input_file), as_version=4)
+    extra_outputs: dict[str, bytes] = {}
+    rel_media_dir = f"{out_file.stem}_files"
+
+    attach_counter = 0
+    for cell in nb.cells:
+        if cell.cell_type != "markdown":
+            continue
+        attachments = getattr(cell, "attachments", None) or {}
+        if not attachments:
+            continue
+        for att_name, mime_data in attachments.items():
+            for mime, b64 in mime_data.items():
+                attach_counter += 1
+                ext = mimetypes.guess_extension(mime) or ".bin"
+                if ext == ".jpe":
+                    ext = ".jpg"
+                filename = f"attachment_{attach_counter:03d}{ext}"
+                out_path = f"{rel_media_dir}/{filename}"
+                try:
+                    extra_outputs[out_path] = base64.b64decode(b64)
+                except Exception:
+                    continue
+                # Rewrite source references: attachment:<name> → <rel_path>
+                src = cell.source if isinstance(cell.source, str) else "".join(cell.source)
+                src = src.replace(f"attachment:{att_name}", out_path)
+                cell.source = src
+
+    exporter = MarkdownExporter()
+    body, resources = exporter.from_notebook_node(nb)
+
+    # Merge attachment outputs with whatever nbconvert collected
+    resources.setdefault("outputs", {}).update(extra_outputs)
+    resources["output_extension"] = ".md"
+
+    writer = FilesWriter(build_directory=str(out_file.parent))
+    writer.write(body, resources, notebook_name=out_file.stem)
+
+    markdown = out_file.read_text(encoding="utf-8") if out_file.exists() else body
+    media_dir = out_file.parent / rel_media_dir
+    _write_generic_image_manifest(media_dir, rel_media_dir, markdown, "ipynb_image")
+    _report_result(out_file, media_dir if media_dir.exists() else None)
+    return markdown
+
+
+# ─────────────────────────────────────────────────────────────
+# Pandoc fallback
+# ─────────────────────────────────────────────────────────────
+
+def _check_pandoc() -> bool:
+    return shutil.which("pandoc") is not None
+
+
+def _convert_with_pandoc(input_file: Path, out_file: Path, suffix: str) -> str:
+    if not _check_pandoc():
+        print(f"[ERROR] Format '{suffix}' requires pandoc. Install it:")
+        print("   macOS:   brew install pandoc")
+        print("   Ubuntu:  sudo apt install pandoc")
+        print("   Windows: https://pandoc.org/installing.html")
+        return ""
+
+    input_format, _ = PANDOC_FORMATS[suffix]
+    rel_media_dir = f"{out_file.stem}_files"
+    media_dir = out_file.parent / rel_media_dir
+
+    cmd = [
+        "pandoc",
+        "-f", input_format,
+        "-t", "gfm",
+        str(input_file.resolve()),
+        "-o", str(out_file.resolve()),
+        "--wrap", "none",
+        "--strip-comments",
+    ]
+    if suffix in PANDOC_MEDIA_FORMATS:
+        cmd.extend(["--extract-media", rel_media_dir])
+
+    result = subprocess.run(cmd, capture_output=True, text=True,
+                            encoding="utf-8", errors="replace",
+                            cwd=str(out_file.parent))
+    if result.returncode != 0:
+        print(f"[ERROR] Pandoc conversion failed:\n{result.stderr}")
+        return ""
+    if not out_file.exists():
+        print("[ERROR] Conversion completed but no output file was generated")
+        return ""
+

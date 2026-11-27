@@ -1,0 +1,124 @@
+        if offset + 6 > total_end:
+            return False
+        record_words = _little_uint(data, offset, 4)
+        function = _little_uint(data, offset + 4, 2)
+        if (
+            record_words < 3
+            or record_words > max_record_words
+            or offset + record_words * 2 > total_end
+        ):
+            return False
+        record_end = offset + record_words * 2
+        if function == 0 and (record_words != 3 or record_end != total_end):
+            return False
+        offset = record_end
+        last_function = function
+        last_record_words = record_words
+        observed_max_record_words = max(
+            observed_max_record_words,
+            record_words,
+        )
+    return (
+        offset == total_end
+        and last_function == 0
+        and last_record_words == 3
+        and observed_max_record_words == max_record_words
+    )
+
+
+def _valid_project_image_payload(img_format: str, img_data: bytes) -> bool:
+    """Return whether bytes are a supported image of the declared format."""
+    if not img_data:
+        return False
+    if img_format == 'svg':
+        return svg_image_payload_error(img_data) is None
+    if img_format == 'emf':
+        return _valid_emf_payload(img_data)
+    if img_format == 'wmf':
+        return _valid_wmf_payload(img_data)
+
+    expected = _PIL_IMAGE_FORMATS.get(img_format)
+    if expected is None:
+        return False
+    try:
+        from PIL import Image, UnidentifiedImageError  # type: ignore
+    except ImportError:
+        return False
+    try:
+        with Image.open(io.BytesIO(img_data)) as image:
+            actual = (image.format or '').upper()
+            image.verify()
+    except (UnidentifiedImageError, OSError, ValueError, SyntaxError):
+        return False
+    if expected == 'JPEG' and actual == 'MPO':
+        # A camera multi-picture JPEG is a JPEG stream followed by sibling
+        # frames; every JPEG decoder renders its primary frame.
+        return True
+    return actual == expected
+
+
+def _decode_data_image_uri(href: str) -> tuple[str, bytes] | None:
+    """Decode and validate one closed-project image data URI."""
+    if not href.startswith('data:') or ',' not in href:
+        return None
+
+    header, payload = href.split(',', 1)
+    match = re.fullmatch(
+        r'data:image/([A-Za-z0-9.+-]+)(?:;[^;,]*)*?(?:;base64)?',
+        header,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+
+    img_format = _normalize_project_image_format(match.group(1))
+    if img_format is None:
+        return None
+
+    is_base64 = any(
+        part.strip().lower() == 'base64'
+        for part in header.split(';')[1:]
+    )
+    try:
+        if is_base64:
+            img_data = base64.b64decode(payload, validate=True)
+        else:
+            img_data = unquote_to_bytes(payload)
+    except (ValueError, binascii.Error):
+        return None
+    if not _valid_project_image_payload(img_format, img_data):
+        return None
+    return img_format, img_data
+
+
+@dataclass(frozen=True)
+class ProjectImageSource:
+    """Validated bytes and package extension for one SVG image reference."""
+
+    img_format: str
+    img_data: bytes
+
+
+def _project_image_href(elem: ET.Element) -> str:
+    href_keys = tuple(
+        key for key in ('href', f'{{{XLINK_NS}}}href')
+        if key in elem.attrib
+    )
+    if len(href_keys) != 1:
+        raise ValueError('requires exactly one href or xlink:href')
+    href = elem.get(href_keys[0])
+    if href is None or not href.strip():
+        raise ValueError('href cannot be empty')
+    return href
+
+
+def load_project_image_source(
+    elem: ET.Element,
+    svg_dir: Path | None,
+    resource_root: Path | None = None,
+) -> ProjectImageSource:
+    """Load one exact SVG image source or raise a contract error."""
+    if elem.tag != f'{{{SVG_NS}}}image':
+        raise ValueError('expected an SVG-namespace <image> element')
+    href = _project_image_href(elem)
+    if href.startswith('data:'):

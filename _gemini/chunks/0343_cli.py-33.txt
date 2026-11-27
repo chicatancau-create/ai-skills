@@ -1,0 +1,84 @@
+                    f"  {filename}: {marker_id}: {finding}",
+                    file=sys.stderr,
+                )
+            print(
+                "Project every listed detail into the closed native payload, or "
+                "remove the active replacement marker and keep the object "
+                "Native-ready=no.",
+                file=sys.stderr,
+            )
+            return 1
+        print(
+            "Warning: --native-charts-and-tables replaces shape-based SVG fallbacks "
+            "with PowerPoint Chart/Table objects. The native objects may normalize "
+            "styling or omit SVG details that are not represented by marker metadata; "
+            "use the default shape-based export when exact fallback artwork is required.",
+            file=sys.stderr,
+        )
+        fallbacks = _native_object_fallbacks(native_files)
+        if fallbacks:
+            print(
+                "Warning: --native-charts-and-tables found fallback-only PPTX objects; "
+                "they will export through their SVG-derived DrawingML shapes instead "
+                "of native Chart/Table objects.",
+                file=sys.stderr,
+            )
+            for filename, marker_id, status in fallbacks[:20]:
+                print(f"  {filename}: {marker_id} ({status})", file=sys.stderr)
+            if len(fallbacks) > 20:
+                print(f"  ... and {len(fallbacks) - 20} more", file=sys.stderr)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    backup_dir: Path | None = None
+    if args.output:
+        native_path = Path(args.output)
+    else:
+        exports_dir = project_path / "exports"
+        exports_dir.mkdir(parents=True, exist_ok=True)
+        # --native-charts-and-tables yields a materially different file (PowerPoint
+        # Chart/Table objects instead of SVG-derived DrawingML shapes), so mark it
+        # in the default-flow name to distinguish the two editable object models.
+        # Narration flags likewise mark _narrated (audio embedded per slide +
+        # auto-advance timings). Flag-driven (not content-sniffed) so the name
+        # is predictable; an explicit -o keeps the caller's exact name untouched.
+        native_tag = "_native_charts_tables" if args.native_objects else ""
+        narrated_tag = "_narrated" if (args.recorded_narration or args.narration_audio_dir) else ""
+        kiosk_tag = "_kiosk" if args.kiosk else ""
+        native_path = exports_dir / f"{project_name}_{timestamp}{native_tag}{narrated_tag}{kiosk_tag}.pptx"
+        # Preserve svg_output/ only when it is the actual source. A custom -s
+        # directory remains the caller-owned source and is not copied under a
+        # misleading svg_output backup name.
+        if not diagnostic_source:
+            backup_dir = project_path / "backup" / timestamp
+
+    native_path.parent.mkdir(parents=True, exist_ok=True)
+
+    verbose = not args.quiet
+
+    enable_notes = not args.no_notes
+    notes: dict[str, str] = {}
+    if enable_notes:
+        try:
+            notes = find_notes_files(project_path, ref_files)
+        except NotesFileReadError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+
+    narration_audio: dict[str, Path] = {}
+    narration_audio_dir_arg = args.recorded_narration or args.narration_audio_dir
+    use_narration_timings = args.use_narration_timings or bool(args.recorded_narration)
+    if narration_audio_dir_arg:
+        narration_audio_dir = Path(narration_audio_dir_arg)
+        if not narration_audio_dir.is_absolute():
+            narration_audio_dir = project_path / narration_audio_dir
+        if args.recorded_narration and not narration_audio_dir.is_dir():
+            print(
+                f"Error: Recorded narration directory does not exist: {narration_audio_dir}",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            narration_audio = find_narration_files(
+                narration_audio_dir,
+                ref_files,

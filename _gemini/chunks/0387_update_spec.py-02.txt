@@ -1,0 +1,94 @@
+    def replace_value(match: re.Match[str]) -> str:
+        prefix, quote, _inner = match.group(1), match.group(2), match.group(3)
+        outer = quote
+        if outer in new_value:
+            outer = "'" if quote == '"' else '"'
+            if outer in new_value:
+                raise ValueError(
+                    f"new font_family value contains both ' and \" — cannot embed: "
+                    f"{new_value!r}"
+                )
+        return f"{prefix}{outer}{new_value}{outer}"
+
+    planned: list[tuple[Path, str, int]] = []
+    for svg in sorted(svg_dir.glob("*.svg")):
+        text = svg.read_text(encoding="utf-8")
+        new_text, count = FONT_FAMILY_RE.subn(replace_value, text)
+        if count > 0 and new_text != text:
+            planned.append((svg, new_text, count))
+    return planned
+
+
+def _plan_native_fallback_updates(
+    planned: list[tuple[Path, str, int]],
+) -> tuple[list[tuple[Path, str, int]], int]:
+    """Re-stamp changed SVG text in memory before the joint publish."""
+    stamped: list[tuple[Path, str, int]] = []
+    restamped_markers = 0
+    for path, text, replacement_count in planned:
+        payload, _svg_first, _json_first, restamped = (
+            prepare_native_fallback_baselines(text.encode("utf-8"), path)
+        )
+        stamped.append((path, payload.decode("utf-8"), replacement_count))
+        restamped_markers += restamped
+    return stamped, restamped_markers
+
+
+def _publish_text_updates(updates: list[tuple[Path, str]]) -> None:
+    """Publish existing text files as one rollback unit."""
+    if not updates:
+        return
+    targets = [path for path, _text in updates]
+    if len(targets) != len(set(targets)):
+        raise ValueError("transaction contains duplicate output paths")
+    for target in targets:
+        if not target.is_file() or target.is_symlink():
+            raise OSError(f"transaction target must be a regular file: {target}")
+
+    transaction_dir = Path(
+        tempfile.mkdtemp(
+            prefix=".update-spec-",
+            dir=targets[0].parent,
+        )
+    )
+    staged_dir = transaction_dir / "staged"
+    backup_dir = transaction_dir / "previous"
+    preserve_transaction = False
+    published: list[tuple[Path, Path]] = []
+    try:
+        staged_dir.mkdir()
+        backup_dir.mkdir()
+        staged: list[tuple[Path, Path, Path]] = []
+        transaction_device = transaction_dir.stat().st_dev
+        for index, (target, text) in enumerate(updates):
+            if target.parent.stat().st_dev != transaction_device:
+                raise OSError(
+                    f"cannot atomically publish across filesystems: {target}"
+                )
+            staged_path = staged_dir / f"{index:06d}.new"
+            backup_path = backup_dir / f"{index:06d}.bak"
+            staged_path.write_text(text, encoding="utf-8")
+            shutil.copymode(target, staged_path)
+            shutil.copy2(target, backup_path, follow_symlinks=False)
+            staged.append((target, staged_path, backup_path))
+
+        try:
+            for target, staged_path, backup_path in staged:
+                os.replace(staged_path, target)
+                published.append((target, backup_path))
+        except BaseException as publish_error:
+            rollback_errors: list[str] = []
+            for target, backup_path in reversed(published):
+                try:
+                    os.replace(backup_path, target)
+                except BaseException as rollback_error:
+                    rollback_errors.append(
+                        f"could not restore {target}: "
+                        f"{type(rollback_error).__name__}: {rollback_error}"
+                    )
+            if rollback_errors:
+                preserve_transaction = True
+                raise RuntimeError(
+                    f"update_spec publish failed ({publish_error}); rollback was "
+                    f"incomplete: {'; '.join(rollback_errors)}; recovery directory: "
+                    f"{transaction_dir}"

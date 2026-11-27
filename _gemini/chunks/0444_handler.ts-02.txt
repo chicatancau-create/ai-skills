@@ -1,0 +1,152 @@
+function isObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object';
+}
+
+function isInjectedReminderFile(value: unknown): boolean {
+  if (!isObject(value) || value.path !== REMINDER_PATH) {
+    return false;
+  }
+
+  return (
+    value.virtual === true ||
+    (typeof value.content === 'string' && value.content.includes(REMINDER_HEADER))
+  );
+}
+
+function redactSensitiveText(text: string): string {
+  let result = text;
+  for (const [pattern, replacement] of REDACTION_RULES) {
+    result = result.replace(pattern, replacement);
+  }
+  return result;
+}
+
+function sanitizeExcerptLine(line: string): string {
+  let excerpt = redactSensitiveText(line.trim()).split('```').join("'''");
+  if (excerpt.length > MAX_EXCERPT_LENGTH) {
+    excerpt = `${excerpt.slice(0, MAX_EXCERPT_LENGTH)}…`;
+  }
+  return excerpt;
+}
+
+function collectTextFragments(value: unknown, out: string[], depth = 0): void {
+  if (depth > 4 || out.length > 200) {
+    return;
+  }
+  if (typeof value === 'string') {
+    out.push(value);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectTextFragments(item, out, depth + 1);
+    }
+    return;
+  }
+  if (isObject(value)) {
+    if (typeof value.text === 'string') {
+      out.push(value.text);
+    }
+    if ('content' in value) {
+      collectTextFragments(value.content, out, depth + 1);
+    }
+  }
+}
+
+function matchErrorPatternKey(line: string): string | null {
+  for (const [pattern, patternKey] of ERROR_PATTERN_KEYS) {
+    if (line.includes(pattern)) {
+      return patternKey;
+    }
+  }
+  return null;
+}
+
+async function scanTranscriptForErrors(sessionFilePath: string): Promise<SweepExcerpt[]> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(sessionFilePath, 'utf-8');
+  } catch {
+    return [];
+  }
+
+  const excerpts: SweepExcerpt[] = [];
+  const seen = new Set<string>();
+
+  for (const jsonLine of raw.split('\n')) {
+    if (excerpts.length >= MAX_EXCERPTS) {
+      break;
+    }
+    const trimmed = jsonLine.trim();
+    if (!trimmed) {
+      continue;
+    }
+
+    let entry: unknown;
+    try {
+      entry = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (!isObject(entry) || !isObject(entry.message)) {
+      continue;
+    }
+
+    const fragments: string[] = [];
+    collectTextFragments(entry.message.content, fragments);
+
+    for (const fragment of fragments) {
+      for (const line of fragment.split('\n')) {
+        const patternKey = matchErrorPatternKey(line);
+        if (!patternKey) {
+          continue;
+        }
+        const excerpt = sanitizeExcerptLine(line);
+        if (!excerpt || seen.has(excerpt)) {
+          continue;
+        }
+        seen.add(excerpt);
+        excerpts.push({ excerpt, patternKey });
+        if (excerpts.length >= MAX_EXCERPTS) {
+          return excerpts;
+        }
+      }
+    }
+  }
+
+  return excerpts;
+}
+
+function resolveSessionFilePath(
+  context: Record<string, unknown>,
+  workspaceDir: string | undefined,
+): string | undefined {
+  const sessionEntry = isObject(context.previousSessionEntry)
+    ? context.previousSessionEntry
+    : isObject(context.sessionEntry)
+      ? context.sessionEntry
+      : {};
+
+  const sessionFile = (sessionEntry as Record<string, unknown>).sessionFile;
+  if (typeof sessionFile === 'string' && sessionFile.trim()) {
+    return sessionFile;
+  }
+
+  const sessionIdValue = (sessionEntry as Record<string, unknown>).sessionId;
+  const sessionId = typeof sessionIdValue === 'string' ? sessionIdValue.trim() : '';
+  if (sessionId && workspaceDir) {
+    return path.join(workspaceDir, 'sessions', `${sessionId}.jsonl`);
+  }
+
+  return undefined;
+}
+
+function generateEntryId(timestamp: Date): string {
+  const yyyymmdd = timestamp.toISOString().slice(0, 10).replace(/-/g, '');
+  const suffix = Math.random().toString(36).slice(2, 5).toUpperCase().padEnd(3, '0');
+  return `ERR-${yyyymmdd}-${suffix}`;
+}
+
+function formatErrorEntry(params: {
+  excerpts: SweepExcerpt[];
+  sessionKey: string;

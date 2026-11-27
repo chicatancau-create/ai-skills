@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+"""
+PPT Master - Page Context Projection
+
+Build deterministic per-page execution views and optional token telemetry.
+
+Usage:
+    Imported by project_management.cli.
+
+Examples:
+    build_page_context(Path("projects/demo"), "P07")
+
+Dependencies:
+    None for projection; tiktoken is optional for exact usage counts.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import re
+import statistics
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, Iterable
+
+from .paths import SKILL_DIR as _SKILL_DIR
+from .project_specs import (
+    default_spec_lock_forbidden,
+    parse_markdown_artifact,
+    parse_spec_lock_artifact,
+    validate_project_artifacts,
+)
+from svg_to_pptx.pptx_package.template_structure import (
+    PptxStructureLock,
+    TemplateStructureError,
+    load_pptx_structure_lock,
+)
+from visualization_catalog import (
+    LEGACY_STRUCTURE_INTENT_KIND,
+    VISUALIZATION_SVG_KIND,
+    VisualizationCatalogError,
+    VisualizationEntry,
+    resolve_visualization_reference,
+)
+
+
+PAGE_CONTEXT_SCHEMA = "ppt-master.page-context.v2"
+PAGE_CONTEXT_USAGE_SCHEMA = "ppt-master.page-context-usage.v2"
+PAGE_CONTEXT_REPORT_SCHEMA = "ppt-master.page-context-usage-report.v2"
+TOKEN_ENCODING = "o200k_base"
+PAGE_CONTEXT_TOKEN_TARGET = 2000
+LOCK_PROJECTION_TOKEN_TARGET = 1000
+
+_PAGE_RE = re.compile(r"^(?:P)?([0-9]+)$", re.IGNORECASE)
+_SLIDE_HEADING_RE = re.compile(
+    r"^#{3,6}[ \t]+Slide[ \t]+0*([0-9]+)(?:[ \t]*(?:[-:–—]).*)?$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_BLOCK_BOUNDARY_RE = re.compile(r"^#{2,6}[ \t]+", re.MULTILINE)
+_PART_HEADING_RE = re.compile(r"^###[ \t]+(?!#)(.+?)[ \t]*$", re.MULTILINE)
+_PAGE_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_])P0*([1-9][0-9]*)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+
+
+class PageContextError(RuntimeError):
+    """Reject an incomplete or ambiguous page-context request."""
+
+
+@dataclass(frozen=True)
+class PageRead:
+    """One exact model-visible page payload."""
+
+    kind: str
+    path: str
+    payload: str
+
+
+@dataclass(frozen=True)
+class PageContextResult:
+    """One projected page view plus the files that make it current."""
+
+    project_path: Path
+    page: str
+    context: dict[str, object]
+    inputs: tuple[Path, ...]
+
+
+def normalize_page_key(raw_page: str) -> tuple[str, int]:
+    """Normalize a positive page identifier to the schema's P<NN> form."""
+    match = _PAGE_RE.fullmatch(raw_page.strip())
+    if match is None or int(match.group(1)) <= 0:
+        raise PageContextError("page must be a positive P<NN> identifier")
+    number = int(match.group(1))
+    return f"P{number:02d}", number
+
+
+def _section_index(
+    sections: Iterable[dict[str, object]],
+) -> dict[str, dict[str, object]]:
+    return {
+        str(section["heading"]).strip().casefold(): section
+        for section in sections
+    }
+
+
+def _section_fields(
+    sections: dict[str, dict[str, object]],
+    heading: str,
+) -> dict[str, str]:
+    section = sections.get(heading.casefold())
+    if section is None:
+        return {}
+    fields = section.get("fields", {})
+    if not isinstance(fields, dict):
+        return {}
+    return {str(key): str(value) for key, value in fields.items()}
+
+
+def _forbidden_items(
+    sections: dict[str, dict[str, object]],
+) -> list[str]:
+    section = sections.get("forbidden")
+    if section is None:
+        return []
+    items: list[str] = []
+    default_items = default_spec_lock_forbidden()
+    for raw_line in str(section.get("body", "")).splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        item = re.sub(r"^-[ \t]+", "", line)
+        if item not in default_items:
+            items.append(item)
+    return items
+
+
+def _outline_section(
+    sections: Iterable[dict[str, object]],
+) -> dict[str, object] | None:
+    for section in sections:
+        heading = str(section.get("heading", "")).strip().casefold()

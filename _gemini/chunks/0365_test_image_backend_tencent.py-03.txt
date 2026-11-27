@@ -1,0 +1,68 @@
+    def test_vidu_reports_unsupported_async_api(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Vidu.*asynchronous submit/query API.*not supported"):
+            backend_tencent.generate("test", model="vidu-image-q2")
+        self.post.assert_not_called()
+
+    def test_missing_key_names_both_options(self) -> None:
+        os.environ.pop("TENCENT_API_KEY")
+        with self.assertRaisesRegex(ValueError, "No API key found.*TENCENT_API_KEY or TOKENHUB_API_KEY"):
+            backend_tencent.generate("test")
+        self.post.assert_not_called()
+        self.sleep.assert_not_called()
+
+    def test_key_fallback_and_primary_precedence(self) -> None:
+        os.environ["TOKENHUB_API_KEY"] = "fallback-key"
+        backend_tencent.generate("test")
+        self.assertEqual(self.post.call_args.kwargs["headers"]["Authorization"], "Bearer test-key")
+        os.environ["TENCENT_API_KEY"] = ""
+        backend_tencent.generate("test")
+        self.assertEqual(self.post.call_args.kwargs["headers"]["Authorization"], "Bearer fallback-key")
+
+    def test_missing_image_includes_response_body(self) -> None:
+        for model in backend_tencent.SUPPORTED_MODELS:
+            for items in (None, [], [{}], [{"url": ""}]):
+                with self.subTest(model=model, items=items):
+                    self.response.json.return_value = {"data": items, "request_id": "missing-image"}
+                    with self.assertRaisesRegex(RuntimeError, "missing image URL.*missing-image"):
+                        backend_tencent.generate("test", model=model, max_retries=0)
+        self.download.assert_not_called()
+        self.save.assert_not_called()
+
+    def test_full_endpoint_is_used_without_appending_path(self) -> None:
+        for model, endpoint in backend_tencent.MODEL_ENDPOINTS.items():
+            with self.subTest(model=model):
+                url = "https://tokenhub-intl.tencentmaas.com" + endpoint
+                os.environ["TENCENT_BASE_URL"] = url + "/"
+                backend_tencent.generate("test", model=model)
+                self.assertEqual(self.post.call_args.args[0], url)
+
+    def test_international_base_selects_model_endpoint(self) -> None:
+        os.environ["TENCENT_BASE_URL"] = "https://tokenhub-intl.tencentmaas.com/"
+        backend_tencent.generate("test")
+        self.assertEqual(
+            self.post.call_args.args[0],
+            "https://tokenhub-intl.tencentmaas.com/v1/wand/hunyuan-image/v3-generation",
+        )
+
+    def test_provider_options_apply_only_to_their_model(self) -> None:
+        os.environ.update({
+            "TENCENT_REVISE": "false", "TENCENT_WATERMARK": "true", "TENCENT_OUTPUT_FORMAT": "jpeg",
+        })
+        self.assertEqual(backend_tencent.generate("test"), "test.png")
+        self.assertIs(self.post.call_args.kwargs["json"]["revise"], False)
+        self.assertNotIn("watermark", self.post.call_args.kwargs["json"])
+        self.assertNotIn("output_format", self.post.call_args.kwargs["json"])
+        self.assertEqual(backend_tencent.generate("test", model="seedream-image-v5.0-pro"), "test.jpeg")
+        self.assertIs(self.post.call_args.kwargs["json"]["watermark"], True)
+        self.assertEqual(self.post.call_args.kwargs["json"]["output_format"], "jpeg")
+        self.assertNotIn("revise", self.post.call_args.kwargs["json"])
+
+    def test_seedream_base64_response_uses_shared_save(self) -> None:
+        image_bytes = b"\x89PNG\r\n\x1a\nminimal-mocked-image"
+        self.response.json.return_value = {"data": [{"b64_json": base64.b64encode(image_bytes).decode("ascii")}]}
+        result = backend_tencent.generate("test", model="seedream-image-v5.0-pro")
+        self.save.assert_called_once_with(image_bytes, "test.png", content_type="image/png")
+        self.download.assert_not_called()
+        self.assertEqual(result, "test.png")
+
+    def test_permanent_http_errors_do_not_retry(self) -> None:

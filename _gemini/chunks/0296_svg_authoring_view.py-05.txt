@@ -1,0 +1,116 @@
+        self.coordinate_attributes_compacted += (
+            other.coordinate_attributes_compacted
+        )
+        self.style_declarations_compacted += other.style_declarations_compacted
+        self.inherited_text_attributes_compacted += (
+            other.inherited_text_attributes_compacted
+        )
+        self.single_tspans_collapsed += other.single_tspans_collapsed
+        self.source_object_proxies += other.source_object_proxies
+        self.source_object_proxy_bytes += other.source_object_proxy_bytes
+        self.semantic_shapes += other.semantic_shapes
+        self.semantic_tables += other.semantic_tables
+        self.semantic_table_preview_bytes += other.semantic_table_preview_bytes
+        self.unused_definitions_pruned += other.unused_definitions_pruned
+        self.source_attributes.update(other.source_attributes)
+
+
+@dataclass
+class ProjectionReport:
+    source: Path
+    output: Path
+    original_bytes: int
+    projected_bytes: int
+    stats: ProjectionStats
+    source_sha256: str
+    initial_authoring_sha256: str
+    source_references: list[SourceReference]
+
+    def as_dict(self) -> dict[str, object]:
+        saved = self.original_bytes - self.projected_bytes
+        reduction = (saved / self.original_bytes * 100) if self.original_bytes else 0.0
+        return {
+            "source": str(self.source),
+            "output": str(self.output),
+            "original_bytes": self.original_bytes,
+            "projected_bytes": self.projected_bytes,
+            "bytes_saved": saved,
+            "reduction_percent": round(reduction, 2),
+            "source_sha256": self.source_sha256,
+            "initial_authoring_sha256": self.initial_authoring_sha256,
+            "source_ref_count": len(self.source_references),
+            "removed": self.stats.as_dict(),
+        }
+
+
+def _is_hidden_geometry_carrier(element: ET.Element) -> bool:
+    if element.get("data-pptx-part") != "geometry":
+        return False
+    visibility = (element.get("visibility") or "").strip().lower()
+    display = (element.get("display") or "").strip().lower()
+    style = (element.get("style") or "").replace(" ", "").lower()
+    return (
+        visibility == "hidden"
+        or display == "none"
+        or "visibility:hidden" in style
+        or "display:none" in style
+    )
+
+
+def _is_semantic_shape_candidate(element: ET.Element) -> bool:
+    if (
+        _local_name(element.tag) != "g"
+        or element.get("data-pptx-object") not in {"shape", "connector"}
+        or (
+            element.get("data-pptx-prst") is None
+            and element.get("data-pptx-geometry-kind") != "custom"
+        )
+    ):
+        return False
+    if any(
+        name in element.attrib
+        for name in (
+            "data-pptx-placeholder",
+            "data-pptx-placeholder-type",
+            "data-pptx-placeholder-idx",
+        )
+    ):
+        return False
+    if any(
+        item.get("data-pptx-effect-status") == "unsupported"
+        or item.get("data-pptx-effect-ooxml") is not None
+        for item in element.iter()
+    ):
+        return False
+    carriers = [
+        child
+        for child in element
+        if child.get("data-pptx-part") == "geometry"
+        and _local_name(child.tag) in _DRAWABLE_TAGS
+    ]
+    if len(carriers) != 1:
+        return False
+    visible_texts = [
+        item
+        for item in element.iter()
+        if _local_name(item.tag) == "text"
+    ]
+    if any(text not in list(element) for text in visible_texts):
+        return False
+    if any(
+        item.get("data-pptx-inline-formula") is not None
+        for text in visible_texts
+        for item in text.iter()
+    ):
+        return False
+    positional_texts = [
+        text
+        for text in visible_texts
+        if any(
+            _local_name(item.tag) == "tspan"
+            and any(item.get(name) is not None for name in ("x", "y", "dy"))
+            for item in text.iter()
+        )
+    ]
+    if len(visible_texts) > 1 and positional_texts:
+        return False

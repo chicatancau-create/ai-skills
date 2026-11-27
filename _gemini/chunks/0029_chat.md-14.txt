@@ -1,0 +1,74 @@
+- `chat search` — 搜**群/会话名**返回 `openConversationId`，**不**搜消息内容；要搜消息内容请用 `chat message search-advanced`（首选）/ `chat message search` / `list-by-sender` / `list-all`，**勿混淆**
+- `chat message list` — 拉取指定**群聊**的消息（需指定 --group，**仅群聊**），按时间点 + 方向翻页
+- `chat message list-direct` — 单聊专用，拉取与指定用户的单聊（私聊）记录（--user / --open-dingtalk-id；用户明确说"单聊""私聊"时使用）
+- `chat message list-by-sender` — 搜索指定发送者发给我的消息，跨所有会话（单聊+群聊均包含，用户只说"某人发的消息"时优先使用）
+- `chat message list-mentions` — 拉取 @我 的消息（跨单聊/群聊，可选指定群）
+- `chat message list-unread-conversations` — 拉取当前用户存在未读消息的会话列表（可选 `--count`）
+- `chat message read-status` — 查询指定消息的已读/未读状态（仅消息发送者可查询自己发的消息，需指定 --group 和 --message-id，可选 --target-open-dingtalk-ids 查特定人）
+- `chat message list-all` — 拉取当前用户所有会话的消息，按时间范围 + cursor 分页。只要用户没有指定某个具体的会话（如某个群名、某个人名），即使提到"单聊消息""群聊消息"等笼统范围，也应路由到此命令
+- `chat message list-topic-replies` — 拉取群话题的回复消息列表
+- `chat message list-focused` — 拉取特别关注人的消息，cursor 分页
+- `chat list-top-conversations` — 拉取置顶会话列表（用户询问"置顶会话"或"置顶消息"时路由到此），cursor 分页
+- `chat message send` — 以当前用户身份发消息（群聊或单聊），text 为位置参数；支持 --msg-type 发送富媒体消息：image（图片）、file（音频/视频/文档等所有非图片文件），图片的 mediaId 通过 dt_media_upload 上传获得，其他文件需先获取会话共享空间再上传钉盘
+- `chat message search` — 按关键词搜索消息内容（跨所有会话，可选指定群）
+- `chat search-common` — 搜索共同群，查询指定人共同所在的群聊（AND=所有人都在，OR=任一人在）
+- `chat message send-by-bot` — 以**机器人**身份发消息（群聊或单聊），text 为 --text flag
+- `chat message send-by-webhook` — 通过**自定义机器人 Webhook** 发群消息
+- `chat message recall-by-bot` — 通过**机器人接口**撤回机器人发出的消息，需要 `--robot-code` + `--keys`（发送时返回的 processQueryKey）；传 `--group` 为群聊撤回，不传为单聊撤回
+- `chat message recall` — 通过 **IM 接口**撤回当前用户自己发出的消息，需要 `--conversation-id`（openConversationId）+ `--msg-id`（openMessageId，可通过 `chat message list` 获取）；群聊单聊均通过 `--conversation-id` 区分
+- `chat message query-send-status` — 查询个人发送的消息的发送状态（需 send 返回的 openTaskId）
+- `chat message search-advanced` — 多维度搜索消息（支持关键词、发送者、@我、@指定人、多个会话等维度组合，与 `search` 的区别：`search` 仅支持关键词且必填，`search-advanced` 所有参数均可选）
+- `chat message list-by-ids` — 根据消息 ID 批量查询消息（最多 50 条）
+- `chat message add-emoji` / `remove-emoji` — 对消息添加/移除 emoji 表情回应
+- `chat message add-text-emotion` / `remove-text-emotion` — 对消息添加/移除文字表情回应
+- `chat message create-text-emotion` — 创建文字表情模板，返回 emotionId 供 add-text-emotion 使用
+- `chat category list` — 获取用户自定义会话分组列表
+- `chat category list-conversations` — 拉取指定分组下的会话列表
+- `chat mute` — 开启/关闭会话消息免打扰（默认开启，--off 关闭）
+- `chat group transfer-owner` — 转让群主
+- `chat group invite-url` — 获取群邀请链接
+- `chat message reply` — 引用回复消息（在群聊中引用某条消息并回复文字）
+- `chat message forward` — 转发单条消息（将一条消息从源会话转发到目标会话）
+- `chat set-top` — 设置/取消会话置顶（默认置顶，--off 取消）
+- `chat group-mute` — 全员禁言/取消全员禁言（默认禁言，--off 取消）
+- `chat group-mute-member` — 指定群成员禁言/取消禁言（需指定 --users 和 --mute-time）
+- `chat group set-admin` — 设置/取消群管理员（默认设为管理员，--off 取消）
+
+## openDingTalkId 获取方式
+
+多个命令参数需要 openDingTalkId（如 --open-dingtalk-id、--at-open-dingtalk-ids、--sender-open-dingtalk-id），统一获取方式如下：
+
+1. 若知道姓名：`dws contact user search --query "姓名"` → 直接从结果中获取 openDingTalkId
+2. 若只有 userId：先 `dws contact user get --ids <userId>` 获取姓名 → 再 `dws contact user search --query "姓名"` 获取 openDingTalkId
+
+openDingTalkId 为当前用户视角下的目标用户唯一标识，不可跨用户共享。
+
+## 核心工作流
+
+```bash
+# 1. 搜索群 — 提取 openconversation_id
+dws chat search --query "项目冲刺" --format json
+
+# 2. 拉取群消息
+dws chat message list --group <openconversation_id> --time "2025-03-01 00:00:00" --format json
+
+# 2b. 拉取未读会话列表
+dws chat message list-unread-conversations --count 20 --format json
+
+# 3. 以个人身份发送群消息
+dws chat message send --group <openconversation_id> --title "周报提醒" "请大家本周五前提交周报" --format json
+
+# 4. 以个人身份单聊（通过 userId）
+dws chat message send --user <userId> "你好" --format json
+
+# 4b. 以个人身份单聊（通过 openDingTalkId，三方应用等无法获取 userId 时使用）
+dws chat message send --open-dingtalk-id <openDingTalkId> "你好" --format json
+
+# 5. 机器人发群消息（Markdown）
+dws chat message send-by-bot --robot-code <robot-code> \
+  --group <openconversation_id> --title "日报" --text "## 今日完成..." --format json
+
+# 6. 机器人单聊发消息
+dws chat message send-by-bot --robot-code <robot-code> \
+  --users userId1,userId2 --title "提醒" --text "请提交周报" --format json
+

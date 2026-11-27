@@ -1,0 +1,123 @@
+    """Lower compatible positioned tspans into one semantic line model."""
+    positional = [
+        child
+        for child in text
+        if _local_name(child.tag) == "tspan"
+        and any(child.get(name) is not None for name in ("x", "y", "dy"))
+    ]
+    if not positional:
+        return False
+
+    parent_x = text.get("x")
+    advances: list[float] = []
+    for child in positional:
+        if child.get("y") is not None:
+            raise ValueError(
+                "Semantic shape text cannot normalize an absolute tspan y"
+            )
+        child_x = child.get("x")
+        if child_x is not None and child_x != parent_x:
+            raise ValueError(
+                "Semantic shape text cannot normalize a tspan x jump"
+            )
+        raw_dy = child.get("dy")
+        try:
+            advance = float(raw_dy or "0")
+        except ValueError as exc:
+            raise ValueError(
+                f"Semantic shape text has a non-numeric tspan dy: {raw_dy!r}"
+            ) from exc
+        if not math.isfinite(advance) or advance <= 0:
+            raise ValueError(
+                f"Semantic shape text requires a positive finite tspan dy: {raw_dy!r}"
+            )
+        advances.append(advance)
+
+    first_line = ET.Element(f"{{{SVG_NS}}}tspan")
+    first_line.text = text.text
+    lines: list[ET.Element] = [first_line]
+    current = first_line
+    for child in list(text):
+        clone = copy.deepcopy(child)
+        if child in positional:
+            for name in ("x", "y", "dy"):
+                clone.attrib.pop(name, None)
+            clone.set("data-paragraph-line-break", "1")
+            lines.append(clone)
+            current = clone
+            continue
+        current.append(clone)
+
+    lines = [line for line in lines if _semantic_text_has_content(line)]
+    if len(lines) < 2:
+        return False
+    for child in list(text):
+        text.remove(child)
+    text.text = None
+    text.set("data-pptx-text-model", "lines")
+    line_height = min(advances)
+    text.set(
+        "data-paragraph-line-height",
+        f"{line_height:.6f}".rstrip("0").rstrip("."),
+    )
+    for line in lines:
+        text.append(line)
+    return True
+
+
+def _semantic_paragraph_from_text(
+    source: ET.Element,
+    parent: ET.Element,
+    *,
+    space_before: float,
+) -> ET.Element:
+    """Wrap one rendered SVG text line as one semantic paragraph run tree."""
+    paragraph = ET.Element(f"{{{SVG_NS}}}tspan")
+    presentation_attributes = _TSPAN_INHERITED_ATTRIBUTES | {
+        "baseline-shift",
+        "opacity",
+        "stroke-linecap",
+        "stroke-linejoin",
+        "stroke-width",
+        "style",
+    }
+    for name in presentation_attributes:
+        value = source.get(name)
+        if value is not None and value != parent.get(name):
+            paragraph.set(name, value)
+    if space_before > 0:
+        paragraph.set(
+            "data-paragraph-space-before",
+            f"{space_before:.6f}".rstrip("0").rstrip("."),
+        )
+    paragraph.text = source.text
+    for child in source:
+        paragraph.append(copy.deepcopy(child))
+    return paragraph
+
+
+def _merge_semantic_shape_texts(
+    shape: ET.Element,
+    texts: list[ET.Element],
+) -> ET.Element:
+    """Represent multiple rendered text rows as one paragraph-based text body."""
+    baselines = [_semantic_text_baseline(text) for text in texts]
+    positive_advances = [
+        current - previous
+        for previous, current in zip(baselines, baselines[1:])
+        if current > previous
+    ]
+    line_height = _semantic_text_font_size(texts[0]) * 1.5
+    if positive_advances:
+        line_height = min(line_height, min(positive_advances))
+    line_height = max(line_height, 1.0)
+
+    combined = copy.deepcopy(texts[0])
+    for child in list(combined):
+        combined.remove(child)
+    combined.text = None
+    combined.set("data-pptx-text-model", "paragraphs")
+    combined.set(
+        "data-paragraph-line-height",
+        f"{line_height:.6f}".rstrip("0").rstrip("."),
+    )

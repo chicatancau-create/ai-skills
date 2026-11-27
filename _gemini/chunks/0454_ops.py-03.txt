@@ -1,0 +1,87 @@
+                    hits.append(line.rstrip())
+        for line in hits[-6:]:
+            print("  " + line[:230])
+        if not any("Kompress ONNX loaded" in x for x in hits):
+            print("  WARNING: no 'Kompress ONNX loaded' line -> ML compressor is OFF.")
+            print("           Re-seed the model cache with seed_kompress.py (uses hf-mirror;")
+            print("           huggingface.co is unreachable here and HEADROOM_OFFLINE=1 blocks fetch).")
+    else:
+        print("  log not found: %s" % LOG)
+
+
+def cmd_guard(fix=False):
+    """cc-switch rewrites BASE_URL on every attach/detach, silently bypassing
+    headroom.  The guard re-asserts the hop (only while cc-switch is in proxy
+    mode, and only when headroom is healthy)."""
+    g = os.path.join(os.path.dirname(ROUTER), "wire_guard.py")
+    print(run([PY, g, "--once" if fix else "--status"], 180))
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-CimInstance Win32_Process -Filter \"Name='pythonw.exe'\" | "
+             "Where-Object { $_.CommandLine -like '*wire_guard*' } | "
+             "Select-Object -ExpandProperty ProcessId"],
+            capture_output=True, text=True, timeout=60)
+        pids = (out.stdout or "").strip()
+        print("watchdog process: %s" % (pids if pids else "NOT RUNNING (logon entry will start it; "
+                                                        "or run: pythonw wire_guard.py --watch)"))
+    except Exception as e:
+        print("watchdog process: query failed %s" % e)
+    gl = os.path.join(os.environ.get("AI_SHARED_SKILLS_STATE_DIR", r"D:\AI-Tool-State"),
+                      "wire-guard", "guard.log")
+    if os.path.isfile(gl):
+        with open(gl, encoding="utf-8", errors="replace") as f:
+            tail = f.readlines()[-5:]
+        print("guard log tail:")
+        for t in tail:
+            print("  " + t.rstrip()[:190])
+
+
+def cmd_shield(snap=False):
+    """The default window is junctions into the library, so a shell delete of the
+    window wipes the library (incident 2026-11-15 02:04:06).  The shield keeps a
+    real mirror at D:\\Skills-mirror and repairs from it."""
+    s = os.path.join(os.path.dirname(ROUTER), "skill_shield.py")
+    print(run([PY, s, "--once"] + (["--snapshot"] if snap else []), 180))
+    print(run([PY, s, "--status"], 120))
+
+
+def cmd_backup(now=False):
+    """The git remotes (GitHub + GitCode) are the backup - no local copies.
+    Shows whether both remotes hold the current HEAD; `backup now` commits and
+    pushes immediately.  The guard also does this automatically every 10 min."""
+    s = os.path.join(os.path.dirname(ROUTER), "git_backup.py")
+    print(run([PY, s, "now" if now else "status"], 1800))
+
+
+def main():
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
+    if cmd == "status":
+        cmd_status()
+    elif cmd == "verify":
+        cmd_verify()
+    elif cmd == "savings":
+        cmd_savings()
+    elif cmd == "guard":
+        cmd_guard("--fix" in sys.argv or "--once" in sys.argv)
+    elif cmd == "shield":
+        cmd_shield("--snapshot" in sys.argv)
+    elif cmd == "backup":
+        cmd_backup("now" in sys.argv)
+    elif cmd == "skills":
+        cmd_skills()
+    elif cmd in ("start", "stop", "restart"):
+        print(hr("install", cmd))
+        time.sleep(3)
+        print(f"  8787 listening: {tcp(8787)}")
+    elif cmd == "wire":
+        print(run([PY, WIRE, "--apply"], 400))
+    elif cmd == "unwire":
+        print(run([PY, WIRE, "--rollback"], 120))
+    else:
+        print(__doc__)
+
+
+if __name__ == "__main__":
+    main()

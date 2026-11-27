@@ -1,0 +1,106 @@
+                    else animation_defaults.get('stagger', 0.5)
+                )
+            ),
+            "animation stagger",
+            allow_zero=True,
+        )
+        animation_seconds_to_milliseconds(
+            animation_stagger,
+            "animation stagger",
+            allow_zero=True,
+        )
+        animation_trigger = normalize_animation_trigger(
+            args.animation_trigger
+            if args.animation_trigger is not None
+            else (
+                inherited_animation['trigger']
+                if 'trigger' in inherited_animation
+                else animation_defaults.get('trigger', 'after-previous')
+            )
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    animation_cli_overrides = {
+        'transition': (
+            args.transition is not None
+            or inherited_overrides.get('transition') is True
+        ),
+        'transition_duration': (
+            args.transition_duration is not None
+            or explicit_transition_uses_default_duration
+            or inherited_overrides.get('transition_duration') is True
+        ),
+        'auto_advance': (
+            args.auto_advance is not None
+            or inherited_overrides.get('auto_advance') is True
+        ),
+        'transition_sound': 'sound' in inherited_transition,
+        'animation': (
+            args.animation is not None
+            or inherited_overrides.get('animation') is True
+        ),
+        'animation_duration': (
+            args.animation_duration is not None
+            or inherited_overrides.get('animation_duration') is True
+        ),
+        'animation_stagger': (
+            args.animation_stagger is not None
+            or inherited_overrides.get('animation_stagger') is True
+        ),
+        'animation_trigger': (
+            args.animation_trigger is not None
+            or inherited_overrides.get('animation_trigger') is True
+        ),
+    }
+
+    deck_motion: dict[str, object] = {
+        'transition': {
+            'effect': transition,
+            'effect_options': transition_effect_options,
+            'duration': transition_duration,
+            'auto_advance': auto_advance,
+            'sound': transition_sound,
+        },
+        'animation': {
+            'effect': normalized_animation or 'none',
+            'effect_request': animation,
+            'duration': animation_duration,
+            'stagger': animation_stagger,
+            'trigger': animation_trigger,
+        },
+        'cli_overrides': animation_cli_overrides,
+        'narration_timings': use_narration_timings,
+    }
+
+    if args.recorded_narration:
+        on_click_slides = _recorded_narration_on_click_slides(
+            ref_files,
+            animation_config,
+            animation,
+            animation_trigger,
+            animation_cli_overrides,
+            roundtrip_source=source_pptx_path(project_path) if args.roundtrip else None,
+            roundtrip_pages=roundtrip_pages,
+            roundtrip_patches=roundtrip_slide_patches,
+        )
+        if on_click_slides:
+            print(
+                "Error: --recorded-narration cannot be used with on-click object animations. "
+                "Explicitly replace or clear the reported source animations, or use "
+                "after-previous / with-previous for authored animation rows.",
+                file=sys.stderr,
+            )
+            for slide in on_click_slides[:20]:
+                print(f"  on-click trigger: {slide}", file=sys.stderr)
+            if len(on_click_slides) > 20:
+                print(f"  ... and {len(on_click_slides) - 20} more", file=sys.stderr)
+            return 1
+
+    # Optional per-project document properties. Absent file → factual fields
+    # are still stamped at export; only the authored fields stay blank.
+    doc_metadata = None
+    metadata_path = project_path / 'metadata.json'
+    if metadata_path.is_file():
+        try:

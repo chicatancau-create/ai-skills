@@ -1,0 +1,98 @@
+                if (
+                    suffix_match is not None
+                    and asset_value.casefold().endswith(
+                        suffix_match.group(1).casefold()
+                    )
+                ):
+                    asset_value = asset_value[: -len(suffix_match.group(1))]
+                try:
+                    relative_asset = asset_pattern.format(value=asset_value)
+                except (KeyError, ValueError) as exc:
+                    errors.append(
+                        f"{markdown_name} schema: reference '{rule_id}' has invalid "
+                        f"asset_path_pattern '{asset_pattern}': {exc}"
+                    )
+                    continue
+                asset_path = (project_root / relative_asset).resolve()
+                try:
+                    asset_path.relative_to(project_root)
+                except ValueError:
+                    errors.append(
+                        f"{markdown_name} schema: reference '{rule_id}' escapes the "
+                        f"project root for value '{reference_value}'"
+                    )
+                    continue
+                if asset_path.suffix.casefold() != ".svg" or not asset_path.is_file():
+                    errors.append(
+                        f"{markdown_name} schema: reference '{rule_id}' value "
+                        f"'{reference_value}' does not resolve to {asset_path}"
+                    )
+    return errors
+
+
+def _validate_strict_data_surface(
+    markdown_name: str,
+    text: str,
+    sections: list[dict[str, object]],
+    matched: Mapping[str, dict[str, object] | None],
+) -> list[str]:
+    """Reject unknown lock sections and prose outside the data-line grammar."""
+    errors: list[str] = []
+    section_ids = {
+        int(section["offset"]): section_id
+        for section_id, section in matched.items()
+        if section is not None
+    }
+    first_offset = min((int(section["offset"]) for section in sections), default=len(text))
+    for line in text[:first_offset].splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("<!--") or stripped.startswith("# "):
+            continue
+        errors.append(f"{markdown_name} schema: unsupported preamble line '{stripped}'")
+
+    for section in sections:
+        heading = str(section["heading"])
+        section_id = section_ids.get(int(section["offset"]))
+        if section_id is None:
+            errors.append(f"{markdown_name} schema: unknown section '{heading}'")
+            continue
+        for line in str(section["body"]).splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if section_id == "forbidden" and stripped.startswith("- "):
+                continue
+            if _MARKDOWN_DATA_LINE_RE.fullmatch(line) is not None:
+                continue
+            errors.append(
+                f"{markdown_name} schema: section '{section_id}' has unsupported "
+                f"line '{stripped}'"
+            )
+    return errors
+
+
+def _validate_spec_lock_relations(
+    markdown_path: Path,
+    matched: Mapping[str, dict[str, object] | None],
+) -> list[str]:
+    """Validate cross-section references that JSON field rules cannot express."""
+    markdown_name = markdown_path.name
+    errors: list[str] = []
+
+    errors.extend(_validate_spec_lock_forbidden(matched.get("forbidden")))
+
+    def fields(section_id: str) -> dict[str, str]:
+        section = matched.get(section_id)
+        if section is None:
+            return {}
+        raw_fields = section["fields"]
+        assert isinstance(raw_fields, dict)
+        return {str(key): str(value) for key, value in raw_fields.items()}
+
+    for section_id, selector_field, references_field, catalog_dir in (
+        _CUSTOM_REFERENCE_CATALOGS
+    ):
+        section_fields = fields(section_id)
+        is_custom = (
+            _normalize_schema_value(section_fields.get(selector_field, "")) == "custom"
+        )

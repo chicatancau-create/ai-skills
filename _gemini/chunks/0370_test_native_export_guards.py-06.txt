@@ -1,0 +1,74 @@
+        errors = self._check()['errors']
+        self.assertTrue(any('pat' in error and 'foreground' in error and 'data-pptx-fg' in error
+                            for error in errors), errors)
+        with self.assertRaisesRegex(SvgNativeConversionError, 'foreground'):
+            self._export()
+
+    def test_complete_pattern_exports_native_fill(self) -> None:
+        self._pattern(
+            '<rect width="10" height="10" fill="#FFFFFF"/>'
+            '<path d="M 0 0 L 10 10" stroke="#123456"/>'
+        )
+        self.assertFalse(self._check()['errors'])
+        pattern = self._export().find('.//a:pattFill', NS)
+        self.assertIsNotNone(pattern)
+        self.assertEqual(pattern.get('prst'), 'smGrid')
+        self.assertEqual(pattern.find('a:fgClr/a:srgbClr', NS).get('val'), '123456')
+        self.assertEqual(pattern.find('a:bgClr/a:srgbClr', NS).get('val'), 'FFFFFF')
+
+    def test_pattern_metadata_and_child_alpha_remain_supported(self) -> None:
+        self._pattern(
+            '<rect width="10" height="10" style="fill:#FFFFFF;fill-opacity:0.5"/>'
+            '<path d="M 0 0 L 10 10" style="stroke:#123456;stroke-opacity:0.25"/>',
+            'data-pptx-pattern="smGrid" data-pptx-fg="#123456" data-pptx-bg="#FFFFFF"',
+        )
+        self.assertFalse(self._check()['errors'])
+        pattern = self._export().find('.//a:pattFill', NS)
+        self.assertEqual(pattern.find('a:fgClr/a:srgbClr/a:alpha', NS).get('val'), '25000')
+        self.assertEqual(pattern.find('a:bgClr/a:srgbClr/a:alpha', NS).get('val'), '50000')
+
+    def test_unmarked_pattern_keeps_missing_foreground_fallback(self) -> None:
+        self._pattern('<rect width="10" height="10" fill="#FF0000"/>', '')
+        self.assertFalse(self._check()['errors'])
+        slide = self._export()
+        self.assertIsNone(slide.find('.//a:pattFill', NS))
+        self.assertIsNotNone(slide.find('.//p:sp/p:spPr/a:noFill', NS))
+
+    def test_single_child_rotation_matches_direct_transform(self) -> None:
+        for child in (
+            '<text x="100" y="120" {transform}>ABC</text>',
+            '<rect x="100" y="120" width="80" height="30" {transform}/>',
+        ):
+            with self.subTest(child=child):
+                transform = 'transform="rotate(90 100 120)"'
+                self._svg(child.format(transform=transform), 'font-family="Arial" font-size="20"')
+                direct = self._export().find('.//p:sp/p:spPr/a:xfrm', NS)
+                self._svg(
+                    f'<g {transform}>{child.format(transform="")}</g>',
+                    'font-family="Arial" font-size="20"',
+                )
+                grouped = self._export()
+                rotated = grouped.find('.//a:xfrm[@rot]', NS)
+                self.assertIsNotNone(rotated)
+                self.assertEqual(rotated.get('rot'), direct.get('rot'))
+                # Group and direct transforms round fractional glyph widths separately.
+                for axis in ('x', 'y'):
+                    self.assertAlmostEqual(
+                        int(rotated.find('a:off', NS).get(axis)),
+                        int(direct.find('a:off', NS).get(axis)),
+                        delta=1,
+                    )
+                self.assertEqual(rotated.find('a:ext', NS).attrib, direct.find('a:ext', NS).attrib)
+
+    def test_multiple_child_rotation_keeps_group_frame(self) -> None:
+        self._svg(
+            '<g transform="rotate(90 100 120)"><text x="100" y="120">ABC</text>'
+            '<rect x="160" y="110" width="40" height="20"/></g>',
+            'font-family="Arial" font-size="20"',
+        )
+        group = self._export().find('.//p:grpSp', NS)
+        self.assertEqual(len(group.findall('p:sp', NS)), 2)
+        frame = group.find('p:grpSpPr/a:xfrm', NS)
+        self.assertEqual(frame.get('rot'), '5400000')
+        self.assertEqual(frame.find('a:off', NS).attrib, {'x': '487680', 'y': '1468755'})
+        self.assertEqual(frame.find('a:chOff', NS).attrib, {'x': '944880', 'y': '981075'})

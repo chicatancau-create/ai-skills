@@ -1,0 +1,135 @@
+> **注意**：`--file-size` 单位是**字节**（不是 KB/MB），AI 不要帮用户估算大小，应让用户确认文件实际字节数。
+
+## 指令树
+
+```
+dws minutes
+├── list <scope>                     # 二级：list 后必须跟 mine / shared / all
+│   ├── mine [--query] [--start] [--end] [--max] [--next-token]
+│   ├── shared [--query] [--start] [--end] [--max] [--next-token]
+│   └── all [--query] [--start] [--end] [--max] [--next-token]
+├── get <subcommand>                 # 二级：get 后必须跟子命令名
+│   ├── info --id <uuid>
+│   ├── summary --id <uuid>
+│   ├── transcription --id <uuid>
+│   ├── keywords --id <uuid>
+│   ├── todos --id <uuid>
+│   ├── audio --id <uuid>
+│   └── batch --ids <uuid1,uuid2>
+├── update <subcommand>              # 二级：update 后必须跟子命令名
+│   ├── title --id <uuid> --title "..."
+│   └── summary --id <uuid> --content "..."
+├── record <subcommand>              # 二级：record 后必须跟子命令名
+│   ├── start
+│   ├── pause --id <uuid>
+│   ├── resume --id <uuid>
+│   └── stop --id <uuid>
+├── speaker <subcommand>
+│   ├── replace --id <uuid> --from "..." --to "..."
+│   └── summary <subcommand>
+│       ├── create --ids <uuid1,uuid2>
+│       └── get --ids <uuid1,uuid2>
+├── mind-graph <subcommand>
+│   ├── create --id <uuid>
+│   └── status --id <uuid>
+├── hot-word <subcommand>
+│   ├── add --words "..."
+│   └── list
+├── replace-text --id <uuid> --search "..." --replace "..."
+├── upload <subcommand>
+│   ├── create --file-name "..." --file-size <n>
+│   ├── complete --session-id <sid>
+│   └── cancel --session-id <sid>
+└── permission <subcommand>
+    ├── add --ids <uuid1,uuid2> --member-uids <uid1,uid2> --policy <0-4> [--cover] [--sub-resources "..."]
+    └── remove --ids <uuid1,uuid2> --member-uids <uid1,uid2>
+```
+
+## 命令总览
+
+### 查询我创建的听记列表
+```
+Usage:
+  dws minutes list mine [flags]
+Example:
+  dws minutes list mine
+  dws minutes list mine --max 10
+  dws minutes list mine --max 10 --next-token <nextToken>
+  dws minutes list mine --query "周会"
+Flags:
+      --max float         查询的听记篇数 (默认 10)
+      --next-token string 分页 token (首页留空，后续填写前次返回的 nextToken)
+      --query string      关键字筛选 (可选)
+      --start string      开始时间 ISO-8601 (可选)
+      --end string        结束时间 ISO-8601 (可选)
+```
+
+查询我创建的听记列表，支持 `--max` 和 `--next-token` 分页，支持按关键字和时间范围筛选。
+
+### 查询他人共享给我的听记列表
+```
+Usage:
+  dws minutes list shared [flags]
+Example:
+  dws minutes list shared
+  dws minutes list shared --max 20
+  dws minutes list shared --max 5 --next-token <nextToken>
+Flags:
+      --max float         查询的听记篇数 (默认 10)
+      --next-token string 分页 token (首页留空，后续填写前次返回的 nextToken)
+      --query string      关键字筛选 (可选)
+      --start string      开始时间 ISO-8601 (可选)
+      --end string        结束时间 ISO-8601 (可选)
+```
+
+查询他人共享给我的听记列表，支持 `--max` 和 `--next-token` 分页，支持按关键字和时间范围筛选。
+
+### 查询我有权限访问的所有听记列表
+```
+Usage:
+  dws minutes list all [flags]
+Example:
+  dws minutes list all
+  dws minutes list all --max 20
+  dws minutes list all --query "周会" --max 20
+  dws minutes list all --start "2026-03-01T00:00:00+08:00" --end "2026-03-20T23:59:59+08:00"
+  dws minutes list all --max 10 --next-token <nextToken>
+Flags:
+      --end string        结束时间 ISO-8601 (可选)
+      --query string      关键字筛选 (可选)
+      --max float         查询的听记篇数 (默认 10)
+      --next-token string 分页 token (首页留空，后续填写前次返回的 nextToken)
+      --start string      开始时间 ISO-8601 (可选)
+```
+
+查询我有权限访问的所有听记列表（包括我创建的、他人共享给我的等所有有权限的听记）。支持按关键字和时间范围筛选。时间范围和关键字为可选参数，不传则返回所有有权限的听记。支持使用 `--max` 和 `--next-token` 进行分页查询。
+
+### 获取听记基础信息
+```
+Usage:
+  dws minutes get info [flags]
+Example:
+  dws minutes get info --id <taskUuid>
+Flags:
+      --id string   听记 taskUuid (必填)，取值逻辑参考 ## 注意事项
+```
+
+返回字段: 创建人、开始时间、截止时间、听记标题、听记访问链接URL
+
+**发言人列表输出规范（查询详情后必须执行）**：
+
+调用 `get info` 和 `get transcription`（首页即可）后，**必须**从返回数据中提取并展示发言人列表：
+
+1. **提取发言人**：从转写数据的 `speakerName` / `speakerId` 字段收集所有不同的发言人
+2. **分类展示**：
+   - **已识别**：声纹已标注真实姓名的发言人（直接显示姓名）
+   - **未识别**：仅有匿名编号的发言人（显示为「发言人 1」「发言人 2」等）
+3. **引导逻辑（存在未识别发言人时）**：
+
+   展示发言人列表后，**必须**向用户提供以下选项：
+
+   > 本次听记共有 M 位发言人，其中 N 位尚未识别身份：
+   >
+   > | # | 当前标注 | 发言占比 |
+   > |---|---------|---------|
+   > | 1 | 张三（已识别） | 35% |

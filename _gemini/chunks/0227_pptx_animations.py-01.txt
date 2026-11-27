@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""
+PPT Master - PPTX Animation Module
+
+Provides one strict object-animation registry plus OOXML read/write helpers.
+
+Supported transition effects:
+    - Complete current PowerPoint gallery: Subtle, Exciting, Dynamic Content
+    - Compatibility aliases: strips, circle, diamond, newsflash, plus, pull,
+      wedge, wheel
+    - none: no visual transition (handled by the shared transition core)
+
+PowerPoint-native object animations:
+    - 53 entrance effects (``entrance_*``)
+    - 33 emphasis effects (``emphasis_*``)
+    - 64 motion paths (``path_*``)
+    - 53 exit effects (``exit_*``)
+
+Legacy compatibility inputs (accepted but never selected for new output):
+    appear, fade, fly, fly_left, fly_right, fly_top, cut, zoom, wipe,
+    wipe_left, wipe_right, wipe_up, wipe_down, split, blinds, checkerboard,
+    dissolve, random_bars, peek, wheel, box, circle, diamond, plus, strips,
+    wedge, stretch, expand, swivel
+
+The four media commands in MsoAnimEffect are intentionally excluded because
+they require audio/video shapes or bookmarks rather than generated SVG groups.
+
+Animation modes used by the builder:
+    - single effect name (one of the above) — apply to every element
+    - 'auto'   — pick effect from the group's SVG id. Image-like ids
+                 (hero / figure- / image / img- / kpi) cycle through a
+                 visual pool (``entrance_zoom`` / ``entrance_dissolve`` /
+                 ``entrance_circle`` / ``entrance_box`` /
+                 ``entrance_diamond`` / ``entrance_wheel``) so multiple
+                 images vary across the deck. Other
+                 semantic matches map to a single stable effect
+                 (chart→``entrance_wipe``,
+                 card-/step-/pillar-→``entrance_fly``,
+                 title/takeaway→``entrance_fade``).
+                 Unmatched ids cycle through a small modern pool
+                 (``entrance_fade`` / ``entrance_wipe`` /
+                 ``entrance_fly`` / ``entrance_zoom``).
+    - 'mixed'  — compatible mode name: first element fades, the rest cycle
+                 through a larger canonical PowerPoint entrance pool.
+    - 'random' — pick a seeded canonical PowerPoint entrance per element
+
+Generated animation rows are validated against their requested effect, target,
+duration, order, and Start mode before a PPTX is published.  Package validation
+also checks timing-tree placement, time-node identifiers, and shape references.
+
+See references/animations.md for the public workflow contract.
+
+Dependencies: None (standard-library XML generation and validation)
+
+Usage:
+    python3 scripts/pptx_animations.py --demo
+    python3 scripts/pptx_animations.py --list
+    python3 scripts/pptx_animations.py --describe entrance_fly
+"""
+
+import argparse
+import copy
+import hashlib
+import json
+import math
+import posixpath
+import random
+import re
+import zipfile
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+from xml.etree import ElementTree as ET
+
+from console_encoding import configure_utf8_stdio
+from pptx_transitions import (
+    LEGACY_TRANSITION_KEYS,
+    MAX_OOXML_MILLISECONDS,
+    MAX_OOXML_UNSIGNED_INT,
+    NATIVE_TRANSITION_KEYS,
+    NATIVE_TRANSITIONS,
+    PML_NS,
+    TRANSITION_ALIAS_OPTIONS,
+    TRANSITION_ALIASES,
+    TRANSITION_CATEGORIES,
+    create_transition_xml,
+    describe_transition_effect,
+    validate_seconds,
+)
+
+configure_utf8_stdio()
+
+
+# ============================================================================
+# Object animation definitions
+# ============================================================================
+
+# Compatibility names normalize to canonical PowerPoint-authored presets.
+# ``cut`` has no current object-animation preset, so the compatibility name
+# resolves to the standard instantaneous entrance, ``entrance_appear``.
+ANIMATION_ALIASES: dict[str, str] = {
+    'appear': 'entrance_appear',
+    'fade': 'entrance_fade',
+    'fly': 'entrance_fly',

@@ -1,0 +1,109 @@
+            line for line in (result.stdout + result.stderr).splitlines()[-25:]
+        )
+        raise ApplyTemplateError(
+            f"template validation failed for {record.display} "
+            f"(exit {result.returncode}):\n{tail}"
+        )
+
+
+def _check_kind_cardinality(roots: list[RootRecord]) -> None:
+    seen: dict[str, str] = {}
+    for record in roots:
+        for kind in record.kinds:
+            if kind in seen:
+                raise ApplyTemplateError(
+                    f"kind {kind!r} is contributed by both {seen[kind]} and "
+                    f"{record.display}; select one root per kind"
+                )
+            seen[kind] = record.display
+
+
+# ---------------------------------------------------------------------------
+# Planning
+# ---------------------------------------------------------------------------
+
+
+def _provenance_line(record: RootRecord) -> str:
+    return f"> **Installed from**: `{record.display}` ({record.source})"
+
+
+def _spec_with_provenance(spec_path: Path, record: RootRecord) -> bytes:
+    text = spec_path.read_text(encoding="utf-8")
+    lines = text.split("\n")
+    body_start = 0
+    if lines and lines[0].strip() == "---":
+        for idx in range(1, len(lines)):
+            if lines[idx].strip() == "---":
+                body_start = idx + 1
+                break
+    h1 = next(
+        (idx for idx in range(body_start, len(lines)) if lines[idx].startswith("# ")),
+        None,
+    )
+    if h1 is None:
+        raise ApplyTemplateError(f"{spec_path} has no H1 to anchor the provenance line")
+    rewritten = lines[: h1 + 1] + ["", _provenance_line(record)] + lines[h1 + 1 :]
+    return "\n".join(rewritten).encode("utf-8")
+
+
+def _iter_files(directory: Path) -> list[Path]:
+    return sorted(path for path in directory.rglob("*") if path.is_file())
+
+
+def _is_spec_file(path: Path) -> bool:
+    return path.name == "design_spec.md" or (
+        path.name.startswith("design_spec.") and path.suffix == ".md"
+    )
+
+
+def _structural_files(record: RootRecord) -> list[Path]:
+    return [
+        path
+        for path in _iter_files(record.templates_dir)
+        if not _is_spec_file(path) and path.suffix.lower() not in BITMAP_SUFFIXES
+    ]
+
+
+def _plan(project: Path, roots: list[RootRecord]) -> InstallPlan:
+    owner = next((r for r in roots if "layout" in r.kinds), None)
+    owner_kind = "layout" if owner else None
+    if owner is None:
+        owner = next((r for r in roots if "deck" in r.kinds), None)
+        owner_kind = "deck" if owner else None
+    plan = InstallPlan(project=project, roots=roots, owner=owner, owner_kind=owner_kind)
+    project_templates = project / "templates"
+
+    for record in roots:
+        if record.in_place:
+            continue
+        for spec in record.specs:
+            plan.mappings.append(
+                Mapping(
+                    src=spec.path,
+                    dst=project_templates / f"design_spec.{spec.kind}.{spec.template_id}.md",
+                    content=_spec_with_provenance(spec.path, record),
+                )
+            )
+        for asset_dir in ASSET_DIRS:
+            source_dir = record.root / asset_dir
+            if not source_dir.is_dir():
+                continue
+            for path in _iter_files(source_dir):
+                plan.mappings.append(
+                    Mapping(src=path, dst=project / asset_dir / path.relative_to(source_dir))
+                )
+    if owner is not None and not owner.in_place:
+        for path in _structural_files(owner):
+            plan.mappings.append(
+                Mapping(src=path, dst=project_templates / path.relative_to(owner.templates_dir))
+            )
+        in_place_deck = next(
+            (r for r in roots if r.in_place and "deck" in r.kinds), None
+        )
+        if owner_kind == "layout" and in_place_deck is not None:
+            plan.removals.extend(_structural_files(in_place_deck))
+    return plan
+
+
+def _preflight(plan: InstallPlan) -> None:
+    by_dst: dict[Path, Mapping] = {}

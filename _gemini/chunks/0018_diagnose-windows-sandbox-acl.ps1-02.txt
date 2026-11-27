@@ -1,0 +1,79 @@
+  $record = [ordered]@{ kind = $Kind; operation = $Operation; path = $Target; status = $Status; reason = $Reason; details = $Details }
+  if ($Kind -eq 'observation' -and $Status -in @('unknown', 'unreadable', 'partial')) { $script:observationFailures++ }
+  $script:reports.Add($record)
+  $json = $record | ConvertTo-Json -Depth 12 -Compress
+  # The complete record set also lands in the report file: tool output is truncated to its
+  # tail, so a long run's early records survive only there.
+  if ($null -ne $script:reportWriter) {
+    try { $script:reportWriter.WriteLine($json); $script:reportWriter.Flush() }
+    catch [System.IO.IOException] {
+      # stdout keeps only its tail, so this file is the complete record: a write failure
+      # has to reach the caller, on stderr, instead of leaving a silently incomplete file.
+      [Console]::Error.WriteLine('REPORT_IO_FAILED {0}: {1}' -f $script:reportPath, $_.Exception.Message)
+      try { $script:reportWriter.Dispose() } catch { }
+      $script:reportWriter = $null
+    }
+  }
+  [Console]::Out.WriteLine('REPORT ' + $json)
+}
+function Invoke-ReportedOperation {
+  param([string]$Operation, [string]$Target, [string]$Reason, [string]$Effect, [scriptblock]$Action)
+  $entry = [ordered]@{ id = $script:operations.Count + 1; operation = $Operation; path = $Target; effect = $Effect; status = 'started' }
+  $script:operations.Add($entry)
+  if ($Effect -eq 'acl' -and $Operation -ne 'restore_dacl' -and $script:recoveries.Count -gt 0) {
+    $script:recoveries[-1].attempted = $true
+  }
+  Write-Report action $Operation $Target started $Reason @{ id = $entry.id; effect = $Effect }
+  try {
+    $result = & $Action
+    $entry.status = 'completed'
+    Write-Report action $Operation $Target completed $Reason @{ id = $entry.id; effect = $Effect }
+    return $result
+  } catch {
+    $entry.status = 'failed'
+    Write-Report action $Operation $Target failed $Reason @{
+      id = $entry.id; effect = $Effect; error = (Get-HResultChain $_.Exception)
+      state = $(if ($Effect -eq 'none') { 'No mutation requested by this operation.' } else { 'The operation may have partially changed state; completion is unconfirmed.' })
+    }
+    throw
+  }
+}
+
+function Write-Decision {
+  param([string]$Operation, [string]$Target, [string]$Status, [string]$Reason)
+  Write-Report decision $Operation $Target $Status $Reason
+}
+
+# Unwrap nested exceptions: PowerShell wraps Win32 failures, and only the inner
+# exception carries the real HRESULT the caller needs to classify the failure.
+function Get-HResultChain {
+  param([System.Exception]$Exception)
+  $chain = @()
+  $e = $Exception
+  while ($null -ne $e) {
+    $chain += ('{0}=0x{1:X8}/win32={2}: {3}' -f $e.GetType().Name, $e.HResult, ($e.HResult -band 0xFFFF), $e.Message)
+    $e = $e.InnerException
+  }
+  return ($chain -join ' <- ')
+}
+
+function Get-CurrentIdentity {
+  return [System.Security.Principal.WindowsIdentity]::GetCurrent()
+}
+
+# Integrity level affects the symptom: the same foreign
+# ACE fails a grant when the caller is below Medium and merely blocks the child
+# when the caller is not.
+# The integrity level lives in the token's group list, which .NET filters out of
+# WindowsIdentity.Groups, so read it through GetTokenInformation. Add-Type compiles
+# in-process on PowerShell 7. Never spawn whoami.exe for this: inside a below-Medium
+# token that process fails to initialize (STATUS_DLL_INIT_FAILED, 0xc0000142) and
+# raises an application-error dialog on the user's desktop.
+function Initialize-NativeApi {
+    if (-not ('Dsh.TokenInfo' -as [type])) {
+      Add-Type -Namespace Dsh -Name TokenInfo -MemberDefinition @'
+[StructLayout(LayoutKind.Sequential)]
+public struct SID_AND_ATTRIBUTES { public IntPtr Sid; public uint Attributes; }
+[StructLayout(LayoutKind.Sequential)]
+public struct TOKEN_MANDATORY_LABEL { public SID_AND_ATTRIBUTES Label; }
+[DllImport("advapi32.dll", SetLastError = true)]

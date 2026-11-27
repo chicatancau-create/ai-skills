@@ -1,0 +1,119 @@
+def normalize_path_commands(commands: list[PathCommand]) -> list[PathCommand]:
+    """Normalize path commands to M/L/C/Z only.
+
+    Converts S -> C, Q -> C, T -> C, A -> C sequences.
+    """
+    result: list[PathCommand] = []
+    cx, cy = 0.0, 0.0
+    last_cp_x, last_cp_y = 0.0, 0.0
+    last_cmd = ''
+
+    for cmd in commands:
+        a = cmd.args
+
+        if cmd.cmd == 'M':
+            cx, cy = a[0], a[1]
+            last_cp_x, last_cp_y = cx, cy
+            result.append(cmd)
+        elif cmd.cmd == 'L':
+            cx, cy = a[0], a[1]
+            last_cp_x, last_cp_y = cx, cy
+            result.append(cmd)
+        elif cmd.cmd == 'C':
+            last_cp_x, last_cp_y = a[2], a[3]
+            cx, cy = a[4], a[5]
+            result.append(cmd)
+        elif cmd.cmd == 'S':
+            if last_cmd in ('C', 'S'):
+                rcp_x, rcp_y = _reflect_control_point(last_cp_x, last_cp_y, cx, cy)
+            else:
+                rcp_x, rcp_y = cx, cy
+            last_cp_x, last_cp_y = a[0], a[1]
+            new_cx, new_cy = a[2], a[3]
+            result.append(PathCommand('C', [rcp_x, rcp_y, a[0], a[1], new_cx, new_cy]))
+            cx, cy = new_cx, new_cy
+        elif cmd.cmd == 'Q':
+            cubic = _quad_to_cubic(a[0], a[1], cx, cy, a[2], a[3])
+            last_cp_x, last_cp_y = a[0], a[1]
+            result.append(PathCommand('C', cubic))
+            cx, cy = a[2], a[3]
+        elif cmd.cmd == 'T':
+            if last_cmd in ('Q', 'T'):
+                qp_x, qp_y = _reflect_control_point(last_cp_x, last_cp_y, cx, cy)
+            else:
+                qp_x, qp_y = cx, cy
+            last_cp_x, last_cp_y = qp_x, qp_y
+            cubic = _quad_to_cubic(qp_x, qp_y, cx, cy, a[0], a[1])
+            result.append(PathCommand('C', cubic))
+            cx, cy = a[0], a[1]
+        elif cmd.cmd == 'A':
+            arc_beziers = _arc_to_cubic_beziers(
+                cx, cy, a[0], a[1], a[2], int(a[3]), int(a[4]), a[5], a[6],
+            )
+            for bc in arc_beziers:
+                result.append(bc)
+            cx, cy = a[5], a[6]
+            last_cp_x, last_cp_y = cx, cy
+        elif cmd.cmd == 'Z':
+            result.append(cmd)
+        else:
+            result.append(cmd)
+
+        last_cmd = cmd.cmd
+
+    return result
+
+
+def transform_path_commands(
+    commands: list[PathCommand],
+    matrix: AffineMatrix,
+) -> list[PathCommand]:
+    """Apply an affine transform to normalized M/L/C/Z path commands."""
+    transformed: list[PathCommand] = []
+    for command in commands:
+        if command.cmd in {'M', 'L'}:
+            x, y = transform_point(
+                matrix,
+                command.args[0],
+                command.args[1],
+            )
+            transformed.append(PathCommand(command.cmd, [x, y]))
+        elif command.cmd == 'C':
+            args: list[float] = []
+            for index in range(0, 6, 2):
+                x, y = transform_point(
+                    matrix,
+                    command.args[index],
+                    command.args[index + 1],
+                )
+                args.extend([x, y])
+            transformed.append(PathCommand(command.cmd, args))
+        else:
+            transformed.append(command)
+    return transformed
+
+
+def path_commands_to_drawingml(
+    commands: list[PathCommand],
+    offset_x: float = 0,
+    offset_y: float = 0,
+    scale_x: float = 1.0,
+    scale_y: float = 1.0,
+) -> tuple[str, float, float, float, float]:
+    """Convert normalized path commands to DrawingML <a:path> inner XML.
+
+    Returns:
+        (path_xml, min_x, min_y, width, height) in scaled+offset coordinates.
+    """
+    if not commands:
+        return '', 0, 0, 0, 0
+
+    # First pass: calculate bounding box
+    points: list[tuple[float, float]] = []
+    for cmd in commands:
+        if cmd.cmd in ('M', 'L'):
+            points.append((
+                cmd.args[0] * scale_x + offset_x,
+                cmd.args[1] * scale_y + offset_y,
+            ))
+        elif cmd.cmd == 'C':

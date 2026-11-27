@@ -1,0 +1,111 @@
+        authoring_dir = project_path / 'authoring-svg-flat'
+        self._has_incomplete_page_roster = False
+        self._structured_native_slots: list[str] = []
+        if not project_path.is_dir():
+            print(f"[ERROR] Round-trip workspace does not exist: {project_path}")
+            self.summary['errors'] += 1
+            self.issue_types['Input issues'] += 1
+            return []
+        if not authoring_dir.is_dir():
+            print(
+                "[ERROR] Round-trip workspace has no authoring-svg-flat/: "
+                f"{project_path}"
+            )
+            self.summary['errors'] += 1
+            self.issue_types['Input issues'] += 1
+            return []
+
+        try:
+            self._roundtrip_source_fingerprint = roundtrip_source_fingerprint(project_path)
+            source_root, source_proxy_dir, documents, _, _ = _load_documents(
+                project_path,
+                authoring_dir,
+            )
+            pages, _ = _load_page_plan(
+                project_path,
+                authoring_dir,
+                documents,
+            )
+            current_assets, inventory = _load_current_assets(
+                project_path,
+                authoring_dir,
+                documents,
+            )
+            baseline_temporary, baseline_dir, baseline_assets = (
+                _generate_baseline_bundle(
+                    project_path,
+                    source_root,
+                    source_proxy_dir,
+                    documents,
+                    inventory,
+                )
+            )
+        except (AuthoringRoundtripError, OSError, ValueError) as exc:
+            print(f"[ERROR] Invalid round-trip workspace: {exc}")
+            self.summary['errors'] += 1
+            self.issue_types['Input issues'] += 1
+            return []
+
+        documents_by_slide = {
+            document.source_slide: document
+            for document in documents.values()
+        }
+        self._active_slide_count = len(pages)
+        print(
+            f"\n[SCAN] Checking {len(pages)} round-trip output SVG page(s) "
+            "for edited-text horizontal capacity (single-line width per "
+            "positioned line; vertical wrapping is not modeled)...\n"
+        )
+        try:
+            baseline_roots = {
+                source_slide: _parse_svg(
+                    baseline_dir / document.name,
+                )
+                for source_slide, document in documents_by_slide.items()
+            }
+            for page in pages:
+                result = self._check_roundtrip_file(
+                    authoring_dir / page.svg_name,
+                    documents_by_slide[page.source_slide],
+                    baseline_roots[page.source_slide],
+                    current_assets,
+                    baseline_assets,
+                    output_index=page.output_index,
+                    source_slide=page.source_slide,
+                )
+                self._print_result(result)
+        finally:
+            baseline_temporary.cleanup()
+        return self.results
+
+    def _check_roundtrip_file(
+        self,
+        svg_path: Path,
+        source_document,
+        baseline_root: ET.Element,
+        current_assets,
+        baseline_assets,
+        *,
+        output_index: int,
+        source_slide: int,
+    ) -> Dict:
+        """Run only edited-text checks for one resolved round-trip page."""
+        result = {
+            'file': svg_path.name,
+            'path': str(svg_path),
+            'exists': svg_path.is_file(),
+            'errors': [],
+            'warnings': [],
+            'info': {
+                'output_page': output_index,
+                'source_slide': source_slide,
+            },
+            'passed': True,
+        }
+        if not svg_path.is_file():
+            result['errors'].append('File does not exist')
+            result['passed'] = False
+            return self._record_result(result)
+
+        try:
+            source_bytes = svg_path.read_bytes()

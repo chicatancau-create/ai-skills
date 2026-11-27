@@ -1,0 +1,151 @@
+        raise ValueError("Unable to read exact audio sample count") from exc
+    samples = duration_ts * time_base * sample_rate
+    if samples.denominator != 1:
+        raise ValueError(
+            "Audio duration does not resolve to a whole number of samples"
+        )
+    return samples.numerator
+
+
+def _target_sample_count(duration_ms: int) -> int:
+    return int(round(duration_ms * _OUTPUT_SAMPLE_RATE / 1000))
+
+
+def _streams(probe: dict[str, Any], kind: str) -> list[dict[str, Any]]:
+    raw_streams = probe.get("streams")
+    if not isinstance(raw_streams, list):
+        return []
+    return [
+        stream
+        for stream in raw_streams
+        if isinstance(stream, dict) and stream.get("codec_type") == kind
+    ]
+
+
+def _stream_hash(path: Path, selector: str, ffmpeg_path: str) -> str:
+    result = _run_command(
+        [
+            ffmpeg_path,
+            "-v",
+            "error",
+            "-i",
+            str(path),
+            "-map",
+            selector,
+            "-c",
+            "copy",
+            "-f",
+            "hash",
+            "-hash",
+            "sha256",
+            "-",
+        ],
+        f"stream hash for {path}",
+    )
+    match = re.search(r"SHA256=([0-9a-fA-F]{64})", result.stdout)
+    if match is None:
+        raise RuntimeError(f"Unable to parse stream hash for {path}")
+    return match.group(1).lower()
+
+
+def _maximum_volume_db(path: Path, ffmpeg_path: str) -> float | None:
+    result = subprocess.run(
+        [
+            ffmpeg_path,
+            "-nostdin",
+            "-hide_banner",
+            "-i",
+            str(path),
+            "-map",
+            "0:a:0",
+            "-af",
+            "volumedetect",
+            "-f",
+            "null",
+            "-",
+        ],
+        capture_output=True,
+        check=False,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Volume inspection failed for {path}:\n{result.stderr.strip()}"
+        )
+    match = re.search(r"max_volume:\s*(-?inf|[-+]?\d+(?:\.\d+)?)\s*dB", result.stderr)
+    if match is None:
+        raise RuntimeError(f"Unable to read maximum volume for {path}")
+    if match.group(1) == "-inf":
+        return None
+    return float(match.group(1))
+
+
+def _true_peak_dbfs(path: Path, ffmpeg_path: str) -> float | None:
+    result = subprocess.run(
+        [
+            ffmpeg_path,
+            "-nostdin",
+            "-hide_banner",
+            "-nostats",
+            "-i",
+            str(path),
+            "-map",
+            "0:a:0",
+            "-af",
+            "ebur128=peak=true",
+            "-f",
+            "null",
+            "-",
+        ],
+        capture_output=True,
+        check=False,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"True-peak inspection failed for {path}:\n{result.stderr.strip()}"
+        )
+    matches = re.findall(
+        r"Peak:\s*(-?inf|[-+]?\d+(?:\.\d+)?)\s*dBFS",
+        result.stderr,
+    )
+    if not matches:
+        raise RuntimeError(f"Unable to read true peak for {path}")
+    if matches[-1] == "-inf":
+        return None
+    return float(matches[-1])
+
+
+def _decode_audio_f32(path: Path, ffmpeg_path: str) -> Any:
+    try:
+        import numpy as np
+    except ImportError as exc:
+        raise RuntimeError(
+            "Video sound verification requires numpy. Install it with: "
+            "python3 -m pip install numpy"
+        ) from exc
+    result = subprocess.run(
+        [
+            ffmpeg_path,
+            "-v",
+            "error",
+            "-i",
+            str(path),
+            "-map",
+            "0:a:0",
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            str(_VERIFICATION_SAMPLE_RATE),
+            "-f",
+            "f32le",
+            "-",
+        ],
+        capture_output=True,
+        check=False,
+    )

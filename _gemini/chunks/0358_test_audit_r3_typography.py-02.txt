@@ -1,0 +1,80 @@
+                        '<a:fontScheme name="Office">'
+                        + "".join(
+                            f'<a:{role}><a:latin typeface="Calibri"/>'
+                            '<a:ea typeface=""/><a:cs typeface=""/>'
+                            '<a:font script="Arab" typeface="Arial"/>'
+                            '<a:font script="Guru" typeface="Raavi"/>'
+                            '<a:font script="Deva" typeface="Mangal"/>'
+                            f'</a:{role}>'
+                            for role in ("majorFont", "minorFont")
+                        )
+                        + '</a:fontScheme></a:themeElements></a:theme>',
+                        encoding="utf-8",
+                    )
+                    spec = load_theme_font_spec(project, language)
+                    self.assertIsNotNone(spec)
+                    self.assertEqual(spec.cs_scripts, (selected,))
+                    apply_theme_font_spec(project, spec)
+                    root = ET.parse(theme_path).getroot()
+                    for role in ("majorFont", "minorFont"):
+                        collection = root.find(f".//a:{role}", NS)
+                        fonts = {
+                            node.get("script"): node.get("typeface")
+                            for node in collection.findall("a:font", NS)
+                        }
+                        for script, original in (
+                            ("Arab", "Arial"), ("Guru", "Raavi"), ("Deva", "Mangal"),
+                        ):
+                            self.assertEqual(
+                                fonts[script], "Tahoma" if script == selected else original,
+                            )
+
+
+class ExportedRunLanguageTests(unittest.TestCase):
+    def test_latin_script_tags_survive_actual_svg_conversion(self) -> None:
+        cases = (
+            ("sr-Latn-RS", "Dobro jutro", "sr-Latn-RS"),
+            ("zh-Latn", "Ni hao", "zh-Latn"),
+            ("sr-Cyrl-RS", "Добро јутро", "sr-Cyrl-RS"),
+            ("vi-VN", "Xin chào", "vi-VN"),
+            ("zh-CN", "2026 AI", "en-US"),
+            ("ar-SA", "2026 AI", "en-US"),
+            ("sr-Cyrl-RS", "Dobro jutro", "en-US"),
+            ("sr-x-Latn", "Dobro jutro", "en-US"),
+            ("zh-CN", "2026 !", "zh-CN"),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            svg = folder / "01.svg"
+            for language, content, expected in cases:
+                with self.subTest(language=language, content=content):
+                    svg.write_text(
+                        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720">'
+                        '<text x="100" y="140" font-size="42" '
+                        f'font-family="Arial" fill="#111111">{content}</text></svg>',
+                        encoding="utf-8",
+                    )
+                    xml, *_ = convert_svg_to_slide_shapes(
+                        svg, resource_root=folder, verbose=False, primary_language=language,
+                    )
+                    root = ET.fromstring(xml)
+                    runs = root.findall(".//a:r", NS)
+                    self.assertTrue(runs)
+                    self.assertEqual("".join(run.findtext("a:t", namespaces=NS) for run in runs), content)
+                    self.assertEqual(
+                        {run.find("a:rPr", NS).get("lang") for run in runs}, {expected},
+                    )
+
+
+class StructuredTextLanguageTests(unittest.TestCase):
+    def test_structured_package_keeps_authored_runs_and_localizes_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            svg = folder / "01.svg"
+            elements = []
+            expected = {}
+            for index, layer in enumerate(("master", "layout", "slide")):
+                metadata = (
+                    f' data-pptx-layer="{layer}" data-pptx-editable="false"'
+                    if layer != "slide" else ""
+                )

@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""PPT Master - Repository Updater
+
+Pull the latest Git checkout and sync Python dependencies when the effective
+requirements include tree changes.
+
+Usage:
+    python3 skills/ppt-master/scripts/update_repo.py
+    python3 skills/ppt-master/scripts/update_repo.py --skip-pip
+
+Examples:
+    python3 skills/ppt-master/scripts/update_repo.py
+    python3 skills/ppt-master/scripts/update_repo.py --skip-pip
+
+Dependencies:
+    None (standard library only)
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import shlex
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+from console_encoding import configure_utf8_stdio
+
+configure_utf8_stdio()
+
+
+TOOLS_DIR = Path(__file__).resolve().parent
+SKILL_DIR = TOOLS_DIR.parent
+REPO_ROOT = SKILL_DIR.parent.parent
+REQUIREMENTS_FILE = REPO_ROOT / "requirements.txt"
+
+
+def non_git_checkout_message() -> str:
+    return f"""This copy of PPT Master is not a Git checkout, so it cannot be updated automatically.
+
+Repository path:
+  {REPO_ROOT}
+
+If you installed with Download ZIP:
+  1. Download the latest ZIP from GitHub or AtomGit.
+  2. Unzip it into a new folder.
+  3. Copy your old .env and projects/ folder into the new folder.
+  4. Run: pip install -r requirements.txt
+
+If you want one-command updates next time, install with Git clone:
+  git clone https://github.com/hugohe3/ppt-master.git
+
+If you installed through a skill marketplace, update or reinstall through the
+same marketplace / skills tool."""
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Pull the latest repository changes and sync Python dependencies "
+            "only when the requirements include tree changes."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--skip-pip",
+        action="store_true",
+        help="Skip Python dependency sync even if the requirements include tree changed.",
+    )
+    return parser.parse_args(argv)
+
+
+def print_status(message: str = "") -> None:
+    """Print progress/status messages to stderr."""
+    print(message, file=sys.stderr)
+
+
+def run_command(args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        args,
+        cwd=REPO_ROOT,
+        check=check,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+
+def _requirement_includes(path: Path, content: str) -> list[Path]:
+    """Resolve local -r/--requirement includes relative to their owning file."""
+    includes: list[Path] = []
+    for raw_line in content.splitlines():
+        try:
+            tokens = shlex.split(raw_line, comments=True, posix=True)
+        except ValueError:
+            continue
+        if not tokens:
+            continue
+
+        option = tokens[0]
+        include_value: str | None = None
+        if option in {"-r", "--requirement"}:
+            if len(tokens) >= 2:
+                include_value = tokens[1]
+        elif option.startswith("--requirement="):
+            include_value = option.partition("=")[2]
+        elif option.startswith("-r") and len(option) > 2:
+            include_value = option[2:].lstrip("=")
+
+        if not include_value:
+            continue
+        include_path = Path(include_value)
+        if not include_path.is_absolute():
+            include_path = path.parent / include_path
+        includes.append(include_path)
+    return includes
+
+
+def requirements_digest(path: Path) -> str | None:
+    """Hash one requirements file and its recursive local include closure."""
+    if not path.exists():
+        return None
+
+    digest = hashlib.sha256()
+    visited: set[Path] = set()
+
+    def visit(current: Path) -> None:
+        try:
+            resolved = current.resolve()
+        except OSError as exc:
+            raise RuntimeError(
+                f"Unable to resolve requirements file {current}: {exc}"

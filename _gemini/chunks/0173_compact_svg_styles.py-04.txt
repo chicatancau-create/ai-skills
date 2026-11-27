@@ -1,0 +1,112 @@
+        for child in children:
+            declarations = _style_declarations(child.get("style"))
+            if declarations is None:
+                break
+            declarations_by_child.append(declarations)
+            value = _style_values(declarations).get(name)
+            if value is None:
+                value = child.get(name)
+            if value is None or not is_canonical_presentation_value(
+                value,
+                property_name=name,
+            ):
+                break
+            values.append(value)
+        if len(values) != len(children) or len(set(values)) != 1:
+            continue
+
+        element.set(name, values[0])
+        stats.group_defaults_promoted += 1
+        for child, declarations in zip(children, declarations_by_child):
+            removed_style = sum(item.name == name for item in declarations)
+            if removed_style:
+                _write_style(
+                    child,
+                    [item for item in declarations if item.name != name],
+                )
+                stats.redundant_style_declarations_removed += removed_style
+            if child.get(name) is not None:
+                child.attrib.pop(name, None)
+                stats.redundant_attributes_removed += 1
+
+
+def _remove_redundant_inherited_styles(
+    element: ET.Element,
+    inherited: dict[str, str],
+    stats: StyleCompactionStats,
+) -> None:
+    if (
+        _local_name(element.tag) in _DEFINITION_SUBTREES
+        or _keeps_local_paint(element)
+    ):
+        return
+    declarations = _style_declarations(element.get("style"))
+    if declarations is None:
+        return
+    style_values = _style_values(declarations)
+    remove_style_names: set[str] = set()
+    effective = dict(inherited)
+
+    for name in INHERITABLE_ATTRIBUTES:
+        style_value = style_values.get(name)
+        attribute_value = element.get(name)
+        if style_value is not None:
+            if attribute_value is not None:
+                element.attrib.pop(name, None)
+                stats.shadowed_attributes_removed += 1
+            if (
+                style_value == inherited.get(name)
+                and is_canonical_presentation_value(
+                    style_value,
+                    property_name=name,
+                )
+            ):
+                remove_style_names.add(name)
+                stats.redundant_style_declarations_removed += sum(
+                    item.name == name for item in declarations
+                )
+            else:
+                effective[name] = style_value
+            continue
+        if attribute_value is None:
+            continue
+        if (
+            attribute_value == inherited.get(name)
+            and is_canonical_presentation_value(
+                attribute_value,
+                property_name=name,
+            )
+        ):
+            element.attrib.pop(name, None)
+            stats.redundant_attributes_removed += 1
+        else:
+            effective[name] = attribute_value
+
+    if remove_style_names:
+        _write_style(
+            element,
+            [
+                item for item in declarations
+                if item.name not in remove_style_names
+            ],
+        )
+    for child in element:
+        _remove_redundant_inherited_styles(child, effective, stats)
+
+
+def compact_svg_style_tree(root: ET.Element) -> StyleCompactionStats:
+    """Compact inherited declarations without changing effective SVG styles."""
+    if _local_name(root.tag) != "svg":
+        raise ValueError("Style compaction requires an SVG root element")
+    stats = StyleCompactionStats()
+    _normalize_container_inherited_styles(root, stats)
+    _normalize_root_font_family(root, stats)
+    _promote_common_group_defaults(root, stats)
+    _remove_redundant_inherited_styles(root, {}, stats)
+    return stats
+
+
+def _svg_files(input_path: Path) -> list[Path]:
+    if input_path.is_file():
+        return [input_path] if input_path.suffix.lower() == ".svg" else []
+    return sorted(

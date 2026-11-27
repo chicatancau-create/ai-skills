@@ -1,0 +1,126 @@
+    uid = cmn._first_nonempty(record, ("userId", "userid", "user_id", "targetUserId"))
+    return str(uid) if uid is not None else None
+
+
+def _extract_work_date(record: dict, columns: list[dict]) -> str | None:
+    """
+    从一条记录里提取"工作日期"（YYYY-MM-DD 格式）。
+
+    试探顺序：
+      1. record 里的 DATE_KEY_CANDIDATES
+      2. columns 里 _column_name 含"日期"的字段
+      3. 13 位毫秒时间戳 → 转 YYYY-MM-DD
+      4. ISO 字符串 → 截前 10 位
+    都没找到返回 None。
+    """
+    candidates: list[Any] = []
+
+    # 1) 直接 key
+    for key in DATE_KEY_CANDIDATES:
+        if key in record and record[key] not in (None, ""):
+            candidates.append(record[key])
+
+    # 2) 字段名含"日期"
+    for col in columns:
+        if "日期" in col["_column_name"] or "date" in col["_column_name"].lower():
+            v = _value_for_column(record, col)
+            if v not in (None, ""):
+                candidates.append(v)
+
+    for raw in candidates:
+        date_str = _normalize_date(raw)
+        if date_str:
+            return date_str
+    return None
+
+
+def _normalize_date(raw: Any) -> str | None:
+    """把任意形态的日期值归一化为 YYYY-MM-DD 字符串。"""
+    if raw is None:
+        return None
+    # 毫秒时间戳
+    if isinstance(raw, (int, float)) and 1_000_000_000_000 <= raw <= 9_999_999_999_999:
+        try:
+            return datetime.fromtimestamp(raw / 1000).strftime(cmn.DATE_FMT)
+        except (OSError, ValueError, OverflowError):
+            return None
+    # 秒级时间戳
+    if isinstance(raw, (int, float)) and 1_000_000_000 <= raw <= 9_999_999_999:
+        try:
+            return datetime.fromtimestamp(raw).strftime(cmn.DATE_FMT)
+        except (OSError, ValueError, OverflowError):
+            return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    # 已经是 YYYY-MM-DD
+    if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+        head = s[:10]
+        try:
+            datetime.strptime(head, cmn.DATE_FMT)
+            return head
+        except ValueError:
+            return None
+    return None
+
+
+def aggregate_daily(
+    all_records: list[dict],
+    columns: list[dict],
+    user_ids: list[str],
+    user_name_map: dict[str, str],
+    stats: cmn.CallStats,
+) -> list[dict[str, Any]]:
+    """
+    按 (userId, workDate) 聚合：
+      - 数值字段：sum
+      - 非数值字段：取首个非空值（同一天同字段通常只有一个值）
+    返回每人每天一行的 dict 列表，按 userId、workDate 排序。
+    """
+    # bucket: (userId, date) → column_name → {sum: float, count_num: int, first_nonnum: Any}
+    buckets: dict[tuple[str, str], dict[str, dict]] = defaultdict(
+        lambda: {col["_column_name"]: {"sum": 0.0, "count_num": 0, "first_nonnum": None}
+                 for col in columns}
+    )
+    no_date_count = 0
+
+    for record in all_records:
+        uid = _user_id_of(record)
+        if uid is None:
+            continue
+        date_str = _extract_work_date(record, columns)
+        if date_str is None:
+            no_date_count += 1
+            date_str = "_no_date"
+
+        for col in columns:
+            cname = col["_column_name"]
+            raw = _value_for_column(record, col)
+            num = _try_number(raw)
+            cell = buckets[(uid, date_str)][cname]
+            if num is not None:
+                cell["sum"] += num
+                cell["count_num"] += 1
+            elif raw not in (None, "") and cell["first_nonnum"] is None:
+                cell["first_nonnum"] = raw
+
+    if no_date_count > 0:
+        stats.add_warning(
+            f"{no_date_count} 条记录无法识别工作日期，已归入 '_no_date'。"
+            "请用 --inspect 查看真实字段名"
+        )
+
+    # 输出：按 (uid, date) 排序
+    rows: list[dict[str, Any]] = []
+    for (uid, date_str) in sorted(buckets.keys(), key=lambda x: (x[0], x[1])):
+        row: dict[str, Any] = {
+            "userId": uid,
+            "userName": user_name_map.get(uid, uid),
+            "workDate": date_str,
+        }
+        bucket = buckets[(uid, date_str)]
+        for col in columns:
+            cname = col["_column_name"]
+            cell = bucket[cname]
+            if cell["count_num"] > 0:
+                total = cell["sum"]

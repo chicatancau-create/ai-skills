@@ -1,0 +1,108 @@
+        assert all(path.get("stroke-dasharray") == "12 4.8" for path in paths)
+    if operation == "subtract":
+        assert (paths[0].get("d") or "").count("M ") >= 2
+
+    expected_custom_shapes += len(paths)
+    (svg_output / f"{index:02d}_{name}.svg").write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" '
+        'data-pptx-page-role="content">'
+        '<rect x="0" y="0" width="1280" height="720" fill="#FFFFFF"/>'
+        f"{fragment}</svg>\n",
+        encoding="utf-8",
+    )
+
+non_scaling = ET.fromstring(
+    run_tool(
+        "shape_boolean_svg.py", "render", source, "--operation", "union",
+        "--source", "non-scaling", "--source", "non-scaling-cut",
+        "--id", "result-non-scaling",
+    )
+)
+assert non_scaling.get("stroke-width") == "5"
+assert non_scaling.get("stroke-dasharray") == "10 4"
+assert non_scaling.get("vector-effect") == "non-scaling-stroke"
+
+rejections = [
+    ("union", "body", "open", "open subpath"),
+    ("union", "body", "clipped", "uses clip-path"),
+    ("union", "body", "imported", "PPTX import/round-trip metadata"),
+    ("union", "body", "dashoffset", "stroke-dashoffset"),
+    ("intersect", "body", "far", "produced no filled area"),
+    ("subtract", "body", "missing-font", "cannot resolve an installed font"),
+    ("subtract", "body", "nested-text", "child content is unsupported"),
+]
+for operation, first, second, expected_error in rejections:
+    rejected = subprocess.run(
+        [
+            sys.executable,
+            str(scripts / "shape_boolean_svg.py"),
+            "render", str(source), "--operation", operation,
+            "--source", first, "--source", second,
+            "--id", f"reject-{second}",
+        ],
+        capture_output=True, text=True,
+    )
+    assert rejected.returncode != 0
+    assert expected_error in rejected.stderr, rejected.stderr
+
+run_tool(
+    "svg_quality_checker.py", project,
+    "--quick-generate", "--format", "ppt169",
+    "--stage", "final", "--json",
+)
+pptx = project / "boolean-smoke.pptx"
+run_tool("svg_to_pptx.py", project, "--quick-generate", "-o", pptx)
+with zipfile.ZipFile(pptx) as archive:
+    slides = [
+        name
+        for name in archive.namelist()
+        if re.fullmatch(r"ppt/slides/slide\d+\.xml", name)
+    ]
+    custom_shapes = sum(
+        archive.read(name).count(b"<a:custGeom>")
+        for name in slides
+    )
+assert len(slides) == len(operations), slides
+assert custom_shapes == expected_custom_shapes
+
+readback = project / "readback"
+run_tool(
+    "pptx_to_svg.py", pptx, "-o", readback,
+    "--inheritance-mode", "flat", "--strict",
+)
+slides = sorted((readback / "svg").glob("slide_*.svg"))
+readback_custom_shapes = sum(
+    slide.read_text(encoding="utf-8").count('data-pptx-custgeom="')
+    for slide in slides
+)
+assert len(slides) == len(operations), slides
+assert readback_custom_shapes == expected_custom_shapes
+print(
+    f"Shape Boolean smoke: passed "
+    f"({expected_custom_shapes} custom shapes; {project})"
+)
+PY
+```
+
+The seven inline negative cases must return nonzero and match their expected
+errors; every other command must pass. Open the printed
+`boolean-smoke.pptx` path in PowerPoint: both shape-cut and text-cut Subtract
+results must have real holes, and every Fragment sibling must remain separately
+selectable.
+
+## `compact_svg_coordinates.py`
+
+Compact safe model-facing page-space coordinates without rewriting unrelated
+SVG formatting:
+
+```bash
+python3 scripts/compact_svg_coordinates.py <svg-file-or-directory>
+python3 scripts/compact_svg_coordinates.py <template-directory> \
+  --inplace --keep-native-frames
+```
+
+The default run is a dry-run JSON report. `--inplace` atomically replaces only
+changed legacy SVG files. `--keep-native-frames` compacts `data-pptx-bounds`,
+translation values, rotation centers, and matrix `e/f`, while preserving canonical
+authored-preset or inline native frames. `svg_authoring_view.py` separately
+compacts imported model-facing frames because the compact authoring tree owns

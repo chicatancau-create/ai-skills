@@ -1,0 +1,107 @@
+                    or stroke_kind in text_paint_kinds
+                    or has_filter
+                    or has_stroke
+                ):
+                    effects['text_effects'] += 1
+
+        return dict(effects)
+
+    @staticmethod
+    def _carrier_native_replacement_kind(element: ET.Element) -> str:
+        """Return one native replacement kind without turning bad data into a check."""
+        if _native_replacement_kind is not None:
+            try:
+                return (_native_replacement_kind(element) or '').strip().lower()
+            except ValueError:
+                pass
+        return (
+            element.get('data-pptx-replace-with')
+            or element.get('data-pptx-native')
+            or ''
+        ).strip().lower()
+
+    @staticmethod
+    def _has_preset_ancestor(
+        element: ET.Element,
+        root: ET.Element,
+        parent_by_id: Dict[int, ET.Element],
+    ) -> bool:
+        """Return whether geometry is only the visible detail of a preset atom."""
+        current = parent_by_id.get(id(element))
+        while current is not None and current is not root:
+            if (current.get('data-pptx-prst') or '').strip():
+                return True
+            current = parent_by_id.get(id(current))
+        return False
+
+    @staticmethod
+    def _carrier_page_frame_role(
+        element: ET.Element,
+        root: ET.Element,
+        parent_by_id: Dict[int, ET.Element],
+    ) -> bool:
+        """Return whether an element belongs to declared page framing."""
+        current: ET.Element | None = element
+        while current is not None:
+            role = (current.get('data-pptx-role') or '').strip().lower()
+            if role in {'background', 'decoration'}:
+                return True
+            if current is root:
+                break
+            current = parent_by_id.get(id(current))
+        return False
+
+    def _carrier_image_receipt(self, root: ET.Element) -> Dict:
+        """Summarize visible image placements and their frame share."""
+        working_root, parent_by_id, images = self._visible_image_elements(root)
+        viewbox = _parse_viewbox_values(working_root.get('viewBox') or '')
+        canvas_area = (
+            abs(viewbox[2] * viewbox[3])
+            if viewbox is not None and viewbox[2] and viewbox[3]
+            else 0.0
+        )
+        frame_shares: List[float] = []
+        filenames = set()
+
+        for image in images:
+            href = image.get('href') or image.get(f'{{{XLINK_NS}}}href') or ''
+            if href.startswith('data:'):
+                filenames.add('(embedded)')
+            elif href:
+                path_name = Path(unquote(urlsplit(href).path)).name
+                filenames.add(path_name or href[:80])
+
+            display_owner = image
+            parent = parent_by_id.get(id(image))
+            if (
+                parent is not None
+                and parent is not working_root
+                and _local_name(parent) == 'svg'
+            ):
+                display_owner = parent
+            try:
+                x = float(display_owner.get('x') or '0')
+                y = float(display_owner.get('y') or '0')
+                width = float(display_owner.get('width') or '0')
+                height = float(display_owner.get('height') or '0')
+            except (TypeError, ValueError):
+                continue
+            if width <= 0 or height <= 0 or canvas_area <= 0:
+                continue
+            transformed = self._transformed_rect_edge_lengths(
+                display_owner,
+                (x, y, width, height),
+                parent_by_id,
+            )
+            if transformed is not None:
+                width, height = transformed
+            frame_shares.append(abs(width * height) / canvas_area)
+
+        return {
+            'placements': len(images),
+            'files': sorted(filenames),
+            'max_frame_share': round(max(frame_shares), 4) if frame_shares else 0.0,
+        }
+
+    def _check_fonts(
+        self,

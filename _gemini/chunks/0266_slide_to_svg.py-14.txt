@@ -1,0 +1,118 @@
+    if image_xml.startswith("<image"):
+        return image_xml.replace("<image", f"<image{clip_attr}", 1)
+    if image_xml.startswith("<svg"):
+        marked = image_xml.replace("<svg", '<svg data-pptx-crop="1"', 1)
+        return marked.replace("<image", f"<image{clip_attr}", 1)
+    return image_xml
+
+
+def _project_clip_into_nested_crop(
+    geom: GeomResult,
+    image_xml: str,
+) -> GeomResult:
+    """Map absolute slide geometry into one nested crop's viewBox space."""
+    wrapper = ET.fromstring(image_xml)
+    if wrapper.tag != "svg":
+        raise ValueError("expected a nested <svg> crop wrapper")
+
+    try:
+        frame_x = float(wrapper.attrib["x"])
+        frame_y = float(wrapper.attrib["y"])
+        frame_w = float(wrapper.attrib["width"])
+        frame_h = float(wrapper.attrib["height"])
+        view_box = [float(token) for token in wrapper.attrib["viewBox"].split()]
+    except (KeyError, ValueError) as exc:
+        raise ValueError("crop wrapper has incomplete numeric geometry") from exc
+    if frame_w <= 0 or frame_h <= 0 or len(view_box) != 4:
+        raise ValueError(
+            "crop wrapper requires positive dimensions and four viewBox values"
+        )
+    vb_x, vb_y, vb_w, vb_h = view_box
+    if vb_w <= 0 or vb_h <= 0:
+        raise ValueError("crop viewBox dimensions must be positive")
+
+    scale_x = vb_w / frame_w
+    scale_y = vb_h / frame_h
+    matrix = (
+        scale_x,
+        0.0,
+        0.0,
+        scale_y,
+        vb_x - frame_x * scale_x,
+        vb_y - frame_y * scale_y,
+    )
+
+    if geom.tag == "path" and geom.path_d:
+        commands = normalize_path_commands(
+            svg_path_to_absolute(parse_svg_path(geom.path_d))
+        )
+        transformed = transform_path_commands(commands, matrix)
+        return GeomResult(
+            tag="path",
+            path_d=_serialize_clip_path(transformed),
+        )
+    if geom.tag in {"polygon", "polyline"} and geom.points:
+        points = parse_svg_points(
+            geom.points,
+            min_points=3 if geom.tag == "polygon" else 2,
+        )
+        transformed = [
+            (
+                x * scale_x + matrix[4],
+                y * scale_y + matrix[5],
+            )
+            for x, y in points
+        ]
+        return GeomResult(
+            tag=geom.tag,
+            points=" ".join(
+                f"{fmt_num(x, 5)},{fmt_num(y, 5)}"
+                for x, y in transformed
+            ),
+        )
+    raise ValueError(f"unsupported clip geometry <{geom.tag}>")
+
+
+def _serialize_clip_path(commands: list[PathCommand]) -> str:
+    """Serialize normalized M/L/C/Z commands with crop-safe precision."""
+    parts: list[str] = []
+    for command in commands:
+        parts.append(command.cmd)
+        if command.args:
+            parts.append(" ".join(fmt_num(value, 5) for value in command.args))
+    return " ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Picture (<p:pic>)
+# ---------------------------------------------------------------------------
+
+def _convert_picture(node: ShapeNode, ctx: AssemblyContext, *, top_level: bool) -> str:
+    sp_pr = node.xml.find("p:spPr", NS)
+    geom = _resolve_geometry(node, sp_pr)
+    try:
+        result = convert_picture(
+            node.xml, node.xfrm, ctx.slide_part, ctx.pkg,
+            media_subdir=ctx.media_subdir,
+            embed_inline=ctx.embed_images,
+            asset_name_map=ctx.asset_name_map,
+            strict=ctx.strict,
+        )
+    except LinkedImageResolutionError as exc:
+        if ctx.strict:
+            raise
+        ctx.diagnose(
+            "linked-image-proxy",
+            str(exc),
+            "retain the complete source picture as a non-editable proxy",
+        )
+        return _fallback_node_svg(
+            node,
+            ctx,
+            top_level=top_level,
+            source_proxy=True,
+        )
+    except MediaResolutionError as exc:
+        if ctx.strict:
+            raise
+        ctx.diagnose(

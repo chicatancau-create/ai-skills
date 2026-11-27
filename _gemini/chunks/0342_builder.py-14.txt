@@ -1,0 +1,121 @@
+            advance_on_click=True if advance_changed else original.advance_on_click,
+            advance_after=auto_advance if advance_changed else (
+                original.advance_after_ms / 1000 if original.advance_after_ms is not None else None
+            ),
+        )
+    slide_path.write_bytes(
+        _preserve_roundtrip_timing_markup(
+            updated_xml.encode("utf-8"),
+            source_bytes,
+        )
+    )
+    return uses_timings
+
+
+def _shape_ids_in_element(element: ET.Element) -> set[str]:
+    """Return every non-visual DrawingML id owned by one shape subtree."""
+    return {
+        value
+        for node in element.iter(f"{{{PML_NS}}}cNvPr")
+        if (value := node.get("id"))
+    }
+
+
+def _rewrite_roundtrip_timing_shape_ids(
+    slide_root: ET.Element,
+    id_map: dict[str, str],
+) -> None:
+    """Rewrite every timing reference to a remapped Slide-local shape id."""
+    if not id_map:
+        return
+    timing = slide_root.find(f"{{{PML_NS}}}timing")
+    if timing is None:
+        return
+    for node in timing.iter():
+        old_id = node.get("spid")
+        if old_id in id_map:
+            node.set("spid", id_map[old_id])
+
+
+def _renumber_roundtrip_generated_shapes(
+    generated_shapes: list[ET.Element],
+    retained_source_nodes: list[ET.Element],
+    slide_root: ET.Element,
+    *,
+    rewrite_timing: bool,
+) -> dict[str, str]:
+    """Keep generated additions disjoint from retained source shape ids."""
+    used_ids = {
+        value
+        for element in retained_source_nodes
+        for value in _shape_ids_in_element(element)
+    }
+    all_ids = set(used_ids)
+    for element in generated_shapes:
+        all_ids.update(_shape_ids_in_element(element))
+    numeric_ids = [int(value) for value in all_ids if value.isdigit()]
+    next_id = max(numeric_ids, default=1) + 1
+    id_map: dict[str, str] = {}
+    for element in generated_shapes:
+        for node in element.iter(f"{{{PML_NS}}}cNvPr"):
+            old_id = node.get("id")
+            if not old_id:
+                continue
+            if old_id in used_ids:
+                while str(next_id) in all_ids:
+                    next_id += 1
+                new_id = str(next_id)
+                next_id += 1
+                node.set("id", new_id)
+                id_map[old_id] = new_id
+                all_ids.add(new_id)
+                used_ids.add(new_id)
+            else:
+                used_ids.add(old_id)
+
+    if not id_map:
+        return {}
+    for element in generated_shapes:
+        for connector_tag in ("stCxn", "endCxn"):
+            for connector in element.iter(f"{{{PML_NS}}}{connector_tag}"):
+                old_id = connector.get("id")
+                if old_id in id_map:
+                    connector.set("id", id_map[old_id])
+    if rewrite_timing:
+        _rewrite_roundtrip_timing_shape_ids(slide_root, id_map)
+    return id_map
+
+
+def _apply_roundtrip_slide_overlay(
+    source_slide: bytes,
+    source_rels: bytes,
+    generated_slide_path: Path,
+    generated_rels_path: Path,
+    patch: RoundtripSlidePatch,
+    conversion_trace: dict[str, Any] | None,
+) -> dict[int, int]:
+    """Overlay authored Slide objects onto the exact source slide package part."""
+    try:
+        source_root = ET.fromstring(source_slide)
+        generated_tree = ET.parse(generated_slide_path)
+    except ET.ParseError as exc:
+        raise TemplateStructureError(
+            "Round-trip source or generated slide is not valid XML"
+        ) from exc
+    generated_root = generated_tree.getroot()
+
+    source_tree = source_root.find(
+        f".//{{{PML_NS}}}cSld/{{{PML_NS}}}spTree"
+    )
+    generated_sp_tree = generated_root.find(
+        f".//{{{PML_NS}}}cSld/{{{PML_NS}}}spTree"
+    )
+    if source_tree is None or generated_sp_tree is None:
+        raise TemplateStructureError(
+            "Round-trip slide overlay requires source and generated p:spTree"
+        )
+
+    (
+        source_shapes,
+        source_descendant_ids,
+        source_key_by_element,

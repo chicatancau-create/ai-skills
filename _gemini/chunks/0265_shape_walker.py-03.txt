@@ -1,0 +1,102 @@
+        and clone.tag.split("}", 1)[-1] == "graphicFrame"
+        and fallback is not None
+    ):
+        graphic_data = clone.find("a:graphic/a:graphicData", NS)
+        if graphic_data is not None:
+            preview = ET.Element(f"{{{NS['mc']}}}AlternateContent")
+            preview.append(
+                ET.fromstring(ET.tostring(fallback, encoding="utf-8"))
+            )
+            graphic_data.append(preview)
+    return clone
+
+
+def _walk_container(
+    container: ET.Element,
+    parent_group_xfrm: Xfrm | None,
+    ancestor_rotation: float = 0.0,
+    source_order_path: tuple[int, ...] = (),
+    placeholder_xfrms: dict[tuple[str | None, str | None], Xfrm] | None = None,
+    placeholder_lst_styles: dict[
+        tuple[str | None, str | None],
+        list[ET.Element],
+    ] | None = None,
+    placeholder_body_properties: dict[
+        tuple[str | None, str | None],
+        list[ET.Element],
+    ] | None = None,
+) -> list[ShapeNode]:
+    """Walk a p:spTree or p:grpSp subtree. Children kept in document (z) order.
+    """
+    nodes: list[ShapeNode] = []
+    source_order = 0
+    for child in list(container):
+        if not isinstance(child.tag, str):
+            continue
+        local = child.tag.split("}", 1)[-1]
+        if local == "AlternateContent":
+            resolved = _resolve_alternate_content(child)
+            if resolved is None:
+                continue
+            child = resolved
+            local = child.tag.split("}", 1)[-1]
+        kind_info = _KIND_MAP.get(local)
+        if kind_info is None:
+            continue
+        source_order += 1
+        child_order_path = (*source_order_path, source_order)
+        kind, nv_tag = kind_info
+
+        (
+            name,
+            spid,
+            hidden,
+            ph,
+            hyperlink_rid,
+            hyperlink_action,
+        ) = _read_nv_sp_pr(child, nv_tag)
+        if not spid:
+            spid = "missing-" + "-".join(
+                str(value) for value in child_order_path
+            )
+        xfrm = parse_xfrm(_resolve_xfrm(child, kind))
+        effective_rotation = (ancestor_rotation + xfrm.rot) % 360.0
+
+        # Placeholders without their own xfrm inherit geometry from a matching
+        # placeholder in the layout, then the master. This is what PowerPoint
+        # itself does when rendering the slide. Without this fallback such
+        # shapes get a 0×0 box and convert_txbody wraps every glyph onto its
+        # own line — visually a vertical strip of single characters.
+        if (ph is not None and placeholder_xfrms
+                and (xfrm.w == 0 and xfrm.h == 0)):
+            inherited = _lookup_placeholder_xfrm(ph, placeholder_xfrms)
+            if inherited is not None:
+                xfrm = Xfrm(
+                    x=inherited.x, y=inherited.y,
+                    w=inherited.w, h=inherited.h,
+                    rot=xfrm.rot, flip_h=xfrm.flip_h, flip_v=xfrm.flip_v,
+                    ch_x=xfrm.ch_x, ch_y=xfrm.ch_y,
+                    ch_w=xfrm.ch_w, ch_h=xfrm.ch_h,
+                )
+
+        # If we're inside a group, remap to slide-absolute coordinates
+        if parent_group_xfrm is not None:
+            xfrm = _adjust_for_group(xfrm, parent_group_xfrm)
+
+        inherited_lst_styles: tuple[ET.Element, ...] = ()
+        if ph is not None and placeholder_lst_styles:
+            inherited_lst_styles = _lookup_placeholder_lst_styles(
+                ph, placeholder_lst_styles,
+            )
+        inherited_body_properties: tuple[ET.Element, ...] = ()
+        if ph is not None and placeholder_body_properties:
+            inherited_body_properties = _lookup_placeholder_body_properties(
+                ph,
+                placeholder_body_properties,
+            )
+
+        node = ShapeNode(
+            kind=kind, xml=child, xfrm=xfrm,
+            name=name, spid=spid, hidden=hidden, placeholder=ph,
+            hyperlink_rid=hyperlink_rid,
+            hyperlink_action=hyperlink_action,

@@ -1,0 +1,96 @@
+    def _try_escaped_brace_delimiter(self) -> Node | None:
+        closing = self._find_matching_control_symbol("{", "}", self.position)
+        if closing is None:
+            return None
+        body = self._parse_fragment(self.source[self.position:closing])
+        self.position = closing + 2
+        return Delimiter("{", "}", (body,))
+
+    def _try_command_delimiter(self, command: str, command_start: int) -> Node | None:
+        pair = BARE_DELIMITER_COMMAND_PAIRS.get(command)
+        if pair is None:
+            return None
+        closing_command, left, right = pair
+        closing = self._find_matching_control_word(command, closing_command, self.position)
+        if closing is None:
+            return None
+        body = self._parse_fragment(self.source[self.position:closing])
+        _, after = _read_control_word(self.source, closing)
+        self.position = _skip_whitespace(self.source, after)
+        return Delimiter(left, right, (body,))
+
+    def _try_symmetric_command_delimiter(self, command_start: int) -> Node | None:
+        closing = self.source.find("\\|", self.position)
+        if closing < 0:
+            return None
+        body = self._parse_fragment(self.source[self.position:closing])
+        self.position = closing + 2
+        return Delimiter("‖", "‖", (body,))
+
+    def _try_symmetric_named_delimiter(self, command: str) -> Node | None:
+        closing = self._find_symmetric_control_word(command, self.position)
+        if closing is None:
+            return None
+        body = self._parse_fragment(self.source[self.position:closing])
+        _, after = _read_control_word(self.source, closing)
+        self.position = _skip_whitespace(self.source, after)
+        delimiter = "‖" if command == "Vert" else "|"
+        return Delimiter(delimiter, delimiter, (body,))
+
+    def _find_matching_character(self, start: int, opener: str, closer: str) -> int | None:
+        expected_closers = [closer]
+        group_depth = 0
+        cursor = start + 1
+        explicit_delimiter_commands = {
+            "left",
+            "right",
+            "middle",
+            _BIG_LEFT_COMMAND,
+            _BIG_RIGHT_COMMAND,
+            _BIG_MIDDLE_COMMAND,
+            _BIG_SYMMETRIC_COMMAND,
+        }
+        while cursor < len(self.source):
+            char = self.source[cursor]
+            if char == "\\":
+                if cursor + 1 >= len(self.source):
+                    return None
+                if not _is_command_letter(self.source[cursor + 1]):
+                    cursor += 2
+                    continue
+                command, cursor = _read_control_word(self.source, cursor)
+                if group_depth == 0 and command in explicit_delimiter_commands:
+                    cursor = self._skip_scanned_delimiter_token(cursor)
+                continue
+            if char == "{":
+                group_depth += 1
+                cursor += 1
+                continue
+            if char == "}":
+                if group_depth == 0:
+                    return None
+                group_depth -= 1
+                cursor += 1
+                continue
+            if group_depth == 0:
+                if char in "([":
+                    expected_closers.append(")" if char == "(" else "]")
+                elif char in ")]":
+                    if char != expected_closers[-1]:
+                        return None
+                    expected_closers.pop()
+                    if not expected_closers:
+                        return cursor
+            cursor += 1
+        return None
+
+    def _skip_scanned_delimiter_token(self, position: int) -> int:
+        position = _skip_whitespace(self.source, position)
+        if position >= len(self.source):
+            return position
+        if self.source[position] != "\\":
+            return position + 1
+        if position + 1 >= len(self.source):
+            return len(self.source)
+        if not _is_command_letter(self.source[position + 1]):
+            return position + 2

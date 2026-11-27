@@ -1,0 +1,107 @@
+            "OOXML chart edits do not support bubble xVal/yVal/bubbleSize data",
+            plot_type=plot_type,
+            plot_count=1,
+            data_model="bubble",
+        )
+    series_nodes = plot.findall("c:ser", NS)
+    if not series_nodes:
+        return _unsupported_chart_capability(
+            "chart_edit_no_series",
+            "OOXML chart edits require at least one editable series",
+            plot_type=plot_type,
+            plot_count=1,
+            data_model="category",
+        )
+    for series in series_nodes:
+        if any(
+            series.find(f"c:{tag}", NS) is not None
+            for tag in ("xVal", "yVal", "bubbleSize")
+        ):
+            return _unsupported_chart_capability(
+                "chart_edit_data_model_unsupported",
+                "OOXML chart edits require c:cat/c:val series",
+                plot_type=plot_type,
+                plot_count=1,
+            )
+        category = series.find("c:cat", NS)
+        values = series.find("c:val", NS)
+        if category is None or values is None:
+            return _unsupported_chart_capability(
+                "chart_edit_data_model_unsupported",
+                "OOXML chart edits require c:cat/c:val on every series",
+                plot_type=plot_type,
+                plot_count=1,
+            )
+    capability_warnings: list[dict[str, str]] = []
+    if plot_area.find("c:dateAx", NS) is not None:
+        capability_warnings.append(
+            {
+                "code": "chart_edit_date_axis_flattened",
+                "message": (
+                    "OOXML chart editing will flatten date-axis categories to the "
+                    "replacement single-level category cache"
+                ),
+            }
+        )
+    if any(
+        series.find("c:cat/c:multiLvlStrRef", NS) is not None
+        for series in series_nodes
+    ):
+        capability_warnings.append(
+            {
+                "code": "chart_edit_multilevel_categories_flattened",
+                "message": (
+                    "OOXML chart editing will flatten multi-level categories to the "
+                    "replacement single-level category cache"
+                ),
+            }
+        )
+
+    return {
+        "supported": True,
+        "code": "chart_edit_category_single_plot",
+        "message": "single classic plot uses c:cat/c:val series",
+        "plot_type": plot_type,
+        "plot_count": 1,
+        "data_model": "category",
+        "warnings": capability_warnings,
+    }
+
+
+def _is_verified_category_capability(capability: Any) -> bool:
+    """Return whether an analyzer capability matches the runtime structural gate."""
+    return bool(
+        isinstance(capability, dict)
+        and capability.get("supported") is True
+        and capability.get("code") == "chart_edit_category_single_plot"
+        and capability.get("data_model") == "category"
+        and capability.get("plot_count") == 1
+        and isinstance(capability.get("plot_type"), str)
+        and bool(capability.get("plot_type"))
+        and capability.get("plot_type") not in _XY_PLOTS
+    )
+
+
+def _require_supported_chart_edit(chart_root: ET.Element) -> dict[str, Any]:
+    """Raise before mutation unless ``chart_root`` uses the verified category model."""
+    capability = _chart_edit_capability(chart_root)
+    if not _is_verified_category_capability(capability):
+        code = capability.get("code") or "chart_edit_capability_unknown"
+        message = capability.get("message") or "chart edit capability is unknown"
+        raise RuntimeError(f"{message} [{code}]")
+    return capability
+
+
+def _ooxml_bool(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "on", "true"}
+
+
+def _positive_span(value: str | None) -> int:
+    try:
+        return max(int(value or "1"), 1)
+    except ValueError:
+        return 1
+
+
+def _table_cell_merge_info(cell: ET.Element) -> dict[str, Any]:
+    """Return the merge role encoded directly on one physical ``a:tc`` cell."""

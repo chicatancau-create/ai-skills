@@ -1,0 +1,61 @@
+    def test_b_real_endpoints_require_install_and_selection_bound_stage2(self) -> None:
+        for template in (True, False):
+            with self.subTest(template=template):
+                project = self.root / str(template)
+                project.mkdir()
+                confirm = project / 'confirm_ui'
+                _write_json(confirm / 'recommendations.stage1.json',
+                            _stage1('templates' if template else 'free_design'))
+                client = server.create_app(project).test_client()
+                options = client.get('/api/recommendations').get_json()['template_options']
+                response = client.post('/api/confirm', json={
+                    'stage': 'stage1', 'options_sha256': options['options_sha256'],
+                    'template_selection': {
+                        'mode': 'templates' if template else 'free_design',
+                        'selection_keys': ['library:brand:zcare-rescue', 'library:layout:report_core']
+                                          if template else [],
+                    },
+                })
+                self.assertEqual(response.status_code, 200, response.get_json())
+                selection = json.loads((confirm / 'template_selection.json').read_text())
+                rec2, final = _stage2(selection['selection_sha256'], template)
+                _write_json(confirm / 'recommendations.stage2.json', rec2)
+                if template:
+                    response = client.get('/api/recommendations')
+                    self.assertEqual(response.status_code, 409)
+                    self.assertIn('template_install.json', response.get_json()['error'])
+                    apply_template.apply_templates(project, [
+                        str(SCRIPTS.parent / 'templates' / 'brands' / 'zcare-rescue'),
+                        str(SCRIPTS.parent / 'templates' / 'layouts' / 'report_core'),
+                    ], validate=False)
+                for path in confirm.iterdir():
+                    os.utime(path, ns=(10, 10))
+                response = client.get('/api/recommendations')
+                self.assertEqual(response.status_code, 200, response.get_json())
+                rec2['selection_sha256'] = '0' * 64
+                _write_json(confirm / 'recommendations.stage2.json', rec2)
+                self.assertNotEqual(client.get('/api/recommendations').status_code, 200)
+                self.assertNotEqual(client.post('/api/confirm', json=final).status_code, 200)
+                rec2['selection_sha256'] = selection['selection_sha256']
+                _write_json(confirm / 'recommendations.stage2.json', rec2)
+                response = client.post('/api/confirm', json=final)
+                self.assertEqual(response.status_code, 200, response.get_json())
+                result = json.loads((confirm / 'result.json').read_text())
+                self.assertEqual(result['status'], 'confirmed')
+                self.assertEqual(result['selection_sha256'], selection['selection_sha256'])
+                self.assertFalse((confirm / 'template_handoff.json').exists())
+                self.assertEqual(client.get('/api/recommendations').status_code, 409)
+
+    def test_b_stale_browser_cannot_confirm_revised_options(self) -> None:
+        confirm = self.root / 'confirm_ui'
+        _write_json(confirm / 'recommendations.stage1.json', _stage1())
+        client = server.create_app(self.root).test_client()
+        options = client.get('/api/recommendations').get_json()['template_options']
+        _write_json(confirm / 'recommendations.stage1.json', {**_stage1(), 'revision': 2})
+        response = client.post('/api/confirm', json={
+            'stage': 'stage1', 'options_sha256': options['options_sha256'],
+            'template_selection': {'mode': 'free_design', 'selection_keys': []},
+        })
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse((confirm / 'template_selection.json').exists())
+

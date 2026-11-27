@@ -1,0 +1,93 @@
+        structure_errors = [item for item in self._pptx_structure_issues if item[0] == 'error']
+        structure_warnings = [item for item in self._pptx_structure_issues if item[0] == 'warning']
+        self.summary['errors'] += len(structure_errors)
+        self.summary['warnings'] += len(structure_warnings)
+        for severity, _msg in self._pptx_structure_issues:
+            self.issue_types[f'pptx_structure_{severity}'] += 1
+
+    def _print_anchor_value_summary(self):
+        """Print anchor comparisons without treating contextual paint/type as drift."""
+        if not self._lock_seen:
+            return
+        has_contextual = any(
+            self._anchor_value_summary[category]
+            for category in ('colors', 'fonts')
+        )
+        has_undeclared_sizes = bool(self._anchor_value_summary['sizes'])
+        if not has_contextual and not has_undeclared_sizes:
+            print(
+                "\n[OK] spec_lock anchor comparison: no additional contextual "
+                "colors/fonts or out-of-band font sizes"
+            )
+            return
+
+        if has_contextual:
+            print("\nContextual values beyond spec_lock anchors (informational):")
+            for category, label in (
+                ('colors', 'Colors'),
+                ('fonts', 'Font families'),
+            ):
+                items = self._anchor_value_summary.get(category, {})
+                if not items:
+                    continue
+                entries = sorted(
+                    items.items(), key=lambda item: (-len(item[1]), item[0])
+                )
+                print(f"  {label}:")
+                for val, files in entries:
+                    count = len(files)
+                    suffix = "file" if count == 1 else "files"
+                    print(f"    {val}  ({count} {suffix})")
+            print(
+                "Note: contextual page paint, gradient/effect colors, and "
+                "export-safe typefaces are allowed.\n"
+                "      Add a spec_lock row only when a value becomes a "
+                "recurring named semantic role."
+            )
+
+        if has_undeclared_sizes:
+            print(
+                "\nTypography sizes outside every declared role anchor ±2px "
+                "(up to 2 occurrences are sparse; the 3rd is recurring):"
+            )
+            entries = sorted(
+                self._anchor_value_summary['sizes'].items(),
+                key=lambda item: (-len(item[1]), item[0]),
+            )
+            for val, files in entries:
+                occurrences = self._undeclared_size_occurrences.get(
+                    val,
+                    len(files),
+                )
+                file_count = len(files)
+                file_suffix = "file" if file_count == 1 else "files"
+                policy = (
+                    "sparse"
+                    if occurrences <= SPARSE_UNDECLARED_FONT_SIZE_MAX_OCCURRENCES
+                    else "recurring — declare a role"
+                )
+                print(
+                    f"  {val}  ({occurrences} occurrences in {file_count} "
+                    f"{file_suffix}; {policy})"
+                )
+
+    def _percentage(self, count: int) -> int:
+        """Calculate percentage"""
+        if self.summary['total'] == 0:
+            return 0
+        return min(100, int(count / self.summary['total'] * 100))
+
+    def export_report(self, output_file: str = 'svg_quality_report.txt'):
+        """Export check report"""
+        with open(output_file, 'w', encoding='utf-8') as f:
+            f.write("PPT Master SVG Quality Check Report\n")
+            f.write("=" * 80 + "\n\n")
+
+            for result in self.results:
+                status = "[OK] Passed" if result['passed'] else "[ERROR] Failed"
+                f.write(f"{status} - {result['file']}\n")
+                f.write(f"Path: {result.get('path', 'N/A')}\n")
+
+                if result['info']:
+                    f.write(f"Info: {result['info']}\n")
+

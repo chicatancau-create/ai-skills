@@ -1,0 +1,106 @@
+            for plot in chart_data.get("plots") or []
+            if plot.get("type") == "line"
+        ]
+    has_markers = "lineMarker" in marker_styles or any(
+        item.get("point_colors") for item in line_series
+    )
+    warnings: list[str] = []
+    if not has_markers:
+        warnings.append(
+            f"Native PPTX line chart fallback draws {len(dots)} point marker(s) "
+            "but the payload has none; set chart-root line_style \"lineMarker\" "
+            "(combo: per plot; marker_size in px) for every point, or series "
+            "point_colors with a colour per marked point "
+            "and null elsewhere"
+        )
+    series_count = (
+        len(chart_data.get("series") or [])
+        if chart_data.get("kind") == "category"
+        else sum(len(plot.get("series") or []) for plot in chart_data.get("plots") or [])
+    )
+    known = _series_palette(payload, series_count) | {
+        color
+        for item in line_series
+        for color in item.get("point_colors", [])
+        if color is not None
+    }
+    deviations = sorted({
+        record.fill for record in dots if record.fill not in known
+    })
+    warnings.extend(
+        f"Native PPTX line marker fill #{color} deviates from its series color, "
+        "but series point_colors is absent"
+        for color in deviations
+    )
+    return warnings
+
+
+def _native_chart_area_warnings(
+    elem: ET.Element,
+    payload: dict[str, Any],
+    chart_data: dict[str, Any],
+) -> list[str]:
+    area_series = _typed_series(chart_data, "area")
+    if not area_series:
+        return []
+    shapes = _fallback_data_shapes(elem)
+    regions = [
+        record
+        for record in shapes
+        if record.tag in {"path", "polygon"} and record.fill is not None
+    ]
+    warnings: list[str] = []
+    translucent = sorted({
+        record.fill_opacity
+        for record in regions
+        if record.fill_opacity is not None and record.fill_opacity < 1
+    })
+    if translucent and not any(item.get("fill_opacity") is not None for item in area_series):
+        sample = ", ".join(f"{value:g}" for value in translucent[:3])
+        warnings.append(
+            f"Native PPTX area chart fallback fills are translucent (fill-opacity {sample}) "
+            "but no area series sets fill_opacity; native areas export opaque"
+        )
+    if chart_data.get("kind") != "category":
+        return warnings
+    strokes = [
+        record
+        for record in shapes
+        if record.tag in {"path", "polyline"} and record.fill is None and record.stroke is not None
+    ]
+    dots = [
+        record
+        for record in shapes
+        if record.tag in {"circle", "ellipse"} and record.fill is not None
+    ]
+    outlined = any(item.get("line_width") is not None for item in area_series)
+    if (strokes and not outlined) or dots:
+        warnings.append(
+            "Native PPTX area chart fallback draws a line"
+            + (" and point markers" if dots else "")
+            + " over the filled region, but an area series exports as a fill without "
+            "either; give the series line_width for a same-colour outline, or use type "
+            "\"combo\" with an area plot (fill_opacity) under a line plot (line_width, "
+            "line_style \"lineMarker\")"
+        )
+    return warnings
+
+
+def _native_chart_category_order_warnings(
+    elem: ET.Element,
+    payload: dict[str, Any],
+    chart_data: dict[str, Any],
+) -> list[str]:
+    chart_type = chart_data.get("type")
+    if chart_data.get("kind") != "category" or chart_type not in {"bar", "column"}:
+        return []
+    categories = [str(item) for item in chart_data.get("categories") or []]
+    if len(categories) < 2:
+        return []
+    first_text = _normalized_fallback_text(categories[0])
+    last_text = _normalized_fallback_text(categories[-1])
+    records = [
+        record
+        for record in _fallback_text_records(elem)
+        if not _record_has_label(record, "legend")
+        and record.x is not None

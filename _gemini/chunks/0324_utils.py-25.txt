@@ -1,0 +1,103 @@
+    dx = 0.0
+    dy = 0.0
+    paint_opacity: float | None = None
+    transfer_opacity: float | None = None
+    color_alpha = 1.0
+    color = '000000'
+    has_offset = False
+
+    def required_number(primitive: ET.Element, attribute_name: str) -> float:
+        primitive_tag = _svg_element_tag(primitive) or str(primitive.tag)
+        raw_value = primitive.get(attribute_name)
+        if raw_value is None:
+            raise ValueError(
+                f'<{primitive_tag}> requires explicit {attribute_name}'
+            )
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f'<{primitive_tag}> {attribute_name} must be a finite number; '
+                f'got {raw_value!r}'
+            ) from exc
+        if not math.isfinite(value):
+            raise ValueError(
+                f'<{primitive_tag}> {attribute_name} must be a finite number; '
+                f'got {raw_value!r}'
+            )
+        return value
+
+    for child in filter_elem.iter():
+        tag = _svg_element_tag(child)
+        style_values = parse_inline_style(child.get('style'))
+
+        def effect_attr(name: str, default: str | None = None) -> str | None:
+            return style_values.get(name) or child.get(name, default)
+
+        def required_effect_attr(name: str) -> str:
+            raw_value = effect_attr(name)
+            if raw_value is None:
+                raise ValueError(f'<{tag}> requires explicit {name}')
+            return raw_value
+
+        if tag == 'feDropShadow':
+            std_dev = required_number(child, 'stdDeviation')
+            dx = required_number(child, 'dx')
+            dy = required_number(child, 'dy')
+            if abs(dx) > 0.01 or abs(dy) > 0.01:
+                has_offset = True
+            paint_opacity = parse_opacity(
+                required_effect_attr('flood-opacity'),
+                allow_percentage=True,
+            )
+            parsed_color, parsed_alpha = parse_svg_color(
+                effect_attr('flood-color', '#000000')
+            )
+            if parsed_color:
+                color = parsed_color
+                color_alpha = parsed_alpha
+        elif tag == 'feGaussianBlur':
+            if child.get('edgeMode') is not None:
+                raise ValueError(
+                    '<feGaussianBlur> edgeMode is unsupported by the native '
+                    'effect mapping'
+                )
+            std_dev = required_number(child, 'stdDeviation')
+        elif tag == 'feOffset':
+            dx = _f(child.get('dx'), 0.0)
+            dy = _f(child.get('dy'), 0.0)
+            if abs(dx) > 0.01 or abs(dy) > 0.01:
+                has_offset = True
+        elif tag == 'feFlood':
+            paint_opacity = parse_opacity(
+                required_effect_attr('flood-opacity'),
+                allow_percentage=True,
+            )
+            parsed_color, parsed_alpha = parse_svg_color(
+                effect_attr('flood-color', '#000000')
+            )
+            if parsed_color:
+                color = parsed_color
+                color_alpha = parsed_alpha
+        elif tag == 'feFuncA' and child.get('type') == 'linear':
+            if child.get('intercept') is not None:
+                raise ValueError(
+                    '<feFuncA> intercept is unsupported; project alpha '
+                    'transfer maps slope multiplication only'
+                )
+            slope = required_number(child, 'slope')
+            transfer_opacity = (
+                slope
+                if transfer_opacity is None
+                else transfer_opacity * slope
+            )
+
+    if paint_opacity is None:
+        opacity = transfer_opacity if transfer_opacity is not None else 0.3
+    elif transfer_opacity is None:
+        opacity = paint_opacity
+    else:
+        opacity = paint_opacity * transfer_opacity
+    opacity = max(0.0, min(1.0, opacity * color_alpha))
+
+    if std_dev is None:

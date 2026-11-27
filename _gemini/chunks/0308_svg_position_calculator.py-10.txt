@@ -1,0 +1,106 @@
+            raise ValueError(f"Unable to parse value: '{item}'") from exc
+        try:
+            numeric_x.append(_finite_number(x.strip(), f"--data point {index} x"))
+        except _NonFiniteNumberError:
+            raise
+        except ValueError:
+            numeric_x.append(None)
+    if all(x is not None for x in numeric_x):
+        return [(x, y) for x, (_label, y) in zip(numeric_x, pairs)]
+    else:
+        print(
+            f"[Note] Category axis: {len(pairs)} labels mapped to ordinals 1..{len(pairs)} "
+            "(pass --x-range=0.5,N+0.5 to centre them in equal slots)"
+        )
+        return [(float(index), y) for index, (_label, y) in enumerate(pairs, start=1)]
+
+
+def parse_tuple(s: str, location: str = 'tuple') -> Tuple[float, ...]:
+    """Parse comma-separated numeric tuple"""
+    return tuple(
+        _finite_number(x.strip(), f"{location}[{index}]")
+        for index, x in enumerate(s.split(','))
+    )
+
+
+def extract_attr(element: str, attr_name: str) -> Optional[str]:
+    """Extract attribute value from element string (attribute order independent)"""
+    pattern = rf'(?<![\w:-]){re.escape(attr_name)}\s*=\s*([\'"])(.*?)\1'
+    match = re.search(pattern, element)
+    return match.group(2) if match else None
+
+
+def analyze_svg_file(svg_file: str) -> None:
+    """Analyze all chart elements in an SVG file"""
+    svg_path = Path(svg_file)
+    if not svg_path.exists():
+        print(f"[Error] File does not exist: {svg_file}")
+        return
+
+    with open(svg_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    print(f"\n{'='*70}")
+    print(f"SVG File Analysis: {svg_path.name}")
+    print(f"{'='*70}")
+
+    # Extract viewBox
+    viewbox_match = re.search(r'viewBox\s*=\s*["\']([^"\']+)["\']', content)
+    if viewbox_match:
+        print(f"Canvas viewBox: {viewbox_match.group(1)}")
+
+    # Use more robust element extraction (attribute order independent)
+    # Extract all rect elements
+    rect_elements = re.findall(r'<rect[^>]*/?>', content)
+    rects = []
+    for elem in rect_elements:
+        x = extract_attr(elem, 'x')
+        y = extract_attr(elem, 'y')
+        w = extract_attr(elem, 'width')
+        h = extract_attr(elem, 'height')
+        if x is not None and y is not None:
+            rects.append((x, y, w, h))
+
+    # Extract all circle elements
+    circle_elements = re.findall(r'<circle[^>]*/?>', content)
+    circles = []
+    for elem in circle_elements:
+        cx = extract_attr(elem, 'cx')
+        cy = extract_attr(elem, 'cy')
+        r = extract_attr(elem, 'r')
+        if cx is not None and cy is not None:
+            circles.append((cx, cy, r))
+
+    # Extract all polyline/polygon elements
+    polylines = re.findall(r'<(?:polyline|polygon)[^>]*points="([^"]*)"', content)
+
+    # Extract path elements
+    paths = re.findall(r'<path[^>]*d="([^"]*)"', content)
+
+    print(f"\nElement statistics:")
+    print(f"  - rect (rectangle): {len(rects)}")
+    print(f"  - circle: {len(circles)}")
+    print(f"  - polyline/polygon: {len(polylines)}")
+    print(f"  - path: {len(paths)}")
+
+    # List rect elements in detail
+    if rects:
+        print(f"\n=== Rectangle Elements (rect) ===")
+        print(f"{'Index':<6}{'X':<8}  {'Y':<8}  {'Width':<8}  {'Height':<8}")
+        print("-" * 45)
+        for i, (x, y, w, h) in enumerate(rects[:20], 1):  # Only show first 20
+            w_str = w if w else '-'
+            h_str = h if h else '-'
+            print(f"{i:<6}{x:<8}  {y:<8}  {w_str:<8}  {h_str:<8}")
+        if len(rects) > 20:
+            print(f"... and {len(rects) - 20} more rectangle(s)")
+
+    # List circle elements in detail
+    if circles:
+        print(f"\n=== Circle Elements (circle) ===")
+        print(f"{'Index':<6}{'CX':<10}  {'CY':<10}  {'Radius':<8}")
+        print("-" * 40)
+        for i, (cx, cy, r) in enumerate(circles[:20], 1):
+            r_str = r if r else '-'
+            print(f"{i:<6}{cx:<10}  {cy:<10}  {r_str:<8}")
+        if len(circles) > 20:

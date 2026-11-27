@@ -1,0 +1,29 @@
+| `dws minutes list --start "2026-04-01"` | `list` 后缺少 scope（mine/shared/all），**缺省时默认补 `all`** | `dws minutes list all --start "2026-04-01"` |
+| `dws minutes list all --start-time "..."` | 参数名是 `--start` 不是 `--start-time` | `dws minutes list all --start "2026-04-01"` |
+| `dws minutes list all --end-time "..."` | 参数名是 `--end` 不是 `--end-time` | `dws minutes list all --end "2026-04-30"` |
+| `dws minutes list --page-size 10` | `--page-size` 不存在，分页用 `--max`；且 `list` 后缺 scope | `dws minutes list mine --max 10` |
+| `dws minutes list --date-range 2026-05-04 2026-05-10` | `--date-range` 不存在，时间范围用 `--start` + `--end` 两个参数；且 `list` 后缺 scope | `dws minutes list mine --start "2026-05-04T00:00:00+08:00" --end "2026-05-10T23:59:59+08:00"` |
+| `dws minutes list mine --limit 10` | `--limit` 尚未注册（跨产品规约 Primary 为 `--limit`，但 minutes CLI 当前只接受 `--max`）。**待 alias 注册后两者等价** | `dws minutes list mine --max 10` |
+| `dws minutes upload create --json '{"fileName":...}'` | `--json` 不存在，cli 不接受 JSON 作为输入格式 | `dws minutes upload create --file-name "xxx.mp3" --file-size 61565431` |
+| `dws minutes upload create -f json '{"fileName":...}'` | `-f json` / `--format json` 是**输出格式**控制，不是输入参数 | `dws minutes upload create --file-name "xxx.mp3" --file-size 61565431 --format json` |
+| `dws minutes get transcription --id <uuid> \| head -c 2000` | Windows 沙箱无 `head` 命令，**严禁使用 shell 管道截断** | `dws minutes get transcription --id <uuid> --format json`（由 AI 在内存中截断处理） |
+| `dws minutes get summary --id "https://shanji.dingtalk.com/app/transcribes/xxx"` | `--id` 只接受 taskUuid（hex 字符串），**不接受完整 URL**。AI 必须自动提取，不要让用户手动抠 | AI 自动从 URL 提取 taskUuid，再 `dws minutes get summary --id <taskUuid>`（详见「URL → taskUuid 自动提取规则」） |
+| `dws minutes get transcription --id "https://shanji.dingtalk.com/meeting/minutes?taskUuid=xxx"` | 同上，`--id` 不接受 URL，且这是 `?taskUuid=` 格式的 URL | AI 自动提取 `taskUuid=` 后的值，再 `dws minutes get transcription --id <taskUuid> --format json` |
+| `dws minutes get transcription --id <uuid>` 只调用一次就"总结整篇听记" | **单次调用最多返回 50 段**，不翻页就只能看到前 1/3~1/8 的内容 | **必须自动循环翻页**：检查返回中的 `nextToken`，非空则继续调用 `--next-token <token>`，直到拉完（详见「转写接口分页机制」） |
+| `dws minutes get summary --id A & dws minutes get summary --id B & wait` | Windows cmd 下 `&` 是命令分隔符不是 background，`wait` 不存在 | 逐条串行调用，或让 AI 在内存中合并结果；**严禁使用 shell 并行/管道/重定向** |
+| `dws minutes get transcription --id <uuid> --next-token <token>` 报 unknown flag | **不会报错**——`--next-token` 是 `get transcription` 的合法参数（见命令总览） | 确保写法正确：`dws minutes get transcription --id <uuid> --next-token <token> --format json` |
+| `dws minutes get transcription --id <uuid> --page-token <token>` | `--page-token` 不存在，正确参数名是 `--next-token` | `dws minutes get transcription --id <uuid> --next-token <token>` |
+| `dws minutes transcribe --url <听记url>` | `transcribe` 不是合法子命令，`--url` 参数也不存在。LLM 凭印象编造 | 先从 URL 提取 taskUuid（见「URL → taskUuid 自动提取规则」），再 `dws minutes get transcription --id <taskUuid> --format json` |
+| `dws minutes get transcription --url <听记url>` | `--url` 参数不存在，`--id` 只接受纯 taskUuid | 同上：从 URL 提取 taskUuid 后用 `--id` |
+| `dws minutes summary --uuid <uuid>` | `summary` 不是顶层子命令（应在 `get` 下），且顶层不识别 `--uuid`。**0519 高频错误** | `dws minutes get summary --id <uuid>` |
+| `dws minutes list`（不跟 scope） | `list` 后**必须**跟 scope（mine/shared/all）。裸 `list` 返回结果不完整且行为未文档化 | `dws minutes list all`（默认 scope） |
+| `dws report inbox --format json`（无时间窗口） | `inbox` 是兼容入口，等价于 `inbox list`；仍必须带 `--start` / `--end` | `dws report inbox list --start "2026-05-06T00:00:00+08:00" --end "2026-05-13T23:59:59+08:00" --format json` |
+| `dws report inbox list --format json`（不带 --start） | inbox list **必须**带 `--start` / `--end` 参数，否则报 "flag --start is required" | `dws report inbox list --start "2026-05-06T00:00:00+08:00" --end "2026-05-13T23:59:59+08:00" --format json` |
+
+> **参数别名说明**：`--id`、`--uuid`、`--task-uuid` 三者等价，均可使用。推荐统一用 `--id`，但 `--uuid` 和 `--task-uuid` 也是合法别名，不会报错。
+
+**跨产品参数规约映射（dws-cli-param-spec 对齐）：**
+
+> minutes 模块参数与跨产品规约 Primary 的映射关系：
+>
+> | 语义 | 规约 Primary | minutes 当前 CLI 实际参数 | alias 注册状态 | 说明 |

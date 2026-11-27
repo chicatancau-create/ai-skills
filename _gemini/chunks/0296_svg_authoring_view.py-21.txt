@@ -1,0 +1,114 @@
+    shape_href = adopted.get("data-pptx-shape-hyperlink")
+    if shape_href and not any(_local_name(item.tag) == "a" for item in adopted.iter()):
+        adopted.attrib.pop("data-pptx-shape-hyperlink")
+        wrapper = ET.Element(f"{{{SVG_NS}}}a", {"href": shape_href})
+        source_href = adopted.attrib.pop(SOURCE_HREF_ATTR, None)
+        if source_href is not None:
+            wrapper.set(SOURCE_HREF_ATTR, source_href)
+        adopted_link = adopted.attrib.pop(ADOPTED_SOURCE_LINK_ATTR, None)
+        if adopted_link is not None:
+            wrapper.set(ADOPTED_SOURCE_LINK_ATTR, adopted_link)
+        wrapper.append(adopted)
+        target_root.append(wrapper)
+    else:
+        target_root.append(adopted)
+
+    original_target = target_path.read_bytes()
+    try:
+        _write_svg_atomically(target_path, target_root)
+        summary_path = write_authoring_summary(authoring_dir)
+    except (OSError, ValueError):
+        with tempfile.NamedTemporaryFile(
+            prefix=f".{target_path.name}.rollback.",
+            suffix=".tmp",
+            dir=target_path.parent,
+            delete=False,
+        ) as handle:
+            rollback_path = Path(handle.name)
+            handle.write(original_target)
+        rollback_path.chmod(target_path.stat().st_mode)
+        rollback_path.replace(target_path)
+        raise
+
+    return {
+        "authoring_dir": str(authoring_dir),
+        "source": f"{source_name}:{element_id}",
+        "target": target_name,
+        "adopted_id": adopted_id,
+        "renamed_ids": dict(sorted(replacements.items())),
+        "copied_definitions": len(adopted_definitions),
+        "inlined_imported_vectors": inlined_icons,
+        "inherited_attributes": list(inherited_attributes),
+        "ancestor_transform_composed": ancestor_transform_composed,
+        "stripped_attributes": sorted(stripped),
+        "removed_native_metadata": removed_metadata,
+        "summary": str(summary_path),
+    }
+
+
+def _nearest_existing_directory(path: Path) -> Path:
+    candidate = path
+    while not os.path.lexists(candidate):
+        parent = candidate.parent
+        if parent == candidate:
+            break
+        candidate = parent
+    if not candidate.is_dir():
+        raise NotADirectoryError(f"Output parent is not a directory: {candidate}")
+    return candidate
+
+
+def _ensure_directory(path: Path, created: list[Path]) -> None:
+    missing: list[Path] = []
+    candidate = path
+    while not candidate.exists():
+        if os.path.lexists(candidate):
+            raise NotADirectoryError(f"Output parent is not a directory: {candidate}")
+        missing.append(candidate)
+        parent = candidate.parent
+        if parent == candidate:
+            raise NotADirectoryError(f"Cannot resolve output parent: {path}")
+        candidate = parent
+    if not candidate.is_dir():
+        raise NotADirectoryError(f"Output parent is not a directory: {candidate}")
+
+    for directory in reversed(missing):
+        directory.mkdir()
+        created.append(directory)
+
+
+def _remove_created_directories(created: list[Path]) -> list[str]:
+    errors: list[str] = []
+    for directory in reversed(created):
+        try:
+            directory.rmdir()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            errors.append(f"could not remove {directory}: {exc}")
+    return errors
+
+
+def _rollback_published_files(
+    published: list[tuple[Path, Path | None]],
+    created: list[Path],
+) -> list[str]:
+    errors: list[str] = []
+    for target, backup in reversed(published):
+        try:
+            if backup is None:
+                target.unlink(missing_ok=True)
+            else:
+                backup.replace(target)
+        except OSError as exc:
+            errors.append(f"could not restore {target}: {exc}")
+    errors.extend(_remove_created_directories(created))
+    return errors
+
+
+def _publish_existing_directory(
+    staged: list[tuple[Path, Path]],
+    staging_root: Path,
+    *,
+    force: bool,
+) -> None:

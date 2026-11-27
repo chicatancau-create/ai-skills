@@ -1,0 +1,96 @@
+        "secondary_category", "secondary_value",
+    }.intersection(axes):
+        raise RuntimeError(
+            "Native PPTX combo secondary axes require a secondary-axis plot"
+        )
+    series_index_groups = [plot.get("series_indices") for plot in plots]
+    if any(group is not None for group in series_index_groups):
+        if any(group is None for group in series_index_groups):
+            raise RuntimeError(
+                "Native PPTX combo series_indices must cover every plot"
+            )
+        flat_indices = [
+            index
+            for group in series_index_groups
+            for index in group
+        ]
+        if sorted(flat_indices) != list(range(len(flat_indices))):
+            raise RuntimeError(
+                "Native PPTX combo series_indices must form one contiguous range"
+            )
+    flat_series: list[dict[str, Any]] = []
+    independent_categories = any(
+        plot["categories"] != categories
+        or plot["category_is_numeric"] != category_is_numeric
+        for plot in plots
+    )
+    next_column = 1
+    for plot in plots:
+        plot["start_index"] = len(flat_series)
+        if independent_categories:
+            plot["category_column"] = next_column
+            plot["start_column"] = next_column + 1
+            next_column += len(plot["series"]) + 1
+        flat_series.extend(plot["series"])
+    if not flat_series:
+        raise RuntimeError("Native PPTX combo chart requires at least one series")
+
+    return {
+        "axes": axes,
+        "categories": categories,
+        "category_is_numeric": category_is_numeric,
+        "independent_categories": independent_categories,
+        "kind": "combo",
+        "plots": plots,
+        "series": flat_series,
+        "type": "combo",
+    }
+
+
+def _chart_values(payload: dict[str, Any], field_name: str = "values") -> list[int | float]:
+    raw_values = payload.get(field_name)
+    if raw_values is None and isinstance(payload.get("series"), list) and payload["series"]:
+        first_series = payload["series"][0]
+        if isinstance(first_series, dict):
+            raw_values = first_series.get("values")
+    values = [_chart_number(value) for value in _chart_list(raw_values, field_name)]
+    if not values:
+        raise RuntimeError(f"Native PPTX chart {field_name} must be a non-empty list")
+    return values
+
+
+def _chart_categories(payload: dict[str, Any], count: int | None = None) -> list[str]:
+    raw_categories = payload.get("categories", payload.get("labels", []))
+    categories = [str(item) for item in _chart_list(raw_categories, "categories")]
+    if count is not None:
+        if not categories:
+            categories = [f"Category {idx + 1}" for idx in range(count)]
+        if len(categories) != count:
+            raise RuntimeError("Native PPTX chart categories length must match values length")
+    elif not categories:
+        raise RuntimeError("Native PPTX chart requires non-empty categories")
+    return categories
+
+
+def _hierarchy_levels(payload: dict[str, Any], count: int) -> list[list[str]]:
+    raw_levels = payload.get("levels")
+    if raw_levels is not None:
+        levels = [
+            [str(value) for value in _chart_list(level, "levels[]")]
+            for level in _chart_list(raw_levels, "levels")
+        ]
+    else:
+        raw_categories = _chart_list(payload.get("categories", []), "categories")
+        if raw_categories and all(isinstance(item, list) for item in raw_categories):
+            path_rows = [[str(value) for value in item] for item in raw_categories]
+        else:
+            path_rows = [[str(item)] for item in raw_categories]
+        if len(path_rows) != count:
+            raise RuntimeError("Native PPTX hierarchical chart categories length must match values length")
+        max_depth = max((len(row) for row in path_rows), default=0)
+        levels = [
+            [row[depth] if depth < len(row) else "" for row in path_rows]
+            for depth in range(max_depth)
+        ]
+
+    if not levels:

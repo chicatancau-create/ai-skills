@@ -1,0 +1,105 @@
+    sentence_text: dict[int, str] = {}
+    sentence_words: dict[int, list] = {}
+    audio_url = ""
+
+    for event in events:
+        code = event.get("code")
+        message = event.get("message")
+        if code or message:
+            details = ": ".join(str(value) for value in (code, message) if value)
+            raise RuntimeError(f"CosyVoice TTS failed: {details}")
+        output = event.get("output") or {}
+        if not isinstance(output, dict):
+            continue
+        audio = output.get("audio") or {}
+        if isinstance(audio, dict) and isinstance(audio.get("url"), str):
+            audio_url = audio["url"]
+
+        sentence = output.get("sentence") or {}
+        if not isinstance(sentence, dict):
+            continue
+        index = sentence.get("index")
+        if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+            continue
+        original_text = output.get("original_text")
+        if isinstance(original_text, str) and original_text:
+            sentence_text[index] = original_text
+        words = sentence.get("words")
+        if isinstance(words, list) and words:
+            sentence_words[index] = words
+
+    if not audio_url:
+        raise RuntimeError("CosyVoice streaming response contains no audio URL")
+    if not sentence_words:
+        raise RuntimeError(
+            "CosyVoice returned no word timestamps. Use a cloned voice from "
+            "cosyvoice-v3.5-plus/flash, cosyvoice-v3-plus/flash, or cosyvoice-v2, "
+            "or a system voice marked as timestamp-supported; otherwise pass "
+            "--cosyvoice-audio-only."
+        )
+
+    boundaries: list[dict] = []
+    for sentence_index in sorted(sentence_words):
+        original_text = sentence_text.get(sentence_index, "")
+        for item in sentence_words[sentence_index]:
+            if not isinstance(item, dict):
+                raise RuntimeError("CosyVoice word timing is not an object")
+            word = item.get("text")
+            begin_index = item.get("begin_index")
+            end_index = item.get("end_index")
+            if (
+                original_text
+                and isinstance(begin_index, int)
+                and not isinstance(begin_index, bool)
+                and isinstance(end_index, int)
+                and not isinstance(end_index, bool)
+                and 0 <= begin_index < end_index <= len(original_text)
+            ):
+                word = original_text[begin_index:end_index]
+            if not isinstance(word, str) or not word:
+                raise RuntimeError("CosyVoice word timing contains no text")
+            start = _ticks(item.get("begin_time"), field="start time")
+            end = _ticks(item.get("end_time"), field="end time")
+            if start < 0 or end <= start:
+                raise RuntimeError(
+                    "CosyVoice response contains an invalid word interval"
+                )
+            if boundaries and start < boundaries[-1]["offset"]:
+                raise RuntimeError(
+                    "CosyVoice word timestamps are not in chronological order"
+                )
+            boundaries.append({
+                "text": word,
+                "offset": start,
+                "duration": end - start,
+            })
+    return boundaries, audio_url
+
+
+def generate(
+    text: str,
+    output_path: Path,
+    *,
+    api_key: str,
+    voice_id: str,
+    model: str,
+    audio_format: str,
+    sample_rate: int,
+    volume: int | None,
+    rate: float | None,
+    pitch: float | None,
+    instruction: str | None,
+    language_hint: str | None,
+    base_url: str | None,
+    subtitle_path: Path | None = None,
+    subtitle_max_chars: int = DEFAULT_SUBTITLE_MAX_CHARS,
+) -> None:
+    input_payload: dict[str, object] = {
+        "text": text,
+        "voice": voice_id,
+        "format": audio_format,
+        "sample_rate": sample_rate,
+    }
+    if volume is not None:
+        input_payload["volume"] = volume
+    if rate is not None:

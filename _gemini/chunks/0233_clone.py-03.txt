@@ -1,0 +1,110 @@
+    every slide in the run so minted names never collide. Returns the complete
+    source-part to clone-part map for this output slide.
+    """
+    cloned: dict[str, str] = {}
+    _clone_part_private_deps(
+        slide_rels_root,
+        owner_part=new_slide_part,
+        entries=entries,
+        content_root=content_root,
+        allocate=allocate,
+        cloned=cloned,
+        skipped_rel_types=skipped_rel_types,
+    )
+    return cloned
+
+
+_SLIDE_LAYOUT_REL_TYPE = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout"
+)
+_SLIDE_MASTER_REL_TYPE = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster"
+)
+
+
+def _slide_jump_relationship_ids(
+    part_root: ET.Element,
+    *,
+    owner_label: str,
+) -> set[str]:
+    """Return relationship ids used by same-deck click or mouse-over actions."""
+    relationship_attr = _qn(NS["r"], "id")
+    relationship_ids: set[str] = set()
+    for tag in ("hlinkClick", "hlinkMouseOver"):
+        for link in part_root.iter(_qn(NS["a"], tag)):
+            if (link.attrib.get("action") or "").strip() != SLIDE_JUMP_ACTION:
+                continue
+            relationship_id = (
+                link.attrib.get(relationship_attr) or ""
+            ).strip()
+            if not relationship_id:
+                raise RuntimeError(
+                    f"{owner_label} has a {tag} slide jump without a "
+                    "relationship id"
+                )
+            relationship_ids.add(relationship_id)
+    return relationship_ids
+
+
+def _remap_slide_jump_relationships(
+    part_root: ET.Element,
+    relationships_root: ET.Element,
+    *,
+    source_owner_part: str,
+    output_owner_part: str,
+    owner_label: str,
+    outputs_by_source_part: dict[str, list[str]],
+    source_ref_by_part: dict[str, SlideRef],
+    self_source_part: str | None = None,
+    self_output_part: str | None = None,
+    fail_on_non_jump_slide_relationships: bool = False,
+    allow_self_non_jump_retarget: bool = False,
+) -> bool:
+    """Point referenced slide-jump relationships at final output slides."""
+    relationship_ids = _slide_jump_relationship_ids(
+        part_root,
+        owner_label=owner_label,
+    )
+    relationships = {
+        rel.attrib.get("Id", ""): rel
+        for rel in relationships_root.findall(_qn(REL_NS, "Relationship"))
+    }
+    changed = False
+    for relationship_id in sorted(relationship_ids):
+        rel = relationships.get(relationship_id)
+        if rel is None:
+            raise RuntimeError(
+                f"{owner_label} has a slide jump with missing relationship "
+                f"{relationship_id!r}"
+            )
+        if rel.attrib.get("Type") != SLIDE_REL_TYPE:
+            raise RuntimeError(
+                f"{owner_label} slide jump {relationship_id!r} does not use "
+                "a slide relationship"
+            )
+        if (rel.attrib.get("TargetMode") or "").strip().lower() == "external":
+            raise RuntimeError(
+                f"{owner_label} has an external slide relationship"
+            )
+        target = rel.attrib.get("Target")
+        if not target:
+            raise RuntimeError(
+                f"{owner_label} has a slide relationship without a target"
+            )
+        source_target_part = _normalize_part(target, source_owner_part)
+        if (
+            self_source_part is not None
+            and self_output_part is not None
+            and source_target_part == self_source_part
+        ):
+            output_target_part = self_output_part
+        else:
+            output_targets = outputs_by_source_part.get(source_target_part, [])
+            source_target_ref = source_ref_by_part.get(source_target_part)
+            target_label = (
+                f"source slide {source_target_ref.index}"
+                if source_target_ref is not None
+                else source_target_part
+            )
+            if not output_targets:
+                raise RuntimeError(

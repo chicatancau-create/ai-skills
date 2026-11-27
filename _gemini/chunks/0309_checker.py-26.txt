@@ -1,0 +1,104 @@
+        expected_viewbox_label: str = "expected canvas",
+    ):
+        """Validate the root page canvas and its project-level locks."""
+        viewbox = root.get('viewBox')
+        try:
+            parsed = parse_project_svg_root(
+                root,
+                context=svg_path.name,
+            )
+        except CanvasContractError as exc:
+            result['errors'].append(str(exc))
+            return
+        assert viewbox is not None
+        result['info']['viewbox'] = viewbox
+        if viewbox != parsed.canonical or not parsed.has_integer_dimensions:
+            if parsed.has_integer_dimensions:
+                recommendation = f'write viewBox="{parsed.canonical}"'
+            else:
+                recommendation = (
+                    "fractional dimensions are reserved for compatible imported "
+                    "custom slide sizes; new authoring uses integer pixels"
+                )
+            result['warnings'].append(
+                f"Compatible non-canonical root viewBox {viewbox!r}; {recommendation}."
+            )
+
+        contracts: list[tuple[str, str]] = []
+        if expected_viewbox is not None:
+            contracts.append((expected_viewbox_label, expected_viewbox))
+        elif not self.template_mode:
+            lock = self._get_spec_lock(svg_path)
+            if lock is not None and 'canvas' in lock:
+                locked_viewbox = lock.get('canvas', {}).get('viewBox')
+                if not locked_viewbox:
+                    result['errors'].append(
+                        "spec_lock.md canvas section must declare viewBox"
+                    )
+                else:
+                    contracts.append(("spec_lock canvas", locked_viewbox))
+
+        if expected_format and expected_format in CANVAS_FORMATS:
+            contracts.append((
+                f"canvas format {expected_format!r}",
+                CANVAS_FORMATS[expected_format]['viewbox'],
+            ))
+        elif expected_format:
+            result['errors'].append(f"Unsupported canvas format: {expected_format}")
+
+        seen_contracts: set[tuple[str, str]] = set()
+        for label, raw_expected in contracts:
+            contract_key = (label, raw_expected)
+            if contract_key in seen_contracts:
+                continue
+            seen_contracts.add(contract_key)
+            try:
+                expected = parse_project_viewbox(
+                    raw_expected,
+                    context=f"{label} viewBox",
+                )
+            except CanvasContractError as exc:
+                result['errors'].append(str(exc))
+                continue
+            if parsed != expected:
+                result['errors'].append(
+                    f"viewBox mismatch: {label} requires '{expected.canonical}', "
+                    f"got '{parsed.canonical}'"
+                )
+
+    def _check_image_contract(
+        self,
+        root: ET.Element,
+        svg_path: Path,
+        result: Dict,
+    ) -> None:
+        """Validate picture frames, references, and bytes before export."""
+        if _project_image_errors is None:
+            result['errors'].append(
+                'Unable to import the image validator; cannot verify picture '
+                'frames or media'
+            )
+            return
+        _working_root, _parent_by_id, images = self._visible_image_elements(root)
+        for image in images:
+            result['errors'].extend(
+                _project_image_errors(
+                    image,
+                    svg_path.parent,
+                    allow_template_placeholders=self.template_mode,
+                )
+            )
+
+    def _record_carrier_receipt(
+        self,
+        root: ET.Element,
+        result: Dict,
+    ) -> None:
+        """Record factual visible-carrier use without grading the design."""
+        parent_by_id = {
+            id(child): parent
+            for parent in root.iter()
+            for child in list(parent)
+        }
+        geometry_tags = (
+            'rect',

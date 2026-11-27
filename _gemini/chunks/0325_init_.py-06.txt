@@ -1,0 +1,101 @@
+<a:chOff x="{min_x}" y="{min_y}"/><a:chExt cx="{group_w}" cy="{group_h}"/>
+</a:xfrm></p:grpSpPr>
+{chart_frame_xml}{companion_xml}
+</p:grpSp>'''
+    return ShapeResult(xml=xml, bounds_emu=(min_x, min_y, max_x, max_y))
+
+
+def _validate_native_object_marker_payload(
+    elem: ET.Element,
+    *,
+    validate_chrome: bool = True,
+    ctx: ConvertContext | None = None,
+    ancestors: tuple[ET.Element, ...] = (),
+    require_fresh_fallback: bool = False,
+) -> tuple[str, dict[str, Any], list[list[Any]] | FormulaSpec | None]:
+    try:
+        kind = native_replacement_kind(elem)
+    except NativeMarkerAttributeError as exc:
+        raise RuntimeError(str(exc)) from exc
+    if not kind:
+        return "", {}, None
+    status_errors = native_marker_status_errors(elem)
+    if status_errors:
+        raise RuntimeError("; ".join(status_errors))
+    if kind not in _NATIVE_KINDS:
+        raise RuntimeError(f"Unsupported data-pptx-replace-with value: {kind}")
+    if _local_tag(elem) != "g":
+        raise RuntimeError("Native PPTX replacement markers must be <g> elements")
+    native_marker_transform(elem.get("transform"))
+    if require_fresh_fallback and kind in {"chart", "table"}:
+        require_fresh_native_fallback(elem, use_runtime_snapshot=True)
+
+    try:
+        payload = _load_payload(elem, kind)
+    except NativeMarkerAttributeError as exc:
+        raise RuntimeError(str(exc)) from exc
+    if native_json_is_authoritative(elem):
+        missing_bounds = [
+            key for key in ("x", "y", "width", "height")
+            if payload.get(key) is None
+        ]
+        if missing_bounds:
+            raise RuntimeError(
+                "JSON-authoritative Chart/Table metadata requires explicit "
+                "x/y/width/height; missing " + ", ".join(missing_bounds)
+            )
+    bounds_ctx = ctx or _native_marker_validation_context(elem, ancestors)
+    off_x, off_y, ext_cx, ext_cy, _ = _validate_bounds_inputs(elem, payload, bounds_ctx)
+    validated_data: list[list[Any]] | FormulaSpec | None = None
+    if kind == "table":
+        _expanded_payload, table_rows, col_count, _merge_layout = (
+            _validate_table_payload(payload)
+        )
+        validated_data = table_rows
+        if ext_cx < col_count or ext_cy < len(table_rows):
+            raise RuntimeError(
+                "Native PPTX table bounds must provide at least one EMU per row and column"
+            )
+    elif kind == "chart":
+        source_package = _decode_source_chart_package(payload)
+        if (
+            elem.get("data-pptx-roundtrip-object")
+            == "source-chart-package"
+            and source_package is None
+        ):
+            raise RuntimeError(
+                "Round-trip source-chart marker requires source_package"
+            )
+        if source_package is None:
+            chart_data = _chart_data(payload)
+            _chart_plot_area_layout(
+                chart_data,
+                (off_x, off_y, ext_cx, ext_cy),
+            )
+            _validate_chart_companion_boxes(
+                payload,
+                chart_bounds=(off_x, off_y, ext_cx, ext_cy),
+                include_title=(
+                    chart_data["kind"] == "chartex"
+                    or _chart_title_is_bounded(payload)
+                ),
+                include_subtitle_as_caption=chart_data["kind"] == "chartex",
+            )
+            if validate_chrome and native_import_source(elem) != "pptx":
+                chrome_errors = _native_chart_chrome_errors(elem, payload)
+                if chrome_errors:
+                    raise RuntimeError("; ".join(chrome_errors))
+    else:
+        validated_data = validate_formula_payload(payload, ctx=ctx)
+    return kind, payload, validated_data
+
+
+def validate_native_object_marker(
+    elem: ET.Element,
+    *,
+    ancestors: tuple[ET.Element, ...] = (),
+) -> None:
+    """Validate a native replacement marker without mutating the package."""
+    _validate_native_object_marker_payload(elem, ancestors=ancestors)
+
+

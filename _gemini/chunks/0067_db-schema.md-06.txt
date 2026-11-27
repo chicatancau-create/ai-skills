@@ -1,0 +1,93 @@
+    tenant_id  bigint NOT NULL,
+    event_type text NOT NULL,
+    payload    jsonb,
+    created_at timestamptz NOT NULL DEFAULT now()
+) PARTITION BY RANGE (created_at);
+
+-- Monthly partitions
+CREATE TABLE events_2025_01 PARTITION OF events
+  FOR VALUES FROM ('2025-01-01') TO ('2025-02-01');
+CREATE TABLE events_2025_02 PARTITION OF events
+  FOR VALUES FROM ('2025-02-01') TO ('2025-03-01');
+
+-- Automate partition creation with pg_partman or cron
+```
+
+### List Partitioning (Multi-Tenant)
+
+```sql
+CREATE TABLE orders (
+    id        bigserial,
+    tenant_id bigint NOT NULL,
+    total     numeric(10,2)
+) PARTITION BY LIST (tenant_id);
+
+CREATE TABLE orders_tenant_1 PARTITION OF orders FOR VALUES IN (1);
+CREATE TABLE orders_tenant_2 PARTITION OF orders FOR VALUES IN (2);
+```
+
+---
+
+## Anti-Patterns
+
+| # | ❌ Don't | ✅ Do Instead |
+|---|---------|--------------|
+| 1 | Premature denormalization | Start 3NF, denormalize when measured |
+| 2 | Auto-increment IDs as public API identifiers | UUID for public, serial for internal |
+| 3 | No foreign key constraints | FK enforced in database, always |
+| 4 | Nullable by default | NOT NULL by default, nullable when required |
+| 5 | No indexes on FK columns | Index every FK column |
+| 6 | Single-step destructive migration | ADD → MIGRATE → REMOVE in separate deploys |
+| 7 | `CREATE INDEX` without `CONCURRENTLY` | Always `CONCURRENTLY` on live tables |
+| 8 | Polymorphic FK (`commentable_type + commentable_id`) | Separate FK columns or separate tables |
+| 9 | JSONB for everything | JSONB for flexible data only, columns for structured |
+| 10 | No `created_at` / `updated_at` | Timestamp pair on every table |
+| 11 | Comma-separated values in one column | Separate table or PostgreSQL array |
+| 12 | `text` without length validation | CHECK constraint or application validation |
+
+---
+
+## Common Issues
+
+### Issue 1: "Query is slow but I already have an index"
+
+**Symptom:** `EXPLAIN ANALYZE` shows Sequential Scan despite existing index.
+
+**Causes:**
+1. **Wrong index column order** — composite index `(A, B)` won't help `WHERE B = ?`
+2. **Low selectivity** — index on boolean column (50% of rows match), planner prefers seq scan
+3. **Stale statistics** — run `ANALYZE table_name;`
+4. **Type mismatch** — comparing `varchar` column with `integer` parameter → no index use
+
+**Fix:** Check `EXPLAIN (ANALYZE, BUFFERS)`, verify index matches query pattern, run `ANALYZE`.
+
+### Issue 2: "Migration locks the table for minutes"
+
+**Symptom:** `ALTER TABLE` blocks all writes during execution.
+
+**Cause:** Adding NOT NULL constraint, changing column type, or creating index without `CONCURRENTLY`.
+
+**Fix:**
+```sql
+-- Add index without lock
+CREATE INDEX CONCURRENTLY idx_name ON table(col);
+
+-- Add NOT NULL constraint without lock (Postgres 12+)
+ALTER TABLE t ADD CONSTRAINT t_col_nn CHECK (col IS NOT NULL) NOT VALID;
+ALTER TABLE t VALIDATE CONSTRAINT t_col_nn;  -- non-blocking validation
+```
+
+### Issue 3: "How many indexes is too many?"
+
+**Rule of thumb:**
+- Read-heavy table (reports, product catalog): 5-10 indexes is fine
+- Write-heavy table (events, logs): 2-3 indexes max
+- Monitor with `pg_stat_user_indexes` — drop indexes with `idx_scan = 0`
+
+```sql
+-- Find unused indexes
+SELECT schemaname, relname, indexrelname, idx_scan
+FROM pg_stat_user_indexes
+WHERE idx_scan = 0 AND indexrelname NOT LIKE '%pkey%'
+ORDER BY pg_relation_size(indexrelid) DESC;
+```

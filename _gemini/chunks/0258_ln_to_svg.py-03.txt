@@ -1,0 +1,108 @@
+    joins = [child for child in ln if child.tag in join_names]
+    if len(joins) > 1:
+        raise ValueError("DrawingML line must contain at most one join")
+    if joins:
+        join = joins[0]
+        linejoin = join_names[join.tag]
+        if list(join):
+            raise ValueError("Invalid DrawingML line join structure")
+        if linejoin in {"round", "bevel"} and join.attrib:
+            raise ValueError("Invalid DrawingML line join structure")
+        if linejoin == "miter":
+            if set(join.attrib) - {"lim"}:
+                raise ValueError("Invalid DrawingML line join structure")
+            limit = join.attrib.get("lim")
+            if limit not in {None, "800000"}:
+                raise ValueError(
+                    f"Unsupported DrawingML miter limit: {limit!r}"
+                )
+        attrs["stroke-linejoin"] = linejoin
+
+    # Arrow markers (head / tail)
+    if id_seq is None:
+        id_seq = [0]
+    for which, attr in (("headEnd", "marker-start"), ("tailEnd", "marker-end")):
+        endpoints = ln.findall(f"a:{which}", NS)
+        if len(endpoints) > 1:
+            raise ValueError(
+                f"DrawingML line must contain at most one {which}"
+            )
+        if not endpoints:
+            continue
+        end_elem = endpoints[0]
+        if (
+            set(end_elem.attrib) - {"type", "w", "len"}
+            or list(end_elem)
+            or (end_elem.text or "").strip()
+        ):
+            raise ValueError(f"Invalid DrawingML {which} structure")
+        marker_color = (
+            marker_color_override
+            or attrs.get("stroke")
+            or style_stroke_default
+            or "#000000"
+        )
+        marker_id, marker_def = _build_arrow_marker(
+            end_elem,
+            marker_color,
+            id_prefix=id_prefix,
+            seq=id_seq,
+            reversed_=(which == "headEnd"),
+        )
+        if marker_id is None:
+            continue
+        defs.append(marker_def)
+        attrs[attr] = f"url(#{marker_id})"
+
+    return StrokeResult(attrs=attrs, defs=defs)
+
+
+def _project_degenerate_stroke_gradients(
+    definitions: list[str],
+    frame: tuple[float, float, float, float] | None,
+    stroke_width: float,
+) -> list[str]:
+    """Use page coordinates when objectBoundingBox has a degenerate axis."""
+    if frame is None:
+        return definitions
+    x, y, width, height = frame
+    if width > 0 and height > 0:
+        return definitions
+
+    projected: list[str] = []
+    safe_width = width if width > 0 else max(stroke_width, 1.0)
+    safe_height = height if height > 0 else max(stroke_width, 1.0)
+    origin_x = x if width > 0 else x - safe_width / 2
+    origin_y = y if height > 0 else y - safe_height / 2
+    for definition in definitions:
+        gradient = ET.fromstring(definition)
+        tag = gradient.tag.rsplit("}", 1)[-1]
+        gradient.set("gradientUnits", "userSpaceOnUse")
+        if tag == "linearGradient":
+            for name, origin, span in (
+                ("x1", origin_x, safe_width),
+                ("x2", origin_x, safe_width),
+                ("y1", origin_y, safe_height),
+                ("y2", origin_y, safe_height),
+            ):
+                gradient.set(
+                    name,
+                    fmt_num(origin + float(gradient.get(name, "0")) * span, 5),
+                )
+        elif tag == "radialGradient":
+            for name, origin, span, default in (
+                ("cx", origin_x, safe_width, "0.5"),
+                ("fx", origin_x, safe_width, gradient.get("cx", "0.5")),
+                ("cy", origin_y, safe_height, "0.5"),
+                ("fy", origin_y, safe_height, gradient.get("cy", "0.5")),
+            ):
+                gradient.set(
+                    name,
+                    fmt_num(
+                        origin + float(gradient.get(name, default)) * span,
+                        5,
+                    ),
+                )
+            gradient.set(
+                "r",
+                fmt_num(

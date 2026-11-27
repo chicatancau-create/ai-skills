@@ -1,0 +1,94 @@
+        target.write_text(content, encoding="utf-8")
+        return target
+
+    def _canonicalize_markdown_content(self, content: str) -> str:
+        canonical = content.replace("\r\n", "\n")
+        canonical = re.sub(r"(?m)^(\s*Crawled:\s+).*$", r"\1__IGNORED__", canonical)
+        canonical = re.sub(r"(?m)^(\s*Imported:\s+).*$", r"\1__IGNORED__", canonical)
+        canonical = re.sub(r"([^\s\]()/]+_files)/", "__ASSET_DIR__/", canonical)
+        return canonical.strip()
+
+    def _find_equivalent_markdown(self, source_path: Path, sources_dir: Path) -> Path | None:
+        source_content = source_path.read_text(encoding="utf-8", errors="replace")
+        canonical_source = self._canonicalize_markdown_content(source_content)
+
+        for existing in sorted(sources_dir.iterdir()):
+            if existing.suffix.lower() not in {".md", ".markdown"}:
+                continue
+            try:
+                if existing.resolve() == source_path.resolve():
+                    continue
+            except FileNotFoundError:
+                pass
+
+            existing_content = existing.read_text(encoding="utf-8", errors="replace")
+            if self._canonicalize_markdown_content(existing_content) == canonical_source:
+                return existing
+
+        return None
+
+    def _companion_asset_dir(self, source_path: Path) -> Path | None:
+        candidate = source_path.with_name(f"{source_path.stem}_files")
+        if candidate.exists() and candidate.is_dir():
+            return candidate
+        return None
+
+    def _rewrite_markdown_asset_refs(
+        self,
+        markdown_path: Path,
+        original_asset_dirname: str,
+        imported_asset_dirname: str,
+    ) -> None:
+        if original_asset_dirname == imported_asset_dirname:
+            return
+
+        content = markdown_path.read_text(encoding="utf-8", errors="replace")
+        updated = content.replace(f"{original_asset_dirname}/", f"{imported_asset_dirname}/")
+        if updated != content:
+            markdown_path.write_text(updated, encoding="utf-8")
+
+    def _merge_image_manifest(self, source_items: list[dict], destination_manifest: Path) -> None:
+        """Merge per-source manifest items into the project-level manifest, keyed by filename."""
+        _validate_image_manifest(source_items, destination_manifest)
+        existing_data = _read_existing_image_manifest(destination_manifest)
+
+        new_by_filename: dict[str, dict] = {}
+        new_order: list[str] = []
+        for item in source_items:
+            filename = item.get("filename")
+            if not isinstance(filename, str):
+                continue
+            normalized_filename = filename.casefold()
+            if normalized_filename not in new_by_filename:
+                new_order.append(normalized_filename)
+            new_by_filename[normalized_filename] = item
+
+        merged: list[dict] = []
+        seen: set[str] = set()
+        for item in existing_data:
+            if not isinstance(item, dict):
+                continue
+            filename = item.get("filename")
+            if not isinstance(filename, str):
+                continue
+            normalized_filename = filename.casefold()
+            if normalized_filename in new_by_filename:
+                merged.append(new_by_filename[normalized_filename])
+            else:
+                merged.append(item)
+            seen.add(normalized_filename)
+
+        for normalized_filename in new_order:
+            if normalized_filename not in seen:
+                merged.append(new_by_filename[normalized_filename])
+
+        _validate_image_manifest(merged, destination_manifest)
+        _write_json_atomic(destination_manifest, merged)
+
+    @staticmethod
+    def _namespace_from_asset_dir(asset_dir: Path) -> str:
+        """Derive a per-source namespace from a `<stem>_files` companion directory name."""
+        name = asset_dir.name
+        suffix = "_files"
+        return name[:-len(suffix)] if name.endswith(suffix) else name
+

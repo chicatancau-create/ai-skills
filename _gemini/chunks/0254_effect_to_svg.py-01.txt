@@ -1,0 +1,137 @@
+"""Convert the closed DrawingML effect subset into project SVG filters.
+
+One classifiable outer shadow or one glow maps to the public shadow/glow
+contract. Every other source effect receives explicit blocking metadata; the
+importer never relabels it as another native effect or drops it silently.
+"""
+
+from __future__ import annotations
+
+import math
+import re
+from dataclasses import dataclass
+from xml.etree import ElementTree as ET
+
+from pptx_effects import native_effect_metadata, unsupported_effect_metadata
+from pptx_shapes.formula import OOXML_COORDINATE_MAX
+
+from .color_resolver import COLOR_TAGS, ColorPalette, resolve_color
+from .emu_units import NS, emu_to_px, fmt_num, format_ooxml_alpha
+
+
+_OOXML_INTEGER_RE = re.compile(r"[+-]?\d+")
+_OOXML_HEX_COLOR_RE = re.compile(r"[0-9A-Fa-f]{6}")
+_DRAWINGML_NAMESPACE = NS["a"]
+_DRAWINGML_TAG_PREFIX = f"{{{_DRAWINGML_NAMESPACE}}}"
+_EFFECT_CONTAINER_NAMES = frozenset({"effectLst", "effectDag"})
+_OUTER_SHADOW_ATTRIBUTES = frozenset({
+    "algn",
+    "blurRad",
+    "dir",
+    "dist",
+    "kx",
+    "ky",
+    "rotWithShape",
+    "sx",
+    "sy",
+})
+_OUTER_SHADOW_ALIGNMENTS = frozenset({
+    "b",
+    "bl",
+    "br",
+    "ctr",
+    "l",
+    "r",
+    "t",
+    "tl",
+    "tr",
+})
+
+
+@dataclass(frozen=True)
+class EffectResult:
+    """One supported SVG filter or one explicit unsupported-source marker."""
+
+    filter_id: str | None = None
+    defs: tuple[str, ...] = ()
+    metadata: tuple[tuple[str, str], ...] = ()
+
+    @classmethod
+    def unsupported(
+        cls,
+        reason: str,
+        effect_container: ET.Element | None = None,
+    ) -> "EffectResult":
+        metadata = unsupported_effect_metadata(reason)
+        if effect_container is not None:
+            metadata.update(native_effect_metadata(effect_container))
+        return cls(metadata=tuple(metadata.items()))
+
+
+def unsupported_target_effect_metadata(
+    sp_pr: ET.Element | None,
+    target: str,
+) -> dict[str, str]:
+    """Mark source effects that cannot attach to this SVG target type."""
+    if sp_pr is None:
+        return {}
+    effect_names: list[str] = []
+    for container in sp_pr:
+        if (
+            not isinstance(container.tag, str)
+            or _local_name(container) not in _EFFECT_CONTAINER_NAMES
+        ):
+            continue
+        container_name = _local_name(container)
+        if container_name == "effectDag":
+            effect_names.append(container_name)
+            continue
+        effect_names.extend(
+            _local_name(child)
+            for child in container
+            if isinstance(child.tag, str)
+        )
+    if not effect_names:
+        return {}
+    metadata = unsupported_effect_metadata(
+        f"unsupported-effect-target:{target}:" + ",".join(effect_names)
+    )
+    containers = [
+        child
+        for child in sp_pr
+        if isinstance(child.tag, str)
+        and _local_name(child) in _EFFECT_CONTAINER_NAMES
+    ]
+    if len(containers) == 1 and containers[0].tag.startswith(
+        _DRAWINGML_TAG_PREFIX
+    ):
+        metadata.update(native_effect_metadata(containers[0]))
+    return metadata
+
+
+def convert_effects(
+    sp_pr: ET.Element | None,
+    palette: ColorPalette | None,
+    *,
+    id_prefix: str = "fx",
+    id_seq: list[int] | None = None,
+    target_rotation_degrees: float = 0.0,
+) -> EffectResult:
+    """Return one supported filter or blocking metadata for source effects."""
+    if sp_pr is None:
+        return EffectResult()
+    containers = [
+        child
+        for child in sp_pr
+        if isinstance(child.tag, str)
+        and _local_name(child) in _EFFECT_CONTAINER_NAMES
+    ]
+    if not containers:
+        return EffectResult()
+    container_names = [_local_name(child) for child in containers]
+    if len(containers) != 1:
+        return EffectResult.unsupported(
+            "multiple-effect-containers:" + ",".join(container_names)
+        )
+    container = containers[0]
+    container_name = container_names[0]

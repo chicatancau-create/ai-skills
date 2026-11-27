@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+"""PPT Master project-management CLI implementation.
+
+Usage:
+    python3 scripts/project_manager.py init <project_name> [--format <registered_format>]
+        [--dir <path>] [--quick-generate]
+    python3 scripts/project_manager.py import-sources <project_path> <source1> [<source2> ...] [--move | --copy]
+    python3 scripts/project_manager.py scaffold-spec <project_path>
+    python3 scripts/project_manager.py scaffold-lock <project_path>
+    python3 scripts/project_manager.py validate <project_path>
+    python3 scripts/project_manager.py info <project_path>
+    python3 scripts/project_manager.py page-context <project_path> P07 [--record-usage]
+    python3 scripts/project_manager.py page-context-report <project_path>
+
+Examples:
+    python3 scripts/project_manager.py init demo
+    python3 scripts/project_manager.py init widescreen --format ppt169
+    python3 scripts/project_manager.py validate projects/demo
+
+Dependencies:
+    Standard library plus local PPT Master project and source-conversion modules.
+"""
+
+from __future__ import annotations
+
+import argparse
+import filecmp
+import json
+import os
+import stat
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from datetime import datetime
+from pathlib import Path
+from urllib.parse import urlparse
+
+from .page_context import (
+    build_page_context,
+    page_context_usage_report,
+    record_page_context_usage,
+    render_page_context,
+)
+from .paths import (
+    PROJECTS_ROOT,
+    REPO_ROOT,
+    SCRIPTS_DIR,
+    SOURCE_TO_MD_DIR,
+)
+from .project_specs import scaffold_project_artifact, validate_project_artifacts
+
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from attribution_guard import require_skill_integrity  # noqa: E402
+from workflow_log import append_note  # noqa: E402
+
+try:
+    from project_utils import (
+        CANVAS_FORMATS,
+        get_project_info as get_project_info_common,
+        normalize_canvas_format,
+        validate_project_structure,
+        validate_svg_viewbox,
+    )
+except ImportError:
+    tools_dir = SCRIPTS_DIR
+    if str(tools_dir) not in sys.path:
+        sys.path.insert(0, str(tools_dir))
+    from project_utils import (  # type: ignore
+        CANVAS_FORMATS,
+        get_project_info as get_project_info_common,
+        normalize_canvas_format,
+        validate_project_structure,
+        validate_svg_viewbox,
+    )
+
+TOOLS_DIR = SCRIPTS_DIR
+SOURCE_TO_MD_TOOLS_DIR = SOURCE_TO_MD_DIR
+if str(SOURCE_TO_MD_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(SOURCE_TO_MD_TOOLS_DIR))
+
+from _dispatcher import (  # noqa: E402
+    DOC_SUFFIXES,
+    EXCEL_SUFFIXES,
+    LEGACY_EXCEL_SUFFIXES,
+    PDF_SUFFIXES,
+    PRESENTATION_SUFFIXES,
+    build_conversion_command,
+)
+
+SOURCE_DIRNAME = "sources"
+TEXT_SOURCE_SUFFIXES = {".md", ".markdown", ".txt"}
+TABLE_TEXT_SUFFIXES = {".csv", ".tsv"}
+BITMAP_IMAGE_SUFFIXES = {
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif",
+}
+IMAGE_ASSET_SUFFIXES = BITMAP_IMAGE_SUFFIXES | {
+    ".emf", ".wmf", ".svg",
+}
+DEFERRED_CANVAS_MESSAGE = (
+    "Canvas is determined during authoring and recorded in spec_lock.md "
+    "(Default) or the first SVG (Quick)."
+)
+
+
+def _is_project_tree(source_path: Path) -> bool:
+    """Return whether a file under projects/ sits inside an initialized project.
+
+    A sibling directory such as ``projects/<slug>_web_sources/`` (topic-research
+    output) is scratch material, not another project's tree.
+    """
+    projects_root = PROJECTS_ROOT.resolve()
+    source_path = source_path.resolve()
+    try:
+        relative = source_path.relative_to(projects_root)
+    except ValueError:
+        return False
+    if not relative.parts:
+        return False
+    for root in source_path.parents:
+        if root == projects_root:
+            break
+        if any(
+            (root / marker).exists()
+            for marker in ("svg_output", "design_spec.md", "spec_lock.md", "README.md")
+        ):
+            return True

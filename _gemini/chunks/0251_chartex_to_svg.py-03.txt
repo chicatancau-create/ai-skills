@@ -1,0 +1,114 @@
+            primary.find("cx:layoutPr/cx:aggregation", CX_NS) is None
+            or line.attrib.get("ownerIdx") != "0"
+            or line.find("cx:dataId", CX_NS) is not None
+        ):
+            raise UnsupportedChartEx("unsupported-chartex-series")
+        return "pareto"
+    raise UnsupportedChartEx("unsupported-chartex-type")
+
+
+def _data_parts(chart_data: ET.Element) -> dict[int, ET.Element]:
+    result: dict[int, ET.Element] = {}
+    for data in _children(chart_data, "data"):
+        data_id = _nonnegative_int(data.attrib.get("id"), "unsupported-chartex-data-id")
+        if data_id in result:
+            raise UnsupportedChartEx("unsupported-chartex-data-id")
+        result[data_id] = data
+    if not result:
+        raise UnsupportedChartEx("unsupported-chartex-data-id")
+    return result
+
+
+def _series_data_id(series: ET.Element) -> int:
+    data_ids = _children(series, "dataId")
+    if len(data_ids) != 1:
+        raise UnsupportedChartEx("unsupported-chartex-data-id")
+    return _nonnegative_int(
+        data_ids[0].attrib.get("val"),
+        "unsupported-chartex-data-id",
+    )
+
+
+def _require_data(data_by_id: dict[int, ET.Element], data_id: int) -> ET.Element:
+    data = data_by_id.get(data_id)
+    if data is None:
+        raise UnsupportedChartEx("unsupported-chartex-data-id")
+    return data
+
+
+def _string_dimension(
+    data: ET.Element,
+    *,
+    expected_levels: int | None,
+) -> list[list[str]]:
+    _reject_dimensions(data, allowed={"strDim", "numDim"})
+    dimensions = [
+        child
+        for child in _children(data, "strDim")
+        if child.attrib.get("type") == "cat"
+    ]
+    if len(dimensions) != 1 or len(_children(data, "strDim")) != 1:
+        raise UnsupportedChartEx("unsupported-chartex-dimension")
+    levels = _children(dimensions[0], "lvl")
+    if not levels or (expected_levels is not None and len(levels) != expected_levels):
+        raise UnsupportedChartEx("unsupported-chartex-dimension")
+    return [_level_values(level, numeric=False) for level in levels]
+
+
+def _numeric_dimension(data: ET.Element, dim_type: str) -> list[int | float]:
+    dimensions = [
+        child
+        for child in _children(data, "numDim")
+        if child.attrib.get("type") == dim_type
+    ]
+    if len(dimensions) != 1 or len(_children(data, "numDim")) != 1:
+        raise UnsupportedChartEx("unsupported-chartex-dimension")
+    levels = _children(dimensions[0], "lvl")
+    if len(levels) != 1:
+        raise UnsupportedChartEx("unsupported-chartex-dimension")
+    return _level_values(levels[0], numeric=True)
+
+
+def _reject_dimensions(data: ET.Element, *, allowed: set[str]) -> None:
+    for child in data:
+        name = _local_name(child.tag)
+        if name.endswith("Dim") and name not in allowed:
+            raise UnsupportedChartEx("unsupported-chartex-dimension")
+
+
+def _level_values(
+    level: ET.Element,
+    *,
+    numeric: bool,
+) -> list[Any]:
+    point_count = _nonnegative_int(
+        level.attrib.get("ptCount"),
+        "unsupported-chartex-cache",
+    )
+    points: dict[int, Any] = {}
+    for point in _children(level, "pt"):
+        point_index = _nonnegative_int(
+            point.attrib.get("idx"),
+            "unsupported-chartex-cache",
+        )
+        if point_index >= point_count or point_index in points or list(point):
+            raise UnsupportedChartEx("unsupported-chartex-cache")
+        raw_value = point.text or ""
+        points[point_index] = (
+            _numeric_value(raw_value)
+            if numeric
+            else raw_value
+        )
+    if (
+        len(points) != point_count
+        or any(index not in points for index in range(point_count))
+    ):
+        raise UnsupportedChartEx("unsupported-chartex-cache")
+    return [points[index] for index in range(point_count)]
+
+
+def _numeric_value(raw_value: str) -> int | float:
+    if not raw_value.strip():
+        raise UnsupportedChartEx("unsupported-chartex-cache")
+    try:
+        number = float(raw_value)

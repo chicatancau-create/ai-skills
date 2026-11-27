@@ -1,0 +1,101 @@
+    label = repr(mode) if mode is not None else 'missing'
+    if requested_mode == 'structured':
+        print(
+            "Error: --pptx-structure structured requires an explicit "
+            "spec_lock.md pptx_structure.mode: structured contract; found "
+            + label + ".",
+            file=sys.stderr,
+        )
+        print(
+            "  A legacy lock without pptx_structure.mode defaults only to flat. "
+            "Mirror/layout reuse must first create a current template workspace "
+            "through skills/ppt-master/workflows/create-template.md, then generate "
+            "new structured SVG pages.",
+            file=sys.stderr,
+        )
+        return
+    print(
+        "Error: unsupported spec_lock.md pptx_structure.mode " + label + ". "
+        "Current release modes are flat (style reference / free design / "
+        "brand-only) and structured (mirror/layout reuse).",
+        file=sys.stderr,
+    )
+    print(
+        "  A legacy lock with no pptx_structure.mode defaults to flat. "
+        "Explicit legacy or unknown values are not inferred. Mirror/layout reuse "
+        "must first create a current template workspace "
+        "through skills/ppt-master/workflows/create-template.md, then generate "
+        "new structured SVG pages.",
+        file=sys.stderr,
+    )
+
+
+def _native_object_fallbacks(svg_files: list[Path]) -> list[tuple[str, str, str]]:
+    """Return fallback-only chart/table replacement statuses from SVG inputs."""
+    fallbacks: list[tuple[str, str, str]] = []
+    for svg_path in svg_files:
+        try:
+            root = ET.parse(svg_path).getroot()
+        except (OSError, ET.ParseError):
+            continue
+        for elem in root.iter():
+            status = native_replacement_status(elem)
+            if not status or elem.tag.rsplit('}', 1)[-1] == 'metadata':
+                continue
+            marker_id = elem.get('id') or elem.get('data-name') or '<unnamed>'
+            fallbacks.append((svg_path.name, marker_id, status))
+    return fallbacks
+
+
+def _native_object_projection_findings(
+    svg_files: list[Path],
+) -> list[tuple[str, str, str]]:
+    """Return SVG-first Chart/Table details that native metadata would discard."""
+    findings: list[tuple[str, str, str]] = []
+    for svg_path in svg_files:
+        try:
+            root = ET.parse(svg_path).getroot()
+        except (OSError, ET.ParseError):
+            continue
+        parent_map = {
+            child: parent
+            for parent in root.iter()
+            for child in parent
+        }
+        for elem in root.iter():
+            if elem.tag.rsplit('}', 1)[-1] == 'metadata':
+                continue
+            if native_replacement_kind(elem) not in {'chart', 'table'}:
+                continue
+            marker_id = elem.get('id') or elem.get('data-name') or '<unnamed>'
+            ancestors: list[ET.Element] = []
+            parent = parent_map.get(elem)
+            while parent is not None and parent is not root:
+                if parent.tag.rsplit('}', 1)[-1] == 'g':
+                    ancestors.append(parent)
+                parent = parent_map.get(parent)
+            try:
+                warnings = native_object_projection_warnings(
+                    elem,
+                    ancestors=tuple(reversed(ancestors)),
+                    document_root=root,
+                )
+            except RuntimeError as exc:
+                warnings = [f"projection validation failed: {exc}"]
+            findings.extend(
+                (svg_path.name, marker_id, warning)
+                for warning in warnings
+            )
+    return findings
+
+
+def _release_blocked_graphics(
+    svg_files: list[Path],
+) -> list[tuple[str, str, str]]:
+    """Return graphics whose status metadata is invalid."""
+    blocked: list[tuple[str, str, str]] = []
+    for svg_path in svg_files:
+        try:
+            root = ET.parse(svg_path).getroot()
+        except (OSError, ET.ParseError):
+            continue

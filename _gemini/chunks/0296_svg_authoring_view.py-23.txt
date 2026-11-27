@@ -1,0 +1,106 @@
+                [report for report, _, _ in rendered],
+                source_root,
+                output_dir,
+                projection_kind,
+            )
+        )
+        staged.append((manifest_path, staged_manifest))
+        staged_summary = write_authoring_summary(new_root)
+        staged.append(
+            (
+                output_dir / AUTHORING_SUMMARY_NAME,
+                staged_summary,
+            )
+        )
+
+        if publish_source_proxies:
+            proxy_staging = staging_root / "source-proxies"
+            for index, (target, payload) in enumerate(sorted(
+                proxy_assets.items(),
+                key=lambda item: item[0].as_posix(),
+            )):
+                if os.path.lexists(target):
+                    if (
+                        target.is_symlink()
+                        or not target.is_file()
+                        or target.read_bytes() != payload
+                    ):
+                        raise FileExistsError(
+                            f"Source proxy target has different content: {target}"
+                        )
+                    continue
+                staged_proxy = proxy_staging / f"{index:06d}.svg"
+                staged_proxy.parent.mkdir(parents=True, exist_ok=True)
+                staged_proxy.write_bytes(payload)
+                staged.append((target, staged_proxy))
+
+        has_external_targets = any(
+            not _is_within(target.resolve(), output_dir.resolve())
+            for target, _ in staged
+        )
+        if not output_dir.exists() and not has_external_targets:
+            created: list[Path] = []
+            try:
+                _ensure_directory(output_dir.parent, created)
+                if os.path.lexists(output_dir):
+                    raise FileExistsError(
+                        f"Output directory appeared while projections were staged: {output_dir}"
+                    )
+                if output_dir.parent.stat().st_dev != staging_root.stat().st_dev:
+                    raise OSError(
+                        f"Cannot atomically publish across filesystems: {output_dir}"
+                    )
+                new_root.replace(output_dir)
+            except OSError as exc:
+                cleanup_errors = _remove_created_directories(created)
+                if cleanup_errors:
+                    details = "; ".join(cleanup_errors)
+                    raise RuntimeError(
+                        f"Batch publish failed ({exc}); cleanup was incomplete: {details}"
+                    ) from exc
+                raise
+        else:
+            _publish_existing_directory(
+                staged,
+                staging_root,
+                force=force,
+            )
+
+    return [report for report, _, _ in rendered]
+
+
+def _is_within(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def _source_mapping(input_path: Path, output_dir: Path) -> list[tuple[Path, Path]]:
+    if input_path.is_file():
+        if input_path.suffix.lower() != ".svg":
+            raise ValueError(f"Input file must use the .svg extension: {input_path}")
+        return [(input_path, output_dir / input_path.name)]
+
+    sources = sorted(
+        path for path in input_path.rglob("*")
+        if path.is_file() and path.suffix.lower() == ".svg"
+    )
+    if not sources:
+        raise ValueError(f"No SVG files found under: {input_path}")
+    return [(source, output_dir / source.relative_to(input_path)) for source in sources]
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Create lightweight editable IR bundles from PPTX-imported SVG files."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("input", type=Path, help="SVG file or directory to project")
+    parser.add_argument(
+        "-o",
+        "--output-dir",
+        type=Path,

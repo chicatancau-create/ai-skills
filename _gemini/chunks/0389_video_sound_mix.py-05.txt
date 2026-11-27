@@ -1,0 +1,114 @@
+                f"Conversion trace slide {expected_number} must be an object"
+            )
+        if raw_slide.get("slide_num") != expected_number:
+            raise ValueError(
+                "Conversion trace slides must be numbered consecutively from 1"
+            )
+        raw_svg = raw_slide.get("svg")
+        if not isinstance(raw_svg, str) or not raw_svg.strip():
+            raise ValueError(
+                f"Conversion trace slide {expected_number} has no SVG path"
+            )
+        slide_name = Path(raw_svg).stem
+        if not slide_name:
+            raise ValueError(
+                f"Conversion trace slide {expected_number} has an invalid SVG path"
+            )
+        slides.append(raw_slide)
+        slide_names.append(slide_name)
+    if len(set(slide_names)) != len(slide_names):
+        raise ValueError("Conversion trace slide names must be unique")
+    return slides, slide_names
+
+
+def _shape_group_ids(trace_slide: dict[str, Any]) -> dict[int, str]:
+    events = trace_slide.get("events")
+    if not isinstance(events, list):
+        return {}
+    mapping: dict[int, str] = {}
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        shape_id = event.get("shape_id")
+        group_id = event.get("id")
+        if (
+            isinstance(shape_id, int)
+            and not isinstance(shape_id, bool)
+            and isinstance(group_id, str)
+            and group_id
+        ):
+            mapping[shape_id] = group_id
+    return mapping
+
+
+def _package_part_map(package: zipfile.ZipFile) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for member in package.namelist():
+        key = canonical_opc_part_path(member)
+        if key is None:
+            continue
+        prior = mapping.get(key)
+        if prior is not None and prior != member:
+            raise ValueError(
+                "PPTX contains OPC-equivalent duplicate package parts: "
+                f"{prior!r}, {member!r}"
+            )
+        mapping[key] = member
+    return mapping
+
+
+def _relationships_part(slide_part: str) -> str:
+    slide_path = Path(slide_part)
+    return (
+        slide_path.parent / "_rels" / f"{slide_path.name}.rels"
+    ).as_posix()
+
+
+def _slide_relationships(
+    package: zipfile.ZipFile,
+    rels_part: str,
+) -> dict[str, ET.Element]:
+    try:
+        root = ET.fromstring(package.read(rels_part))
+    except KeyError as exc:
+        raise ValueError(f"PPTX is missing slide relationships: {rels_part}") from exc
+    except ET.ParseError as exc:
+        raise ValueError(f"Invalid slide relationships XML: {rels_part}") from exc
+    relationships: dict[str, ET.Element] = {}
+    for relationship in root.findall(_RELATIONSHIP_TAG):
+        relationship_id = relationship.get("Id")
+        if not relationship_id:
+            continue
+        if relationship_id in relationships:
+            raise ValueError(
+                f"Duplicate relationship id {relationship_id!r} in {rels_part}"
+            )
+        relationships[relationship_id] = relationship
+    return relationships
+
+
+def _extract_sound(
+    *,
+    package: zipfile.ZipFile,
+    package_parts: dict[str, str],
+    relationships: dict[str, ET.Element],
+    rels_part: str,
+    relationship_id: str,
+    temp_dir: Path,
+    ffprobe_path: str,
+    extracted: dict[str, tuple[str, str, Path, int]],
+) -> tuple[str, str, Path, int]:
+    relationship = relationships.get(relationship_id)
+    if relationship is None:
+        raise ValueError(
+            f"PPTX sound relationship is missing: {rels_part}#{relationship_id}"
+        )
+    if relationship.get("Type") != AUDIO_REL_TYPE:
+        raise ValueError(
+            f"PPTX sound relationship is not audio: {rels_part}#{relationship_id}"
+        )
+    if relationship.get("TargetMode", "Internal") == "External":
+        raise ValueError(
+            f"PPTX sound relationship must be internal: {rels_part}#{relationship_id}"
+        )
+    target = relationship.get("Target") or ""

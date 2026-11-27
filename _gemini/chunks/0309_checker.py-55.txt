@@ -1,0 +1,106 @@
+                f'opacity ({examples}{suffix}). Canonical page/template authoring '
+                'keeps preset paint local and reruns the helper with channel alpha; '
+                'export remains supported.'
+            )
+
+    def _check_preset_geometry_transforms(
+        self,
+        root: ET.Element,
+        result: Dict,
+    ) -> None:
+        """Reject preset transforms that DrawingML cannot represent exactly."""
+        helpers = (
+            _IDENTITY_MATRIX,
+            _matrix_multiply,
+            _parse_transform_matrix,
+            _rect_to_dml_xfrm,
+            _validate_dml_shape_matrix,
+        )
+        if any(helper is None for helper in helpers):
+            return
+
+        relevant: set[ET.Element] = set()
+
+        def mark_relevant(element: ET.Element) -> bool:
+            found = element.get('data-pptx-prst') is not None
+            for child in element:
+                found = mark_relevant(child) or found
+            if found:
+                relevant.add(element)
+            return found
+
+        mark_relevant(root)
+        issues = set()
+
+        def visit(element: ET.Element, parent_matrix) -> None:
+            if element not in relevant:
+                return
+            matrix = parent_matrix
+            transform = element.get('transform')
+            if transform:
+                try:
+                    local_matrix = _parse_transform_matrix(transform)
+                    matrix = _matrix_multiply(parent_matrix, local_matrix)
+                except ValueError as exc:
+                    issues.add(
+                        f'<{_local_name(element)}> has invalid preset '
+                        f'transform: {exc}'
+                    )
+                    return
+            if element.get('data-pptx-prst') is not None:
+                try:
+                    raw_frame = element.get('data-pptx-frame')
+                    if raw_frame:
+                        frame = tuple(
+                            float(part)
+                            for part in re.split(r'[\s,]+', raw_frame.strip())
+                        )
+                        if len(frame) != 4:
+                            raise ValueError(
+                                'data-pptx-frame must contain four numbers'
+                            )
+                        preset = element.get('data-pptx-prst') or ''
+                        _rect_to_dml_xfrm(
+                            frame[0],
+                            frame[1],
+                            frame[2],
+                            frame[3],
+                            matrix,
+                            preserve_degenerate_axes=(
+                                element.get('data-pptx-object') == 'connector'
+                                or preset in _CONNECTOR_PRESET_TYPES
+                            ),
+                        )
+                    else:
+                        _validate_dml_shape_matrix(matrix)
+                except ValueError as exc:
+                    elem_id = element.get('id') or '(no id)'
+                    issues.add(
+                        f'<{_local_name(element)} id="{elem_id}"> has '
+                        f'unsupported preset transform: {exc}'
+                    )
+            for child in element:
+                visit(child, matrix)
+
+        visit(root, _IDENTITY_MATRIX)
+        result['errors'].extend(sorted(issues))
+
+    @staticmethod
+    def _is_full_canvas_root_rect(
+        root: ET.Element,
+        element: ET.Element,
+    ) -> bool:
+        """Return whether one direct rect is the ordinary full-page backdrop."""
+        if (
+            _local_name(element) != 'rect'
+            or _parse_project_geometry_length is None
+            or any(
+                element.get(attribute)
+                for attribute in ('transform', 'filter', 'clip-path')
+            )
+        ):
+            return False
+        viewbox = _parse_viewbox_values(root.get('viewBox') or '')
+        if viewbox is None:
+            return False
+

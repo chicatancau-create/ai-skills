@@ -1,0 +1,114 @@
+                parent = parent_by_id.get(id(current))
+                if parent is text_el:
+                    return current
+                current = parent
+            return None
+
+        rows: List[Tuple[ET.Element | None, List[Tuple[ET.Element, str]]]] = []
+        for owner, text in source_runs:
+            row = row_of(owner)
+            if rows and rows[-1][0] is row:
+                rows[-1][1].append((owner, text))
+            else:
+                rows.append((row, [(owner, text)]))
+        try:
+            line_height = float(text_el.get('data-paragraph-line-height') or 0)
+        except ValueError:
+            line_height = 0.0
+        lines: List[Tuple[ET.Element, float, float, List[Dict], float]] = []
+        y = base_y
+        try:
+            for index, (row, row_runs) in enumerate(rows):
+                resolved = cls._resolved_text_runs(
+                    row_runs,
+                    parent_by_id,
+                    font_sizes,
+                    letter_spacings,
+                )
+                if not resolved:
+                    continue
+                size = max(float(run['font_size']) for run in resolved)
+                if index > 0:
+                    y += line_height if line_height > 0 else size * 1.2
+                    if row is not None:
+                        y += float(row.get('data-paragraph-space-before') or 0)
+                lines.append((row if row is not None else text_el, base_x, y, resolved, size))
+        except (KeyError, TypeError, ValueError):
+            return None
+        return lines or None
+
+    @classmethod
+    def _resolved_text_lines(
+        cls,
+        text_el: ET.Element,
+        parent_by_id: Dict[int, ET.Element],
+        font_sizes: Dict[int, float],
+        letter_spacings: Dict[int, float],
+    ) -> List[Tuple[ET.Element, float, float, List[Dict], float]] | None:
+        """Resolve one text carrier into the lines used by width estimation."""
+        lines: List[Tuple[ET.Element, float, float, List[Dict], float]] | None
+        model_lines = cls._imported_model_text_lines(
+            text_el,
+            parent_by_id,
+            font_sizes,
+            letter_spacings,
+        )
+        if model_lines:
+            return model_lines
+        try:
+            runs = cls._resolved_single_line_text_runs(
+                text_el,
+                parent_by_id,
+                font_sizes,
+                letter_spacings,
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+        if runs:
+            try:
+                lines = [(
+                    text_el,
+                    _parse_project_geometry_length(text_el.get('x') or '0', 'x'),
+                    _parse_project_geometry_length(text_el.get('y') or '0', 'y'),
+                    runs,
+                    max(float(run['font_size']) for run in runs),
+                )]
+            except (KeyError, TypeError, ValueError):
+                return None
+        else:
+            lines = cls._positioned_text_lines(
+                text_el,
+                parent_by_id,
+                font_sizes,
+                letter_spacings,
+            )
+        return lines or None
+
+    @classmethod
+    def _estimated_text_bounds(
+        cls,
+        text_el: ET.Element,
+        parent_by_id: Dict[int, ET.Element],
+        font_sizes: Dict[int, float],
+        letter_spacings: Dict[int, float],
+        *,
+        include_headroom: bool = True,
+    ) -> Tuple[float, float, float, float] | None:
+        """Estimate one single- or multi-line text carrier's visual bounds."""
+        lines = cls._resolved_text_lines(
+            text_el,
+            parent_by_id,
+            font_sizes,
+            letter_spacings,
+        )
+        if lines is None:
+            return None
+
+        bounds = [
+            cls._estimated_text_line_bounds(
+                line_el,
+                x,
+                y,
+                line_runs,
+                font_size,
+                parent_by_id,

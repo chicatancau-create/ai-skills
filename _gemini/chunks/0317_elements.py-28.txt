@@ -1,0 +1,107 @@
+        return False, False, False
+    a, b, c, d, _e, _f = ctx.transform_matrix
+    if abs(b) > 1e-9 or abs(c) > 1e-9:
+        return False, False, False
+    return True, a < 0, d < 0
+
+
+def _build_run_xml(
+    run: dict[str, Any],
+    default_fonts: dict[str, str],
+    ctx: ConvertContext | None = None,
+    effect_xml: str = '',
+) -> str:
+    """Build a single <a:r> XML from a run dict. Supports gradient fills on text."""
+    if run.get('_line_break'):
+        return '<a:br/>'
+    text = str(run['text'])
+    inline_formula = run.get(_INLINE_FORMULA_KEY)
+    if inline_formula is not None:
+        fill_raw = str(run.get('fill_raw') or f"#{run.get('fill', '000000')}")
+        fill_color, fill_alpha = parse_svg_color(fill_raw)
+        if fill_color is None or fill_alpha <= 0:
+            raise ValueError(
+                'inline formula text requires one visible solid fill color'
+            )
+        math_run = {
+            **run,
+            'font_family': 'Cambria Math',
+            'font_weight': '400',
+            'font_style': 'normal',
+            'text_decoration': 'none',
+            'letter_spacing': 0.0,
+            'stroke_raw': '',
+            'stroke_opacity': None,
+            '_language_override': (
+                ctx.primary_language
+                if ctx is not None and ctx.primary_language is not None
+                else 'en-US'
+            ),
+        }
+        properties_xml = _build_run_properties_xml(
+            math_run,
+            default_fonts,
+            ctx,
+            fixed_font_family='Cambria Math',
+        )
+        from ..native_objects.inline_formula import build_inline_formula_xml
+        return build_inline_formula_xml(str(inline_formula), properties_xml)
+    properties_xml = _build_run_properties_xml(
+        run,
+        default_fonts,
+        ctx,
+        effect_xml,
+    )
+    space_attr = ' xml:space="preserve"' if text != text.strip() or '  ' in text else ''
+
+    return f'''<a:r>
+{properties_xml}
+<a:t{space_attr}>{_xml_escape(text)}</a:t>
+</a:r>'''
+
+
+def convert_text(elem: ET.Element, ctx: ConvertContext) -> ShapeResult | None:
+    """Convert SVG <text> to DrawingML text shape with multi-run support."""
+    raw_x = svg_length_x(elem.get('x'), ctx)
+    raw_y = svg_length_y(elem.get('y'), ctx)
+    use_axis_transform, reflect_x, reflect_y = _text_axis_transform(ctx)
+    if use_axis_transform:
+        x, y = transform_point(ctx.transform_matrix, raw_x, raw_y)
+    else:
+        x = ctx_x(raw_x, ctx)
+        y = ctx_y(raw_y, ctx)
+    resolved_font_size = ctx.text_font_sizes.get(id(elem))
+    font_size = (
+        resolved_font_size * ctx.scale_y
+        if resolved_font_size is not None
+        else parse_svg_length(
+            _get_attr(elem, 'font-size', ctx),
+            16,
+            font_size=16,
+        ) * ctx.scale_y
+    )
+    font_weight = parse_project_font_weight(
+        _get_attr(elem, 'font-weight', ctx) or '400'
+    ).canonical
+    font_family_str = _get_attr(elem, 'font-family', ctx) or ''
+    text_anchor = parse_project_text_anchor(
+        _get_attr(elem, 'text-anchor', ctx) or 'start'
+    ).canonical
+    if reflect_x:
+        text_anchor = {
+            'start': 'end',
+            'end': 'start',
+        }.get(text_anchor, text_anchor)
+    fill_raw = _get_attr(elem, 'fill', ctx) or '#000000'
+    fill_color = parse_hex_color(fill_raw) or '000000'
+    opacity = get_fill_opacity(elem, ctx)
+    object_opacity = get_element_opacity(elem, ctx)
+    object_opacity = 1.0 if object_opacity is None else object_opacity
+    fill_opacity = _text_opacity_ratio(_get_attr(elem, 'fill-opacity', ctx))
+    stroke_raw = _get_attr(elem, 'stroke', ctx) or ''
+    stroke_width = svg_length_size(_get_attr(elem, 'stroke-width', ctx), ctx, 1.0)
+    stroke_opacity = get_stroke_opacity(elem, ctx)
+    stroke_opacity_value = _text_opacity_ratio(_get_attr(elem, 'stroke-opacity', ctx))
+    font_style = parse_project_font_style(
+        _get_attr(elem, 'font-style', ctx) or 'normal'
+    ).canonical

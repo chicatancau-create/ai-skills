@@ -1,0 +1,109 @@
+    """Resolve the pixel budget for a rendered SVG image box."""
+    target_w = max(1, int(round(box_w * max(image_scale, 1.0))))
+    target_h = max(1, int(round(box_h * max(image_scale, 1.0))))
+    if max_dimension and max(target_w, target_h) > max_dimension:
+        ratio = max_dimension / max(target_w, target_h)
+        target_w = max(1, int(round(target_w * ratio)))
+        target_h = max(1, int(round(target_h * ratio)))
+    return target_w, target_h
+
+
+def _downscale_to_target(img: 'PILImage', target_w: int, target_h: int) -> tuple['PILImage', bool]:
+    """Downscale without upsampling."""
+    width, height = img.size
+    if width <= 0 or height <= 0:
+        return img, False
+    ratio = min(target_w / width, target_h / height, 1.0)
+    if ratio >= 1.0:
+        return img, False
+    from PIL import Image
+    new_size = (max(1, int(round(width * ratio))), max(1, int(round(height * ratio))))
+    return img.resize(new_size, Image.Resampling.LANCZOS), True
+
+
+def _encode_pil_to_data_uri(
+    img: 'PILImage',
+    src_path: Path,
+    *,
+    compress: bool,
+    max_dimension: int | None,
+    fallback_bytes: bytes | None,
+) -> tuple[str, int] | None:
+    """Serialize *img* to a base64 data URI.
+
+    If the image has not been transformed, ``--no-compress`` preserves a
+    supported PNG/JPEG/GIF/WebP payload byte-for-byte. Compression mode may
+    still retain a smaller original payload. *fallback_bytes* carries those
+    raw on-disk bytes.
+    """
+    original_mime_type = get_mime_type(src_path.name, fallback_bytes)
+    if (
+        not compress
+        and fallback_bytes is not None
+        and original_mime_type in _PIL_FORMAT_BY_MIME
+    ):
+        encoded = base64.b64encode(fallback_bytes).decode('ascii')
+        return (
+            f'data:{original_mime_type};base64,{encoded}',
+            len(fallback_bytes),
+        )
+
+    # Match native export: only original JPEG assets stay lossy. PNG remains
+    # PNG, while BMP/TIFF and other static raster formats become lossless PNG.
+    mime_type = (
+        'image/jpeg' if original_mime_type == 'image/jpeg' else 'image/png'
+    )
+    pil_format = _PIL_FORMAT_BY_MIME.get(mime_type, 'PNG')
+
+    # Encode current PIL image
+    try:
+        prepared = _normalize_for_save(img, mime_type)
+        buf = io.BytesIO()
+        save_kwargs: dict = {'format': pil_format}
+        if pil_format == 'JPEG':
+            save_kwargs['quality'] = 95
+            save_kwargs['optimize'] = True
+        elif pil_format == 'PNG':
+            save_kwargs['optimize'] = True
+        prepared.save(buf, **save_kwargs)
+        encoded_bytes = buf.getvalue()
+    except (OSError, ValueError):
+        return None
+
+    optimized_bytes = _optimize_image_bytes(
+        encoded_bytes, mime_type, compress=compress, max_dimension=max_dimension,
+    )
+
+    # If the original represents the same uncropped pixels and is smaller,
+    # retain it instead of inflating an already efficient PNG/JPEG.
+    chosen = optimized_bytes
+    if (
+        fallback_bytes
+        and mime_type == original_mime_type
+        and len(fallback_bytes) < len(optimized_bytes)
+    ):
+        chosen = fallback_bytes
+
+    b64 = base64.b64encode(chosen).decode('ascii')
+    return f'data:{mime_type};base64,{b64}', len(chosen)
+
+
+def _iter_image_elements(root: ET.Element):
+    """Yield every <image> in the tree regardless of namespace prefix."""
+    for image in root.iter(f'{{{SVG_NS}}}image'):
+        yield image
+    # Also catch namespace-stripped trees just in case
+    for image in root.iter('image'):
+        yield image
+
+
+def _get_href(image: ET.Element) -> str | None:
+    """Return the image href, supporting both ``href`` and ``xlink:href``."""
+    return image.get('href') or image.get(f'{{{XLINK_NS}}}href')
+
+
+def _set_href(image: ET.Element, value: str) -> None:
+    """Write the data URI back to whichever href attribute the image used."""
+    if image.get(f'{{{XLINK_NS}}}href') is not None:
+        image.set(f'{{{XLINK_NS}}}href', value)
+    else:

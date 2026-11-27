@@ -1,0 +1,100 @@
+            rowspan = span(cell, 'rowspan')
+            for offset in range(span(cell, 'colspan')):
+                if rowspan > 1:
+                    carried[len(cells)] = rowspan - 1
+                cells.append(fold(cell) if offset == 0 else '')
+        while any(count > 0 for column, count in carried.items() if column >= len(cells)):
+            if carried.get(len(cells), 0) > 0:
+                carried[len(cells)] -= 1
+            cells.append('')
+        return cells
+
+    def traverse(node: Tag | NavigableString) -> str:
+        if isinstance(node, Comment):
+            # ``Comment`` is a ``NavigableString`` subclass: without this
+            # branch SSR markers such as ``<!--lit-node 1-->`` would be
+            # emitted as body text and even land inside headings.
+            return ""
+        if isinstance(node, NavigableString):
+            text = str(node)
+            # Normalize whitespace but keep single spaces
+            return re.sub(r'\s+', ' ', text)
+
+        if node.name in ['script', 'style', 'comment', 'meta', 'link']:
+            return ""
+
+        # Handle Block Elements
+        is_block = node.name in ['p', 'div', 'h1', 'h2', 'h3', 'h4',
+                                 'h5', 'h6', 'li', 'blockquote', 'pre', 'hr', 'table', 'tr',
+                                 'section', 'article', 'main', 'header', 'footer', 'nav',
+                                 'aside', 'ul', 'ol', 'dl', 'dt', 'dd', 'figure',
+                                 'figcaption', 'address', 'details', 'summary']
+
+        # Pre-processing
+        prefix = ""
+        suffix = ""
+
+        if node.name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+            level = int(node.name[1])
+            prefix = f"\n\n{'#' * level} "
+            suffix = "\n\n"
+        elif node.name == 'p':
+            prefix = "\n\n"
+            suffix = "\n\n"
+        elif node.name == 'li':
+            prefix = "\n- "
+        elif node.name == 'blockquote':
+            prefix = "\n> "
+            suffix = "\n"
+        elif node.name == 'hr':
+            return "\n\n---\n\n"
+        elif node.name == 'br':
+            return "  \n"
+        elif node.name == 'pre':
+            # Extract raw text from pre to preserve formatting
+            return f"\n\n```\n{node.get_text()}\n```\n\n"
+        elif is_block:
+            prefix, suffix = "\n\n", "\n\n"
+
+        # Inline formatting
+        if node.name in ['strong', 'b']:
+            prefix, suffix = "**", "**"
+        elif node.name in ['em', 'i']:
+            prefix, suffix = "*", "*"
+        elif node.name == 'code' and node.parent.name != 'pre':
+            prefix, suffix = "`", "`"
+        elif node.name == 'a':
+            href = node.get('href')
+            if href and not href.lower().startswith('javascript:'):
+                if not href.startswith('#') and urlparse(href).scheme.lower() not in {'mailto', 'tel'}:
+                    href = urljoin(page_url, href)
+                prefix = "["
+                suffix = f"]({href})"
+            else:
+                prefix, suffix = "", ""
+        elif node.name == 'img':
+            src = node.get('src')
+            alt = node.get('alt', '')
+            if src:
+                return f"![{alt}]({src})"
+            return ""
+
+        # Recurse
+        inner_text = ""
+        for child in node.children:
+            res = traverse(child)
+            if res:
+                if isinstance(child, NavigableString) and not res.strip():
+                    if inner_text and not inner_text.endswith((' ', '\n')):
+                        inner_text += ' '
+                else:
+                    if res.startswith('\n'):
+                        inner_text = inner_text.rstrip(' ')
+                    elif inner_text.endswith((' ', '\n')) and child.name != 'br':
+                        res = res.lstrip(' ')
+                    inner_text += res
+
+        if is_block:
+            inner_text = inner_text.strip()
+
+        if node.name == 'tr':

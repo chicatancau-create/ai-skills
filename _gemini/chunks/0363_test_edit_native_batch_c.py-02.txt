@@ -1,0 +1,66 @@
+                rate="-5%", pitch="-2Hz", volume="-10%",
+                subtitle_max_chars=20, concurrency=1,
+            ))
+        self.assertEqual(results, [None])
+        self.assertEqual(generate.await_args.kwargs["rate"], "-5%")
+        self.assertEqual(generate.await_args.kwargs["pitch"], "-2Hz")
+        self.assertEqual(generate.await_args.kwargs["volume"], "-10%")
+        communicate = Mock(return_value=SimpleNamespace(save=AsyncMock()))
+        with patch.dict(sys.modules, {"edge_tts": SimpleNamespace(Communicate=communicate)}):
+            asyncio.run(notes_to_audio.backend_edge.generate(
+                "Example", Path("page.mp3"), voice="en-US-AriaNeural",
+                rate="-5%", pitch="-2Hz", volume="-10%",
+            ))
+        self.assertEqual(communicate.call_args.kwargs["pitch"], "-2Hz")
+        self.assertEqual(communicate.call_args.kwargs["volume"], "-10%")
+        with patch.object(notes_to_audio.backend_edge, "_generate_with_subtitles", new_callable=AsyncMock) as generate:
+            asyncio.run(notes_to_audio.backend_edge.generate(
+                "Example", Path("page.mp3"), voice="en-US-AriaNeural",
+                rate="-5%", pitch="-2Hz", volume="-10%", subtitle_path=Path("page.srt"),
+            ))
+        self.assertEqual(generate.await_args.kwargs["pitch"], "-2Hz")
+        self.assertEqual(generate.await_args.kwargs["volume"], "-10%")
+
+    def test_c2_roundtrip_quality_receipt_tracks_authoring_and_page_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = _workspace(root)
+            output = workspace / "exports/result.pptx"
+            code, log = _invoke(export_cli.main, workspace, "--roundtrip", "-o", output)
+            self.assertEqual(code, 0, log)
+            self.assertIn("quality_gate=not-provided", log)
+            code, log = _invoke(quality_cli.main, workspace, "--roundtrip", "--json")
+            self.assertEqual(code, 0, log)
+            report_path = workspace / "validation/svg_quality_report.json"
+            self.assertTrue(report_path.is_file(), log)
+            code, log = _invoke(export_cli.main, workspace, "--roundtrip", "-o", output)
+            self.assertEqual(code, 0, log)
+            self.assertIn("quality_gate=passed", log)
+            postflight = workspace / "validation/result.report.json"
+            self.assertEqual(
+                export_cli._load_deck_motion_handoff(workspace, str(postflight), []),
+                json.loads(postflight.read_text(encoding="utf-8"))["deck_motion"],
+            )
+            plan = workspace / "page_plan.json"
+            plan.write_text(json.dumps({
+                "schema": "ppt-master.roundtrip-page-plan.v1",
+                "pages": [{"source_slide": 2}, {"source_slide": 1}],
+            }), encoding="utf-8")
+            code, log = _invoke(export_cli.main, workspace, "--roundtrip", "-o", output)
+            self.assertEqual(code, 0, log)
+            self.assertIn("quality_gate=stale", log)
+            code, log = _invoke(quality_cli.main, workspace, "--roundtrip", "--json")
+            self.assertEqual(code, 0, log)
+            code, log = _invoke(export_cli.main, workspace, "--roundtrip", "-o", output)
+            self.assertEqual(code, 0, log)
+            self.assertIn("quality_gate=passed", log)
+            plan.write_text(json.dumps({
+                "schema": "ppt-master.roundtrip-page-plan.v1",
+                "pages": [{"source_slide": 1}, {"source_slide": 2}],
+            }), encoding="utf-8")
+            code, log = _invoke(export_cli.main, workspace, "--roundtrip", "-o", output)
+            self.assertEqual(code, 0, log)
+            self.assertIn("quality_gate=stale", log)
+            code, log = _invoke(quality_cli.main, workspace, "--roundtrip", "--json")
+            self.assertEqual(code, 0, log)
+            svg = workspace / "authoring-svg-flat/slide_01.svg"

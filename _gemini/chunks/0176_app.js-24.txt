@@ -1,0 +1,95 @@
+            return locale === "*" || locale === target ||
+                (target !== targetBase && locale === targetBase);
+        })) return true;
+
+        var supportedScripts = stringList(font && font.scripts).map(normalizedFontToken);
+        var wantedScripts = fontScriptTokens(language);
+        if (supportedScripts.some(function (script) {
+            return wantedScripts.indexOf(script) >= 0;
+        })) return true;
+
+        // A catalog entry without language metadata remains usable. Once either
+        // metadata field is present, filtering follows it.
+        return !locales.length && !supportedScripts.length;
+    }
+
+    function fontCatalogEntries(field) {
+        var fonts = (CAT && Array.isArray(CAT.fonts)) ? CAT.fonts : [];
+        var language = field === "english" ? "en" : recommendationLanguage();
+        if (field === "primary" && language === "und") {
+            return fonts.filter(function (font) { return font && font.id; });
+        }
+        var matching = fonts.filter(function (font) {
+            return font && font.id && fontSupportsLanguage(font, language);
+        });
+        return matching;
+    }
+
+    function findFontCatalogEntry(id) {
+        var fonts = (CAT && Array.isArray(CAT.fonts)) ? CAT.fonts : [];
+        var target = String(id || "").trim().toLowerCase();
+        for (var i = 0; i < fonts.length; i += 1) {
+            if (String(fonts[i].id || "").trim().toLowerCase() === target) return fonts[i];
+        }
+        return null;
+    }
+
+    function derivedFontCss(font) {
+        var primary = findFontCatalogEntry(font && font.primary);
+        return String((primary && primary.css) || "sans-serif").trim() ||
+            "sans-serif";
+    }
+
+    function normalizedFontRole(font, samples) {
+        font = (font && typeof font === "object") ? Object.assign({}, font) : {};
+        samples = samples || {};
+        var primary = font.primary;
+        var english = font.english;
+        if (isEnglishProject()) {
+            primary = primary || font.latin || font.cjk || "";
+            english = "";
+        } else {
+            primary = primary || font.cjk || "";
+            english = english || font.latin || "";
+        }
+        font.primary = primary;
+        if (isEnglishProject()) delete font.english;
+        else font.english = english;
+        font.sample_primary = font.sample_primary ||
+            (isEnglishProject() ? font.sample_latin : font.sample_cjk) ||
+            samples.primary || "";
+        if (isEnglishProject()) {
+            delete font.sample_english;
+        } else {
+            font.sample_english = font.sample_english || font.sample_latin ||
+                samples.english || "";
+        }
+        delete font.cjk;
+        delete font.latin;
+        delete font.sample_cjk;
+        delete font.sample_latin;
+        if (!String(font.css || "").trim()) font.css = derivedFontCss(font);
+        return font;
+    }
+
+    function normTypography(c) {
+        c = c || {};
+        var normalized = Object.assign({}, c);
+        var objectShape = c.heading && typeof c.heading === "object" &&
+            c.body && typeof c.body === "object";
+        var heading = objectShape ? c.heading : {
+            primary: isEnglishProject() ? (c.heading_latin || c.heading || "") : (c.heading || ""),
+            english: isEnglishProject() ? "" : (c.heading_latin || ""),
+            css: c.heading_css || ""
+        };
+        var body = objectShape ? c.body : {
+            primary: isEnglishProject() ? (c.body_latin || c.body || "") : (c.body || ""),
+            english: isEnglishProject() ? "" : (c.body_latin || ""),
+            css: c.body_css || ""
+        };
+        normalized.name = c.name || "";
+        normalized.note = c.note || "";
+        normalized.custom = c.custom || "";
+        normalized.body_size = typographyBodySize(c);
+        normalized.heading = normalizedFontRole(heading, {
+            primary: isEnglishProject()

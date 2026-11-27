@@ -1,0 +1,96 @@
+        json_data = json.dumps(images)
+
+        # Embed HTML template
+        html_content = self._get_html_template().replace('__IMAGES__', json_data)
+
+        with open(html_output_path, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+
+        return str(html_output_path)
+
+    def apply_fixes(self, json_source: Union[str, List[Dict]]) -> Dict[str, int]:
+        """Apply image rotation fixes"""
+        tasks = []
+        json_file_dir: Optional[Path] = None
+
+        # Parse input
+        if isinstance(json_source, str):
+            if json_source.endswith('.json') or os.path.exists(json_source):
+                json_file_dir = Path(json_source).resolve().parent
+                with open(json_source, 'r', encoding='utf-8') as f:
+                    tasks = json.load(f)
+            else:
+                try:
+                    tasks = json.loads(json_source)
+                except json.JSONDecodeError:
+                    raise ValueError("Invalid input: not a file path nor a valid JSON string")
+        elif isinstance(json_source, list):
+            tasks = json_source
+        else:
+            raise ValueError("Rotation tasks must be a JSON array")
+
+        if not isinstance(tasks, list):
+            raise ValueError("Rotation tasks must be a JSON array")
+
+        gif_paths = []
+        for task in tasks:
+            if not isinstance(task, dict) or not isinstance(task.get('path'), str):
+                continue
+            task_path = self._normalize_task_path(task.get('path', ''))
+            if Path(task_path).suffix.lower() == '.gif':
+                gif_paths.append(task_path)
+        if gif_paths:
+            raise ValueError(
+                "GIF rotation is unsupported; preserve GIF files unchanged: "
+                + ", ".join(gif_paths)
+            )
+
+        print(f"[WORK] Starting {len(tasks)} manual rotation task(s)...")
+        print("=" * 60)
+
+        cwd = Path(os.getcwd())
+        repo_root = self._repo_root()
+        stats = {'total': len(tasks), 'success': 0, 'failed': 0}
+
+        for task in tasks:
+            if not isinstance(task, dict) or not isinstance(task.get('path'), str):
+                print(f"[ERROR] Invalid rotation task: {task!r}")
+                stats['failed'] += 1
+                continue
+            rel_path = self._normalize_task_path(task.get('path', ''))
+            rotation = task.get('rotation')
+
+            if not rel_path or rotation is None:
+                print(f"[ERROR] Rotation task requires path and rotation: {task!r}")
+                stats['failed'] += 1
+                continue
+
+            # Absolute paths should stay absolute; repo-relative paths should resolve from repo root.
+            target_file = Path(rel_path)
+            if not target_file.is_absolute():
+                # Prefer repo root (stable); also allow CWD and fixes.json location as fallbacks.
+                candidates = [
+                    repo_root / rel_path,
+                    cwd / rel_path,
+                ]
+                if json_file_dir:
+                    candidates.append(json_file_dir / rel_path)
+
+                # Compatibility with legacy logic / bare filenames (try finding under the projects directory)
+                candidates.append(repo_root / 'projects' / rel_path)
+                candidates.append(cwd / 'projects' / rel_path)
+                if json_file_dir:
+                    candidates.append(json_file_dir / 'projects' / rel_path)
+
+                target_file = next((c for c in candidates if c.exists()), candidates[0])
+
+            if not target_file.exists():
+                print(f"[SKIP] File not found: {rel_path}")
+                stats['failed'] += 1
+                continue
+
+            try:
+                self._rotate_single_image(target_file, rotation)
+                print(f"[OK] {target_file.name} rotated {rotation} degrees")
+                stats['success'] += 1
+            except Exception as e:

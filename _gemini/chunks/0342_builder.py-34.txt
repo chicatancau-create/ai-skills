@@ -1,0 +1,120 @@
+    level_props = list_style.find(level_tag)
+    if level_props is None:
+        level_props = ET.Element(level_tag)
+        trailing_tags = {
+            f"{{{DML_NS}}}lvl{level}pPr" for level in range(2, 10)
+        }
+        trailing_tags.add(f"{{{DML_NS}}}extLst")
+        insert_at = next(
+            (
+                index
+                for index, child in enumerate(list_style)
+                if child.tag in trailing_tags
+            ),
+            len(list_style),
+        )
+        list_style.insert(insert_at, level_props)
+    return level_props
+
+
+def _set_layout_level_one_default_size(
+    list_style: ET.Element,
+    source_run_pr: ET.Element | None,
+) -> None:
+    """Persist the prototype run size as the Layout's level-one text default."""
+    if source_run_pr is None or source_run_pr.get("sz") is None:
+        return
+    level_props = _layout_level_one_paragraph_properties(list_style)
+    default_props = level_props.find(f"{{{DML_NS}}}defRPr")
+    if default_props is None:
+        default_props = ET.Element(f"{{{DML_NS}}}defRPr")
+        ext_tag = f"{{{DML_NS}}}extLst"
+        insert_at = next(
+            (
+                index
+                for index, child in enumerate(level_props)
+                if child.tag == ext_tag
+            ),
+            len(level_props),
+        )
+        level_props.insert(insert_at, default_props)
+    default_props.set("sz", source_run_pr.get("sz", ""))
+
+
+def _set_no_bullet_paragraph_properties(
+    paragraph_props: ET.Element,
+    *,
+    replace_existing: bool = False,
+) -> None:
+    """Disable inherited bullets and hanging indent for a prose paragraph."""
+    if replace_existing:
+        for child in list(paragraph_props):
+            if child.tag in _PARAGRAPH_BULLET_CHOICE_TAGS:
+                paragraph_props.remove(child)
+
+    bullet_choice = next(
+        (
+            child
+            for child in paragraph_props
+            if child.tag in _PARAGRAPH_BULLET_CHOICE_TAGS
+        ),
+        None,
+    )
+    if bullet_choice is not None and bullet_choice.tag != f"{{{DML_NS}}}buNone":
+        return
+    if bullet_choice is None:
+        insert_at = next(
+            (
+                index
+                for index, child in enumerate(paragraph_props)
+                if child.tag in _PARAGRAPH_PROPERTIES_TRAILING_TAGS
+            ),
+            len(paragraph_props),
+        )
+        paragraph_props.insert(insert_at, ET.Element(f"{{{DML_NS}}}buNone"))
+
+    paragraph_props.set("marL", "0")
+    paragraph_props.set("indent", "0")
+
+
+def _placeholder_text_body(
+    source_shape: ET.Element,
+    item: TemplateElementSpec,
+) -> ET.Element:
+    tx_body = ET.Element(f"{{{PML_NS}}}txBody")
+    source_tx_body = source_shape.find(f"{{{PML_NS}}}txBody")
+    source_body_pr = (
+        source_tx_body.find(f"{{{DML_NS}}}bodyPr")
+        if source_tx_body is not None
+        else None
+    )
+    source_lst_style = (
+        source_tx_body.find(f"{{{DML_NS}}}lstStyle")
+        if source_tx_body is not None
+        else None
+    )
+    source_run_pr = (
+        source_tx_body.find(f".//{{{DML_NS}}}rPr")
+        if source_tx_body is not None
+        else None
+    )
+    body_pr = (
+        ET.fromstring(ET.tostring(source_body_pr, encoding="utf-8"))
+        if source_body_pr is not None
+        else ET.Element(f"{{{DML_NS}}}bodyPr")
+    )
+    target_bounds = _shape_bounds_emu(source_shape, item.placeholder_bounds)
+    try:
+        source_bounds = _shape_bounds_emu(source_shape, None)
+    except TemplateStructureError:
+        # Composite proxy content may compile to p:grpSp, whose transform is
+        # intentionally not reused for the Layout's synthetic p:sp carrier.
+        # The explicit design-zone bounds remain the authoritative frame.
+        source_bounds = target_bounds
+    _normalize_placeholder_body_properties(
+        body_pr,
+        source_bounds,
+        target_bounds,
+    )
+    tx_body.append(body_pr)
+    list_style = (

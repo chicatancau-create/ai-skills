@@ -1,0 +1,109 @@
+    if not isinstance(color_elem.tag, str):
+        return None
+    tag = color_elem.tag.rsplit("}", 1)[-1]
+    base_attributes = {
+        "srgbClr": ("val",),
+        "schemeClr": ("val",),
+        "sysClr": ("val", "lastClr"),
+        "prstClr": ("val",),
+        "hslClr": ("hue", "sat", "lum"),
+        "scrgbClr": ("r", "g", "b"),
+    }.get(tag)
+    if base_attributes is None or color_elem.tag != f"{{{NS['a']}}}{tag}":
+        return None
+
+    clone = ET.Element(color_elem.tag)
+    for attr in base_attributes:
+        value = color_elem.attrib.get(attr)
+        if value is not None:
+            clone.set(attr, value)
+
+    for child in color_elem:
+        if not isinstance(child.tag, str):
+            continue
+        name = child.tag.rsplit("}", 1)[-1]
+        if child.tag != f"{{{NS['a']}}}{name}":
+            continue
+        if name in _COLOR_MODIFIER_FLAG_NAMES:
+            clone.append(ET.Element(child.tag))
+            continue
+        if name not in _COLOR_MODIFIER_PERCENT_RANGES and name != "hueOff":
+            continue
+        value = child.attrib.get("val")
+        if value is None:
+            continue
+        modifier = ET.Element(child.tag)
+        modifier.set("val", value)
+        clone.append(modifier)
+    return clone
+
+
+def _srgb_hex_value(color_elem: ET.Element) -> str:
+    """Parse the closed six-digit DrawingML sRGB base token."""
+    children = list(color_elem)
+    if (
+        color_elem.tag != f"{{{NS['a']}}}srgbClr"
+        or set(color_elem.attrib) != {"val"}
+        or (color_elem.text or "").strip()
+        or any((child.tail or "").strip() for child in children)
+    ):
+        raise ValueError("Invalid DrawingML sRGB color structure")
+    raw = color_elem.attrib["val"]
+    if _SRGB_HEX_RE.fullmatch(raw) is None:
+        raise ValueError(f"Invalid DrawingML sRGB color value: {raw!r}")
+    return raw.upper()
+
+
+def _scheme_color_name(color_elem: ET.Element) -> str:
+    """Parse one closed DrawingML scheme-color reference."""
+    children = list(color_elem)
+    if (
+        color_elem.tag != f"{{{NS['a']}}}schemeClr"
+        or set(color_elem.attrib) != {"val"}
+        or (color_elem.text or "").strip()
+        or any((child.tail or "").strip() for child in children)
+    ):
+        raise ValueError("Invalid DrawingML scheme color structure")
+    name = color_elem.attrib["val"]
+    if name not in _SCHEME_COLOR_VALUES:
+        raise ValueError(f"Invalid DrawingML scheme color value: {name!r}")
+    return name
+
+
+def _system_color_fallback(color_elem: ET.Element) -> str:
+    """Parse a registered system color with a portable six-digit fallback."""
+    children = list(color_elem)
+    if (
+        color_elem.tag != f"{{{NS['a']}}}sysClr"
+        or set(color_elem.attrib) - {"val", "lastClr"}
+        or "val" not in color_elem.attrib
+        or (color_elem.text or "").strip()
+        or any((child.tail or "").strip() for child in children)
+    ):
+        raise ValueError("Invalid DrawingML system color structure")
+    name = color_elem.attrib["val"]
+    if name not in _SYSTEM_COLOR_VALUES:
+        raise ValueError(f"Invalid DrawingML system color value: {name!r}")
+    fallback = color_elem.get("lastClr")
+    if fallback is None:
+        raise ValueError(
+            "DrawingML system color requires a lastClr fallback"
+        )
+    if _SRGB_HEX_RE.fullmatch(fallback) is None:
+        raise ValueError(
+            f"Invalid DrawingML system color fallback: {fallback!r}"
+        )
+    return fallback.upper()
+
+
+def _preset_color_hex(color_elem: ET.Element) -> str:
+    """Resolve one exact value from the complete DrawingML preset enum."""
+    children = list(color_elem)
+    if (
+        color_elem.tag != f"{{{NS['a']}}}prstClr"
+        or set(color_elem.attrib) != {"val"}
+        or (color_elem.text or "").strip()
+        or any((child.tail or "").strip() for child in children)
+    ):
+        raise ValueError("Invalid DrawingML preset color structure")
+    name = color_elem.attrib["val"]

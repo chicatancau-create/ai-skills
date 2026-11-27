@@ -1,0 +1,76 @@
+        var sizeRow = el("div", "font-size-row");
+        var sizeInput = el("input", "num-input font-size-input");
+        sizeInput.type = "number";
+        sizeInput.min = "8";
+        sizeInput.max = "256";
+        sizeInput.step = "1";
+        sizeInput.value = (STATE.typography && STATE.typography.body_size) || "";
+        sizeInput.placeholder = isPptCanvas(STATE.canvas)
+            ? "20 / 24 / 32"
+            : String(bodySizeBandForCanvas(STATE.canvas, STATE.delivery_purpose).def);
+        sizeInput.addEventListener("input", function () {
+            if (!STATE.typography) STATE.typography = { name: "", heading: {}, body: {} };
+            STATE.typography.body_size = sizeInput.value;
+            TYPOGRAPHY_SIZE_OVERRIDES.body = sizeInput.value !== "";
+            // Body is an explicit local anchor. Recompute only role values the
+            // user has not edited; no request leaves the browser.
+            syncUnpinnedTypographySizes(false);
+        });
+        sizeRow.appendChild(sizeInput);
+        sizeRow.appendChild(el("span", "font-size-unit", "px"));
+        var sizePtHint = el("div", "toggle-desc body-size-pt");
+        var sizeHint = el("div", "toggle-desc body-size-hint");
+        // PPT body is one fixed px value per reading mode (not a range); non-PPT
+        // canvases use the canvas-owned effective span. A manually pinned value is never
+        // overwritten by later reading-mode changes.
+        // Everything is px — lo/hi are only a sanity envelope for the OOR flag.
+        refreshBodySizeHint = function () {
+            var txt = t("font_body_size_hint");
+            var lo, hi;
+            if (isPptCanvas(STATE.canvas)) {
+                var pb = deliveryBodyPx(STATE.delivery_purpose);
+                lo = pb.lo; hi = pb.hi;
+                txt += " " + t("body_size_hint_purpose").replace("{def}", pb.def);
+            } else {
+                var band = bodySizeBandForCanvas(STATE.canvas, STATE.delivery_purpose);
+                lo = band.lo; hi = band.hi;
+                txt += " " + t("body_size_hint_canvas")
+                    .replace("{lo}", lo).replace("{hi}", hi);
+            }
+            // Flag (hint only) a value far outside the
+            // canvas's usual px range, so an accidental extreme value is visible
+            // instead of silently submitting it.
+            var cur = parseFloat(STATE.typography && STATE.typography.body_size);
+            sizePtHint.textContent = isFinite(cur)
+                ? t("body_size_pt_hint").replace("{pt}", formatPtFromPx(cur))
+                : "";
+            if (isFinite(cur) && isFinite(lo) && isFinite(hi) && (cur < lo || cur > hi)) {
+                txt += " " + t("body_size_hint_oor");
+            }
+            sizeHint.textContent = txt;
+        };
+        refreshBodySizeHint();
+        sizeField.appendChild(sizeRow);
+        sizeField.appendChild(sizePtHint);
+        sizeField.appendChild(sizeHint);
+
+        // Reading mode and typography are both confirmed in Stage 2. Its
+        // compatibility key remains delivery_purpose; the dependency is a local
+        // deterministic update, not a second Stage-2 recommendation.
+        sec.appendChild(sizeField);
+
+        // Per-role size override (parallel to color's per-role HEX override): the
+        // ramp derives title / subtitle / annotation from body, but the user may
+        // set each explicitly. Values are px (the system's only unit).
+        var sizeOverride = el("div", "hex-override");
+        sizeOverride.appendChild(el("div", "subfield-label", t("size_override")));
+        var srow = el("div", "hex-row");
+        var sizeInputs = {};
+        var sizePtHints = {};
+        function refreshRolePtHint(role) {
+            var input = sizeInputs[role];
+            var hint = sizePtHints[role];
+            if (!input || !hint) return;
+            var pt = formatPtFromPx(input.value);
+            hint.textContent = pt ? t("role_size_pt_hint").replace("{pt}", pt) : "";
+        }

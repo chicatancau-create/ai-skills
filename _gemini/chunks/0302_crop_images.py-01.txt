@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+"""
+PPT Master - Smart Image Cropping Tool
+
+Smartly crops images based on the preserveAspectRatio attribute of <image> elements in SVG:
+- slice: Crop to fill (similar to CSS object-fit: cover)
+- meet: Display fully without cropping (similar to CSS object-fit: contain)
+
+Supports 9 alignment modes:
+- xMinYMin / xMidYMin / xMaxYMin (top alignment)
+- xMinYMid / xMidYMid / xMaxYMid (vertical center)
+- xMinYMax / xMidYMax / xMaxYMax (bottom alignment)
+
+Usage:
+    python3 scripts/svg_finalize/crop_images.py <SVG file or directory> [--dry-run]
+"""
+
+import os
+import re
+import hashlib
+import sys
+import argparse
+from pathlib import Path
+from xml.etree import ElementTree as ET
+from urllib.parse import unquote
+
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from console_encoding import configure_utf8_stdio  # noqa: E402
+
+configure_utf8_stdio()
+
+try:
+    from PIL import Image, ImageOps
+except ImportError:
+    print("Error: PIL (Pillow) is required. Run: pip install Pillow")
+    exit(1)
+
+
+def parse_preserve_aspect_ratio(attr: str) -> tuple[str, str]:
+    """
+    Parse the preserveAspectRatio attribute.
+
+    Returns: (align, meet_or_slice)
+        align: e.g. 'xMidYMid'
+        meet_or_slice: 'meet' or 'slice'
+    """
+    if not attr:
+        return ('xMidYMid', 'meet')  # Default value
+    
+    parts = attr.strip().split()
+    align = parts[0] if parts else 'xMidYMid'
+    meet_or_slice = parts[1] if len(parts) > 1 else 'meet'
+    
+    return (align, meet_or_slice)
+
+
+def get_crop_anchor(align: str) -> tuple[float, float]:
+    """
+    Return the crop anchor point based on the align value.
+
+    Returns: (x_anchor, y_anchor)
+        x_anchor: 0.0 (left), 0.5 (center), 1.0 (right)
+        y_anchor: 0.0 (top), 0.5 (center), 1.0 (bottom)
+    """
+    x_map = {'xMin': 0.0, 'xMid': 0.5, 'xMax': 1.0}
+    y_map = {'YMin': 0.0, 'YMid': 0.5, 'YMax': 1.0}
+    
+    x_anchor = 0.5
+    y_anchor = 0.5
+    
+    for key, val in x_map.items():
+        if key in align:
+            x_anchor = val
+            break
+    
+    for key, val in y_map.items():
+        if key in align:
+            y_anchor = val
+            break
+    
+    return (x_anchor, y_anchor)
+
+
+def crop_image_to_size(
+    img: Image.Image,
+    target_width: float,
+    target_height: float,
+    x_anchor: float = 0.5,
+    y_anchor: float = 0.5,
+) -> Image.Image:
+    """
+    Crop an image to the target aspect ratio, preserving original resolution (no scaling).
+
+    New logic: Only crops the original image to the target aspect ratio without any scaling,
+    thus preserving the original resolution and clarity.
+
+    Args:
+        img: PIL Image object
+        target_width: Target width (used to calculate ratio)
+        target_height: Target height (used to calculate ratio)
+        x_anchor: Horizontal anchor (0=left, 0.5=center, 1=right)
+        y_anchor: Vertical anchor (0=top, 0.5=center, 1=bottom)
+
+    Returns:
+        Cropped PIL Image object (preserving original resolution)
+    """
+    img_width, img_height = img.size
+    if img_width <= 0 or img_height <= 0:
+        raise ValueError('source image dimensions must be positive')
+    if target_width <= 0 or target_height <= 0:
+        raise ValueError('target image dimensions must be positive')
+    
+    # Calculate target aspect ratio
+    target_ratio = target_width / target_height
+    img_ratio = img_width / img_height
+    
+    # Calculate crop region on the original image based on ratio (no scaling)
+    if img_ratio > target_ratio:
+        # Original image is wider; crop left and right sides
+        crop_height = img_height
+        crop_width = max(1, min(img_width, int(round(img_height * target_ratio))))
+    else:
+        # Original image is taller; crop top and bottom sides
+        crop_width = img_width
+        crop_height = max(1, min(img_height, int(round(img_width / target_ratio))))
+    
+    # Calculate crop position based on anchor point

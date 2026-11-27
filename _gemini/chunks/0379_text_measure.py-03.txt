@@ -1,0 +1,121 @@
+        if any(_is_hangul_cluster(item) for item in clusters[index:word_end]):
+            # Korean breaks between space-separated words (eojeol), never
+            # inside one; an eojeol wider than the line is reported oversized.
+            end = word_end
+        elif _is_word_cluster(cluster):
+            while end < len(clusters):
+                next_cluster = clusters[end]
+                if _is_word_cluster(next_cluster):
+                    end += 1
+                    continue
+                connector = (
+                    next_cluster in _LATIN_TOKEN_CONNECTORS
+                    or (
+                        next_cluster == ','
+                        and clusters[end - 1].isdigit()
+                    )
+                )
+                if (
+                    connector
+                    and end + 1 < len(clusters)
+                    and _is_word_cluster(clusters[end + 1])
+                ):
+                    end += 2
+                    continue
+                if next_cluster in _NUMBER_SUFFIXES and clusters[end - 1].isdigit():
+                    end += 1
+                    continue
+                break
+
+        prefix = ' ' if pending_space else ''
+        units.append(prefix + ''.join(clusters[index:end]))
+        pending_space = False
+        index = end
+    return units
+
+
+def _protected_units(text: str) -> list[str]:
+    units = _lexical_units(text)
+    protected: list[str] = []
+    for unit in units:
+        content = unit.lstrip()
+        if protected and (
+            content[0] in _NO_LINE_START
+            or protected[-1].rstrip()[-1] in _OPENING_PUNCTUATION
+        ):
+            protected[-1] += unit
+        else:
+            protected.append(unit)
+    return protected
+
+
+def _joined_units(units: list[str], start: int, end: int) -> str:
+    return ''.join(units[start:end]).lstrip()
+
+
+def _preferred_break_after(text: str) -> bool:
+    tail = text.rstrip()
+    while (
+        tail
+        and tail[-1] in _CLOSING_PUNCTUATION
+        and tail[-1] not in _PREFERRED_BREAK_PUNCTUATION
+    ):
+        tail = tail[:-1]
+    return bool(tail) and tail[-1] in _PREFERRED_BREAK_PUNCTUATION
+
+
+def wrap_text(
+    text: str, *, size: float, max_width: float, family: str = 'Calibri',
+    weight: str = 'normal', letter_spacing: float = 0.0,
+    include_headroom: bool = True,
+) -> tuple[list[str], list[float], list[tuple[str, float]]]:
+    """Greedily wrap text and return lines, widths, and oversized units."""
+    style = dict(
+        size=size,
+        family=family,
+        weight=weight,
+        letter_spacing=letter_spacing,
+        include_headroom=include_headroom,
+    )
+    units = _protected_units(text)
+    if not units:
+        return [''], [0.0], []
+
+    lines: list[str] = []
+    widths: list[float] = []
+    oversized: list[tuple[str, float]] = []
+    start = 0
+    while start < len(units):
+        fit_widths: dict[int, float] = {}
+        preferred_end: int | None = None
+        end = start
+        while end < len(units):
+            candidate_end = end + 1
+            candidate = _joined_units(units, start, candidate_end)
+            candidate_width = measure_text(candidate, **style)
+            if candidate_width > max_width:
+                break
+            fit_widths[candidate_end] = candidate_width
+            if _preferred_break_after(candidate):
+                preferred_end = candidate_end
+            end = candidate_end
+
+        if end == len(units):
+            line = _joined_units(units, start, end)
+            lines.append(line)
+            widths.append(fit_widths[end])
+            break
+
+        if end == start:
+            unit = units[start].lstrip()
+            unit_width = measure_text(unit, **style)
+            lines.append(unit)
+            widths.append(unit_width)
+            oversized.append((unit, unit_width))
+            start += 1
+            continue
+
+        line_end = end
+        if (
+            preferred_end
+            and fit_widths[preferred_end]

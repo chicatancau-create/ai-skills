@@ -1,0 +1,103 @@
+        raise ValueError(f"sliced {len(written)} elements but expected {total_cells}")
+
+    return written
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the command-line parser."""
+    parser = argparse.ArgumentParser(
+        description="Slice an AI illustration sheet into individual element images.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Examples:
+  python3 scripts/slice_images.py projects/demo/images/illus_sheet.png --grid 2x3
+  python3 scripts/slice_images.py projects/demo/images/illus_sheet.png --grid 2x3 \\
+      --names team,product,customer,growth,risk,vision --trim --alpha \\
+      --bg "#00FF00" --strict-alpha
+""",
+    )
+    parser.add_argument("sheet", help="Path to the generated illustration sheet image")
+    parser.add_argument("--grid", required=True, help="Grid as 'RxC' (rows x cols), e.g. 2x3")
+    parser.add_argument(
+        "-o", "--output", default=None,
+        help="Output directory (default: the sheet's own directory)",
+    )
+    parser.add_argument(
+        "--names", default=None,
+        help="Comma-separated element names, row-major (extension optional). "
+             "Must provide exactly rows*cols bare filenames.",
+    )
+    parser.add_argument(
+        "--prefix", default=None,
+        help="Filename prefix when --names is absent (default: '<sheet-stem>_')",
+    )
+    parser.add_argument(
+        "--inset", type=str, default="0",
+        help=(
+            "Trim each cell inward by this fraction (0-0.49) to drop gutters: "
+            "one value for every side, or H,V (e.g. 0.01,0.03) when wide cells "
+            "only need the horizontal grid line trimmed"
+        ),
+    )
+    parser.add_argument(
+        "--trim", action="store_true",
+        help="Tight-crop each cell to its content bounding box",
+    )
+    parser.add_argument(
+        "--alpha", action="store_true",
+        help="Make the (flat) background transparent in each element",
+    )
+    parser.add_argument(
+        "--strict-alpha", action="store_true",
+        help="Fail without writing outputs when --alpha validation finds incomplete keying",
+    )
+    parser.add_argument(
+        "--bg", default=None,
+        help="Background hex color for --trim/--alpha; an exact pure red/green/blue "
+             "key enables despill and soft-alpha recovery, skipping opaque "
+             "foreground pixels of a key-like hue (default: auto-sample)",
+    )
+    parser.add_argument(
+        "--tolerance", type=int, default=18,
+        help="Maximum per-channel color distance treated as background for --trim/--alpha "
+             "(default: 18)",
+    )
+    return parser
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    """Run the CLI entry point."""
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    sheet_path = Path(args.sheet)
+    if not sheet_path.exists():
+        print(f"[ERROR] Sheet not found: {sheet_path}", file=sys.stderr)
+        return 1
+
+    try:
+        rows, cols = parse_grid(args.grid)
+        bg = parse_hex(args.bg) if args.bg else None
+    except ValueError as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        inset = parse_inset(args.inset)
+    except ValueError as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 1
+    if not 0 <= args.tolerance <= 255:
+        print("[ERROR] --tolerance must be in [0, 255]", file=sys.stderr)
+        return 1
+    if args.strict_alpha and not args.alpha:
+        print("[ERROR] --strict-alpha requires --alpha", file=sys.stderr)
+        return 1
+
+    names = [n.strip() for n in args.names.split(",") if n.strip()] if args.names else None
+    output_dir = Path(args.output) if args.output else sheet_path.parent
+
+    try:
+        written = slice_sheet(
+            sheet_path, rows, cols, output_dir,
+            names=names, prefix=args.prefix, inset=inset,
+            trim=args.trim, alpha=args.alpha, strict_alpha=args.strict_alpha,

@@ -1,0 +1,110 @@
+    bold span's open/close pair and is left alone — merging it would corrupt
+    every legitimate ``**bold**`` phrase on the page. The previous regexes
+    ``\\*\\s*\\*`` and ``\\*\\*\\*\\s*\\*\\*\\*`` did exactly that, deleting
+    all bold formatting from the converted Markdown.
+    """
+    # Bold-italic adjacency first so the inner ``******`` isn't half-eaten
+    # by the bold pass.
+    text = re.sub(r'\*{6}', ' ', text)
+    text = re.sub(r'\*{4}', ' ', text)
+    return text
+
+
+def is_sentence_end(text: str) -> bool:
+    """Check if the text ends with sentence-ending punctuation."""
+    text = text.rstrip()
+    if not text:
+        return True
+    end_puncts = '.。!！?？:：;；'
+    return text[-1] in end_puncts
+
+
+def should_merge_lines(current: dict, next_line: dict) -> bool:
+    """Determine if two lines should be merged into the same paragraph."""
+    if current.get("is_heading") or next_line.get("is_heading"):
+        return False
+    if current.get("is_list") or next_line.get("is_list"):
+        return False
+    if is_sentence_end(current.get("content", "")):
+        return False
+    return True
+
+
+def extract_pdf_to_markdown(
+    pdf_path: str,
+    output_path: str = None,
+    images: str = "filtered",
+    render_vector_figures: bool = False,
+    vector_figure_dpi: int = VECTOR_FIGURE_DPI,
+) -> str:
+    """Extract text, images, and tables from a PDF and convert to Markdown.
+
+    Args:
+        pdf_path: Path to the PDF file.
+        output_path: Optional output path for the Markdown file.
+        images: Image extraction mode.
+            "filtered" = apply size/quality filters (default),
+            "all"      = extract all images without filtering,
+            "none"     = skip all images.
+        render_vector_figures: Rasterize large vector drawing regions as PNGs.
+        vector_figure_dpi: DPI used for rendered vector figure PNGs.
+    """
+    try:
+        doc = fitz.open(pdf_path)
+    except Exception as e:
+        print(f"[ERROR] Failed to open PDF file: {e}")
+        return ""
+
+    if len(doc) >= 200:
+        print(f"[HINT] {len(doc)} pages — for very large PDFs, consider splitting "
+              f"the source by chapter beforehand (e.g. with pdftk / qpdf / PyPDF2) "
+              f"and converting each part individually.")
+
+    filename = Path(pdf_path).stem
+    title = re.sub(r'^\d+-', '', filename).strip()
+
+    print(f"[INFO] Analyzing document structure...")
+    size_map = analyze_font_sizes(doc)
+    print(f"   Font size mapping: body={size_map.get('body', 'N/A')}, " +
+          f"H1={size_map.get('h1', 'N/A')}, H2={size_map.get('h2', 'N/A')}, H3={size_map.get('h3', 'N/A')}")
+
+    print(f"[INFO] Detecting repeated headers/footers...")
+    noise_texts = detect_headers_footers(doc)
+    if noise_texts:
+        print(f"   Found {len(noise_texts)} repeated noise texts (will be removed):")
+        for t in list(noise_texts)[:3]:
+            print(f"     - {t[:30]}...")
+
+    markdown_content = f"# {title}\n\n"
+    seen_image_hashes = set()  # Track seen image hashes for deduplication
+
+    img_dir = None
+    rel_img_dir = None
+    if output_path:
+        output_path = Path(output_path)
+        rel_img_dir = f"{output_path.stem}_files"
+        img_dir = output_path.parent / rel_img_dir
+
+    img_count = 0
+    image_manifest: list[dict[str, object]] = []
+    previous_table_continues = False
+
+    for page_num, page in enumerate(doc, 1):
+        if page_num > 1:
+            # Add page break marker to help LLM understand context segmentation
+            markdown_content += f"\n\n<!-- Page {page_num} -->\n\n"
+
+        table_candidates, previous_table_continues = find_page_tables(
+            page,
+            include_top_continuation=previous_table_continues,
+        )
+        tab_rects = [
+            candidate["bbox"]
+            for candidate in table_candidates
+            if isinstance(candidate["bbox"], fitz.Rect)
+        ]
+
+        page_elements = []
+
+        for table in table_candidates:
+            bbox = table["bbox"]

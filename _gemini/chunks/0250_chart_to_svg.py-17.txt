@@ -1,0 +1,108 @@
+        cross_nodes = axis.findall("c:crossAx", C_NS)
+        if (
+            len(id_nodes) != 1
+            or len(cross_nodes) != 1
+            or set(id_nodes[0].attrib) != {"val"}
+            or set(cross_nodes[0].attrib) != {"val"}
+            or list(id_nodes[0])
+            or list(cross_nodes[0])
+            or _element_val(id_nodes[0]) != axis_id
+            or _element_val(cross_nodes[0]) != cross_axis_id
+        ):
+            raise _UnsupportedChart("unsupported-chart-axis-options")
+
+    position_nodes = (
+        cat_axis.findall("c:axPos", C_NS),
+        val_axis.findall("c:axPos", C_NS),
+    )
+    if any(
+        len(nodes) != 1
+        or set(nodes[0].attrib) != {"val"}
+        or list(nodes[0])
+        for nodes in position_nodes
+    ):
+        raise _UnsupportedChart("unsupported-chart-axis-options")
+    category_position = _element_val(position_nodes[0][0])
+    value_position = _element_val(position_nodes[1][0])
+    if payload["type"] == "bar":
+        valid_positions = (
+            category_position in {"l", "r"}
+            and value_position in {"b", "t"}
+        )
+    else:
+        valid_positions = (
+            category_position in {"b", "t"}
+            and value_position in {"l", "r"}
+        )
+    if not valid_positions:
+        raise _UnsupportedChart("unsupported-chart-axis-options")
+
+
+def _validate_or_normalize_legacy_axes(
+    payload: dict[str, Any],
+    plot_area: ET.Element,
+    plot: ET.Element,
+) -> None:
+    """Keep exact legacy payloads while allowing presentation normalization."""
+    try:
+        _validate_legacy_axes(payload, plot_area)
+    except _UnsupportedChart as exc:
+        if exc.status not in {
+            "unsupported-chart-axis-number-format",
+            "unsupported-chart-axis-options",
+        }:
+            raise
+        if payload["type"] in {"area", "column", "line"}:
+            try:
+                payload["axes"] = _single_axis_contract(
+                    plot_area,
+                    plot,
+                    category_kind="text",
+                    cross_between="between",
+                )
+                return
+            except _UnsupportedChart:
+                payload.pop("axes", None)
+        _validate_normalized_axis_topology(payload, plot_area, plot)
+
+
+def _effective_radar_style(plot: ET.Element) -> str:
+    """Map Office radar marker variants to the writer's uniform style set."""
+    style_nodes = plot.findall("c:radarStyle", C_NS)
+    if len(style_nodes) > 1:
+        raise _UnsupportedChart("unsupported-chart-radar-style")
+    style_node = style_nodes[0] if style_nodes else None
+    if style_node is not None and (
+        set(style_node.attrib) != {"val"} or list(style_node)
+    ):
+        raise _UnsupportedChart("unsupported-chart-radar-style")
+    style = _element_val(style_node) if style_node is not None else "standard"
+    if style == "filled":
+        return "filled"
+    if style not in {"marker", "standard"}:
+        raise _UnsupportedChart("unsupported-chart-radar-style")
+
+    default_marker = style == "marker"
+    marker_states: list[bool] = []
+    for series in plot.findall("c:ser", C_NS):
+        symbol = _element_val(series.find("c:marker/c:symbol", C_NS))
+        marker_states.append(
+            default_marker if symbol is None else symbol != "none"
+        )
+    return "lineMarker" if any(marker_states) else "line"
+
+
+def _effective_scatter_style(
+    plot: ET.Element,
+    visual_styles: list[SeriesVisualStyle],
+) -> str:
+    """Normalize plot-level line intent plus uniform series overrides."""
+    style_nodes = plot.findall("c:scatterStyle", C_NS)
+    if len(style_nodes) > 1:
+        raise _UnsupportedChart("unsupported-chart-scatter-style")
+    style_node = style_nodes[0] if style_nodes else None
+    if style_node is not None and (
+        set(style_node.attrib) != {"val"} or list(style_node)
+    ):
+        raise _UnsupportedChart("unsupported-chart-scatter-style")
+    plot_style = _element_val(style_node) or "marker"

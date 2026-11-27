@@ -1,0 +1,122 @@
+    overlap: int | None = None,
+) -> str:
+    bar_dir = "bar" if chart_type == "bar" else "col"
+    vary_colors_xml = '<c:varyColors val="1"/>' if vary_colors else '<c:varyColors val="0"/>'
+    overlap_xml = _bar_overlap_xml(grouping, overlap)
+    return (
+        "<c:barChart>"
+        f'<c:barDir val="{bar_dir}"/><c:grouping val="{grouping}"/>'
+        f"{vary_colors_xml}"
+        f"{ser_xml}"
+        f"{data_labels_xml}"
+        f'<c:gapWidth val="{_DEFAULT_GAP_WIDTH if gap_width is None else gap_width}"/>'
+        f"{overlap_xml}"
+        f'<c:axId val="{cat_ax_id}"/><c:axId val="{val_ax_id}"/>'
+        "</c:barChart>"
+    )
+
+
+def _line_area_chart_group_xml(
+    chart_type: str,
+    grouping: str,
+    ser_xml: str,
+    *,
+    cat_ax_id: str,
+    val_ax_id: str,
+    data_labels_xml: str = "",
+) -> str:
+    tag = "lineChart" if chart_type == "line" else "areaChart"
+    line_tail_xml = '<c:marker val="1"/><c:smooth val="0"/>' if chart_type == "line" else ""
+    return (
+        f'<c:{tag}><c:grouping val="{grouping}"/><c:varyColors val="0"/>'
+        f"{ser_xml}"
+        f"{data_labels_xml}"
+        f"{line_tail_xml}"
+        f'<c:axId val="{cat_ax_id}"/><c:axId val="{val_ax_id}"/>'
+        f"</c:{tag}>"
+    )
+
+
+def _axis_scaling_xml(config: dict[str, Any], *, reverse: bool | None = None) -> str:
+    if reverse is None:
+        reverse = bool(config.get("reverse"))
+    orientation = "maxMin" if reverse else "minMax"
+    maximum = (
+        f'<c:max val="{config["maximum"]}"/>'
+        if config.get("maximum") is not None else ""
+    )
+    minimum = (
+        f'<c:min val="{config["minimum"]}"/>'
+        if config.get("minimum") is not None else ""
+    )
+    return f'<c:scaling><c:orientation val="{orientation}"/>{maximum}{minimum}</c:scaling>'
+
+
+def _axis_tick_marks(config: dict[str, Any]) -> str:
+    """Axis tick marks default to none: generated fallbacks draw labels, not ticks."""
+    return str(config.get("tick_marks") or "none")
+
+
+def _axis_position(config: dict[str, Any], default: str) -> str:
+    return {
+        "bottom": "b",
+        "left": "l",
+        "right": "r",
+        "top": "t",
+    }.get(str(config.get("position") or ""), default)
+
+
+def _axis_label_position(config: dict[str, Any], default: str) -> str:
+    return {
+        "high": "high",
+        "low": "low",
+        "next_to": "nextTo",
+        "none": "none",
+    }.get(str(config.get("label_position") or ""), default)
+
+
+def _axis_number_format_xml(
+    config: dict[str, Any],
+    default: str | None = None,
+) -> str:
+    number_format = config.get("number_format", default)
+    if number_format is None:
+        return ""
+    return f'<c:numFmt formatCode="{_xml_escape(str(number_format))}" sourceLinked="0"/>'
+
+
+def _axis_major_gridlines_xml(
+    config: dict[str, Any],
+    *,
+    default: bool,
+    color: str | None,
+) -> str:
+    enabled = config.get("major_gridlines", default)
+    return _major_gridlines_xml(color) if enabled else ""
+
+
+def _axis_pair_xml(
+    cat_ax_id: str,
+    val_ax_id: str,
+    *,
+    axis_font_size: int,
+    axis_title_font_size: int,
+    axis_titles: dict[str, Any],
+    chart_style: dict[str, str | None],
+    chart_type: str,
+    grouping: str | None,
+    show_value_axis_labels: bool,
+    axes: dict[str, dict[str, Any]],
+    secondary: bool,
+) -> str:
+    primary_language = chart_style.get("primary_language")
+    category_role = "secondary_category" if secondary else "category"
+    value_role = "secondary_value" if secondary else "value"
+    category = axes.get(category_role, {})
+    value = axes.get(value_role, {})
+    category_kind = str(category.get("kind") or ("date" if chart_type == "stock" else "text"))
+    category_tag = "dateAx" if category_kind == "date" else "catAx"
+    default_cat_pos = "l" if chart_type == "bar" else "b"
+    default_val_pos = "r" if secondary else ("b" if chart_type == "bar" else "l")
+    cat_pos = _axis_position(category, default_cat_pos)
+    val_pos = _axis_position(value, default_val_pos)

@@ -1,0 +1,136 @@
+def unsafe_exported_font_faces(font_family_str: str) -> dict[str, str]:
+    """Return resolved PPTX typefaces that require a custom installation."""
+    return {
+        role: family
+        for role, family in parse_font_family(font_family_str).items()
+        if family.strip().lower() not in PPT_SAFE_FONTS
+    }
+
+
+def _is_han_char(ch: str) -> bool:
+    """Return whether one character belongs to a Han ideograph block."""
+    cp = ord(ch)
+    return (
+        0x3400 <= cp <= 0x4DBF
+        or 0x4E00 <= cp <= 0x9FFF
+        or 0xF900 <= cp <= 0xFAFF
+        or 0x20000 <= cp <= 0x2EE5F
+        or 0x30000 <= cp <= 0x323AF
+    )
+
+
+def _is_hiragana_char(ch: str) -> bool:
+    cp = ord(ch)
+    return (
+        0x3040 <= cp <= 0x309F
+        or 0x1B001 <= cp <= 0x1B11F
+    )
+
+
+def _is_katakana_char(ch: str) -> bool:
+    cp = ord(ch)
+    return (
+        0x30A0 <= cp <= 0x30FF
+        or 0x31F0 <= cp <= 0x31FF
+        or 0xFF65 <= cp <= 0xFF9F
+        or 0x1AFF0 <= cp <= 0x1AFFF
+        or cp == 0x1B000
+        or 0x1B120 <= cp <= 0x1B16F
+    )
+
+
+def _is_hangul_char(ch: str) -> bool:
+    cp = ord(ch)
+    return (
+        0x1100 <= cp <= 0x11FF
+        or 0x3130 <= cp <= 0x318F
+        or 0xA960 <= cp <= 0xA97F
+        or 0xAC00 <= cp <= 0xD7AF
+        or 0xD7B0 <= cp <= 0xD7FF
+        or 0xFFA0 <= cp <= 0xFFDC
+    )
+
+
+def is_cjk_char(ch: str) -> bool:
+    """Return whether one character uses the project East Asian width model."""
+    cp = ord(ch)
+    return (
+        _is_han_char(ch)
+        or _is_hiragana_char(ch)
+        or _is_katakana_char(ch)
+        or _is_hangul_char(ch)
+        or 0x2E80 <= cp <= 0x2FFF
+        or 0x3000 <= cp <= 0x303F
+        or 0x3100 <= cp <= 0x312F
+        or 0x31A0 <= cp <= 0x31BF
+        or 0x31C0 <= cp <= 0x31EF
+        or 0xFF00 <= cp <= 0xFFEF
+    )
+
+
+def _contains_codepoint_range(
+    text: str,
+    ranges: tuple[tuple[int, int], ...],
+) -> bool:
+    """Return whether text contains a code point in one of the ranges."""
+    return any(
+        start <= ord(ch) <= end
+        for ch in text
+        for start, end in ranges
+    )
+
+
+def _explicit_language_script(language: str) -> str | None:
+    """Return the explicit script before any region, variant, or extension."""
+    parts = normalize_language_tag(language).split('-')
+    index = 1
+    if len(parts[0]) <= 3:
+        while index < len(parts) and len(parts[index]) == 3 and parts[index].isalpha():
+            index += 1
+    if index < len(parts) and len(parts[index]) == 4 and parts[index].isalpha():
+        return parts[index]
+    return None
+
+
+def _default_language_for_script(
+    default_language: str | None,
+    bases: frozenset[str],
+    fallback: str,
+) -> str:
+    """Prefer the project language when it belongs to the detected script."""
+    if default_language and language_base(default_language) in bases:
+        return default_language
+    return fallback
+
+
+def text_has_rtl_characters(text: str) -> bool:
+    """Return whether text contains a strong right-to-left character."""
+    return any(unicodedata.bidirectional(ch) in {'R', 'AL'} for ch in text)
+
+
+def text_uses_rtl(text: str, default_language: str | None = None) -> bool:
+    """Resolve paragraph direction from its first strong character or project."""
+    for char in text:
+        direction = unicodedata.bidirectional(char)
+        if direction in {'R', 'AL'}:
+            return True
+        if direction == 'L':
+            return False
+    return bool(default_language and language_uses_rtl(default_language))
+
+
+def detect_text_lang(
+    text: str,
+    default_language: str | None = None,
+) -> str:
+    """Return a DrawingML language tag, preferring the project contract."""
+    has_hangul = False
+    has_kana = False
+    has_east_asian_text = False
+    for ch in text:
+        has_hangul = has_hangul or _is_hangul_char(ch)
+        has_kana = (
+            has_kana
+            or _is_hiragana_char(ch)
+            or _is_katakana_char(ch)
+        )

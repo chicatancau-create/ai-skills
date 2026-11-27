@@ -1,0 +1,124 @@
+    duration: float = 0.5,
+    advance_after: float | None = None,
+    advance_on_click: bool | None = None,
+    effect_options: Mapping[str, object] | None = None,
+    sound: Mapping[str, object] | None = None,
+) -> str:
+    """Build a direct or MCE-backed p:transition XML fragment."""
+    normalized_effect, normalized_options = normalize_transition_effect_request(
+        effect,
+        effect_options,
+    )
+    normalized_sound = _normalize_transition_sound(sound)
+    duration_ms = None
+    if normalized_effect is not None:
+        duration_ms = _seconds_to_ms(
+            duration,
+            "transition duration",
+            allow_zero=False,
+        )
+    if advance_on_click is not None:
+        if not isinstance(advance_on_click, bool):
+            raise ValueError(
+                "transition advance_on_click must be a boolean or None"
+            )
+    advance_ms = None
+    if advance_after is not None:
+        advance_ms = _seconds_to_ms(
+            advance_after,
+            "transition advance_after",
+            allow_zero=True,
+        )
+
+    if (
+        normalized_effect is None
+        and advance_ms is None
+        and advance_on_click is None
+        and normalized_sound is None
+    ):
+        return ""
+
+    attr_text = _transition_attributes(
+        duration_ms=duration_ms,
+        advance_after_ms=advance_ms,
+        advance_on_click=advance_on_click,
+        declare_p14=normalized_effect is not None,
+    )
+    if normalized_effect is None:
+        if normalized_sound is None:
+            return f"  <p:transition{attr_text}/>"
+        return (
+            f"  <p:transition{attr_text}>\n"
+            + _transition_sound_xml(normalized_sound, indent="    ")
+            + "  </p:transition>"
+        )
+
+    prefix, element_name, effect_attrs = _effect_xml(
+        normalized_effect,
+        normalized_options,
+    )
+    if prefix != "p":
+        _effect_prefix, _namespace, _element, _attrs, fallback = _effect_spec(
+            normalized_effect,
+            normalized_options,
+        )
+        fallback_effect = fallback or "fade"
+        fallback_prefix, fallback_name, fallback_attrs = _effect_xml(
+            fallback_effect
+        )
+        fallback_attr_text = _transition_attributes(
+            duration_ms=None,
+            advance_after_ms=advance_ms,
+            advance_on_click=advance_on_click,
+            declare_p14=False,
+        )
+        choice_sound_xml = _transition_sound_xml(
+            normalized_sound,
+            indent="        ",
+        )
+        fallback_sound_xml = _transition_sound_xml(
+            normalized_sound,
+            indent="        ",
+        )
+        return (
+            f'  <mc:AlternateContent xmlns:mc="{MC_NS}">\n'
+            f'    <mc:Choice xmlns:{prefix}="{TRANSITION_NAMESPACES[prefix]}" '
+            f'Requires="{prefix}">\n'
+            f"      <p:transition{attr_text}>\n"
+            f"        <{prefix}:{element_name}{effect_attrs}/>\n"
+            f"{choice_sound_xml}"
+            "      </p:transition>\n"
+            "    </mc:Choice>\n"
+            "    <mc:Fallback>\n"
+            f"      <p:transition{fallback_attr_text}>\n"
+            f"        <{fallback_prefix}:{fallback_name}{fallback_attrs}/>\n"
+            f"{fallback_sound_xml}"
+            "      </p:transition>\n"
+            "    </mc:Fallback>\n"
+            "  </mc:AlternateContent>"
+        )
+    sound_xml = _transition_sound_xml(normalized_sound, indent="    ")
+    return (
+        f"  <p:transition{attr_text}>\n"
+        f"    <{prefix}:{element_name}{effect_attrs}/>\n"
+        f"{sound_xml}"
+        "  </p:transition>"
+    )
+
+
+def _is_lxml_element(element: object) -> bool:
+    return LET is not None and isinstance(element, LET._Element)
+
+
+def _new_element(
+    context: Any,
+    tag: str,
+    *,
+    nsmap: dict[str, str] | None = None,
+) -> Any:
+    if _is_lxml_element(context):
+        return LET.Element(tag, nsmap=nsmap)
+    return ET.Element(tag)
+
+
+def _build_transition_element(

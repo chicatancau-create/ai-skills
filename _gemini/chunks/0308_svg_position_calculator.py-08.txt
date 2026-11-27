@@ -1,0 +1,101 @@
+        for element_id, attrs in expected_coords.items():
+            for attr, expected in attrs.items():
+                actual = self._extract_attribute(svg_content, element_id, attr)
+
+                if actual is not None:
+                    deviation = abs(actual - expected)
+                    passed = deviation <= self.tolerance
+
+                    results.append(ValidationResult(
+                        element_type=self._guess_element_type(element_id),
+                        element_id=element_id,
+                        attribute=attr,
+                        expected=expected,
+                        actual=actual,
+                        deviation=round(deviation, 2),
+                        passed=passed
+                    ))
+                else:
+                    results.append(ValidationResult(
+                        element_type=self._guess_element_type(element_id),
+                        element_id=element_id,
+                        attribute=attr,
+                        expected=expected,
+                        actual=float('nan'),
+                        deviation=float('inf'),
+                        passed=False
+                    ))
+
+        return results
+
+    def _extract_attribute(self, content: str, element_id: str, attr: str) -> Optional[float]:
+        """Extract attribute value from SVG content"""
+        pattern = rf'<[^>]*(?<![\w:-])id\s*=\s*([\'"]){re.escape(element_id)}\1[^>]*>'
+        match = re.search(pattern, content)
+        if match:
+            value = extract_attr(match.group(0), attr)
+            if value is None:
+                return None
+            try:
+                return float(value)
+            except ValueError:
+                return None
+
+        return None
+
+    def _guess_element_type(self, element_id: str) -> str:
+        """Guess element type based on ID"""
+        id_lower = element_id.lower()
+        if 'bar' in id_lower or 'rect' in id_lower:
+            return 'rect'
+        elif 'circle' in id_lower or 'dot' in id_lower:
+            return 'circle'
+        elif 'path' in id_lower or 'slice' in id_lower:
+            return 'path'
+        elif 'line' in id_lower:
+            return 'line'
+        elif 'text' in id_lower or 'label' in id_lower:
+            return 'text'
+        return 'unknown'
+
+    def extract_all_positions(self, svg_content: str) -> Dict[str, Dict[str, float]]:
+        """Extract position information of all elements in SVG"""
+        positions = {}
+
+        # Extract rect elements
+        for match in re.finditer(r'<rect[^>]*/?>', svg_content):
+            elem = match.group(0)
+            x = extract_attr(elem, 'x')
+            y = extract_attr(elem, 'y')
+            if x is None or y is None:
+                continue
+            id_val = extract_attr(elem, 'id') or f"rect_{len(positions)}"
+            try:
+                positions[id_val] = {'x': float(x), 'y': float(y)}
+                width = extract_attr(elem, 'width')
+                height = extract_attr(elem, 'height')
+                if width is not None:
+                    positions[id_val]['width'] = float(width)
+                if height is not None:
+                    positions[id_val]['height'] = float(height)
+            except ValueError:
+                continue
+
+        # Extract circle elements
+        for match in re.finditer(r'<circle[^>]*/?>', svg_content):
+            elem = match.group(0)
+            cx = extract_attr(elem, 'cx')
+            cy = extract_attr(elem, 'cy')
+            if cx is None or cy is None:
+                continue
+            id_val = extract_attr(elem, 'id') or f"circle_{len(positions)}"
+            try:
+                positions[id_val] = {'cx': float(cx), 'cy': float(cy)}
+            except ValueError:
+                continue
+
+        return positions
+
+    def format_results(self, results: List[ValidationResult]) -> str:
+        """Format validation results"""
+        lines = []

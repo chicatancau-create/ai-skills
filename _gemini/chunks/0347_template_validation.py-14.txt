@@ -1,0 +1,87 @@
+                if not (
+                    master_part.startswith("ppt/slideMasters/")
+                    and master_part.endswith(".xml")
+                ):
+                    errors.append(
+                        f"Layout {layout_key!r} targets non-Master part {master_part}"
+                    )
+                    continue
+                reader.xml(master_part)
+                used_master_parts.add(master_part)
+                previous_master_part = master_parts_by_key.setdefault(
+                    prototype.master_key,
+                    master_part,
+                )
+                if previous_master_part != master_part:
+                    errors.append(
+                        f"Master key {prototype.master_key!r} targets both "
+                        f"{previous_master_part} and {master_part}"
+                    )
+                previous_master_key = keys_by_master_part.setdefault(
+                    master_part,
+                    prototype.master_key,
+                )
+                if previous_master_key != prototype.master_key:
+                    errors.append(
+                        f"Master keys {previous_master_key!r} and "
+                        f"{prototype.master_key!r} both target {master_part}"
+                    )
+                previous_master_spec = master_specs_by_part.setdefault(
+                    master_part,
+                    prototype,
+                )
+                if previous_master_spec.master_key != prototype.master_key:
+                    errors.append(
+                        f"{master_part} is shared by conflicting SVG Master contracts"
+                    )
+                layout_parts_by_master.setdefault(master_part, set()).add(
+                    layout_part
+                )
+
+            layout_id_owners: dict[int, str] = {}
+            for master_part, layout_parts in sorted(layout_parts_by_master.items()):
+                master_root = reader.xml(master_part)
+                if master_root is None:
+                    continue
+                master_spec = master_specs_by_part.get(master_part)
+                if master_spec is not None:
+                    master_c_sld = master_root.find(f"{{{PML_NS}}}cSld")
+                    actual_master_name = (
+                        master_c_sld.get("name")
+                        if master_c_sld is not None
+                        else None
+                    )
+                    if actual_master_name != master_spec.master_name:
+                        errors.append(
+                            f"Master {master_part} has picker name "
+                            f"{actual_master_name!r}, expected "
+                            f"{master_spec.master_name!r}"
+                        )
+                    _validate_named_shape_roster(
+                        master_root,
+                        tuple(
+                            f"{item.element_id} Master"
+                            for item in master_spec.master_elements
+                            if not item.is_background
+                        ),
+                        f"Master {master_part}",
+                        errors,
+                        exact=True,
+                        ordered=True,
+                    )
+                    expected_master_background = any(
+                        item.is_background
+                        for item in master_spec.master_elements
+                    )
+                    if (
+                        expected_master_background
+                        and not _has_explicit_background(master_root)
+                    ):
+                        errors.append(
+                            f"Master {master_part} is missing its explicit background"
+                        )
+                    if (
+                        expected_master_background
+                        and expected_backgrounds is not None
+                        and master_part not in expected_backgrounds
+                    ):

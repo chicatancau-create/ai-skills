@@ -1,0 +1,115 @@
+        else:
+            deck_rendering = legacy_anchor
+
+    if project:
+        lines.append(f"> Project: {project}")
+    if generated_at:
+        lines.append(f"> Generated: {generated_at}")
+    if color_scheme:
+        cs = " | ".join(
+            f"{k.capitalize()} {v}" for k, v in color_scheme.items()
+        )
+        lines.append(f"> Color scheme: {cs}")
+    if deck_rendering:
+        lines.append(f"> Deck Rendering: {deck_rendering}")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+
+    for i, item in enumerate(manifest["items"], start=1):
+        lines.append(f"### Image {i}: {item['filename']}")
+        lines.append("")
+        lines.append("| Attribute | Value |")
+        lines.append("|---|---|")
+        for label, key in (
+            ("Purpose", "purpose"),
+            ("Type", "type"),
+            ("Page role", "page_role"),
+            ("Text policy", "text_policy"),
+            ("Aspect ratio", "aspect_ratio"),
+            ("Image size", "image_size"),
+            ("Model", "model"),
+            ("Slice grid", "slice_grid"),
+            ("Slice names", "slice_names"),
+            ("Status", "status"),
+        ):
+            value = item.get(key)
+            if not value and key == "page_role":
+                value = "local (legacy default)"
+            elif not value and key == "text_policy":
+                value = "none (legacy default)"
+            if value:
+                lines.append(f"| {label} | {value} |")
+        if item.get("last_error"):
+            lines.append(f"| Last error | {item['last_error']} |")
+        lines.append("")
+        lines.append("**Prompt**:")
+        lines.append("")
+        lines.append(item["prompt"])
+        lines.append("")
+        if item.get("alt_text"):
+            lines.append("**Alt Text**:")
+            lines.append(f"> {item['alt_text']}")
+            lines.append("")
+        lines.append("---")
+        lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def render_manifest_md_to_file(manifest_path: str, manifest: dict | None = None) -> str:
+    """Render the manifest's Markdown sidecar next to the JSON file.
+
+    Returns the written path. If `manifest` is omitted, it is loaded from
+    `manifest_path` first.
+    """
+    if manifest is None:
+        manifest = load_manifest(manifest_path)
+    md_path = str(Path(manifest_path).with_suffix(".md"))
+    Path(md_path).write_text(render_manifest_md(manifest), encoding="utf-8")
+    return md_path
+
+
+def main() -> None:
+    """Run the CLI entry point."""
+    parser = argparse.ArgumentParser(
+        description="Generate images using AI image model providers."
+    )
+    parser.add_argument(
+        "prompt", nargs="?", default=None,
+        help=(
+            "The text prompt for image generation. With --reference-image, "
+            "this is the edit instruction (required in that mode)."
+        )
+    )
+    parser.add_argument(
+        "--aspect_ratio", default="1:1", choices=ALL_ASPECT_RATIOS,
+        help=f"Aspect ratio. Default: 1:1."
+    )
+    parser.add_argument(
+        "--image_size", default=None,
+        help=(
+            f"Image size. Choices: {ALL_IMAGE_SIZES}. Default depends on the "
+            "backend and is shown by --list-backends. (case-insensitive)"
+        ),
+    )
+    parser.add_argument(
+        "--output", "-o", default=None,
+        help="Output directory. Default: current directory."
+    )
+    parser.add_argument(
+        "--filename", "-f", default=None,
+        help="Output filename (without extension). Overrides auto-naming."
+    )
+    parser.add_argument(
+        "--model", "-m", default=None,
+        help="Model name. Default depends on backend."
+    )
+    parser.add_argument(
+        "--backend", "-b", default=None, choices=SUPPORTED_BACKENDS,
+        help="Override IMAGE_BACKEND env var."
+    )
+    parser.add_argument(
+        "--list-backends", action="store_true",
+        help="List available backends grouped by support tier and exit."
+    )

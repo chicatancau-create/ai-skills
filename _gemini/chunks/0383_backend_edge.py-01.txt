@@ -1,0 +1,140 @@
+"""edge-tts backend for narration audio generation."""
+
+from __future__ import annotations
+
+import os
+import re
+from dataclasses import dataclass
+from pathlib import Path
+
+from tts_backends.backend_common import publish_staged_pair, temporary_path
+
+
+DEFAULT_SUBTITLE_MAX_CHARS = 20
+DEFAULT_BOUNDARY_OVERLAP_TOLERANCE_MS = 100
+_TICKS_PER_MILLISECOND = 10_000
+_SENTENCE_END = frozenset("。！？!?")
+_CLAUSE_END = frozenset("，,；;：:")
+_CLOSING_PUNCTUATION = frozenset('”’」』）》)"\'')
+# Characters that spell one number when adjacent: digits, CJK numerals and
+# their connectors. A cue boundary between two of them splits a value such as
+# 一百一十点五 or 2,750 across two subtitles.
+_NUMERAL_CHARS = frozenset("0123456789零〇一二三四五六七八九十百千万亿两点.,%")
+
+
+@dataclass(frozen=True)
+class _MappedWord:
+    start: int
+    end: int
+    source_start: int
+    source_end: int
+
+
+@dataclass(frozen=True)
+class _SubtitleCue:
+    start: int
+    end: int
+    text: str
+
+
+COMMON_VOICES = [
+    ("zh-CN", "zh-CN-XiaoxiaoNeural", "女声，普通话，清晰自然，默认推荐"),
+    ("zh-CN", "zh-CN-XiaoyiNeural", "女声，普通话，明亮"),
+    ("zh-CN", "zh-CN-YunjianNeural", "男声，普通话，稳重"),
+    ("zh-CN", "zh-CN-YunxiNeural", "男声，普通话，年轻"),
+    ("zh-CN", "zh-CN-YunxiaNeural", "男声，普通话，少年感"),
+    ("zh-CN", "zh-CN-YunyangNeural", "男声，普通话，播报感"),
+    ("zh-HK", "zh-HK-HiuGaaiNeural", "女声，粤语"),
+    ("zh-HK", "zh-HK-WanLungNeural", "男声，粤语"),
+    ("zh-TW", "zh-TW-HsiaoChenNeural", "女声，台湾普通话"),
+    ("zh-TW", "zh-TW-YunJheNeural", "男声，台湾普通话"),
+    ("en-US", "en-US-JennyNeural", "女声，美式英语"),
+    ("en-US", "en-US-GuyNeural", "男声，美式英语"),
+    ("en-GB", "en-GB-SoniaNeural", "女声，英式英语"),
+    ("en-GB", "en-GB-RyanNeural", "男声，英式英语"),
+]
+
+
+def edge_output_extension() -> str:
+    return ".mp3"
+
+
+def normalize_rate(rate: str) -> str:
+    """Normalize a user-provided rate into edge-tts format."""
+    value = rate.strip()
+    if not value:
+        return "+0%"
+    if value.endswith("%"):
+        if value[0] not in "+-":
+            return f"+{value}"
+        return value
+    if re.fullmatch(r"[+-]?\d+", value):
+        number = int(value)
+        return f"{number:+d}%"
+    return value
+
+
+async def generate(
+    text: str,
+    output_path: Path,
+    *,
+    voice: str,
+    rate: str,
+    pitch: str = "+0Hz",
+    volume: str = "+0%",
+    subtitle_path: Path | None = None,
+    subtitle_max_chars: int = DEFAULT_SUBTITLE_MAX_CHARS,
+) -> None:
+    """Generate narration audio and, when requested, its compact SRT."""
+    if subtitle_path is not None:
+        await _generate_with_subtitles(
+            text,
+            output_path,
+            subtitle_path,
+            voice=voice,
+            rate=rate,
+            pitch=pitch,
+            volume=volume,
+            max_chars=subtitle_max_chars,
+        )
+        return
+
+    try:
+        import edge_tts
+    except ImportError as exc:
+        raise RuntimeError(
+            "Missing dependency `edge-tts`. Install it with: "
+            "python3 -m pip install edge-tts"
+        ) from exc
+
+    communicate = edge_tts.Communicate(
+        text, voice=voice, rate=normalize_rate(rate), pitch=pitch, volume=volume,
+    )
+    await communicate.save(str(output_path))
+
+
+def _text_key(text: str) -> str:
+    return "".join(character.casefold() for character in text if character.isalnum())
+
+
+def _source_key_positions(text: str) -> tuple[str, list[int]]:
+    key: list[str] = []
+    positions: list[int] = []
+    for index, character in enumerate(text):
+        if not character.isalnum():
+            continue
+        normalized = character.casefold()
+        key.extend(normalized)
+        positions.extend([index] * len(normalized))
+    return "".join(key), positions
+
+
+def _map_word_boundaries(
+    text: str,
+    boundaries: list[dict],
+    provider_label: str,
+) -> list[_MappedWord]:
+    source_key, source_positions = _source_key_positions(text)
+    boundary_keys = [_text_key(boundary["text"]) for boundary in boundaries]
+    boundary_key = "".join(boundary_keys)
+    if not source_key or source_key != boundary_key:

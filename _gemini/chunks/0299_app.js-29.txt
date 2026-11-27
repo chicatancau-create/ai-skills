@@ -1,0 +1,99 @@
+                    textParent.appendChild(textClone);
+                }
+            }
+            selectedElementIds.delete(newText.id);
+            selectedElementIds.add(tspan.id);
+            markSelection();
+            return textClone.querySelector("#" + CSS.escape(tspan.id)) || textClone;
+        };
+
+        text.parentNode.insertBefore(newText, text.nextSibling);
+        text.removeChild(tspan);
+        if (next && nextBase && !next.hasAttribute("y") && next.hasAttribute("dy")) {
+            next.setAttribute("dy", adjustedDyValue(
+                next.getAttribute("dy"),
+                nextBase.y,
+                prevBase ? prevBase.y : parentBaseY
+            ));
+        }
+        if (!(text.textContent || "").trim() && text.children.length === 0) {
+            text.parentNode.removeChild(text);
+        }
+        selectedElementIds.delete(tspan.id);
+        selectedElementIds.add(newText.id);
+        markSelection();
+        return newText;
+    }
+
+    function payloadForMovedElement(el, attrs) {
+        var promoted = tspanPromotionPayload(el);
+        if (promoted) return { promote_tspan: promoted };
+        return { attrs: attrs };
+    }
+
+    function canUseRawGeometry(el) {
+        var own = ownMatrix(el);
+        var close = function (a, b) { return Math.abs(a - b) < 1e-6; };
+        if (close(own.b, 0) && close(own.c, 0)) {
+            if (close(own.a, 1) && close(own.d, 1)) return "translate";
+            if (localName(el) === "use") return "use-transform";
+            if (["rect", "image"].indexOf(localName(el)) !== -1) return "box-transform";
+        }
+        return "";
+    }
+
+    function rawMoveAttrs(el, dx, dy) {
+        if (localName(el) === "g" && el.hasAttribute("data-icon") &&
+                el.hasAttribute("data-use-x") && el.hasAttribute("data-use-y")) {
+            var iconOwn = ownMatrix(el);
+            var close = function (a, b) { return Math.abs(a - b) < 1e-6; };
+            if (close(iconOwn.b, 0) && close(iconOwn.c, 0)) {
+                var iconDelta = parentDelta(dx, dy, el);
+                if (iconDelta) {
+                    var iconAttrs = {
+                        x: formatCoord(iconOwn.e + iconDelta.x),
+                        y: formatCoord(iconOwn.f + iconDelta.y)
+                    };
+                    if (el.hasAttribute("data-use-has-transform")) {
+                        iconAttrs.transform = null;
+                    }
+                    return iconAttrs;
+                }
+            }
+        }
+
+        var rawMode = canUseRawGeometry(el);
+        if (!rawMode) return null;
+        var d = parentDelta(dx, dy, el);
+        if (!d) return null;
+        var tag = localName(el);
+        var attrs = {};
+        var own = ownMatrix(el);
+        var add = function (key, delta) {
+            if (!el.hasAttribute(key)) return false;
+            var next = shiftedAttrValue(el, key, delta);
+            if (next === null) return false;
+            attrs[key] = next;
+            return true;
+        };
+        var fmt = function (value) {
+            return String(Math.round(value * 1000) / 1000);
+        };
+        var bakeTranslate = function (xKey, yKey) {
+            if (!el.hasAttribute(xKey) || !el.hasAttribute(yKey)) return false;
+            if (rawMode === "use-transform") {
+                attrs[xKey] = fmt(own.e + d.x);
+                attrs[yKey] = fmt(own.f + d.y);
+                attrs.transform = null;
+                return true;
+            }
+            var nx = shiftedAttrValue(el, xKey, own.e + d.x);
+            var ny = shiftedAttrValue(el, yKey, own.f + d.y);
+            if (nx === null || ny === null) return false;
+            attrs[xKey] = nx;
+            attrs[yKey] = ny;
+            if (el.hasAttribute("transform")) attrs.transform = null;
+            return true;
+        };
+        var bakeBox = function () {
+            if (!el.hasAttribute("x") || !el.hasAttribute("y") ||

@@ -1,0 +1,102 @@
+                    layout_states,
+                    item,
+                    layout_path,
+                    layout_rels_path,
+                    slide_size_emu,
+                )
+                if background_xml is not None:
+                    expected_backgrounds[layout_part] = background_xml
+                layout_shape_count += 1
+                continue
+            if not item.placeholder:
+                continue
+            proxy_binding = is_proxy_placeholder(item)
+            if proxy_binding:
+                placeholder_shapes = [
+                    _template_shape_for_item(state, item)
+                    for state in layout_states
+                ]
+                if any(shape is None for shape in placeholder_shapes):
+                    raise TemplateStructureError(
+                        f"Placeholder {item.element_id!r} cannot be a slide background"
+                    )
+                resolved_shapes = [
+                    shape for shape in placeholder_shapes if shape is not None
+                ]
+            else:
+                resolved_shapes = [
+                    _unwrap_placeholder_carrier(state, item)
+                    for state in layout_states
+                ]
+            prototype_shape = resolved_shapes[0]
+            binding = placeholder_bindings[item.element_id]
+            assigned_idx = binding.assigned_idx
+            layout_placeholder = _layout_placeholder_shape(
+                prototype_shape,
+                item,
+                assigned_idx,
+                theme_font_spec,
+            )
+            _append_shape_to_part(layout_path, layout_placeholder)
+            for state, shape in zip(layout_states, resolved_shapes):
+                if not proxy_binding:
+                    _patch_slide_placeholder(
+                        shape,
+                        item,
+                        assigned_idx,
+                        theme_font_spec=theme_font_spec,
+                    )
+                    if use_layout_placeholder_frames:
+                        _apply_layout_frame_to_placeholder_carrier(shape, item)
+                    _set_shape_name(
+                        shape,
+                        f"{item.element_id} Placeholder Carrier",
+                    )
+                else:
+                    _set_shape_name(
+                        shape,
+                        f"{item.element_id} Proxy Content",
+                    )
+                    _append_shape_to_runtime_slide(
+                        state,
+                        _placeholder_binding_proxy(layout_placeholder, item),
+                    )
+            placeholder_count += 1
+
+        _set_template_layout_header_footer(layout_path, prototype.placeholders)
+        for state in layout_states:
+            _set_slide_layout_target(state.rels_path, layout_target)
+
+    slide_backgrounds = _apply_template_slide_backgrounds(
+        states,
+        slide_size_emu,
+    )
+    expected_backgrounds.update(slide_backgrounds)
+    for state in states:
+        state.root.set(
+            "showMasterSp",
+            "1" if state.spec.slide_show_inherited_shapes else "0",
+        )
+        _write_xml_tree(state.slide_path, state.tree)
+        expected_backgrounds.setdefault(
+            f"ppt/slides/slide{state.spec.slide_num}.xml",
+            None,
+        )
+        expected_shape_rosters[
+            f"ppt/slides/slide{state.spec.slide_num}.xml"
+        ] = _top_level_shape_name_roster(state.root)
+    for part in states_by_master:
+        expected_backgrounds.setdefault(
+            part,
+            _extract_slide_background_xml(
+                (extract_dir / part).read_text(encoding="utf-8")
+            ),
+        )
+    for part in created_layout_parts:
+        expected_backgrounds.setdefault(part, None)
+    for part in (*states_by_master, *created_layout_parts):
+        expected_shape_rosters[part] = _top_level_shape_name_roster(
+            ET.parse(extract_dir / part).getroot()
+        )
+
+    if verbose:

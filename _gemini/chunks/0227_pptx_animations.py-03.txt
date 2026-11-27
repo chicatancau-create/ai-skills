@@ -1,0 +1,80 @@
+        raise RuntimeError('native animation preset manifest field "effects" must be a list')
+
+    native: dict[str, dict[str, Any]] = {}
+    category_counts = {category: 0 for category in ANIMATION_CATEGORIES}
+    for raw in raw_effects:
+        if not isinstance(raw, dict):
+            raise RuntimeError('native animation preset entries must be objects')
+        key = raw.get('key')
+        category = raw.get('category')
+        if not isinstance(key, str) or not key:
+            raise RuntimeError(f'native animation preset has invalid key: {key!r}')
+        if category not in ANIMATION_CATEGORIES:
+            raise RuntimeError(
+                f'native animation preset {key!r} has invalid category: {category!r}'
+            )
+        if key in native or key in ANIMATION_ALIASES:
+            raise RuntimeError(f'duplicate animation preset key: {key}')
+        row_xml = raw.get('row_xml')
+        if not isinstance(row_xml, str):
+            raise RuntimeError(f'native animation preset {key!r} is missing row_xml')
+        try:
+            row = ET.fromstring(row_xml)
+        except ET.ParseError as exc:
+            raise RuntimeError(
+                f'native animation preset {key!r} contains invalid row_xml: {exc}'
+            ) from exc
+        if row.tag != f'{{{PML_NS}}}cTn':
+            raise RuntimeError(f'native animation preset {key!r} is not a p:cTn row')
+
+        spec = {
+            'name': str(raw.get('name') or key),
+            'filter': raw.get('filter'),
+            'presetID': int(raw.get('preset_id')),
+            'presetSubtype': int(raw.get('preset_subtype')),
+            'presetClass': _PRESET_CLASS_BY_CATEGORY[category],
+            'category': category,
+            'msoEffectId': int(raw.get('mso_effect_id')),
+            'defaultDurationMs': raw.get('default_duration_ms'),
+            'durationScalable': bool(raw.get('duration_scalable')),
+            'rowXml': row_xml,
+            'effectOptions': raw.get('effect_options', {}),
+        }
+        if row.get('presetClass') != spec['presetClass']:
+            raise RuntimeError(f'native animation preset {key!r} changed presetClass')
+        if int(row.get('presetID', '-1')) != spec['presetID']:
+            raise RuntimeError(f'native animation preset {key!r} changed presetID')
+        if int(row.get('presetSubtype', '-1')) != spec['presetSubtype']:
+            raise RuntimeError(f'native animation preset {key!r} changed presetSubtype')
+        effect_options = spec['effectOptions']
+        if not isinstance(effect_options, dict):
+            raise RuntimeError(
+                f'native animation preset {key!r} effect_options must be an object'
+            )
+        unknown_options = set(effect_options) - set(ANIMATION_EFFECT_OPTION_FIELDS)
+        if unknown_options:
+            raise RuntimeError(
+                f'native animation preset {key!r} has unknown effect option(s): '
+                + ', '.join(sorted(unknown_options))
+            )
+        for option_name, option_spec in effect_options.items():
+            if not isinstance(option_spec, dict):
+                raise RuntimeError(
+                    f'native animation preset {key!r} option {option_name!r} '
+                    'must be an object'
+                )
+            required = option_spec.get('required', False)
+            if not isinstance(required, bool):
+                raise RuntimeError(
+                    f'native animation preset {key!r} option {option_name!r} '
+                    'required must be a boolean'
+                )
+            if required and 'default' in option_spec:
+                raise RuntimeError(
+                    f'native animation preset {key!r} option {option_name!r} '
+                    'cannot define both required and default'
+                )
+            option_type = option_spec.get('type')
+            if option_type == 'enum':
+                values = option_spec.get('values')
+                if not isinstance(values, dict) or not values:

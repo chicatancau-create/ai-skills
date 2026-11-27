@@ -1,0 +1,66 @@
+    slides.update(
+        {
+            "count": slide_count,
+            "hidden_count": len(hidden_slides),
+            "hidden": hidden_slides,
+        }
+    )
+    report["motion"] = motion
+    if hidden_slides:
+        advisories.append(
+            _issue(
+                "hidden_slides",
+                "The presentation contains hidden slides; their state was not changed.",
+                slides=[item["index"] for item in hidden_slides],
+            )
+        )
+
+    media = report["media"]
+    if isinstance(media, dict) and media.get("external_count"):
+        advisories.append(
+            _issue(
+                "external_media",
+                (
+                    "The presentation contains externally linked media; "
+                    "offline delivery may depend on those targets."
+                ),
+                targets=[
+                    item["target"]
+                    for item in media.get("external", [])
+                    if isinstance(item, dict) and "target" in item
+                ],
+            )
+        )
+
+    report["errors"] = _deduplicate_issues(errors)
+    report["advisories"] = _deduplicate_issues(advisories)
+    report["status"] = (
+        "failed"
+        if report["errors"]
+        else (
+            "passed-with-advisories"
+            if report["advisories"]
+            else "passed"
+        )
+    )
+    return report
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Inspect a finished PPTX for delivery risks without modifying it.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("pptx", help="Finished .pptx file to inspect")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    report = audit_pptx_delivery(args.pptx)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 1 if report["status"] == "failed" else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

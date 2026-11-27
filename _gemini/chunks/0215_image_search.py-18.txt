@@ -1,0 +1,111 @@
+                    f"{prefix} field '{dimension_field}' must be a positive integer"
+                )
+        fname = item["filename"]
+        try:
+            _validate_bare_filename(fname)
+        except ValueError as exc:
+            raise ValueError(f"{prefix} {exc}") from exc
+        normalized_filename = fname.casefold()
+        if normalized_filename in seen_filenames:
+            raise ValueError(
+                f"{prefix} filename {fname!r} conflicts with "
+                f"{seen_filenames[normalized_filename]!r} (case-insensitive)"
+            )
+        seen_filenames[normalized_filename] = fname
+
+    return data
+
+
+def save_search_manifest(path: str, data: dict) -> None:
+    """Atomically write the batch manifest back (tmp file + rename)."""
+    try:
+        _write_json_atomic(path, data)
+    except OSError as exc:
+        raise RuntimeError(
+            f"cannot update image query manifest {path}: {exc}"
+        ) from exc
+
+
+def _resolve_search_concurrency(cli_value: Optional[int]) -> int:
+    """CLI value wins over IMAGE_SEARCH_CONCURRENCY env; default 3."""
+    if cli_value is not None:
+        return max(1, cli_value)
+    env_val = os.environ.get("IMAGE_SEARCH_CONCURRENCY", "").strip()
+    if env_val.isdigit():
+        return max(1, int(env_val))
+    return DEFAULT_SEARCH_CONCURRENCY
+
+
+def _search_one_item(
+    item: dict,
+    *,
+    output_dir: Path,
+    save_candidates: bool,
+    max_candidates: int,
+    default_candidate_page: int,
+    default_provider: Optional[str],
+    default_strict: bool,
+    default_min_width: int,
+    default_min_height: int,
+) -> tuple[
+    Optional[dict],
+    Optional[str],
+    bool,
+    bool,
+    Optional[Path],
+    Optional[Path],
+]:
+    """Run one batch item's search or thumbnail-shortlist stage.
+
+    Returns ``(manifest_item, message, retryable, selection_required,
+    staged_path, output_path)``.
+    Only network and staged-file work happens here; canonical replacement and
+    all manifest writes are serialized by the caller.
+    """
+    filename = _validate_bare_filename(item["filename"])
+    orientation = item.get("orientation", "any") or "any"
+    strict = bool(item.get("strict_no_attribution", default_strict))
+    required_terms = _parse_required_terms(item.get("required_terms"))
+    candidate_page = int(item.get("candidate_page", default_candidate_page))
+    if max_candidates == 0 and candidate_page != 1:
+        raise ValueError(
+            "candidate_page must be 1 when max_candidates is 0"
+        )
+    _warn_weak_required_terms(required_terms)
+    request = ImageSearchRequest(
+        query=item["query"],
+        purpose=item.get("purpose", ""),
+        orientation="" if orientation == "any" else orientation,
+        filename=filename,
+        slide=item.get("slide", ""),
+        min_width=int(item.get("min_width", default_min_width)),
+        min_height=int(item.get("min_height", default_min_height)),
+        required_terms=required_terms,
+        query_variants=_parse_query_variants(item.get("query_variants")),
+    )
+
+    pinned = item.get("provider") or default_provider
+    providers = [pinned] if pinned else _default_provider_chain()
+    output_path = output_dir / filename
+
+    result = search_and_download(
+        providers,
+        request,
+        output_path=output_path,
+        strict_no_attribution=strict,
+        save_candidates=save_candidates,
+        max_candidates=max_candidates,
+        candidate_page=candidate_page,
+        provider_is_explicit=bool(pinned),
+    )
+    if result.selection_required:
+        sheet = result.review_sheet or (
+            output_dir / "candidates" / Path(filename).stem / "review_sheet.jpg"
+        )
+        return (
+            {
+                "candidate_page": result.candidate_page,
+                "candidate_count": result.candidate_count,
+                "candidate_total": result.candidate_total,
+                "has_more_candidates": result.has_more_candidates,
+                "next_candidate_page": (

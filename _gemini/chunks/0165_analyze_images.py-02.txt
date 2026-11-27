@@ -1,0 +1,120 @@
+    """Copy optional manifest fields into an image analysis row."""
+    result["usage_count"] = _manifest_usage_count(meta)
+    result["display_ratio_variants"] = _manifest_ratio_variants(meta)
+    if not meta:
+        return
+
+    source_ext = meta.get("source_ext")
+    original_filename = meta.get("original_filename")
+    if isinstance(source_ext, str):
+        result["source_ext"] = source_ext
+    if isinstance(original_filename, str):
+        result["original_filename"] = original_filename
+    result["asset_kind"] = meta.get("asset_kind", "bitmap")
+    result["svg_renderable"] = meta.get("svg_renderable", True)
+    result["pptx_native_supported"] = meta.get("pptx_native_supported", True)
+
+
+def _has_transparent_pixels(image: Image.Image) -> bool:
+    """Return whether any frame contains a pixel with alpha below 255."""
+    original_frame = image.tell()
+    frame_count = int(getattr(image, "n_frames", 1))
+    try:
+        for frame_index in range(frame_count):
+            image.seek(frame_index)
+            if "A" not in image.getbands() and "transparency" not in image.info:
+                continue
+            rgba = image.convert("RGBA")
+            alpha = rgba.getchannel("A")
+            try:
+                extrema = alpha.getextrema()
+            finally:
+                alpha.close()
+                rgba.close()
+            if extrema and extrema[0] < 255:
+                return True
+    finally:
+        image.seek(original_frame)
+    return False
+
+
+def _result_from_manifest(
+    filename: str,
+    filepath: str,
+    meta: dict,
+) -> ImageAnalysis | None:
+    """Build an analysis row for vector media Pillow cannot decode."""
+    ratio = _manifest_ratio(meta)
+    if ratio is None:
+        return None
+    width, height = _manifest_display_size(meta, ratio)
+    result: ImageAnalysis = {
+        'filename': filename,
+        'width': width,
+        'height': height,
+        'aspect_ratio': ratio,
+        'pixel_aspect_ratio': None,
+        'source_display_ratio': ratio,
+        'ratio_source': 'manifest',
+        'format': Path(filename).suffix.lstrip('.').upper(),
+        'has_transparent_pixels': None,
+        'category': classify_ratio(ratio),
+        'filesize_kb': os.path.getsize(filepath) / 1024,
+    }
+    _apply_manifest_metadata(result, meta)
+    suffix = Path(filename).suffix.lower()
+    is_office_vector = suffix in OFFICE_VECTOR_EXTENSIONS
+    result["asset_kind"] = meta.get(
+        "asset_kind",
+        "office_vector" if is_office_vector else "vector",
+    )
+    result["svg_renderable"] = meta.get("svg_renderable", suffix == ".svg")
+    result["pptx_native_supported"] = meta.get(
+        "pptx_native_supported",
+        is_office_vector or suffix == ".svg",
+    )
+    return result
+
+
+def classify_ratio(aspect_ratio: float) -> str:
+    """Classify an image by its objective aspect-ratio range.
+
+    Ranges: >2.0 ultra-wide, 1.5-2.0 wide, 1.2-1.5 standard
+    landscape, 0.8-1.2 near square, and <0.8 portrait.
+    """
+    if aspect_ratio > 2.0:
+        return "Ultra-wide"
+    elif aspect_ratio > 1.5:
+        return "Wide landscape"
+    elif aspect_ratio > 1.2:
+        return "Standard landscape"
+    elif aspect_ratio > 0.8:
+        return "Near square"
+    else:
+        return "Portrait"
+
+
+def _analyze_images(images_dir: str) -> tuple[list[ImageAnalysis], list[str]]:
+    """Analyze all image files in a directory.
+
+    Args:
+        images_dir: Directory that contains image files.
+
+    Returns:
+        Sorted image analysis records and supported files that could not be read.
+    """
+
+    results: list[ImageAnalysis] = []
+    errors: list[str] = []
+    manifest = _load_image_manifest(images_dir)
+
+    for filename in sorted(os.listdir(images_dir)):
+        filepath = os.path.join(images_dir, filename)
+        if not os.path.isfile(filepath):
+            continue
+
+        suffix = Path(filename).suffix.lower()
+        meta = manifest.get(filename)
+
+        if suffix in IMAGE_EXTENSIONS:
+            try:

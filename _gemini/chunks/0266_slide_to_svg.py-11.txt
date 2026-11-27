@@ -1,0 +1,123 @@
+        'data-pptx-encoding="base64" '
+        f'data-pptx-ooxml-sha256="{hashlib.sha256(raw).hexdigest()}">'
+        f'{base64.b64encode(raw).decode("ascii")}</metadata>'
+    )
+
+
+def _resolve_geometry(node: ShapeNode, sp_pr: ET.Element | None) -> GeomResult | None:
+    """Resolve a DrawingML shape geometry into an absolute SVG geometry model."""
+    prst_geom = sp_pr.find("a:prstGeom", NS) if sp_pr is not None else None
+    cust_geom = sp_pr.find("a:custGeom", NS) if sp_pr is not None else None
+    prst = prst_geom.attrib.get("prst", "rect") if prst_geom is not None else None
+
+    geom: GeomResult | None = None
+    if prst_geom is not None:
+        geom = convert_prst_geom(prst, node.xfrm, prst_geom)
+    elif cust_geom is not None:
+        d = convert_custom_geom(cust_geom, node.xfrm)
+        if d:
+            raw = ET.tostring(cust_geom, encoding="utf-8")
+            geom = GeomResult(
+                tag="path",
+                path_d=d,
+                attrs={
+                    "data-pptx-part": "geometry",
+                    "data-pptx-geometry-kind": "custom",
+                    "data-pptx-custgeom": base64.b64encode(raw).decode("ascii"),
+                    "data-pptx-geometry-sha256": hashlib.sha256(
+                        d.strip().encode("utf-8")
+                    ).hexdigest(),
+                },
+            )
+    else:
+        # No geometry hint at all — render bounding rect
+        geom = convert_prst_geom("rect", node.xfrm, None)
+
+    if geom is None:
+        return None
+    permits_degenerate_axis = (
+        node.kind == CONNECTOR
+        or prst in CONNECTOR_PRESET_TYPES
+    )
+    if (
+        not permits_degenerate_axis
+        and (node.xfrm.w <= 0 or node.xfrm.h <= 0)
+    ):
+        return None
+    return geom
+
+
+def _build_geometry_xml(node: ShapeNode, sp_pr: ET.Element | None,
+                        ctx: AssemblyContext,
+                        geom: GeomResult | None = None) -> str:
+    """Build the SVG geometry element with fill/stroke/effect attributes."""
+    if geom is None:
+        geom = _resolve_geometry(node, sp_pr)
+    if geom is None:
+        return ""
+
+    # Resolve style defaults early so markers can adopt the theme stroke color
+    # when <a:ln> doesn't carry an explicit solidFill.
+    try:
+        style_defaults = _resolve_shape_style_defaults(node, ctx)
+    except ValueError as exc:
+        if ctx.strict:
+            raise
+        ctx.diagnose(
+            "shape-style-omitted",
+            str(exc),
+            "omit unresolved theme style defaults",
+        )
+        style_defaults = {}
+
+    # Fill / stroke / effect
+    try:
+        fill = resolve_fill(
+            sp_pr,
+            ctx.palette,
+            id_prefix="g",
+            id_seq=ctx.grad_seq,
+            group_fill=ctx.group_fills[-1] if ctx.group_fills else None,
+        )
+    except ValueError as exc:
+        if ctx.strict:
+            raise
+        ctx.diagnose(
+            "fill-omitted",
+            str(exc),
+            "omit only the unsupported fill",
+        )
+        fill = FillResult.none_fill()
+    try:
+        stroke = resolve_stroke(
+            sp_pr,
+            ctx.palette,
+            id_prefix="m",
+            id_seq=ctx.marker_seq,
+            style_stroke_default=style_defaults.get("stroke"),
+            gradient_frame=(
+                node.xfrm.x,
+                node.xfrm.y,
+                node.xfrm.w,
+                node.xfrm.h,
+            ),
+        )
+    except ValueError as exc:
+        if ctx.strict:
+            raise
+        ctx.diagnose(
+            "stroke-omitted",
+            str(exc),
+            "omit only the unsupported outline",
+        )
+        stroke = StrokeResult(attrs={"stroke": "none"})
+    try:
+        effect = convert_effects(
+            sp_pr,
+            ctx.palette,
+            id_prefix="fx",
+            id_seq=ctx.filter_seq,
+            target_rotation_degrees=node.effective_rotation,
+        )
+    except ValueError as exc:
+        if ctx.strict:

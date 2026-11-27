@@ -1,0 +1,92 @@
+        try { hasStored = !!window.localStorage.getItem("ppt_lang"); } catch (e) { /* ignore */ }
+        if (hasStored) return;
+        LANG = requested;
+        applyStaticTranslations();
+        var toggleBtn = document.getElementById("btn-lang-toggle");
+        if (toggleBtn) refreshLangToggle(toggleBtn);
+    }
+
+    function loadStrategistUi(forceStage) {
+        return Promise.all([
+            loadCatalogs(),
+            fetchJson("/api/recommendations", "recommendations"),
+            loadIconPreviews(),
+            loadAiImageComparison()
+        ]).then(function (res) {
+            CAT = res[0];
+            REC = res[1];
+            ICON_PREVIEWS = res[2] || {};
+            AI_IMAGE_COMPARISON = res[3] || {};
+            applyServerLanguage(REC);
+            var activeStage = forceStage || stageNumber(REC);
+            if (activeStage === 1) {
+                if (!REC.template_options || typeof REC.template_options !== "object" ||
+                        Array.isArray(REC.template_options)) {
+                    throw new Error("Stage 1 recommendations must include template_options");
+                }
+                initTemplateOptions(REC.template_options);
+            }
+            initState();
+            enterStage(REC, activeStage);
+            return REC;
+        });
+    }
+
+    function boot() {
+        applyStaticTranslations();
+        var toggleBtn = document.getElementById("btn-lang-toggle");
+        var langMenu = document.getElementById("lang-menu");
+        refreshLangToggle(toggleBtn);
+        var setMenuOpen = function (open) {
+            langMenu.hidden = !open;
+            toggleBtn.setAttribute("aria-expanded", open ? "true" : "false");
+            if (open) {
+                var sel = langMenu.querySelector("li.selected") || langMenu.querySelector("li[data-lang]");
+                if (sel) sel.focus();
+            }
+        };
+        var chooseLang = function (v) {
+            setMenuOpen(false);
+            toggleBtn.focus();
+            if (v !== "ja" && v !== "en" && v !== "zh" && v !== "zh-TW") return;
+            if (v === LANG) return;
+            LANG = v;
+            try { window.localStorage.setItem("ppt_lang", LANG); } catch (e2) { /* ignore */ }
+            applyStaticTranslations();
+            refreshLangToggle(toggleBtn);
+            if (REC && CAT) {
+                renderAll();   // STATE persists → selections preserved
+            }
+        };
+        toggleBtn.addEventListener("click", function (e) {
+            e.stopPropagation();
+            setMenuOpen(langMenu.hidden);
+        });
+        toggleBtn.addEventListener("keydown", function (e) {
+            if (e.key === "Escape" && !langMenu.hidden) {
+                e.stopPropagation();
+                setMenuOpen(false);
+            } else if ((e.key === "ArrowDown" || e.key === "ArrowUp") && langMenu.hidden) {
+                e.preventDefault();
+                e.stopPropagation();
+                setMenuOpen(true);
+            }
+        });
+        langMenu.addEventListener("click", function (e) {
+            e.stopPropagation();
+            var li = e.target && e.target.closest ? e.target.closest("li[data-lang]") : null;
+            if (li) chooseLang(li.getAttribute("data-lang"));
+            else setMenuOpen(false);
+        });
+        langMenu.addEventListener("keydown", function (e) {
+            e.stopPropagation();   // page-level shortcuts must not fire while the menu is open
+            var items = Array.prototype.slice.call(langMenu.querySelectorAll("li[data-lang]"));
+            var idx = items.indexOf(document.activeElement);
+            if (e.key === "Escape") {
+                setMenuOpen(false);
+                toggleBtn.focus();
+            } else if (e.key === "ArrowDown") {
+                e.preventDefault();
+                (items[idx + 1] || items[0]).focus();
+            } else if (e.key === "ArrowUp") {
+                e.preventDefault();

@@ -1,0 +1,108 @@
+        and all(_style_value_is_substantive(cell) for cell in row[:4])
+        for row in role_rows
+    ):
+        errors.append(
+            "III. Page Role Vocabulary must contain at least one complete "
+            "four-column role row"
+        )
+
+    for (
+        section_title,
+        preferred_label,
+        behavior_label,
+        references_label,
+        catalog_dir,
+    ) in _STYLE_CUSTOM_FIELDS:
+        preferred = _extract_section_field(
+            body,
+            section_title,
+            [preferred_label],
+        )
+        behavior = _extract_section_field(
+            body,
+            section_title,
+            [behavior_label],
+        )
+        references = _extract_section_field(
+            body,
+            section_title,
+            [references_label],
+        )
+        preferred_text = _clean_field_value(preferred or "")
+        catalog_ids = {
+            path.stem
+            for path in catalog_dir.glob("*.md")
+            if not path.stem.startswith("_")
+        }
+        is_custom = bool(
+            re.match(r"^custom(?:\b|\s*[:—-])", preferred_text, re.IGNORECASE)
+        )
+        if is_custom and not _style_value_is_substantive(behavior):
+            errors.append(
+                f"{behavior_label} is required when {preferred_label} is custom"
+            )
+        if not is_custom and _style_value_is_substantive(behavior):
+            errors.append(
+                f"{behavior_label} is allowed only when {preferred_label} is custom"
+            )
+        if not is_custom and _style_value_is_substantive(references):
+            errors.append(
+                f"{references_label} is allowed only when "
+                f"{preferred_label} is custom"
+            )
+        if (
+            _style_value_is_substantive(preferred)
+            and not is_custom
+            and preferred_text not in catalog_ids
+        ):
+            errors.append(
+                f"{preferred_label} references unknown catalog id "
+                f"{preferred_text!r}"
+            )
+        if is_custom and _style_value_is_substantive(references):
+            catalog_references = [
+                _clean_field_value(item)
+                for item in (references or "").split(",")
+            ]
+            if any(not item for item in catalog_references):
+                errors.append(
+                    f"{references_label} must be a comma-separated list of "
+                    "catalog ids"
+                )
+            duplicates = sorted(
+                item
+                for item in set(catalog_references)
+                if catalog_references.count(item) > 1
+            )
+            if duplicates:
+                errors.append(
+                    f"{references_label} repeats catalog id(s): "
+                    + ", ".join(duplicates)
+                )
+            unknown_references = sorted(
+                item
+                for item in set(catalog_references)
+                if item == "custom" or item not in catalog_ids
+            )
+            if unknown_references:
+                errors.append(
+                    f"{references_label} references unknown catalog id(s): "
+                    + ", ".join(unknown_references)
+                )
+
+    visual_section = _numbered_section(body, "Visual System Defaults") or ""
+    fallback_colors = _markdown_subsection(body, "Fallback Color Scheme")
+    if fallback_colors is not None:
+        if "### Fallback Color Scheme" not in visual_section:
+            errors.append("Fallback Color Scheme must appear under section V")
+        color_rows = [
+            row
+            for row in _markdown_table_rows(fallback_colors)
+            if row and row[0].casefold() != "role"
+        ]
+        if not color_rows:
+            errors.append("Fallback Color Scheme must contain at least one row")
+        for row in color_rows:
+            if (
+                len(row) < 3
+                or not _style_value_is_substantive(row[0])

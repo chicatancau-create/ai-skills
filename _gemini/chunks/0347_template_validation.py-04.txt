@@ -1,0 +1,124 @@
+    if "\\" in raw_target or any(ord(char) <= 0x20 for char in raw_target):
+        errors.append(f"{context} has invalid target {raw_target!r}")
+        return None
+    try:
+        parsed = urlsplit(raw_target)
+    except ValueError:
+        errors.append(f"{context} has invalid target {raw_target!r}")
+        return None
+    if parsed.scheme or parsed.netloc or parsed.query or parsed.fragment:
+        errors.append(f"{context} has invalid target {raw_target!r}")
+        return None
+    decoded = unquote(parsed.path)
+    if not decoded:
+        errors.append(f"{context} has an empty target")
+        return None
+    if decoded.startswith("/"):
+        candidate = decoded[1:]
+    else:
+        candidate = posixpath.join(posixpath.dirname(source_part), decoded)
+    normalized = posixpath.normpath(candidate)
+    if (
+        normalized in {"", ".", ".."}
+        or normalized.startswith("../")
+        or normalized.startswith("/")
+    ):
+        errors.append(f"{context} target escapes the package: {raw_target!r}")
+        return None
+    return normalized
+
+
+def _single_relationship_target(
+    reader: _PackageReader,
+    source_part: str,
+    rel_type: str,
+    context: str,
+) -> tuple[_Relationship, str] | None:
+    matches = [
+        relationship
+        for relationship in reader.relationships(source_part)
+        if relationship.rel_type == rel_type
+    ]
+    if len(matches) != 1:
+        reader.errors.append(
+            f"{context} must have exactly one {rel_type.rsplit('/', 1)[-1]} "
+            f"relationship, found {len(matches)}"
+        )
+        return None
+    target = _resolve_relationship_target(
+        source_part,
+        matches[0],
+        reader.errors,
+        context,
+    )
+    if target is None:
+        return None
+    return matches[0], target
+
+
+def _placeholder_for_shape(shape: ET.Element) -> ET.Element | None:
+    paths = {
+        f"{{{PML_NS}}}sp": (
+            f"{{{PML_NS}}}nvSpPr/{{{PML_NS}}}nvPr/{{{PML_NS}}}ph"
+        ),
+        f"{{{PML_NS}}}pic": (
+            f"{{{PML_NS}}}nvPicPr/{{{PML_NS}}}nvPr/{{{PML_NS}}}ph"
+        ),
+        f"{{{PML_NS}}}graphicFrame": (
+            f"{{{PML_NS}}}nvGraphicFramePr/{{{PML_NS}}}nvPr/{{{PML_NS}}}ph"
+        ),
+    }
+    path = paths.get(shape.tag)
+    return shape.find(path) if path else None
+
+
+def _read_placeholders(
+    root: ET.Element,
+    context: str,
+    errors: list[str],
+) -> dict[int, _Placeholder]:
+    sp_tree = root.find(f"{{{PML_NS}}}cSld/{{{PML_NS}}}spTree")
+    if sp_tree is None:
+        errors.append(f"{context} has no p:cSld/p:spTree")
+        return {}
+    placeholders: dict[int, _Placeholder] = {}
+    for shape in sp_tree:
+        ph = _placeholder_for_shape(shape)
+        if ph is None:
+            continue
+        raw_idx_value = ph.get("idx")
+        try:
+            raw_idx = int(raw_idx_value) if raw_idx_value is not None else None
+        except ValueError:
+            errors.append(f"{context} contains invalid placeholder idx {raw_idx_value!r}")
+            continue
+        idx = raw_idx if raw_idx is not None else 0
+        if not 0 <= idx <= OOXML_UINT32_MAX:
+            errors.append(
+                f"{context} placeholder idx {idx} is outside the OOXML UInt32 range"
+            )
+            continue
+        if idx in placeholders:
+            errors.append(f"{context} repeats effective placeholder idx {idx}")
+            continue
+        raw_type = ph.get("type")
+        placeholders[idx] = _Placeholder(
+            shape=shape,
+            placeholder_type=raw_type or "obj",
+            raw_type=raw_type,
+            idx=idx,
+            raw_idx=raw_idx,
+        )
+    return placeholders
+
+
+def _validate_placeholder_roster(
+    root: ET.Element,
+    bindings: tuple[TemplatePlaceholderBinding, ...],
+    context: str,
+    errors: list[str],
+    *,
+    is_layout: bool,
+) -> dict[int, _Placeholder]:
+    actual = _read_placeholders(root, context, errors)
+    expected = {binding.effective_idx: binding for binding in bindings}

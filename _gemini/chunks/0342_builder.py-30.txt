@@ -1,0 +1,104 @@
+    if any(child.tag in competing_fills for child in sp_pr):
+        return None
+    line = sp_pr.find(f"{{{DML_NS}}}ln")
+    if line is not None and line.find(f"{{{DML_NS}}}noFill") is None:
+        return None
+    for effect_tag in (f"{{{DML_NS}}}effectLst", f"{{{DML_NS}}}effectDag"):
+        effect = sp_pr.find(effect_tag)
+        if effect is not None and (effect.attrib or list(effect)):
+            return None
+
+    background = ET.Element(f"{{{PML_NS}}}bg")
+    background_props = ET.SubElement(background, f"{{{PML_NS}}}bgPr")
+    background_props.append(
+        ET.fromstring(ET.tostring(solid_fill, encoding="utf-8"))
+    )
+    ET.SubElement(background_props, f"{{{DML_NS}}}effectLst")
+    return ET.tostring(background, encoding="unicode")
+
+
+def _remove_template_shape(
+    state: _TemplateRuntimeSlide,
+    shape: ET.Element,
+) -> None:
+    sp_tree = _slide_sp_tree(state)
+    if shape not in list(sp_tree):
+        raise TemplateStructureError(
+            f"{state.spec.svg_path.name}: structure shape is not slide-local"
+        )
+    sp_tree.remove(shape)
+
+
+def _template_reference_indices(
+    states: list[_TemplateRuntimeSlide],
+    public_slide_count: int | None,
+) -> list[int]:
+    """Use public pages as truth, or prototypes for an otherwise unused Master."""
+    return [
+        index for index, state in enumerate(states)
+        if public_slide_count is None or state.spec.slide_num <= public_slide_count
+    ] or list(range(len(states)))
+
+
+def _move_template_background(
+    states: list[_TemplateRuntimeSlide],
+    target_path: Path,
+    public_slide_count: int | None = None,
+) -> str:
+    backgrounds = [
+        _extract_slide_background_xml(state.slide_path.read_text(encoding="utf-8"))
+        for state in states
+    ]
+    if not backgrounds or any(background is None for background in backgrounds):
+        raise TemplateStructureError(
+            "Template background metadata must resolve to an explicit background "
+            "on every affected slide"
+        )
+    reference_indices = _template_reference_indices(states, public_slide_count)
+    canonical_backgrounds = set()
+    for index in reference_indices:
+        background = backgrounds[index]
+        if background is None:
+            continue
+        wrapper = ET.fromstring(
+            f'<root xmlns:p="{PML_NS}" xmlns:a="{DML_NS}">{background}</root>'
+        )
+        canonical_backgrounds.add(
+            ET.tostring(list(wrapper)[0], encoding="utf-8")
+        )
+    if len(canonical_backgrounds) != 1:
+        slide_names = ", ".join(states[index].spec.svg_path.name for index in reference_indices)
+        raise TemplateStructureError(
+            f"Explicit template background differs across slides: {slide_names}"
+        )
+    background_xml = backgrounds[reference_indices[0]]
+    if background_xml is None:
+        raise TemplateStructureError("Template background is unexpectedly empty")
+    target_xml = target_path.read_text(encoding="utf-8")
+    updated = _put_background_on_part(target_xml, background_xml)
+    if updated is None:
+        raise TemplateStructureError(
+            f"Cannot install explicit background on {target_path.name}"
+        )
+    target_path.write_text(updated, encoding="utf-8")
+    for state in states:
+        c_sld = state.root.find(f"{{{PML_NS}}}cSld")
+        background = (
+            c_sld.find(f"{{{PML_NS}}}bg") if c_sld is not None else None
+        )
+        if c_sld is None or background is None:
+            raise TemplateStructureError(
+                f"{state.spec.svg_path.name}: explicit background disappeared "
+                "during explicit Layout structure assembly"
+            )
+        c_sld.remove(background)
+    return background_xml
+
+
+def _move_template_solid_background_shapes(
+    states: list[_TemplateRuntimeSlide],
+    shapes: list[ET.Element],
+    target_path: Path,
+    slide_size_emu: tuple[int, int],
+    public_slide_count: int | None = None,
+) -> str | None:

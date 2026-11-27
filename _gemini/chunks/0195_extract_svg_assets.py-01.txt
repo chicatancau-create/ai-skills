@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""
+PPT Master - Large Vector Asset Extractor
+
+Factor large non-semantic vector decorations out of working SVGs into project
+icon assets, leaving a compact decoration-marked `<use data-icon>` placeholder
+behind. Semantic objects and semantic descendants always remain inline. The
+existing icon embedding path re-inlines each asset before export, so the
+exported PPTX remains native shapes rather than an embedded picture.
+
+Because re-inlining restores the extracted decoration subtree, the detection
+threshold is a readability convenience. It never expands the eligible asset
+role beyond decoration.
+
+Usage:
+    python3 scripts/extract_svg_assets.py <svg_dir> [options]
+
+Examples:
+    python3 scripts/extract_svg_assets.py import_ws/authoring-svg \
+        --icons-dir import_ws/icons --icon-namespace imported \
+        --inplace --id-prefix layered --clean-stale
+    python3 scripts/extract_svg_assets.py import_ws/authoring-svg-flat \
+        --icons-dir import_ws/icons --icon-namespace imported \
+        --reuse-inventory import_ws/authoring-svg_vector_asset_inventory.json \
+        --inplace --id-prefix flat --clean-stale
+    python3 scripts/extract_svg_assets.py project/svg_output --inplace --min-drawables 40
+
+Dependencies:
+    None (standard library only).
+
+See workflows/create-template.md and svg_finalize/embed_icons.py.
+"""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import hashlib
+import json
+import os
+import re
+import sys
+from pathlib import Path
+from typing import Optional
+from urllib.parse import urlsplit, urlunsplit
+from xml.etree import ElementTree as ET
+
+from console_encoding import configure_utf8_stdio
+from pptx_shapes import (
+    NATIVE_FALLBACK_SHA256_ATTR,
+    svg_native_fallback_fingerprint,
+)
+from svg_authoring_view import (
+    AUTHORING_MANIFEST_NAME,
+    SEMANTIC_OBJECT_ATTRIBUTE,
+    write_authoring_summary,
+)
+from svg_authoring_contract import normalize_compact_authoring_tree
+
+configure_utf8_stdio()
+
+SVG_NS = "http://www.w3.org/2000/svg"
+XLINK_NS = "http://www.w3.org/1999/xlink"
+DRAWABLE = {"path", "polygon", "polyline", "rect", "circle", "ellipse", "line"}
+SEMANTIC_CONTENT = {"text", "tspan", "foreignObject"}
+SEMANTIC_MARKER_ATTRIBUTES = {
+    "data-pptx-carrier",
+    "data-pptx-inline-formula",
+    "data-pptx-layer",
+    "data-pptx-page-role",
+    "data-pptx-placeholder",
+    "data-pptx-replace-with",
+    "data-pptx-role",
+    "data-pptx-shape-hyperlink",
+    SEMANTIC_OBJECT_ATTRIBUTE,
+}
+DEFINITION_CONTAINERS = {"defs"}
+DEFAULT_MIN_DRAWABLES = 20
+DEFAULT_MIN_BYTES = 3000
+DEFAULT_MIN_DECORATION_BYTES = 3000
+SOURCE_REF_ATTRIBUTE = "data-pptx-source-ref"
+ASSET_ROLE_ATTRIBUTE = "data-pptx-asset-role"
+DECORATION_ASSET_ROLE = "decoration"
+VECTOR_INVENTORY_SCHEMA = "vector_asset_inventory.v2"
+ICON_NAMESPACE_RE = re.compile(r"^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$")
+URL_REF_RE = re.compile(r"url\(\s*(['\"]?)#([^)'\"]\S*?)\1\s*\)")
+_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+def _local(tag: object) -> str:
+    return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
+
+
+def _drawable_count(elem: ET.Element) -> int:
+    return sum(1 for e in elem.iter() if _local(e.tag) in DRAWABLE)
+
+
+def _xml_size(elem: ET.Element) -> int:
+    if not any(item.get(SOURCE_REF_ATTRIBUTE) for item in elem.iter()):
+        ET.register_namespace("", SVG_NS)
+        ET.register_namespace("xlink", XLINK_NS)
+        return len(ET.tostring(elem, encoding="utf-8"))
+    measured = copy.deepcopy(elem)
+    for item in measured.iter():
+        item.attrib.pop(SOURCE_REF_ATTRIBUTE, None)
+    ET.register_namespace("", SVG_NS)
+    ET.register_namespace("xlink", XLINK_NS)
+    return len(ET.tostring(measured, encoding="utf-8"))
+
+
+def _large_enough(elem: ET.Element, min_drawables: int, min_bytes: int) -> bool:
+    return _drawable_count(elem) >= min_drawables or _xml_size(elem) >= min_bytes
+
+
+def _has_semantic_content(elem: ET.Element) -> bool:

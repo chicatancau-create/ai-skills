@@ -1,0 +1,37 @@
+        self.assertEqual(ctx.trace_events[-1]["output_geometry"], "group")
+        self.assertEqual(ctx.trace_events[-1]["fidelity"], "visual-only")
+
+    def test_nested_transformed_group_includes_outlying_companion(self) -> None:
+        for explicit in (True, False):
+            with self.subTest(explicit=explicit):
+                outer = ET.Element(f"{{{SVG_NS}}}g", {
+                    "id": "section", "transform": "translate(10 20) scale(2)",
+                })
+                payload = _payload(notes=[{
+                    "text": "Outside", "x": 1100, "y": 700, "width": 100, "height": 30,
+                }])
+                if not explicit:
+                    for key in ("x", "y", "width", "height"):
+                        payload.pop(key)
+                elem = _marker(payload)
+                if not explicit:
+                    elem.attrib.pop("data-pptx-native-authority")
+                    elem.remove(elem.find(f"{{{SVG_NS}}}text"))
+                    stamp_native_fallback_baseline(elem)
+                outer.append(elem)
+                result, root, ctx = self._convert(outer)
+                group = root[0]
+                self.assertEqual(ctx.anim_targets, [(_shape_id(group), "section")])
+                self.assertEqual(len(root.findall(".//p:grpSp", NS)), 2)
+                frame = group.find(".//p:graphicFrame", NS)
+                # Explicit payload boxes are already in slide coordinates;
+                # inferred fallback bounds consume the ancestor transform.
+                frame_box = (100, 80, 500, 320) if explicit else (210, 180, 1010, 660)
+                self.assertEqual(_box(frame, "p:xfrm"), tuple(v * EMU_PER_PX for v in frame_box))
+                expected = tuple(v * EMU_PER_PX for v in (*frame_box[:2], 1200, 730))
+                self.assertEqual(result.bounds_emu, expected)
+                self.assertEqual(_box(group, "p:grpSpPr/a:xfrm"), expected)
+
+
+if __name__ == "__main__":
+    unittest.main()

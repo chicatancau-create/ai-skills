@@ -1,0 +1,105 @@
+            f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
+        )
+    for master_key, master_part in master_parts_by_key.items():
+        payload = payloads_by_key[master_key]
+        _validate_source_theme_xml(payload)
+        master_rels = _relationships_path_for_part(extract_dir, master_part)
+        targets = [
+            attrs["Target"]
+            for attrs in _read_relationships(master_rels).values()
+            if attrs.get("Type") == THEME_REL_TYPE and attrs.get("Target")
+        ]
+        if len(targets) != 1:
+            raise ThemeColorError(
+                f"Structured Master {master_key!r} must own one Theme relationship"
+            )
+        theme_part = _resolve_package_target(master_part, targets[0])
+        theme_path = extract_dir / theme_part
+        if not theme_path.is_file():
+            raise ThemeColorError(
+                f"Structured Master {master_key!r} Theme part is missing: {theme_part}"
+            )
+        theme_path.write_bytes(payload)
+
+
+def _install_source_embedded_fonts(
+    extract_dir: Path,
+    bundle: EmbeddedFontBundle,
+) -> tuple[str, ...]:
+    """Install validated source font parts into the generated PPTX package."""
+    typefaces = embedded_font_typefaces(bundle)
+    try:
+        font_list = ET.fromstring(bundle.font_list_xml)
+    except ET.ParseError as exc:
+        raise EmbeddedFontError(
+            f"Embedded font list XML is malformed: {exc}"
+        ) from exc
+
+    ppt_dir = extract_dir / "ppt"
+    presentation_path = ppt_dir / "presentation.xml"
+    presentation_rels_path = ppt_dir / "_rels" / "presentation.xml.rels"
+    presentation_tree = ET.parse(presentation_path)
+    presentation_root = presentation_tree.getroot()
+    rels_tree = ET.parse(presentation_rels_path)
+    rels_root = rels_tree.getroot()
+
+    fonts_dir = ppt_dir / "fonts"
+    fonts_dir.mkdir(exist_ok=True)
+    for relationship in list(rels_root):
+        if relationship.attrib.get("Type") != FONT_REL_TYPE:
+            continue
+        target = relationship.attrib.get("Target", "")
+        target_path = PurePosixPath(target)
+        if (
+            not target_path.is_absolute()
+            and target_path.parts[:1] == ("fonts",)
+            and target_path.suffix.lower() == ".fntdata"
+        ):
+            candidate = ppt_dir.joinpath(*target_path.parts)
+            if candidate.is_file():
+                candidate.unlink()
+        rels_root.remove(relationship)
+
+    rid_numbers = [
+        int(match.group(1))
+        for relationship in rels_root
+        if (match := re.fullmatch(
+            r"rId(\d+)",
+            relationship.attrib.get("Id", ""),
+        ))
+    ]
+    next_rid = max(rid_numbers, default=0) + 1
+    relationship_mapping: dict[str, str] = {}
+    for index, part in enumerate(bundle.parts, start=1):
+        filename = f"font{index}.fntdata"
+        (fonts_dir / filename).write_bytes(part.payload)
+        relationship_id = f"rId{next_rid}"
+        next_rid += 1
+        ET.SubElement(
+            rels_root,
+            f"{{{PACKAGE_REL_NS}}}Relationship",
+            {
+                "Id": relationship_id,
+                "Type": FONT_REL_TYPE,
+                "Target": f"fonts/{filename}",
+            },
+        )
+        relationship_mapping[part.relationship_id] = relationship_id
+
+    for node in font_list.iter():
+        relationship_attr = f"{{{EMBEDDED_FONT_REL_NS}}}id"
+        original_id = node.attrib.get(relationship_attr)
+        if original_id is None:
+            continue
+        replacement_id = relationship_mapping.get(original_id)
+        if replacement_id is None:
+            raise EmbeddedFontError(
+                f"Embedded font list references an unknown part: {original_id}"
+            )
+        node.set(relationship_attr, replacement_id)
+
+    existing = presentation_root.find(
+        f"{{{EMBEDDED_FONT_PML_NS}}}embeddedFontLst"
+    )
+    if existing is not None:
+        insertion_index = list(presentation_root).index(existing)

@@ -1,0 +1,88 @@
+                    f"{markdown_name} schema: section '{section_id}' is missing field "
+                    f"'{field_name}'"
+                )
+            elif (
+                field_key not in allow_empty
+                and not _normalize_schema_value(str(fields[field_key]))
+            ):
+                errors.append(
+                    f"{markdown_name} schema: section '{section_id}' field "
+                    f"'{field_name}' must not be empty"
+                )
+
+    allowed_fields = definition.get("allowed_fields")
+    if isinstance(allowed_fields, list):
+        allowed = {str(field_name) for field_name in allowed_fields}
+        for field_name in fields:
+            if field_name not in allowed:
+                errors.append(
+                    f"{markdown_name} schema: section '{section_id}' has unknown "
+                    f"field '{field_name}'"
+                )
+
+    field_enums = definition.get("field_enums", {})
+    if isinstance(field_enums, dict):
+        for field_name, allowed in field_enums.items():
+            field_key = str(field_name)
+            if field_key not in fields or not isinstance(allowed, list):
+                continue
+            value = _normalize_schema_value(str(fields[field_key]))
+            if value not in [str(item) for item in allowed]:
+                errors.append(
+                    f"{markdown_name} schema: section '{section_id}' field "
+                    f"'{field_name}' has illegal value '{value}'"
+                )
+
+    field_patterns = definition.get("field_patterns", {})
+    if isinstance(field_patterns, dict):
+        for field_name, pattern in field_patterns.items():
+            field_key = str(field_name)
+            if field_key not in fields:
+                continue
+            value = _normalize_schema_value(str(fields[field_key]))
+            if re.fullmatch(str(pattern), value) is None:
+                errors.append(
+                    f"{markdown_name} schema: section '{section_id}' field "
+                    f"'{field_name}' does not match '{pattern}'"
+                )
+
+    field_value_rules = definition.get("field_value_rules", [])
+    if isinstance(field_value_rules, list):
+        for rule in field_value_rules:
+            if not isinstance(rule, dict):
+                continue
+            key_pattern = rule.get("key_pattern")
+            value_pattern = rule.get("value_pattern")
+            if not isinstance(key_pattern, str) or not isinstance(
+                value_pattern, str
+            ):
+                continue
+            requirement = str(rule.get("requirement", "match its value grammar"))
+            for field_name, raw_value in fields.items():
+                if re.fullmatch(key_pattern, str(field_name)) is None:
+                    continue
+                value = str(raw_value).strip()
+                if bool(rule.get("normalize", True)):
+                    value = _normalize_schema_value(value)
+                value_matches = re.fullmatch(value_pattern, value) is not None
+                if value_matches and rule.get("numeric") == "positive_finite":
+                    try:
+                        number = float(value)
+                    except ValueError:
+                        value_matches = False
+                    else:
+                        value_matches = math.isfinite(number) and number > 0
+                if not value_matches:
+                    errors.append(
+                        f"{markdown_name} schema: section '{section_id}' field "
+                        f"'{field_name}' must {requirement}; found '{value}'"
+                    )
+
+    minimum = definition.get("min_entries")
+    if isinstance(minimum, int) and len(fields) < minimum:
+        errors.append(
+            f"{markdown_name} schema: section '{section_id}' needs at least "
+            f"{minimum} data line(s)"
+        )
+
+    min_body_chars = definition.get("min_body_chars")

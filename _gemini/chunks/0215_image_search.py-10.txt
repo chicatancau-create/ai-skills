@@ -1,0 +1,95 @@
+    provider_errors: list[str] = []
+    download_errors: list[str] = []
+    quality_rejections = 0
+    request_variants = _search_request_variants(request)
+    scorer = score_review_candidate if save_candidates else score_candidate
+
+    for stage in license_filters:
+        ranked: list[tuple[float, str, AssetCandidate]] = []
+        for provider_name in providers:
+            provider_ranked: list[tuple[float, str, AssetCandidate]] = []
+            for query_request in request_variants:
+                print(
+                    f"  -> trying {provider_name} ({stage}): "
+                    f"{query_request.query!r}",
+                    file=sys.stderr,
+                )
+                candidates, provider_error = _try_provider(
+                    provider_name,
+                    query_request,
+                    stage,
+                    provider_is_explicit=provider_is_explicit,
+                )
+                if provider_error:
+                    provider_errors.append(provider_error)
+                    break
+                if candidates is None:
+                    break
+                for candidate in candidates:
+                    candidate.discovery_query = query_request.query
+                    score = scorer(candidate, query_request)
+                    if score != float("-inf"):
+                        provider_ranked.append(
+                            (score, provider_name, candidate)
+                        )
+            if not provider_ranked:
+                reason = "query"
+                if request.required_terms:
+                    reason += f" / required_terms={list(request.required_terms)}"
+                print(
+                    f"    no candidate matched {reason}; trying next provider/stage",
+                    file=sys.stderr,
+                )
+                continue
+            ranked.extend(provider_ranked)
+
+        sorted_ranked = _dedupe_ranked_candidates(ranked)
+
+        # --- Thumbnail-only visual selection (no original download) ---
+        if save_candidates and sorted_ranked:
+            stem = Path(output_path).stem
+            try:
+                (
+                    pool,
+                    review_sheet,
+                    preview_errors,
+                    candidate_total,
+                    has_more_candidates,
+                ) = _save_candidate_thumbnails(
+                    sorted_ranked,
+                    output_path.parent,
+                    stem,
+                    request,
+                    stage,
+                    max_candidates=max_candidates,
+                    candidate_page=candidate_page,
+                )
+            except Exception as exc:
+                if not _is_recoverable_image_error(exc):
+                    raise
+                print(
+                    f"  warning: candidate pool could not be saved: {exc}",
+                    file=sys.stderr,
+                )
+            else:
+                download_errors.extend(preview_errors)
+                if pool:
+                    return SearchDownloadResult(
+                        stage=stage,
+                        output_path=output_path,
+                        selection_required=True,
+                        candidate_count=len(pool),
+                        candidate_total=candidate_total,
+                        candidate_page=candidate_page,
+                        has_more_candidates=has_more_candidates,
+                        review_sheet=review_sheet,
+                    )
+                if candidate_total and not preview_errors:
+                    return SearchDownloadResult(
+                        stage=stage,
+                        output_path=output_path,
+                        candidate_total=candidate_total,
+                        candidate_page=candidate_page,
+                        failure_kind=SEARCH_FAILURE_NO_MATCH,
+                        error=(
+                            f"candidate page {candidate_page} is past the "

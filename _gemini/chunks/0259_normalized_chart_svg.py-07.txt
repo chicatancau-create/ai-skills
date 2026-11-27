@@ -1,0 +1,97 @@
+            labels = _point_data_labels(payload, item, idx)
+            if labels:
+                value = float(item["values"][idx])
+                start, end = row[idx]
+                normalized_percent = end - start if percent else None
+                label = _data_label(
+                    labels,
+                    str(item.get("name") or ""),
+                    categories[idx],
+                    value,
+                    percent_value=normalized_percent,
+                )
+                if label:
+                    parts.append(_text(
+                        x,
+                        y - 5.0,
+                        label,
+                        size=_label_font_size(labels, label_size),
+                        anchor="middle",
+                        fill=_entry_color(labels, "#444444"),
+                        weight="600" if labels.get("bold") else None,
+                        font_family=str(labels.get("font_family") or "Arial"),
+                    ))
+    return parts
+
+
+def _render_pie(
+    payload: dict[str, Any],
+    styles: list[SeriesVisualStyle],
+    content: _Rect,
+    doughnut: bool,
+) -> list[str]:
+    categories = [str(value) for value in payload.get("categories") or []]
+    series = payload.get("series") or []
+    if not categories or len(series) != 1:
+        return []
+    values = [abs(float(value)) for value in series[0].get("values") or []]
+    total = sum(values)
+    styles = _complete_styles(styles, len(categories))
+    label_size = max(6.0, min(10.0, content.h * 0.035, content.w * 0.018))
+    radius = max(5.0, min(content.w, content.h) * 0.34)
+    inner_radius = radius * (
+        float(payload.get("hole_size", 75)) / 100.0
+        if doughnut
+        else 0.0
+    )
+    cx = content.x + content.w / 2
+    cy = content.y + content.h / 2
+    if total <= 0:
+        parts = [
+            f'<circle cx="{_fmt(cx)}" cy="{_fmt(cy)}" r="{_fmt(radius)}" '
+            'fill="none" stroke="#B8C0CC" stroke-width="1.2" stroke-dasharray="4 3"/>'
+        ]
+        if doughnut:
+            parts.append(
+                f'<circle cx="{_fmt(cx)}" cy="{_fmt(cy)}" r="{_fmt(inner_radius)}" '
+                'fill="none" stroke="#D5DAE1" stroke-width="1"/>'
+            )
+        parts.append(
+            _text(cx, cy + label_size * 0.32, "0", size=label_size, anchor="middle")
+        )
+        return parts
+    parts: list[str] = []
+    angle = -math.pi / 2
+    for idx, (category, value, style) in enumerate(zip(categories, values, styles)):
+        sweep = math.tau * value / total
+        end = angle + sweep
+        # Pie styles are completed before rendering, so ``None`` here means
+        # the source explicitly used ``noFill`` rather than an absent style.
+        fill = style.fill or "none"
+        stroke = style.stroke or "none"
+        if sweep >= math.tau - 1e-9:
+            if doughnut:
+                path = _full_ring_path(cx, cy, radius, inner_radius)
+                parts.append(
+                    f'<path d="{path}" fill="{fill}" fill-opacity="{_fmt(style.fill_opacity)}" '
+                    f'stroke="{stroke}" stroke-width="{_fmt(max(0.6, style.stroke_width))}" '
+                    'fill-rule="evenodd"/>'
+                )
+            else:
+                parts.append(
+                    f'<circle cx="{_fmt(cx)}" cy="{_fmt(cy)}" r="{_fmt(radius)}" '
+                    f'fill="{fill}" fill-opacity="{_fmt(style.fill_opacity)}" '
+                    f'stroke="{stroke}" stroke-width="{_fmt(max(0.6, style.stroke_width))}"/>'
+                )
+        else:
+            path = _sector_path(
+                cx,
+                cy,
+                radius,
+                angle,
+                end,
+                inner_radius,
+            )
+            parts.append(
+                f'<path d="{path}" fill="{fill}" fill-opacity="{_fmt(style.fill_opacity)}" '
+                f'stroke="{stroke}" stroke-opacity="{_fmt(style.stroke_opacity)}" '

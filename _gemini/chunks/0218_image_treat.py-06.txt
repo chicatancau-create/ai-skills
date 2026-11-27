@@ -1,0 +1,65 @@
+        except FileExistsError as exc:
+            raise RuntimeError(
+                f"output appeared during processing and will not be replaced: {output_path}"
+            ) from exc
+        if provenance_item is not None:
+            try:
+                if not _is_staged_output(temporary_path, output_path):
+                    raise RuntimeError(
+                        f"installed output changed before provenance commit: {output_path}"
+                    )
+                _assert_manifest_output_absent(manifest_path, output_path.name)
+                _write_sources_manifest(manifest_path, provenance_item)
+            except Exception as exc:
+                try:
+                    if _is_staged_output(temporary_path, output_path):
+                        output_path.unlink()
+                except OSError as cleanup_exc:
+                    raise RuntimeError(
+                        f"manifest update failed and output rollback also failed: {cleanup_exc}"
+                    ) from exc
+                raise RuntimeError(f"manifest update failed; output was rolled back: {exc}") from exc
+    finally:
+        try:
+            temporary_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        images_path, source_path, output_path = _resolve_paths(
+            args.project_path,
+            args.source,
+            args.output,
+        )
+        args.output_format = (
+            "JPEG" if output_path.suffix.casefold() in {".jpg", ".jpeg"} else "PNG"
+        )
+        treatments = _treatment_plan(args)
+        manifest_path = images_path / "image_sources.json"
+        provenance_item = _prepare_provenance(
+            manifest_path,
+            args.source,
+            args.output,
+            treatments,
+        )
+        _write_derivative(
+            source_path,
+            output_path,
+            manifest_path,
+            provenance_item,
+            args,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    print(output_path)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,53 @@
+            "Embedded font fontListOoxml requires payload and sha256"
+        )
+    try:
+        font_list_xml = base64.b64decode(payload_value, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise EmbeddedFontError(
+            "Embedded font fontListOoxml payload is invalid base64"
+        ) from exc
+    if hashlib.sha256(font_list_xml).hexdigest() != digest.lower():
+        raise EmbeddedFontError(
+            "Embedded font fontListOoxml checksum does not match"
+        )
+    raw_parts = manifest.get("parts")
+    if not isinstance(raw_parts, list) or not raw_parts:
+        raise EmbeddedFontError("Embedded font manifest has no parts")
+    parts: list[EmbeddedFontPart] = []
+    for entry in raw_parts:
+        if not isinstance(entry, dict):
+            raise EmbeddedFontError(
+                "Embedded font manifest part entries must be objects"
+            )
+        relationship_id = entry.get("relationshipId")
+        expected_digest = entry.get("sha256")
+        if not isinstance(relationship_id, str) or not relationship_id:
+            raise EmbeddedFontError(
+                "Embedded font manifest part requires relationshipId"
+            )
+        if not isinstance(expected_digest, str):
+            raise EmbeddedFontError(
+                "Embedded font manifest part requires sha256"
+            )
+        part_path = _safe_workspace_path(project_root, entry.get("path"))
+        payload = part_path.read_bytes()
+        if hashlib.sha256(payload).hexdigest() != expected_digest.lower():
+            raise EmbeddedFontError(
+                f"Embedded font payload checksum does not match: {part_path}"
+            )
+        parts.append(EmbeddedFontPart(
+            relationship_id=relationship_id,
+            filename=part_path.name,
+            payload=payload,
+        ))
+    bundle = EmbeddedFontBundle(
+        font_list_xml=font_list_xml,
+        parts=tuple(parts),
+    )
+    _validate_bundle(bundle)
+    expected_count = descriptor.get("partCount")
+    if expected_count is not None and expected_count != len(parts):
+        raise EmbeddedFontError(
+            "Embedded font report partCount does not match the manifest"
+        )
+    return bundle

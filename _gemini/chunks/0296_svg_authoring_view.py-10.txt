@@ -1,0 +1,118 @@
+            references.update(match.group(2) for match in _URL_ID_RE.finditer(value))
+            if _local_name(name) == "href" and value.startswith("#"):
+                references.add(value[1:])
+        if item.text:
+            references.update(
+                match.group(2) for match in _URL_ID_RE.finditer(item.text)
+            )
+    return references
+
+
+def _definition_closure(
+    root: ET.Element,
+    content: list[ET.Element],
+) -> tuple[list[ET.Element], set[int]]:
+    definitions = [
+        child for child in root
+        if _local_name(child.tag) == "defs"
+    ]
+    owner_by_id: dict[str, ET.Element] = {}
+    for definitions_root in definitions:
+        for child in definitions_root:
+            for item in child.iter():
+                definition_id = item.get("id")
+                if definition_id:
+                    owner_by_id.setdefault(definition_id, child)
+
+    required_ids: set[str] = set()
+    pending = [
+        reference
+        for element in content
+        for reference in _definition_references(element)
+    ]
+    selected_owners: set[int] = set()
+    while pending:
+        definition_id = pending.pop()
+        if definition_id in required_ids:
+            continue
+        required_ids.add(definition_id)
+        owner = owner_by_id.get(definition_id)
+        if owner is None or id(owner) in selected_owners:
+            continue
+        selected_owners.add(id(owner))
+        pending.extend(_definition_references(owner) - required_ids)
+    return definitions, selected_owners
+
+
+def _selected_definitions(
+    root: ET.Element,
+    content: list[ET.Element],
+) -> list[ET.Element]:
+    definitions, selected_owners = _definition_closure(root, content)
+    selected: list[ET.Element] = []
+    for definitions_root in definitions:
+        clone = ET.Element(definitions_root.tag, dict(definitions_root.attrib))
+        clone.text = definitions_root.text
+        for child in definitions_root:
+            always_keep = _local_name(child.tag) == "style" or not child.get("id")
+            if always_keep or id(child) in selected_owners:
+                clone.append(copy.deepcopy(child))
+        if list(clone) or (clone.text and clone.text.strip()):
+            selected.append(clone)
+    return selected
+
+
+def _prune_unreferenced_definitions(
+    root: ET.Element,
+    stats: ProjectionStats,
+) -> None:
+    definitions = [
+        child for child in root
+        if _local_name(child.tag) == "defs"
+    ]
+    if not definitions:
+        return
+    visible_content = [child for child in root if child not in definitions]
+    _, selected_owners = _definition_closure(root, visible_content)
+    for definitions_root in definitions:
+        for child in list(definitions_root):
+            always_keep = _local_name(child.tag) == "style" or not child.get("id")
+            if always_keep or id(child) in selected_owners:
+                continue
+            definitions_root.remove(child)
+            stats.unused_definitions_pruned += 1
+        if not list(definitions_root) and not (
+            definitions_root.text and definitions_root.text.strip()
+        ):
+            root.remove(definitions_root)
+
+
+def _proxy_canvas_attributes(root: ET.Element) -> dict[str, str]:
+    view_box = (root.get("viewBox") or "").split()
+    if len(view_box) == 4:
+        x, y, width, height = view_box
+    else:
+        x = y = "0"
+        width = root.get("width") or "1"
+        height = root.get("height") or "1"
+    return {
+        "x": x,
+        "y": y,
+        "width": width,
+        "height": height,
+        "preserveAspectRatio": "none",
+    }
+
+
+def _source_proxy_asset_bytes(
+    root: ET.Element,
+    element: ET.Element,
+    authoring_dir: Path,
+    proxy_dir: Path,
+    stats: ProjectionStats,
+    *,
+    strip_element_transform: bool = False,
+) -> bytes:
+    asset_root = ET.Element(root.tag, dict(root.attrib))
+    for definitions in _selected_definitions(root, [element]):
+        asset_root.append(definitions)

@@ -1,0 +1,110 @@
+        text = design_spec.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = _AI_IMAGE_PATH_ROW_RE.search(text)
+    if not match:
+        return None
+    value = match.group(1).strip().lstrip("`*_ ").strip()
+    token_match = re.match(
+        r"^(host[\s_-]*native|api|auto|manual)(?![A-Za-z0-9_-])",
+        value,
+        re.IGNORECASE,
+    )
+    selected = token_match.group(1) if token_match else value
+    return re.sub(r"[\s_]+", "-", selected.strip().lower())
+
+
+def _guard_confirmed_non_api_path(manifest_path: str) -> None:
+    """Allow project Path A only when its Design Spec explicitly permits it."""
+    design_spec = _project_design_spec_for_manifest(manifest_path)
+    if design_spec is None:
+        return
+    acquisition_path = _confirmed_image_acquisition_path_for_manifest(manifest_path)
+    if acquisition_path not in VALID_AI_IMAGE_ACQUISITION_PATHS:
+        shown = acquisition_path or "(missing)"
+        valid = ", ".join(sorted(VALID_AI_IMAGE_ACQUISITION_PATHS))
+        print(
+            "Error: project manifest mode requires a valid "
+            "AI Image Acquisition Path in design_spec.md §I.\n"
+            f"Found: {shown!r}. Valid values: {valid}.\n"
+            "Return to Generate Step 4 recovery and record the durable "
+            "selection before running Path A."
+        )
+        sys.exit(1)
+    if acquisition_path in {"api", "auto"}:
+        return
+    if acquisition_path == "host-native":
+        print(
+            "Error: Design Spec confirms AI Image Acquisition Path as 'host-native'.\n"
+            "\n"
+            "Do NOT run image_gen.py --manifest for this project. That command is Path A\n"
+            "and may use the configured API/proxy backend. Use the host's native image\n"
+            "generation tool with prompts from images/image_prompts.json, save outputs to\n"
+            "images/<filename>, update each item status to Generated, then run:\n"
+            "  python3 scripts/image_gen.py --render-md images/image_prompts.json\n"
+        )
+    else:
+        print(
+            "Error: Design Spec confirms AI Image Acquisition Path as 'manual'.\n"
+            "\n"
+            "Do NOT run image_gen.py --manifest for this project. Render the Markdown\n"
+            "sidecar and hand images/image_prompts.md to the user for external generation:\n"
+            "  python3 scripts/image_gen.py --render-md images/image_prompts.json\n"
+        )
+    sys.exit(1)
+
+
+DEFAULT_MANIFEST_CONCURRENCY = 3
+MAX_MANIFEST_RATE_LIMIT_ATTEMPTS = 3
+
+STATUS_PENDING = "Pending"
+STATUS_GENERATED = "Generated"
+STATUS_FAILED = "Failed"
+STATUS_NEEDS_MANUAL = "Needs-Manual"
+VALID_STATUSES = {STATUS_PENDING, STATUS_GENERATED, STATUS_FAILED, STATUS_NEEDS_MANUAL}
+RETRYABLE_STATUSES = {STATUS_PENDING, STATUS_FAILED}
+REQUIRED_ITEM_FIELDS = ("filename", "prompt", "aspect_ratio", "status")
+VALID_PAGE_ROLES = {"local", "hero_page", "full_page"}
+VALID_TEXT_POLICIES = {"none", "embedded"}
+STRUCTURAL_IMAGE_TYPES = {
+    "infographic",
+    "flowchart",
+    "framework",
+    "matrix",
+    "cycle",
+    "funnel",
+    "pyramid",
+    "comparison",
+    "timeline",
+    "map",
+    "scene",
+}
+LEGACY_IMAGE_TYPES = {"background", "hero", "portrait", "typography"}
+EARLY_LEGACY_IMAGE_TYPES = {"illustration", "photography"}
+SHEET_TYPE_SPELLINGS = {"illustration sheet", "sheet"}
+VALID_IMAGE_TYPES = (
+    STRUCTURAL_IMAGE_TYPES
+    | LEGACY_IMAGE_TYPES
+    | EARLY_LEGACY_IMAGE_TYPES
+)
+
+
+def _validate_bare_output_name(
+    value: str,
+    *,
+    field_name: str,
+    require_extension: bool = False,
+    reject_parent_marker: bool = False,
+) -> Path:
+    """Require one cross-platform-safe basename, optionally with an extension."""
+    value_path = Path(value)
+    if (
+        not value.strip()
+        or value in {".", ".."}
+        or reject_parent_marker and ".." in value
+        or "/" in value
+        or "\\" in value
+        or ":" in value
+        or value_path.is_absolute()
+        or value_path.name != value
+    ):

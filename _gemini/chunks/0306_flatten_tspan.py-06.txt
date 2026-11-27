@@ -1,0 +1,106 @@
+        try:
+            extra = next(extras_iter)
+            break_kind = next(break_iter)
+        except StopIteration:
+            extra = 0.0
+            break_kind = "paragraph"
+        if break_kind == "soft":
+            tspan.set(PARAGRAPH_SOFT_BREAK_ATTR, "1")
+        elif break_kind == "line":
+            tspan.set(PARAGRAPH_LINE_BREAK_ATTR, "1")
+        elif extra > 1e-6:
+            tspan.set(PARAGRAPH_SPACE_BEFORE_ATTR, format_number(extra))
+
+
+def flatten_text_with_tspans(
+    tree: ET.ElementTree,
+    merge_paragraphs: bool = False,
+    preserve_line_breaks: bool = False,
+) -> bool:
+    """Flatten multi-line tspan text into independent text nodes when needed.
+
+    When ``merge_paragraphs`` is True, mergeable paragraph blocks (same x,
+    dy clustered around one base line-height) are kept as a single <text>.
+    ``preserve_line_breaks`` marks ordinary visual rows as hard line breaks
+    instead of reflowable continuations. Default split behavior still promotes
+    every positioned row to its own <text>.
+    """
+    root = tree.getroot()
+    positional_errors = nested_positional_tspan_errors(root)
+    if positional_errors:
+        preview = "; ".join(positional_errors[:3])
+        suffix = (
+            ""
+            if len(positional_errors) <= 3
+            else f"; +{len(positional_errors) - 3} more"
+        )
+        raise ValueError(f"Unsupported nested positional <tspan>: {preview}{suffix}")
+    parent_map = {c: p for p in root.iter() for c in p}
+    changed = False
+
+    # Collect candidates first to avoid modifying while iterating
+    candidates = []
+    for el in root.iter():
+        if _is_svg_tag(el, "text"):
+            has_tspan_child = any(_is_svg_tag(c, "tspan") for c in list(el))
+            if has_tspan_child:
+                candidates.append(el)
+
+    for text_el in candidates:
+        parent = parent_map.get(text_el)
+        if parent is None:
+            continue
+
+        # First check whether any tspan needs flattening (dy != 0 or has its own y attribute)
+        needs_flatten = False
+        for child in list(text_el):
+            if not _is_svg_tag(child, "tspan"):
+                continue
+            if _is_new_line_tspan(child):
+                needs_flatten = True
+                break
+        
+        # If no tspan needs a line break, skip the entire text element
+        if not needs_flatten:
+            continue
+
+        # Single-frame fast path: conservative same-x/dy blocks stay in one
+        # <text>. The downstream converter either preserves visual breaks or
+        # reflows them. Split mode promotes each positioned line to <text>.
+        if merge_paragraphs:
+            paragraph = classify_paragraph_block(
+                text_el,
+                preserve_line_breaks=preserve_line_breaks,
+            )
+            if paragraph is not None:
+                base_dy, extras, break_kinds, line_groups, synthetic_first = paragraph
+                _emit_mergeable_paragraph(
+                    text_el,
+                    base_dy,
+                    extras,
+                    break_kinds,
+                    line_groups,
+                    synthetic_first=synthetic_first,
+                )
+                changed = True
+                continue
+
+        base_x = parse_first_number(get_attr(text_el, "x")) or 0.0
+        base_y = parse_first_number(get_attr(text_el, "y")) or 0.0
+        cur_x, cur_y = base_x, base_y
+
+        new_texts = []
+        
+        # Collect tspan elements belonging to the same line
+        current_line_tspans = []
+        current_line_lead_text = text_el.text or None
+        
+        for idx, child in enumerate(list(text_el)):
+            if not _is_svg_tag(child, "tspan"):
+                continue
+
+            content = collect_text_content(child)
+            
+            # Check whether this tspan starts a new line
+            if _is_new_line_tspan(child):
+                # Save previously accumulated same-line tspans first

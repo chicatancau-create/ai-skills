@@ -1,0 +1,23 @@
+「网络老出问题」的分层归因：把 `WLAN-AutoConfig/Operational` 的 8001/8002/8011 与 `Microsoft-Windows-Power-Troubleshooter` Id=1（唤醒）逐条对时刻——**贴着唤醒的重连是正常形态**（本机 7 天 18 次唤醒、7 天 385 条 WLAN 事件），不贴唤醒而贴着 `System 10002 WLAN 扩展模块已停止` / `NDIS 10400 硬件停止响应` 的才要查，再看它贴着哪个第三方软件的操作时间。本机 MT7922 高级属性 `LowPowerEnable=Auto`、`RoamIndicateTh=5.中高` 与小米 USB 共享上网（`USB\VID_2717&PID_FF88`）重置 10 次，是两条**未动、待用户定**的候选（关节能会增耗电）。详见手册 `03-通用\03-调试与验证\踩坑-杀软断网修复清零系统代理且StateListen过滤假报端口死.md`。
+
+**2026-11-06 追加（同日第二次）：网页「第一次打不开、刷新就好」= 非默认网卡上写死的手动 DNS 被系统当默认服务器。** 本机 Radmin VPN(idx8) 注册表 `NameServer=192.168.0.1,192.168.40.187`，两个地址原始 UDP 探测 2.5s 超时，而 Windows 选路就是先用它 —— **每个未缓存域名先白等 12.0 秒**（Dnscache 重试节奏），已缓存的 5~12ms，所以症状看着是"偶发"。清掉后同一测量 **5~29ms**，经代理 github 从 3.3~5.2s 降到 1.24s。
+- **判据两条**：① `nslookup` 不带服务器时打印的 `Address:` 行才是"系统实际在用谁"（`ipconfig`/`Get-DnsClientServerAddress` 只按网卡列各自登记值，看不出优先序）；② 一条对照定层：`Resolve-DnsName X` 12,053ms vs `Resolve-DnsName X -Server 192.168.55.131` **5ms**，唯一差别是指不指定服务器 ⇒ 别再往服务器/链路/防火墙上找。
+- **只用 `Set-DnsClientServerAddress -InterfaceIndex N -ResetServerAddresses`；`-ServerAddresses @()` 是静默空操作**（我第一遍就这么"修完"了还以为假设错）。三条边界：默认出口网卡的 DNS 不应答也不碰（清了等于一个都不剩）、DHCP 下发的死地址不碰（本机 以太网2 现在就是，要改路由器）、只清注册表 `Interfaces\<GUID>\NameServer` 里真有手动值的。
+- **本机 `netstat` 把 mihomo 的监听报成 `CLOSED`**（与 `-State Listen` 恒回空同源）⇒ 判端口死活唯一可靠的是真 `TcpClient.BeginConnect('127.0.0.1',N)` 连一次；用户的 `fix-network.bat` v2.0 长期因此误报"端口没人监听"，已随 v2.1 改掉。
+- 那次「网卡节能优化」**没落地**：powercfg 的 GUID/标签解析没匹配上，脚本自己打了"本次不改"，前后 3.42s / 3.63s 无差异 ⇒ `LowPowerEnable=Auto`、`RoamIndicateTh=5.中高` 仍是未动项，别当已优化。
+- 详见手册 `03-通用\03-调试与验证\踩坑-非默认网卡写死的手动DNS被系统当默认服务器致冷解析12秒.md`。
+
+**2026-11-11 追加：Clash Verge「主程序退出、系统代理仍开」= 全网 2 秒失败；机场订阅 TLS EOF 时用 DIRECT 规则保底。** 本机实测链路：
+- 现象：所有走系统代理的软件全部失败（每个请求约 2s），但直连中转站 200。查进程只剩 `clash-verge-service.exe`，`clash-verge.exe` 已退出，7897 实连 CLOSED，而注册表 `ProxyEnable=1`。**判据：代理坏先看主程序是否在跑，不要只看服务/端口历史状态**；拉起 `D:\Clash Verge\clash-verge.exe` 后端口与代理链路立即恢复。
+- 机场：当前订阅 `app.mitce.net` 直连与走代理都 `tls handshake eof`，所有节点延迟测试失败，`25 provider caches were not synced`。此时在**当前订阅的 merge 文件**（`%APPDATA%\io.github.clash-verge-rev.clash-verge-rev\profiles\<uid>.yaml`）加 `prepend-rules: DOMAIN-SUFFIX,moyucccx.top,DIRECT`（Qoder 中转站）与 `qoder.sh`/`qoder.com`，重启主程序后 `curl -x 7897 https://moyucccx.top/` = 200，节点全挂也不影响 Qoder 模型调用（端到端 200、TTFB 3.2s、model 回显正确）。
+- **DoH 在 UDP 被限速的热点上会反向劣化**：给 223.5.5.5/223.6.6.6 配 `autoupgrade=yes udpfallback=yes` 后，冷解析一度 27–32s（DoH 引导也要先解析），撤销模板并 `-ResetServerAddresses` 回 DHCP 后恢复 36–74ms。⇒ 先测 UDP，别把 DoH 当默认优化。
+- 该网络是手机热点形态：网关 MAC 本地管理（`ea-ac-ad-db-c3-91`）、网关只开 TCP 53、公网 ICMP/UDP 大量丢而 TCP 正常；同时手机 USB 共享网卡报 NDIS 10400 硬件复位 **94 次**并导致重启。此类链路只能改善热点侧/换有线，本机无解。
+- `E:\DeskBox\VPN\fix-network.dns.ps1` 曾缺失（bat 的 DNS 选路与代理广播空转），已按 bat 标签协议补回。PowerShell 5.1 坑：`[byte[]]@(($id -shr 8) -band 0xff, $id -band 0xff, ...)` 会按逗号优先解析成 `Object[] -band` 报错，必须逐字节赋值；`VERDICT/NOTE` 要带 `code=` 前缀（bat 里 `!C:~5!` 会切掉 5 字符）。bat 已升 v2.2（GBK+CRLF 保持），新增中转站直连/走代理两项探测。
+
+**2026-11-11 再追加：「手机能用、电脑不能用」先查 PC 本地 Wi-Fi 扩展与代理内核，别信“节点全挂”。** 实测：同一机场/同一热点，手机正常、PC 全挂；事后同节点在 PC 上走代理 google/github 均 200 ⇒ 节点没问题，之前 Clash 内核测速的 `tls handshake eof` 是本地状态坏掉时的假象。
+- PC 侧硬证据：`WLAN-AutoConfig 10002 WLAN 扩展模块已停止`，模块 `C:\WINDOWS\system32\mtkihvx.dll`，`mtkwlex` 1033/8001 → 约 6 秒后 8000/1030 重载；同时 `11004`/`8003` 断开。一天内发生两次（10:05:47、10:47:43），是 Wi-Fi 硬断而非拥塞。查法：`Get-WinEvent System -ProviderName mtkwlex` + `WLAN-AutoConfig` 10002/11004/8003。
+- 同时 Clash 服务内核“端口未绑定”→ 主程序退出后系统代理仍开，所有请求打空端口。两层任一层都能造成“PC 全挂、手机正常”。干净重启让 mtkwlex 与内核重新加载后恢复；别把重启后的恢复误记为“机场恢复了”。
+- `UmiTun 4`（UmiVPN TUN）在两次 Wi-Fi 断之前 15 秒/更早出现过一次，只能算时间相关；同时开 Clash+Lantern+UmiVPN+WARP 服务会互踩 TUN/路由/DNS/过滤驱动，排障时保持只开一个。
+- 订阅更新返回 **403 Forbidden** 是机场拒绝更新请求（token/UA/风控），与断网无关，节点仍可用；不要拿它当网络故障证据。
+
+**2026-11-11 收尾：网络修复收敛为单文件 `E:\DeskBox\VPN\fix-network.bat` v2.3（自动识别 Clash Verge / FlClash）。** 用户已卸载 Clash Verge，改用 **FlClash**（`D:\FlClash`，端口 7890，配置 `%APPDATA%\com.follow\clash`）。

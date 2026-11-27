@@ -1,0 +1,109 @@
+def resolve_columns(args: argparse.Namespace) -> list[dict]:
+    if args.columns.strip():
+        cids = [c.strip() for c in args.columns.split(",") if c.strip()]
+        all_cols_payload = cmn.run_dws(["attendance", "report", "columns"])
+        all_cols = cmn.extract_records(all_cols_payload)
+        id_to_name: dict[str, str] = {}
+        for col in all_cols:
+            cid = cmn._first_nonempty(col, ("id", "columnId", "code", "key"))
+            name = cmn._first_nonempty(col, ("name", "columnName", "title", "label"))
+            if cid is not None:
+                id_to_name[str(cid)] = str(name) if name else str(cid)
+        return [{"_column_id": cid, "_column_name": id_to_name.get(cid, cid)}
+                for cid in cids]
+
+    keywords = (
+        [k.strip() for k in args.column_keywords.split(",") if k.strip()]
+        if args.column_keywords.strip()
+        else DEFAULT_KEYWORDS
+    )
+    cmn.log(f"[columns] 使用关键词匹配字段：{keywords}")
+    all_cols_payload = cmn.run_dws(["attendance", "report", "columns"])
+    all_cols = cmn.extract_records(all_cols_payload)
+    cmn.log(f"[columns] dws 返回 {len(all_cols)} 个字段")
+    matched = cmn.match_columns_by_keywords(all_cols, keywords)
+    if not matched:
+        raise RuntimeError(
+            f"未匹配到任何字段。可用字段示例："
+            f"{[cmn._first_nonempty(c, ('name','columnName','title','label')) for c in all_cols[:10]]}"
+        )
+    cmn.log(f"[columns] 匹配到 {len(matched)} 个字段：{[c['_column_name'] for c in matched]}")
+    return matched
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 接口调用（与 detail / monthly 一致）
+# ─────────────────────────────────────────────────────────────────────────────
+
+def query_one_batch(
+    user_batch: list[str],
+    column_ids: list[str],
+    date_slice: cmn.DateSlice,
+    stats: cmn.CallStats,
+    *,
+    column_id_to_name: dict[str, str] | None = None,
+    inspect: bool = False,
+    inspected_flag: list[bool] = None,
+) -> list[dict]:
+    cmn.log(
+        f"[query] users={len(user_batch)} cols={len(column_ids)} "
+        f"slice={date_slice.label}"
+    )
+    try:
+        payload = cmn.run_dws([
+            "attendance", "report", "query-data",
+            "--users", ",".join(user_batch),
+            "--columns", ",".join(column_ids),
+            "--start", date_slice.start_str,
+            "--end", date_slice.end_str,
+        ])
+        stats.total_dws_calls += 1
+    except cmn.DwsCallError as e:
+        stats.total_dws_calls += 1
+        stats.failed_calls += 1
+        if e.is_permission_error:
+            cmn.error(
+                "权限错误：当前账号无管理员权限，无法导出考勤报表。"
+                "请联系考勤管理员或换号重试。"
+            )
+            raise SystemExit(2) from e
+        stats.add_warning(f"[query failed] {date_slice.label}: {e}")
+        return []
+
+    records = cmn.extract_records(payload)
+    # 展平 report query-data 返回的嵌套 values 结构
+    records = cmn.flatten_query_data_records(records, column_id_to_name)
+    if inspect and records and inspected_flag is not None and not inspected_flag[0]:
+        cmn.dump_first_record_for_inspection(records, "query-data (flattened)")
+        inspected_flag[0] = True
+    return records
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 每日聚合
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _value_for_column(record: dict, col: dict) -> Any:
+    cname, cid = col["_column_name"], col["_column_id"]
+    for key in (cname, cid, f"col_{cid}", f"column_{cid}"):
+        if key in record:
+            return record[key]
+    return None
+
+
+def _try_number(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _user_id_of(record: dict) -> str | None:

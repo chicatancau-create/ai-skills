@@ -1,0 +1,88 @@
+        return
+    for child in children:
+        properties.remove(child)
+    for _, child in ordered:
+        properties.append(child)
+
+
+def _merged_properties(
+    default_properties: ET.Element,
+    local_properties: ET.Element | None,
+) -> ET.Element:
+    merged = deepcopy(default_properties)
+    if local_properties is None:
+        _normalize_child_order(merged)
+        return merged
+    local = deepcopy(local_properties)
+    _inherit_default_fill_alpha(merged, local)
+    merged.attrib.update(local.attrib)
+    _replace_child_group(merged, local, _FILL_TAGS)
+    for child in local:
+        if child.tag in _FILL_TAGS:
+            continue
+        for existing in list(merged):
+            if existing.tag == child.tag:
+                merged.remove(existing)
+        merged.append(deepcopy(child))
+    _normalize_child_order(merged)
+    return merged
+
+
+def merge_formula_run_properties(
+    run: ET.Element,
+    default_properties: ET.Element,
+) -> None:
+    """Merge one formula run's local a:rPr over marker-level defaults."""
+    if default_properties.tag != _DML_RUN_PROPERTIES:
+        raise RuntimeError("Formula run defaults must use one a:rPr root")
+    local_properties = next(
+        (child for child in run if child.tag == _DML_RUN_PROPERTIES),
+        None,
+    )
+    merged = _merged_properties(default_properties, local_properties)
+    if local_properties is not None:
+        run.remove(local_properties)
+    insert_at = 1 if len(run) and run[0].tag == _MATH_RUN_PROPERTIES else 0
+    run.insert(insert_at, merged)
+
+
+def merge_formula_control_properties(
+    root: ET.Element,
+    default_properties: ET.Element,
+) -> None:
+    """Merge marker defaults onto visible non-selectable math controls."""
+    if default_properties.tag != _DML_RUN_PROPERTIES:
+        raise RuntimeError("Formula control defaults must use one a:rPr root")
+    for owner in root.iter():
+        if owner.tag not in _CONTROL_OWNER_TAGS:
+            continue
+        control = next(
+            (child for child in owner if child.tag == _MATH_CONTROL_PROPERTIES),
+            None,
+        )
+        if control is None:
+            control = ET.SubElement(owner, _MATH_CONTROL_PROPERTIES)
+        local_properties = next(
+            (child for child in control if child.tag == _DML_RUN_PROPERTIES),
+            None,
+        )
+        merged = _merged_properties(default_properties, local_properties)
+        if local_properties is not None:
+            control.remove(local_properties)
+        control.insert(0, merged)
+
+
+def serialize_styled_formula_omml(root: ET.Element) -> str:
+    """Serialize styled OMML under the compiler's final size and depth limits."""
+    try:
+        xml = ET.tostring(root, encoding="unicode", short_empty_elements=True)
+        return validate_omml_resource_limits(xml)
+    except (FormulaCompileError, RecursionError) as exc:
+        raise RuntimeError(f"Invalid styled formula OMML: {exc}") from exc
+
+
+__all__ = [
+    "merge_formula_control_properties",
+    "merge_formula_run_properties",
+    "serialize_styled_formula_omml",
+]

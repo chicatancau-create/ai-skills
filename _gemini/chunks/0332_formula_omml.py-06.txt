@@ -1,0 +1,107 @@
+        expression = _math_element(lower, "e")
+        _append_node(expression, base, inherited_style, display=display)
+        limit = _math_element(lower, "lim")
+        _append_sequence(limit, node.lower, inherited_style, display=display)
+        base = Sequence(())
+        if node.upper is not None:
+            wrapper = ET.Element(_math_tag("limUpp"))
+            _math_element(wrapper, "limUppPr")
+            expression = _math_element(wrapper, "e")
+            expression.append(lower)
+            limit = _math_element(wrapper, "lim")
+            _append_sequence(limit, node.upper, inherited_style, display=display)
+            parent.remove(lower)
+            parent.append(wrapper)
+        return
+    if node.upper is not None:
+        upper = _math_element(parent, "limUpp")
+        _math_element(upper, "limUppPr")
+        expression = _math_element(upper, "e")
+        _append_node(expression, base, inherited_style, display=display)
+        limit = _math_element(upper, "lim")
+        _append_sequence(limit, node.upper, inherited_style, display=display)
+        return
+    _append_node(parent, base, inherited_style, display=display)
+
+
+def _append_function(
+    parent: ET.Element,
+    node: Function,
+    inherited_style: RunStyle | None,
+    *,
+    display: bool,
+) -> None:
+    function = _math_element(parent, "func")
+    _math_element(function, "funcPr")
+    name_parent = _math_element(function, "fName")
+    name: Node = node.name
+    if node.subscript is not None or node.superscript is not None:
+        use_limits = node.limit_modifier == "limits" or (
+            node.limit_modifier != "nolimits" and node.limit_style and display
+        )
+        if use_limits:
+            name = Limit(name, lower=node.subscript, upper=node.superscript)
+        else:
+            name = Script(name, node.subscript, node.superscript)
+    _append_node(name_parent, name, inherited_style, display=display)
+    body = _math_element(function, "e")
+    if node.body is not None:
+        _append_sequence(body, node.body, inherited_style, display=display)
+
+
+def _qualified_name(name: str) -> tuple[str | None, str]:
+    if name.startswith("{") and "}" in name:
+        namespace, local_name = name[1:].split("}", 1)
+        return namespace, local_name
+    return None, name
+
+
+def _child_names(element: ET.Element) -> list[str]:
+    return [_qualified_name(child.tag)[1] for child in element]
+
+
+def _require_children(
+    element: ET.Element,
+    expected: tuple[str, ...],
+) -> None:
+    element_name = _qualified_name(element.tag)[1]
+    actual = tuple(_child_names(element))
+    if actual != expected:
+        raise FormulaCompileError(
+            f"m:{element_name} children must be {expected!r}, found {actual!r}"
+        )
+
+
+def _require_repeated_children(
+    element: ET.Element,
+    child_name: str,
+    *,
+    minimum: int,
+    maximum: int,
+) -> None:
+    element_name = _qualified_name(element.tag)[1]
+    actual = _child_names(element)
+    if (
+        not minimum <= len(actual) <= maximum
+        or any(name != child_name for name in actual)
+    ):
+        raise FormulaCompileError(
+            f"m:{element_name} must contain {minimum}..{maximum} "
+            f"m:{child_name} children"
+        )
+
+
+def _validate_property_children(element: ET.Element, element_name: str) -> None:
+    expected_order = _PROPERTY_ORDER[element_name]
+    actual = _child_names(element)
+    if len(actual) != len(set(actual)):
+        raise FormulaCompileError(f"m:{element_name} contains duplicate properties")
+    unknown = [name for name in actual if name not in expected_order]
+    if unknown:
+        raise FormulaCompileError(
+            f"m:{element_name} contains unsupported properties: {unknown!r}"
+        )
+    order = [expected_order.index(name) for name in actual]
+    if order != sorted(order):
+        raise FormulaCompileError(f"m:{element_name} properties are out of order")
+    if element_name == "rPr" and "nor" in actual and (

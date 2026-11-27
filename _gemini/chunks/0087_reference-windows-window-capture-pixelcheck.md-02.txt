@@ -1,0 +1,45 @@
+- 125% 下 PrintWindow 位图是 **CSS 尺寸**（≈物理宽/1.25），画面右侧像被裁；判据用页面内 `innerWidth`、
+  `devicePixelRatio`、`scrollWidth==clientWidth` 与逐元素 `getBoundingClientRect().right`，别从截图下"布局溢出"结论。
+- **镂空窗口（LWA_COLORKEY）用屏幕 BitBlt 会看到桌面，这是功能生效而不是穿透 bug**：证明办法是量窗口矩形内
+  等于键色的像素数（背景区应≈0），并读回 `flags=3`；注意抓图前不要再调只会带 `LWA_ALPHA` 的 set_alpha，
+  它会把 flags 覆盖成 2。
+- **未 DPI 感知时 `GetMonitorInfo` 的 `rcWork` 也是虚拟化的**（2560 屏量成 2048）：先 `SetProcessDpiAwarenessContext(-4)`
+  再 `EnumDisplayMonitors`，否则按右下角裁任务栏/定位会裁到别的窗口（实测裁出过 Clash 窗口的一条边）。
+
+## 2026-11-08：任务栏/托盘像素取证的两个坐标系陷阱
+
+- **托盘不能按「工作区底边」裁图**：`rcWork` 本来就不含任务栏，按它裁只会拍到任务栏上方的窗口
+  （我截到过自家卡片的一角，还误以为是托盘）。要拍托盘就用**整屏坐标**：先 DPI 感知，再
+  `GetSystemMetrics(0/1)` 取 2560×1600，裁 `(0, h-70, w, h)`。
+- **Win11 托盘是 XAML 组合**：`TrayNotifyWnd` 句柄为 0、`Shell_NotifyIconGetRect` 返回
+  `0x80004005` 属正常现象；溢出按钮实际能在 UIA 里找到（Name=「显示隐藏的图标」，
+  Class=SystemTray.NormalButton），但 .ps1 必须存成 **UTF-8 with BOM**，且 Invoke 后要等约 1.4s，
+  面板类名是 `TopLevelWindowForOverflowXamlIsland`。详见 [[reference-windows-tray-icon-registration]]。
+  面板未展开时按该窗口矩形裁图会拍到背景应用（我拍到过 IDE 的文件列表），判据必须是展开后的证据。
+- **颜色断言要先回源码取真值**：取证脚本里硬编码的强调色可能来自旧实现；这次 `#34D399`
+  属于旧 tkinter 托盘，屏幕上另一个 `#00D76B` 绿图标是别的应用。严格容差 10 px、放宽到 60 才 225 px
+  的差异说明「颜色不是同一个东西」，不是「图标变淡了」。
+- **按标题取窗会拿到别人的窗口**：本机同时开着用户旧的 `cc-hud.pyw`，`FindWindowW(None,"cc-hud")`
+  第一次命中的是它；`GetWindowThreadProcessId` 不声明 `argtypes=[HWND, POINTER(DWORD)]` 时 64 位句柄
+  按 int 截断，归属判断全假。正确做法：`EnumWindows` 枚举**所有同标题**窗口，逐个取 owner PID，
+  选与运行态 JSON 中 pid 一致的那个；`dot_window` 同理。取证脚本据此只操作本进程窗口，避免误关用户实例。
+- **托盘取证器已按整屏条带修**：`tools/tray_pixel.py` 原来裁 `rcWork` 底边（不含任务栏），现改为
+  `(sw-800, sh-64, sw, sh)` 并先 DPI 感知；收尾按 runtime pid，不再 `FindWindow` 关窗。
+
+## 2026-11-08：`FindWindow("cc-hud")` 会命中 explorer 的任务栏代理窗
+
+- 即使目标应用已退出，`FindWindowW(None,"cc-hud")` 仍可能返回一个**可见**窗口：类名
+  `Windows.Internal.Shell.TabProxyWindow`、owner 是 `explorer.exe`（本机 PID 10644）——这是 Win11 任务栏的
+  tab 代理窗，不是应用本体。用它做“应用是否在跑”的预检会**误报 running**。
+- 正确判“应用是否在跑”：查应用自己的命名互斥体（`OpenMutexW(SYNCHRONIZE, False, "Local\\cc-hud-single")`），
+  或枚举窗口后按 owner PID 过滤（`GetWindowThreadProcessId` 必须设 argtypes）；不要按标题存在性下结论。
+
+## 2026-11-08：合成点击/剪裁前必须设 DPI 感知
+
+- **`SetCursorPos`/`mouse_event` 在未 DPI 感知的进程里按逻辑坐标解释**：本机 125% 下点任务栏溢出箭头
+  `(2017,1533)` 实际落到时钟附近，弹出的是日历而不是溢出面板。任何合成点击脚本先
+  `SetProcessDpiAwarenessContext(-4)`（或 `shcore.SetProcessDpiAwareness(2)`）再发坐标。
+- **托盘隐藏槽位**：`GetRect` 返回的 rect 可能落在任务栏空白处，按它截图 accent 像素为 0 是“图标被隐藏”，
+  不等于“没注册”。可见性判据只能靠展开溢出面板后的 UIA/截图，或看 `NotifyIconSettings` 的提升项。
+
+Related: [[reference-inapp-browser-verification]], [[reference-headless-browser-debris]], [[reference-computer-use-blocked]], [[reference-qt-qml-build-traps]], [[reference-pywebview-host-traps]]

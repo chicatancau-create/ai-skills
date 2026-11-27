@@ -1,0 +1,93 @@
+    for tag in ("catAx", "dateAx", "valAx"):
+        for axis in plot_area.findall(f"c:{tag}", C_NS):
+            axis_id = _element_val(axis.find("c:axId", C_NS))
+            if not axis_id or axis_id in axes:
+                raise _UnsupportedChart("unsupported-chart-axis-options")
+            axes[axis_id] = axis
+    return axes
+
+
+def _plot_axis_pair(
+    plot: ET.Element,
+    axes_by_id: dict[str, ET.Element],
+) -> tuple[str, ET.Element, str, ET.Element]:
+    axis_ids = [_element_val(elem) for elem in plot.findall("c:axId", C_NS)]
+    if len(axis_ids) != 2 or any(not axis_id for axis_id in axis_ids):
+        raise _UnsupportedChart("unsupported-chart-axis-options")
+    if len(set(axis_ids)) != 2:
+        raise _UnsupportedChart("unsupported-chart-axis-options")
+    resolved = [(axis_id, axes_by_id.get(str(axis_id))) for axis_id in axis_ids]
+    if any(axis is None for _, axis in resolved):
+        raise _UnsupportedChart("unsupported-chart-axis-options")
+    category_axes = [
+        (str(axis_id), axis)
+        for axis_id, axis in resolved
+        if axis is not None and _local_name(axis.tag) in {"catAx", "dateAx"}
+    ]
+    value_axes = [
+        (str(axis_id), axis)
+        for axis_id, axis in resolved
+        if axis is not None and _local_name(axis.tag) == "valAx"
+    ]
+    if len(category_axes) != 1 or len(value_axes) != 1:
+        raise _UnsupportedChart("unsupported-chart-axis-options")
+    cat_id, cat_axis = category_axes[0]
+    val_id, val_axis = value_axes[0]
+    return cat_id, cat_axis, val_id, val_axis
+
+
+def _axis_config_from_xml(
+    axis: ET.Element,
+    *,
+    role: str,
+    expected_cross_axis_id: str,
+    allowed_crosses: set[str],
+    expected_cross_between: str | None,
+) -> dict[str, Any]:
+    axis_kind = _local_name(axis.tag)
+    allowed_children = {
+        "auto", "axId", "axPos", "baseTimeUnit", "crossAx", "crossBetween",
+        "crosses", "delete", "lblAlgn", "lblOffset", "majorGridlines",
+        "majorTickMark", "majorUnit", "minorTickMark", "noMultiLvlLbl",
+        "numFmt", "scaling", "spPr", "tickLblPos", "title", "txPr",
+    }
+    if any(_local_name(child.tag) not in allowed_children for child in axis):
+        raise _UnsupportedChart("unsupported-chart-axis-options")
+    if axis.attrib:
+        raise _UnsupportedChart("unsupported-chart-axis-options")
+    for child_name in allowed_children:
+        if len(axis.findall(f"c:{child_name}", C_NS)) > 1:
+            raise _UnsupportedChart("unsupported-chart-axis-options")
+    simple_children = {
+        "auto", "axId", "axPos", "baseTimeUnit", "crossAx",
+        "crossBetween", "crosses", "delete", "lblAlgn", "lblOffset",
+        "majorTickMark", "majorUnit", "minorTickMark", "noMultiLvlLbl",
+        "tickLblPos",
+    }
+    if any(
+        _local_name(child.tag) in simple_children
+        and (set(child.attrib) != {"val"} or list(child))
+        for child in axis
+    ):
+        raise _UnsupportedChart("unsupported-chart-axis-options")
+    if axis.find("c:minorGridlines", C_NS) is not None:
+        raise _UnsupportedChart("unsupported-chart-axis-options")
+
+    scaling = axis.find("c:scaling", C_NS)
+    config: dict[str, Any] = {}
+    if scaling is not None:
+        if scaling.attrib or any(
+            _local_name(child.tag) not in {"max", "min", "orientation"}
+            for child in scaling
+        ):
+            raise _UnsupportedChart("unsupported-chart-axis-options")
+        for child_name in ("orientation", "max", "min"):
+            if len(scaling.findall(f"c:{child_name}", C_NS)) > 1:
+                raise _UnsupportedChart("unsupported-chart-axis-options")
+        if any(
+            set(child.attrib) != {"val"} or list(child)
+            for child in scaling
+        ):
+            raise _UnsupportedChart("unsupported-chart-axis-options")
+        orientation = _element_val(scaling.find("c:orientation", C_NS)) or "minMax"
+        if orientation not in {"maxMin", "minMax"}:

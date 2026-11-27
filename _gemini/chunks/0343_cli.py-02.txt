@@ -1,0 +1,122 @@
+    return value if isinstance(value, dict) else {}
+
+
+def _path_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open('rb') as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _roundtrip_slide_parts(
+    row: dict[str, object],
+    *,
+    include_structure: bool,
+) -> set[str]:
+    """Return package owners that make one semantic sidecar slide-relevant."""
+    keys = ["sourcePart"]
+    if include_structure:
+        keys.extend(["layoutPart", "masterPart"])
+    parts = {
+        str(row[key])
+        for key in keys
+        if isinstance(row.get(key), str) and row.get(key)
+    }
+    note = row.get("notes")
+    if isinstance(note, dict) and isinstance(note.get("sourcePart"), str):
+        parts.add(str(note["sourcePart"]))
+    return parts
+
+
+def _resource_owner_parts(item: dict[str, object]) -> set[str]:
+    raw = item.get("ownerParts")
+    if not isinstance(raw, list):
+        raw = item.get("sourceParts")
+    return {
+        str(value)
+        for value in raw or []
+        if isinstance(value, str) and value
+    }
+
+
+def _resource_slide_indices(
+    item: dict[str, object],
+    slide_rows: dict[int, dict[str, object]],
+    *,
+    include_structure: bool,
+) -> set[int]:
+    owners = _resource_owner_parts(item)
+    return {
+        index
+        for index, row in slide_rows.items()
+        if owners & _roundtrip_slide_parts(
+            row,
+            include_structure=include_structure,
+        )
+    }
+
+
+def _changed_roundtrip_resource_pages(
+    resources: tuple[WorkspaceResourceSpec, ...],
+    manifest: dict[str, object],
+    pages: tuple[RoundtripPage, ...],
+) -> dict[int, frozenset[str]]:
+    """Map changed materialized resources to every referencing output page."""
+    raw_slides = manifest.get("slides")
+    if not isinstance(raw_slides, list):
+        raise RuntimeError("Round-trip manifest slides must be an array")
+    slide_rows = {
+        int(row["index"]): row
+        for row in raw_slides
+        if isinstance(row, dict) and isinstance(row.get("index"), int)
+    }
+    affected: dict[int, set[str]] = {}
+    for resource in resources:
+        if not resource.changed:
+            continue
+        source_slides = {
+            index
+            for index, row in slide_rows.items()
+            if set(resource.owner_parts) & _roundtrip_slide_parts(
+                row,
+                include_structure=True,
+            )
+        }
+        for page in pages:
+            if page.source_slide in source_slides:
+                affected.setdefault(page.output_index, set()).add(
+                    resource.workspace_path.as_posix()
+                )
+    return {
+        index: frozenset(paths)
+        for index, paths in affected.items()
+    }
+
+
+def _roundtrip_animation_config_for_pages(
+    config: dict[str, object],
+    pages: tuple[RoundtripPage, ...],
+) -> dict[str, object]:
+    """Key per-slide motion by output SVG stem, inheriting source rows for copies."""
+    expanded = copy.deepcopy(config)
+    raw_slides = expanded.get("slides")
+    if not isinstance(raw_slides, dict):
+        raise RuntimeError("Round-trip animation sidecar slides must be an object")
+    output_slides: dict[str, object] = {}
+    for page_index, page in enumerate(pages):
+        output_stem = page.svg_stem
+        source_stem = Path(page.source_svg_name).stem
+        if output_stem in raw_slides:
+            selected = copy.deepcopy(raw_slides[output_stem])
+            row_origin = "declares"
+        elif source_stem in raw_slides:
+            selected = copy.deepcopy(raw_slides[source_stem])
+            row_origin = "inherits"
+        else:
+            continue
+        if isinstance(selected, dict):
+            morph = selected.get("morph")
+            if isinstance(morph, dict):
+                original_from = morph.get("from")
+                previous_page = pages[page_index - 1] if page_index else None

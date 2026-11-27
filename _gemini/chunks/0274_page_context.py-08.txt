@@ -1,0 +1,105 @@
+            "source-material reads",
+            "once-per-execution-context reference payloads",
+            "other session-level prompt references",
+        ],
+    }
+    usage_dir = result.project_path / "analysis" / "page-context"
+    usage_dir.mkdir(parents=True, exist_ok=True)
+    usage_path = usage_dir / f"{result.page}.usage.json"
+    temporary_path = usage_path.with_suffix(".usage.json.tmp")
+    temporary_path.write_text(_pretty_json(usage), encoding="utf-8")
+    temporary_path.replace(usage_path)
+    return usage_path, token_status
+
+
+def _nearest_rank(values: list[int], percentile: float) -> int:
+    rank = max(1, math.ceil(percentile * len(values)))
+    return sorted(values)[rank - 1]
+
+
+def _metric(values: list[int], *, target: int | None = None) -> dict[str, object]:
+    if not values:
+        return {
+            "count": 0,
+            "sum": 0,
+            "min": None,
+            "p50": None,
+            "p95": None,
+            "max": None,
+            **({"over_target_count": 0, "target": target} if target else {}),
+        }
+    metric: dict[str, object] = {
+        "count": len(values),
+        "sum": sum(values),
+        "min": min(values),
+        "p50": round(statistics.median(values)),
+        "p95": _nearest_rank(values, 0.95),
+        "max": max(values),
+    }
+    if target is not None:
+        metric.update({
+            "target": target,
+            "over_target_count": sum(value > target for value in values),
+        })
+    return metric
+
+
+def page_context_usage_report(project: str | Path) -> dict[str, object]:
+    """Summarize fresh per-page telemetry without changing recorded history."""
+    project_path = Path(project).resolve()
+    usage_dir = project_path / "analysis" / "page-context"
+    records: list[dict[str, object]] = []
+    stale_pages: list[str] = []
+    unavailable_pages: list[str] = []
+    if usage_dir.is_dir():
+        for usage_path in sorted(usage_dir.glob("P*.usage.json")):
+            try:
+                record = json.loads(usage_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                stale_pages.append(usage_path.stem.split(".", 1)[0])
+                continue
+            page = str(record.get("page", usage_path.stem.split(".", 1)[0]))
+            if record.get("schema") != PAGE_CONTEXT_USAGE_SCHEMA:
+                stale_pages.append(page)
+                continue
+            if record.get("output_mode") != "compact":
+                stale_pages.append(page)
+                continue
+            stale = False
+            for item in record.get("inputs", []):
+                if not isinstance(item, dict):
+                    stale = True
+                    break
+                source_path = _resolve_input_location(
+                    project_path,
+                    str(item.get("scope", "project")),
+                    str(item.get("path", "")),
+                )
+                if source_path is None:
+                    stale = True
+                    break
+                expected_exists = item.get("exists", True)
+                if expected_exists is False:
+                    if source_path.exists():
+                        stale = True
+                        break
+                elif (
+                    not source_path.is_file()
+                    or _file_sha256(source_path) != item.get("sha256")
+                ):
+                    stale = True
+                    break
+            if stale:
+                stale_pages.append(page)
+                continue
+            if record.get("token_status") != "exact":
+                unavailable_pages.append(page)
+            records.append(record)
+
+    def tokens_for(kind: str) -> list[int]:
+        values: list[int] = []
+        for record in records:
+            for document in record.get("documents", []):
+                if not isinstance(document, dict) or document.get("kind") != kind:
+                    continue
+                value = document.get("tokens")

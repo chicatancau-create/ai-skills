@@ -1,0 +1,117 @@
+        explicit_grid = len(row_cells) >= col_count
+        c = 0
+        for physical_col, tc in enumerate(row_cells):
+            if explicit_grid:
+                c = physical_col
+            else:
+                # Retain best-effort support for compact/non-canonical rows that
+                # omit explicit merge continuation cells.
+                while c < col_count and grid[r][c] is not None:
+                    c += 1
+            if c >= col_count:
+                break
+
+            grid_span = _safe_int(tc.attrib.get("gridSpan"), 1)
+            row_span = _safe_int(tc.attrib.get("rowSpan"), 1)
+            h_merge = ooxml_bool(tc.attrib.get("hMerge"))
+            v_merge = ooxml_bool(tc.attrib.get("vMerge"))
+
+            if h_merge or v_merge:
+                # Merge slaves are physical cells but have no independent paint.
+                grid[r][c] = _CellSlot(element=tc, is_dropped=True)
+                c += 1
+                continue
+
+            slot = _CellSlot(
+                element=tc,
+                col_span=max(grid_span, 1),
+                row_span=max(row_span, 1),
+            )
+            for dr in range(slot.row_span):
+                for dc in range(slot.col_span):
+                    rr = r + dr
+                    cc = c + dc
+                    if rr >= len(rows) or cc >= col_count:
+                        continue
+                    if dr == 0 and dc == 0:
+                        grid[rr][cc] = slot
+                    else:
+                        grid[rr][cc] = _CellSlot(
+                            element=tc, is_dropped=True,
+                        )
+            c += 1 if explicit_grid else slot.col_span
+
+    return grid
+
+
+def _safe_int(value: str | None, default: int) -> int:
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def _strict_merge_bool(value: str | None) -> bool:
+    if value is None:
+        return False
+    normalized = value.strip().lower()
+    if normalized in {"1", "on", "true"}:
+        return True
+    if normalized in {"0", "false", "off"}:
+        return False
+    raise ValueError("invalid OOXML boolean")
+
+
+def _strict_merge_span(value: str | None) -> int:
+    if value is None:
+        return 1
+    normalized = value.strip()
+    if not normalized.isdigit():
+        raise ValueError("invalid OOXML span")
+    span = int(normalized)
+    if span <= 0:
+        raise ValueError("invalid OOXML span")
+    return span
+
+
+def _canonical_native_merge_status(
+    rows: list[ET.Element],
+    col_count: int,
+) -> str | None:
+    """Accept only explicit rectangular merge topology safe for regeneration."""
+    physical_rows = [row.findall("a:tc", NS) for row in rows]
+    merge_attrs = {"gridSpan", "rowSpan", "hMerge", "vMerge"}
+    if not any(
+        any(name in tc.attrib for name in merge_attrs)
+        for row_cells in physical_rows
+        for tc in row_cells
+    ):
+        return None
+    if col_count <= 0 or any(
+        len(row_cells) != col_count for row_cells in physical_rows
+    ):
+        return "unsupported-merge-topology"
+
+    states: dict[tuple[int, int], tuple[ET.Element, int, int, bool, bool]] = {}
+    try:
+        for row_idx, row_cells in enumerate(physical_rows):
+            for col_idx, tc in enumerate(row_cells):
+                states[(row_idx, col_idx)] = (
+                    tc,
+                    _strict_merge_span(tc.get("rowSpan")),
+                    _strict_merge_span(tc.get("gridSpan")),
+                    _strict_merge_bool(tc.get("hMerge")),
+                    _strict_merge_bool(tc.get("vMerge")),
+                )
+    except ValueError:
+        return "unsupported-merge-topology"
+
+    anchors: list[_CanonicalMergeRegion] = []
+    for (
+        (row_idx, col_idx),
+        (_tc, row_span, col_span, h_merge, v_merge),
+    ) in states.items():
+        if not h_merge and not v_merge and (row_span > 1 or col_span > 1):
+            anchors.append(

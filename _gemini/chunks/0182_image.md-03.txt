@@ -1,0 +1,63 @@
+**Compatibility**: legacy `type` values read as `background` → `hero_page` + no type, `hero` → `hero_page` + Primitive A, `portrait` → `local` + Primitive B, `typography` → `hero_page` + `embedded` + Primitive C; a missing `page_role` is `local`, a missing `text_policy` is `none` (one aggregate warning per manifest); an existing manifest lacking `deck_rendering` or an item lacking `type` replays its assembled `prompt` verbatim without reconstruction; a legacy `deck_style_anchor` or `deck_palette` never overrides `deck_rendering` / `color_scheme`; legacy `page_role: full_page` reads as `hero_page`.
+
+## `image_treat.py`
+
+Create a non-destructive PNG derivative from one bitmap already prepared under
+`<project_path>/images/`. Use this only when a slide needs a baked bitmap effect;
+crop, mask, rotation, mirror, opacity, shadow, scrim, outline, and overlap remain
+native SVG/PPT treatments. This tool does not perform semantic background
+removal: use `slice_images.py --alpha --bg <key> --strict-alpha` for flat-color
+keys (a pure red/green/blue key also recovers soft alpha and removes spill from
+key-dominant blends, leaving an opaque foreground of the key's hue untouched; thin
+dark strokes of that hue can still fringe, so choose the key by hue absence;
+strict alpha diagnoses off-key haze from the four 10% key-only margins, allowing
+soft shadows and glows on a clean key), an
+already prepared RGBA asset or the active host image editor for a standalone cutout, and
+[`image-generator.md`](../../references/image-generator.md) §4.4 only for
+registered subject/base layers.
+
+```bash
+python3 scripts/image_treat.py projects/demo hero.jpg \
+  --output hero_soft.png --brightness 0.9 --contrast 1.1 --blur 12
+
+python3 scripts/image_treat.py projects/demo hero.jpg \
+  --output hero_duotone.png --duotone "#14213D" "#FCA311"
+
+python3 scripts/image_treat.py projects/demo title_art.png \
+  --output title_art_fit.png --fit 920x228
+```
+
+Supported operations are brightness, contrast, desaturation/grayscale,
+duotone, Gaussian blur, and `--fit WxH` (downscale to fit inside a pixel
+box, aspect ratio and alpha preserved; never upscales). They compose in a
+fixed order: brightness → contrast → tone treatment → blur → fit. Desaturation, grayscale, and duotone are
+mutually exclusive. At least one option must produce a real change; animated
+sources are rejected rather than reduced to one frame, while a camera
+multi-picture JPEG (MPO) contributes its primary frame.
+
+Both input and output are bare filenames directly under `images/`; output must
+be a new `.png` file, or a new `.jpg` file when the source is opaque (a
+photograph downscaled with `--fit` keeps its weight in check that way; a
+source with transparency is refused for `.jpg`). The tool keeps the EXIF-corrected display dimensions,
+leaves any alpha mask unchanged, and never overwrites the source or an existing
+derivative. If `images/image_sources.json` contains the source filename, the
+new record inherits that legal provenance and records `derived_from` plus the
+ordered `treatments`. Run `analyze_images.py` after all planned derivatives are
+ready so the inventory reflects the files that SVG authoring will consume.
+
+## `analyze_images.py`
+
+Analyze objective image-file facts in a project directory before writing the
+design spec or authoring SVG.
+
+```bash
+python3 scripts/analyze_images.py <project_path>/images
+```
+
+The tool does not resolve a canvas or recommend a left/right, top/bottom, or
+other slide layout. Its atomic CSV records EXIF-corrected native dimensions and
+`AspectRatio`, the objective aspect-ratio category, optional source
+`SourceDisplayRatio`, format, actual transparent-pixel presence, usage count,
+and bitmap/vector capability facts. The usage count (`Uses` in the table) is
+how many source occurrences the import manifest recorded for the asset; it is
+not a count of SVG references and does not find unused assets. An empty folder rewrites a header-only

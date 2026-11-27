@@ -1,0 +1,110 @@
+    ``compute_relevance`` falls back to neutral (1.0) and lets the other
+    score dimensions decide.
+    """
+    cleaned = re.sub(r"#[0-9a-fA-F]{3,8}", "", query.lower())
+    cleaned = re.sub(r"\([^)]*\)", "", cleaned)
+    words = [w.strip(_TOKEN_STRIP_CHARS) for w in cleaned.split()]
+    words = [w for w in words if len(w) > 2 and w.isascii()]
+    if not words:
+        return []
+    after_hard = [w for w in words if w not in _NOISE_WORDS]
+    after_soft = [w for w in after_hard if w not in _SOFT_NOISE_WORDS]
+    return after_soft if after_soft else after_hard
+
+
+def _candidate_text(candidate: AssetCandidate) -> str:
+    """Concatenate the candidate's matchable metadata fields for scoring."""
+    return " ".join(
+        filter(
+            None,
+            (
+                candidate.title,
+                candidate.author,
+                candidate.source_page_url,
+            ),
+        )
+    ).lower()
+
+
+def _candidate_match_tokens(candidate: AssetCandidate) -> set[str]:
+    """Return whole ASCII tokens from candidate metadata for relevance scoring."""
+    return set(_ASCII_MATCH_TOKEN_RE.findall(_candidate_text(candidate)))
+
+
+def _normalize_match_text(text: str) -> str:
+    """Normalize metadata / required terms for conservative substring matching."""
+    lowered = (text or "").lower()
+    return _MATCH_SEPARATOR_RE.sub(" ", lowered).strip()
+
+
+def _term_group_alternatives(term_group: str) -> list[str]:
+    """Split one required term group into alternatives.
+
+    ``"Jiefangbei|Liberation Monument"`` means either alternative satisfies
+    that required group. Different list items are ANDed by
+    ``missing_required_terms``.
+    """
+    return [
+        _normalize_match_text(part)
+        for part in str(term_group or "").split("|")
+        if _normalize_match_text(part)
+    ]
+
+
+def missing_required_terms(
+    candidate: AssetCandidate,
+    required_terms: tuple[str, ...] | list[str] | None,
+) -> list[str]:
+    """Return required term groups not present in candidate metadata.
+
+    This is an entity-safety gate, not a fuzzy visual classifier. Use it for
+    exact subjects such as landmarks, people, companies, or products where a
+    visually nice but wrong image is worse than no image.
+    """
+    if not required_terms:
+        return []
+
+    text = _normalize_match_text(_candidate_text(candidate))
+    compact_text = text.replace(" ", "")
+    missing: list[str] = []
+    for group in required_terms:
+        alternatives = _term_group_alternatives(group)
+        if not alternatives:
+            continue
+        matched = any(
+            alt in text or alt.replace(" ", "") in compact_text
+            for alt in alternatives
+        )
+        if not matched:
+            missing.append(str(group))
+    return missing
+
+
+def compute_relevance(candidate: AssetCandidate, query: str) -> float:
+    """Fraction of query tokens that match whole candidate metadata tokens.
+
+    Range ``[0.0, 1.0]``. Returns ``1.0`` (neutral) when the query has no
+    ASCII tokens to match — this lets non-English queries fall through
+    to license / size scoring without being unfairly rejected. Whole-token
+    matching prevents false positives such as ``office`` matching ``officer``.
+    """
+    tokens = _query_tokens(query)
+    if not tokens:
+        return 1.0
+    candidate_tokens = _candidate_match_tokens(candidate)
+    if not candidate_tokens:
+        return 0.0
+    hits = sum(1 for token in tokens if token in candidate_tokens)
+    return hits / len(tokens)
+
+
+def score_candidate(candidate: AssetCandidate, request: ImageSearchRequest) -> float:
+    """Score a candidate against a request. Higher is better; -inf rejects.
+
+    Relevance dominates: a candidate whose metadata shares no query
+    tokens is rejected outright, so size / license / orientation cannot
+    rescue an irrelevant image from a permissive provider.
+    """
+    if not candidate.license_tier:
+        return float("-inf")
+    if (

@@ -1,0 +1,117 @@
+| `sheet get-float-image` | 获取浮动图片详情 |
+| `sheet list-float-images` | 列出工作表所有浮动图片 |
+| `sheet update-float-image` | 更新浮动图片属性 |
+| `sheet delete-float-image` | 删除浮动图片 |
+| `sheet export` | 导出表格为 xlsx |
+| `sheet filter get` | 获取全局筛选信息 |
+| `sheet filter create` | 创建全局筛选 |
+| `sheet filter delete` | 删除全局筛选 |
+| `sheet filter update` | 批量更新筛选条件 |
+| `sheet filter clear-criteria` | 清除单列筛选条件 |
+| `sheet filter sort` | 筛选排序 |
+| `sheet filter-view list` | 获取所有筛选视图 |
+| `sheet filter-view create` | 创建筛选视图 |
+| `sheet filter-view update` | 更新筛选视图属性 |
+| `sheet filter-view delete` | 删除筛选视图 |
+| `sheet filter-view update-criteria` | 更新筛选视图列条件 |
+| `sheet filter-view delete-criteria` | 删除筛选视图列条件 |
+| `sheet filter-view info` | 获取单个筛选视图详情 |
+| `sheet filter-view list-criteria` | 列出筛选视图所有列条件 |
+| `sheet filter-view get-criteria` | 获取单列筛选条件详情 |
+
+> 不确定参数？对任意命令执行 `dws sheet <命令> --help` 查看完整用法。
+
+## 意图判断
+
+### 表格与工作表管理
+
+用户说"创建表格/新建电子表格":
+- 创建表格文档 → `create`
+
+用户说"看工作表/有哪些工作表/表格结构":
+- 列出工作表 → `list`
+- 工作表详情 → `info`
+
+用户说"加工作表/新增Sheet":
+- 新建工作表 → `new`
+
+用户说"修改工作表名称/重命名工作表/移动工作表位置/隐藏工作表/显示工作表/冻结行/冻结列/取消冻结/更新工作表属性":
+- 更新工作表属性 → `update`
+- 重命名工作表 → `update --title "新名称"`
+- 移动工作表位置 → `update --index N`
+- 隐藏工作表 → `update --hidden`
+- 显示工作表 → `update --hidden=false`
+- 冻结行列 → `update --frozen-row-count N --frozen-column-count M`
+- 取消冻结 → `update --frozen-row-count 0 --frozen-column-count 0`
+
+用户说"复制工作表/拷贝工作表/克隆工作表/工作表副本":
+- 复制工作表 → `copy`
+- 复制并指定名称 → `copy --title "副本名称"`
+- 复制并指定位置 → `copy --index N`
+
+### 数据读写
+
+用户说"读数据/看表格内容":
+- 读取数据 → `range read`
+
+用户说"写数据/填表/更新单元格/写入公式":
+- 更新数据 → `range update`
+- 【强制】`--sheet-id` 必填：即使是单工作表也不能省略，不要参照 `range read` 的默认行为；未知时先执行 `dws sheet list --node <NODE_ID> --format json` 获取 `sheetId`，禁止凭空臆测为 `Sheet1`、`sheet1`、`0`、`default` 等
+- 注意：如果用户的目的是替换文本、移动行列或追加空行空列，请勿使用 `range update`，必须使用对应的专用命令（`replace`/`move-dimension`/`add-dimension`）
+- **批量纯值写入优先用 `csv-put`**：当写入场景同时满足以下条件时，必须优先使用 `csv-put` 而非 `range update`：(1) 写入的是纯值（不含公式、超链接）；(2) 数据量较大（超过 5 行或超过 20 个单元格）；(3) 数据来源为表格/CSV 文本/结构化文本。`csv-put` 无需手动构造二维 JSON 数组，直接传 CSV 文本即可，更简洁高效且支持自动扩容
+
+用户说"追加数据/添加行/在末尾加数据/新增记录":
+- 追加数据 → `append`
+
+用户说"批量写入CSV/导入CSV/CSV写入表格/把CSV贴到表格里":
+- 写入 CSV → `csv-put`
+- 与 `range update` 的区别：`csv-put` 接受 CSV 文本直接写入，无需手动构造二维 JSON 数组；适合大批量纯值写入
+- 与 `append` 的区别：`csv-put` 写入指定位置（--start-cell），`append` 在末尾追加
+
+用户说"搜索/查找/找单元格/搜内容/精确搜索/精确匹配/完全匹配/全字匹配":
+- 搜索单元格 → `find`
+- 精确匹配（只匹配完全等于的，不匹配包含的） → `find --match-entire-cell`
+- 正则搜索 → `find --use-regexp`
+- 搜索公式 → `find --match-formula`
+- 不要用 `range read` 读取全量数据后在客户端过滤来替代 `find`，必须使用 `find` 命令的服务端搜索能力
+
+用户说"替换/查找替换/全局替换/批量替换/把A替换成B/把所有的X改成Y":
+- 查找替换 → `replace`
+- 精确匹配后替换（只替换内容完全等于的单元格） → `replace --match-entire-cell`
+- 正则替换 → `replace --use-regexp`
+- 删除匹配内容 → `replace --replacement ""`
+- 请勿用 `find` + `range update`、`range read` + `range update` 等组合来模拟替换，`replace` 是服务端原子操作，效率更高且返回替换计数
+
+### 行列操作
+
+用户说"插入行/插入列/在某行前插入/在某列前插入":
+- 插入行或列 → `insert-dimension`
+- 在末尾追加 → `append`（insert-dimension 不支持末尾追加）
+
+用户说"删除行/删除列/删掉第几行/删掉某列/移除行/移除列":
+- 删除行或列 → `delete-dimension`
+- 仅清空内容但保留行/列 → `range update --values` 写入空字符串 `""`
+
+用户说"隐藏行/隐藏列/显示行/显示列/设置行高/设置列宽/调整行高/调整列宽/行列属性":
+- 隐藏/显示行或列 → `update-dimension --hidden` / `--hidden=false`
+- 设置行高/列宽 → `update-dimension --pixel-size`
+- 同时修改尺寸与显隐 → `update-dimension --pixel-size --hidden`
+
+用户说"移动行/移动列/调整行顺序/调整列顺序/行列拖拽/把第N行移到第M行":
+- 移动行或列 → `move-dimension`
+- 请勿用 `range read` + `range update` 读取再重写来模拟移动，`move-dimension` 是原子操作，能保留格式和合并状态
+
+用户说"追加空行/追加空列/增加行数/增加列数/扩展表格/在末尾加空行":
+- 追加空行/空列 → `add-dimension`
+- 注意与 `append`（追加数据行）区分：`add-dimension` 追加的是空行/空列，`append` 追加的是带数据的行
+- 请勿用 `range update` 写空数据来模拟追加，`add-dimension` 直接扩展表格维度
+
+### 单元格格式
+
+用户说"设置样式/改颜色/设背景色/加粗/居中/换行/字体颜色/字号":
+- 设置单元格样式 → `range set-style`
+- 批量设置不同 range 的样式 → `range batch-set-style --batch ./styles.json`（内部顺序循环调 `update_range`）
+- 请勿用 `range update --values` 写空/重写来模拟样式变更；也请勿把样式变更混在 `range update` 里、再故意清空 `--values`
+
+用户说"设置数字格式/改成百分比/用人民币显示/按日期显示/文本格式/保留几位小数":
+- 设置数字格式 → `range set-style --number-format <格式代码>`（如 `0%` / `¥#,##0.00` / `yyyy/m/d` / `@`）

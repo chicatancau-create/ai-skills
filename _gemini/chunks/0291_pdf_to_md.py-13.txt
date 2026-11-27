@@ -1,0 +1,113 @@
+                markdown,
+                "continuation-words",
+                replace_narrow=True,
+            )
+
+    candidates.sort(key=lambda candidate: candidate["bbox"].y0)
+    table_continues = any(
+        isinstance(candidate["bbox"], fitz.Rect)
+        and candidate["bbox"].y1 >= page.rect.height * TABLE_CONTINUATION_Y_RATIO
+        for candidate in candidates
+    )
+    return candidates, table_continues
+
+
+def _is_markdown_table_line(line: str) -> bool:
+    """Return whether a Markdown line belongs to a pipe table."""
+    return line.startswith("|")
+
+
+def _is_markdown_separator_line(line: str) -> bool:
+    """Return whether a Markdown table line is the separator row."""
+    cells = [cell.strip() for cell in line.strip("|").split("|")]
+    return bool(cells) and all(cell and set(cell) <= {"-", ":"} for cell in cells)
+
+
+def _compatible_table_headers(first: list[str], second: list[str]) -> bool:
+    """Return whether two Markdown table blocks have the same flattened header."""
+    if len(first) < 2 or len(second) < 2:
+        return False
+    if not _is_markdown_separator_line(first[1]) or not _is_markdown_separator_line(second[1]):
+        return False
+    return first[0] == second[0] and _markdown_col_count(first[0]) > 2
+
+
+def _is_table_continuation_noise(line: str) -> bool:
+    """Allow only page/header noise between split table parts."""
+    text = line.strip()
+    if not text:
+        return True
+    if text.startswith("<!-- Page ") and text.endswith("-->"):
+        return True
+    if re.fullmatch(r'\d+', text):
+        return True
+    if "重庆大学硕士学位论文" in text:
+        return True
+    continuation_labels = [
+        "营改增",
+        "深化增值税改革",
+        "国有企业",
+        "非国有企业",
+    ]
+    return any(label in text for label in continuation_labels)
+
+
+def _read_markdown_table_block(lines: list[str], start: int) -> tuple[list[str], int]:
+    """Read a contiguous Markdown table block from ``start``."""
+    end = start
+    while end < len(lines) and _is_markdown_table_line(lines[end]):
+        end += 1
+    return lines[start:end], end
+
+
+def merge_markdown_continuation_tables(markdown: str) -> str:
+    """Merge split cross-page Markdown tables with repeated headers."""
+    lines = markdown.splitlines()
+    result = []
+    index = 0
+
+    while index < len(lines):
+        if not _is_markdown_table_line(lines[index]):
+            result.append(lines[index])
+            index += 1
+            continue
+
+        table, table_end = _read_markdown_table_block(lines, index)
+        search = table_end
+        while True:
+            between_start = search
+            while search < len(lines) and not _is_markdown_table_line(lines[search]):
+                if not _is_table_continuation_noise(lines[search]):
+                    break
+                search += 1
+
+            if search >= len(lines) or not _is_markdown_table_line(lines[search]):
+                break
+            if any(
+                not _is_table_continuation_noise(line)
+                for line in lines[between_start:search]
+            ):
+                break
+
+            next_table, next_end = _read_markdown_table_block(lines, search)
+            if not _compatible_table_headers(table, next_table):
+                break
+
+            table.extend(next_table[2:])
+            search = next_end
+
+        result.extend(table)
+        index = search if search != table_end else table_end
+
+    return "\n".join(result)
+
+
+def merge_adjacent_formatting(text: str) -> str:
+    """Merge adjacent same-style formatted spans split across PDF tokens.
+
+    PyMuPDF often emits a phrase as several spans, so per-span wrapping in
+    ``format_span_text`` produces ``**X****Y**`` (bold) or ``***X******Y***``
+    (bold-italic) where one phrase is intended. Collapse the abutting markers
+    so the run reads as a single phrase: ``**X Y**`` / ``***X Y***``.
+
+    Italic-italic adjacency (``*X**Y*``) is indistinguishable from a plain

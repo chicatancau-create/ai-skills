@@ -1,0 +1,75 @@
+attribute, select that outer group instead; this prevents applying the ancestor
+effect once inside the SVG asset and again to the replacement `<image>`.
+Scripts, `foreignObject`, SVG animation, remote resources, and external SVG
+fragment references fail closed; local image/CSS resources must stay inside
+the declared `--resource-root` and are embedded into the asset.
+An in-place rewrite inside an authoring bundle refreshes
+`authoring_summary.json` automatically.
+
+This operation belongs only to an explicit `create-template` normalization
+decision in `standard` or `fidelity` mode. It does not choose groups, detect
+repetition, infer a Master/Layout, or run during ordinary import, free
+generation, mirror materialization, finalize, or export. Placeholder, native
+single-shape, table/chart, icon-placeholder, and authored-preset groups are
+rejected because they already own a different semantic route.
+
+Do not confuse this tool with `extract_svg_assets.py`:
+
+- `extract_svg_assets.py` is a model-readability optimization. It replaces
+  heuristic vector runs with `<use data-icon>`, then re-inlines them before
+  export so the PPTX still contains native shapes.
+- `extract_svg_pictures.py` is an explicit representation change. It replaces
+  only named groups with `<image>`, so each result intentionally remains one
+  editable PowerPoint picture rather than individually editable paths.
+
+## Recommended Pipeline
+
+Run these steps one at a time. Wait for each command to exit successfully before
+starting the next command.
+
+When the effective Speaker Notes outcome in `design_spec.md §I` is enabled, run:
+
+```bash
+python3 scripts/total_md_split.py <project_path>
+```
+
+After `total_md_split.py` exits successfully, run:
+
+```bash
+python3 scripts/finalize_svg.py <project_path>
+```
+
+After `finalize_svg.py` exits successfully, run:
+
+```bash
+python3 scripts/svg_to_pptx.py <project_path>
+```
+
+When Speaker Notes is disabled, skip `total_md_split.py` and use
+`python3 scripts/svg_to_pptx.py <project_path> --no-notes` for the final
+command. This prevents stale files under `notes/` from being embedded.
+
+Do not start another post-processing command while the current command is still
+running. The canonical gates and success criteria are owned by
+[`generate-pptx.md`](../../workflows/generate-pptx.md) Step 7.
+
+## `finalize_svg.py`
+
+Unified post-processing entry point. This is the preferred way to run SVG cleanup.
+
+It aggregates:
+- `embed_icons.py`
+- static same-document `<use>` expansion from `svg_to_pptx/use_expander.py`
+- `align_embed_images.py` (`crop-images` / `fix-aspect` / `embed-images` aliases route here)
+- `flatten_tspan.py`
+
+EMF/WMF images referenced by a page are preserved as external references, never embedded or rasterized.
+
+`svg_final/` is an optional Step 7.2 preview artifact; the native exporter reads `svg_output/` and never requires it. It is the self-contained visual reference and may be manually inserted as an SVG picture.
+
+## `svg_to_pptx.py`
+
+Convert project SVGs into PPTX. EMF/WMF images referenced from `svg_output/` are embedded as native `image/x-emf` / `image/x-wmf` media at full vector fidelity.
+
+Each exported object is named after `data-pptx-shape-name`, else its SVG `id` (or `data-name`), else a positional `Group N` / `TextBox N`; forced-Morph `!!` names still win. The PowerPoint Selection and Animation panes therefore read like the source SVG.
+

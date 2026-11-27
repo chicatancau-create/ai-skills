@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+"""Canonical compact SVG authoring contract.
+
+The contract keeps authoring SVG as valid, readable XML.  It removes only
+provably redundant inherited declarations and safely canonicalizes page-space
+metadata; it never encodes geometry or invents semantic grouping.
+"""
+
+from __future__ import annotations
+
+import copy
+from dataclasses import dataclass
+from xml.etree import ElementTree as ET
+
+from compact_svg_coordinates import (
+    CoordinateCompactionStats,
+    compact_svg_tree,
+)
+from compact_svg_styles import (
+    INHERITABLE_ATTRIBUTES,
+    StyleCompactionStats,
+    compact_svg_style_tree,
+    is_canonical_presentation_value,
+)
+
+
+_DEFINITION_SUBTREES = frozenset({
+    "clipPath",
+    "defs",
+    "filter",
+    "linearGradient",
+    "marker",
+    "mask",
+    "pattern",
+    "radialGradient",
+    "symbol",
+})
+_ROOT_PAINT_ATTRIBUTES = frozenset({
+    "clip-path",
+    "color",
+    "fill",
+    "fill-opacity",
+    "fill-rule",
+    "marker-end",
+    "marker-mid",
+    "marker-start",
+    "mask",
+    "opacity",
+    "paint-order",
+    "filter",
+    "stroke",
+    "stroke-dasharray",
+    "stroke-linecap",
+    "stroke-linejoin",
+    "stroke-opacity",
+    "stroke-width",
+})
+_SVG_NAMESPACE = "http://www.w3.org/2000/svg"
+_COORDINATE_ATTRIBUTES = frozenset({
+    "data-pptx-bounds",
+    "data-pptx-frame",
+    "transform",
+})
+
+
+def _local_name(name: object) -> str:
+    return name.rsplit("}", 1)[-1] if isinstance(name, str) else ""
+
+
+def _namespace(name: object) -> str | None:
+    if not isinstance(name, str) or not name.startswith("{"):
+        return None
+    return name[1:].split("}", 1)[0]
+
+
+def _style_names(value: str | None) -> set[str]:
+    if not value:
+        return set()
+    names: set[str] = set()
+    for declaration in value.split(";"):
+        if ":" not in declaration:
+            continue
+        name, _raw_value = declaration.split(":", 1)
+        normalized = name.strip().lower()
+        if normalized:
+            names.add(normalized)
+    return names
+
+
+def _style_value(value: str | None, name: str) -> str | None:
+    if not value:
+        return None
+    resolved: str | None = None
+    for declaration in value.split(";"):
+        if ":" not in declaration:
+            continue
+        raw_name, raw_value = declaration.split(":", 1)
+        if raw_name.strip().lower() == name:
+            resolved = raw_value.strip().lower()
+    return resolved
+
+
+def _href_target(element: ET.Element) -> str | None:
+    for name, value in element.attrib.items():
+        if _local_name(name) == "href" and value.startswith("#"):
+            return value[1:]
+    return None
+
+
+def _svg_namespace_errors(root: ET.Element) -> list[str]:
+    errors: list[str] = []
+
+    def visit(
+        element: ET.Element,
+        inside_metadata: bool,
+        *,
+        is_root: bool = False,
+    ) -> None:
+        if not isinstance(element.tag, str):
+            return
+        local = _local_name(element.tag)
+        nested_metadata = inside_metadata or local == "metadata"
+        if (
+            not is_root
+            and not inside_metadata
+            and _namespace(element.tag) != _SVG_NAMESPACE
+        ):
+            errors.append(
+                f"SVG element <{local}> exits the standard SVG namespace"
+            )
+        for child in element:
+            visit(child, nested_metadata)
+
+    visit(root, False, is_root=True)
+    return errors
+
+
+def _attribute_change_examples(
+    before: ET.Element,
+    after: ET.Element,
+    *,
+    coordinate_changes: bool,
+    limit: int = 3,
+) -> list[str]:
+    examples: list[str] = []
+    for index, (source, candidate) in enumerate(
+        zip(before.iter(), after.iter()),
+        start=1,
+    ):
+        if not isinstance(source.tag, str):
+            continue
+        names = sorted(set(source.attrib) | set(candidate.attrib))
+        for name in names:
+            is_coordinate = name in _COORDINATE_ATTRIBUTES
+            if is_coordinate != coordinate_changes:
+                continue

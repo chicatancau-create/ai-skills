@@ -1,0 +1,72 @@
+        for status, code in ((400, "FieldInvalid"), (401, "Unauthorized"), (422, "CreationPolicyViolation")):
+            with self.subTest(status=status):
+                self.post.reset_mock()
+                self.response.status_code = status
+                self.response.text = '{"error": {"code": "' + code + '"}}'
+                with self.assertRaisesRegex(RuntimeError, rf"\({status}\).*{code}"):
+                    backend_tencent.generate("test")
+                self.post.assert_called_once()
+        self.sleep.assert_not_called()
+
+    def test_rate_limit_uses_shared_exponential_backoff(self) -> None:
+        limited = Mock(status_code=429, text='{"error": {"code": "ConcurrencyLimit"}}')
+        self.post.side_effect = [limited, limited, self.response]
+        backend_tencent.generate("test")
+        self.assertEqual(self.post.call_count, 3)
+        self.assertEqual([call.args[0] for call in self.sleep.call_args_list], [10, 20])
+
+    def test_server_error_is_retried(self) -> None:
+        failure = Mock(status_code=500, text='{"error": {"code": "InternalError"}}')
+        self.post.side_effect = [failure, self.response]
+        backend_tencent.generate("test")
+        self.sleep.assert_called_once_with(5)
+        self.assertEqual(self.post.call_count, 2)
+
+    def test_prompt_limits_fail_before_request(self) -> None:
+        for model, limit in (("hy-image-v3", 8192), ("seedream-image-v5.0-pro", 600)):
+            with self.subTest(model=model):
+                with self.assertRaisesRegex(ValueError, f"1-{limit} characters"):
+                    backend_tencent.generate("x" * (limit + 1), model=model)
+        self.post.assert_not_called()
+
+    def test_invalid_provider_options_do_not_retry(self) -> None:
+        for key, model in (
+            ("TENCENT_REVISE", "hy-image-v3"),
+            ("TENCENT_WATERMARK", "seedream-image-v5.0-pro"),
+            ("TENCENT_OUTPUT_FORMAT", "seedream-image-v5.0-pro"),
+        ):
+            with self.subTest(key=key), patch.dict(os.environ, {key: "invalid"}):
+                with self.assertRaisesRegex(ValueError, key):
+                    backend_tencent.generate("test", model=model)
+        self.post.assert_not_called()
+        self.sleep.assert_not_called()
+
+    def test_registry_aliases_and_env_file_reach_backend(self) -> None:
+        env_text = (
+            "IMAGE_BACKEND=tokenhub\nTOKENHUB_API_KEY=dotenv-key\n"
+            "TENCENT_MODEL=seedream-image-v5.0-pro\n"
+            "TENCENT_BASE_URL=https://tokenhub-intl.tencentmaas.com\n"
+            "TENCENT_WATERMARK=true\nTENCENT_OUTPUT_FORMAT=jpeg\nTENCENT_REVISE=false\n"
+        )
+        os.environ.pop("TENCENT_API_KEY")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env_path = Path(temp_dir) / ".env"
+            env_path.write_text(env_text, encoding="utf-8")
+            with patch("config.resolve_env_path", return_value=env_path):
+                image_gen._load_image_env_file()
+        self.assertEqual(os.environ["TENCENT_REVISE"], "false")
+        for alias in ("tencent", "tokenhub", "hunyuan", "tencentmaas"):
+            self.assertEqual(image_gen.BACKEND_ALIASES[alias], "tencent")
+        backend, name = image_gen._resolve_backend()
+        self.assertEqual(name, "tencent")
+        self.assertIs(backend, backend_tencent)
+        self.assertEqual(backend.generate("test"), "test.jpeg")
+        self.assertEqual(
+            self.post.call_args.args[0], "https://tokenhub-intl.tencentmaas.com/v1/wand/si-image/generation",
+        )
+        self.assertEqual(self.post.call_args.kwargs["headers"]["Authorization"], "Bearer dotenv-key")
+        self.assertIs(self.post.call_args.kwargs["json"]["watermark"], True)
+
+
+if __name__ == "__main__":
+    unittest.main()

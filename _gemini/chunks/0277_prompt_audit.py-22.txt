@@ -1,0 +1,108 @@
+        root,
+        manifest.get("schema_grammars", []),
+        documents,
+        manifest_label,
+    )
+    findings.extend(schema_findings)
+
+    findings.sort(key=_finding_key)
+    serialized_findings = [asdict(finding) for finding in findings]
+    errors = sum(finding.severity == "error" for finding in findings)
+    warnings = sum(finding.severity == "warning" for finding in findings)
+
+    return {
+        "schema_version": 1,
+        "encoding": encoding_name,
+        "manifest": {
+            "audit_only": manifest["audit_only"],
+            "runtime_consumed": manifest["runtime_consumed"],
+            "budget_policy": manifest["budget_policy"],
+        },
+        "summary": {
+            "files": len(documents),
+            "tokens": corpus_tokens,
+            "max_tokens": corpus_budget,
+            "errors": errors,
+            "warnings": warnings,
+        },
+        "files": [
+            {"path": path, "tokens": tokens}
+            for path, tokens in sorted(token_counts.items(), key=lambda item: (-item[1], item[0]))
+        ],
+        "load_sets": load_sets,
+        "coverage": coverage,
+        "duplicates": {
+            "exact_total": exact_total,
+            "exact": exact,
+            "exact_accepted": exact_accepted,
+            "near_scanned": include_near_duplicates,
+            "near_total": near_total,
+            "near": near,
+            "near_accepted": near_accepted,
+        },
+        "references": {
+            "edges": [asdict(edge) for edge in references],
+            "cycles": reference_cycles,
+            "authority_candidates": [asdict(edge) for edge in authority_candidates],
+            "authority_candidate_cycles": authority_candidate_cycles,
+            "declared_authority_edges": authority_edges,
+            "declared_authority_cycles": authority_cycles,
+        },
+        "registries": registries,
+        "schema_grammars": schema_grammars,
+        "findings": serialized_findings,
+    }
+
+
+def render_text(report: dict[str, Any]) -> str:
+    """Render the stable JSON report as a maintainer-oriented text summary."""
+    summary = report["summary"]
+    lines = [
+        "PPT Master Prompt Audit",
+        "=======================",
+        "Manifest: audit-only | runtime loading: disabled | budgets: fixed upper bounds",
+        (
+            f"Corpus: {summary['files']} files | {summary['tokens']} tokens "
+            f"(budget {summary['max_tokens']})"
+        ),
+        (
+            f"Coverage: {report['coverage']['covered']} in load sets | "
+            f"{report['coverage']['exempt']} exempt | "
+            f"{len(report['coverage']['uncovered'])} uncovered"
+        ),
+        f"Findings: {summary['errors']} error(s) | {summary['warnings']} warning(s)",
+        "",
+        "Load sets (min / typical / max <= budget):",
+    ]
+    for item in report["load_sets"]:
+        tokens = item["tokens"]
+        lines.append(
+            f"  {item['status'].upper():4} {item['name']}: "
+            f"{tokens['min']} / {tokens['typical']} / {tokens['max']} <= {item['max_tokens']}"
+        )
+
+    lines.extend(["", "Registries:"])
+    for item in report["registries"]:
+        bounds = ""
+        if item["minimum_id"] is not None:
+            bounds = f" | ids {item['minimum_id']}..{item['maximum_id']}"
+        lines.append(f"  {item['name']}: {item['entries']} entries{bounds}")
+
+    references = report["references"]
+    duplicates = report["duplicates"]
+    schema_open = sum(len(item["open"]) for item in report["schema_grammars"])
+    schema_accepted = sum(
+        len(item["accepted"]) for item in report["schema_grammars"]
+    )
+    schema_stale = sum(len(item["stale"]) for item in report["schema_grammars"])
+    near_summary = (
+        (
+            f"{duplicates['near_total']} near pair(s) + "
+            f"{len(duplicates['near_accepted'])} accepted"
+        )
+        if duplicates["near_scanned"]
+        else "near scan skipped"
+    )
+    lines.extend(
+        [
+            "",

@@ -1,0 +1,89 @@
+        for candidate in typography_roots:
+            value = candidate.get(name)
+            if value is not None:
+                root.set(name, value)
+                break
+
+    roots = [master_root, layout_root]
+    if slide_root is not None:
+        roots.append(slide_root)
+    defs, styles = _non_visual_nodes(roots)
+    if defs is not None:
+        root.append(defs)
+    for style in styles:
+        root.append(style)
+
+    master_atoms = _fixed_atoms(master_root, scope="master", key=str(master["key"]))
+    layout_placeholder_refs = {
+        f"layout:{item['shapeId']}"
+        for item in layout.get("placeholders", [])
+        if isinstance(item, dict) and item.get("shapeId") is not None
+    }
+    layout_atoms = _fixed_atoms(
+        layout_root,
+        scope="layout",
+        key=str(layout["key"]),
+        placeholder_source_refs=layout_placeholder_refs,
+    )
+    master_backgrounds = [
+        atom for atom in master_atoms if _is_full_canvas_rect(atom, width, height)
+    ]
+    layout_backgrounds = [
+        atom for atom in layout_atoms if _is_full_canvas_rect(atom, width, height)
+    ]
+    master_shapes = [atom for atom in master_atoms if atom not in master_backgrounds]
+    layout_shapes = [atom for atom in layout_atoms if atom not in layout_backgrounds]
+
+    slide_backgrounds: list[ET.Element] = []
+    slide_content: list[ET.Element] = []
+    source_placeholder_elements: dict[str, ET.Element] = {}
+    if slide_root is not None and slide is not None:
+        placeholder_refs = _slide_placeholder_map(slide)
+        for index, child in enumerate(slide_root):
+            if _local_name(child.tag) in _NON_VISUAL_TAGS:
+                continue
+            source_ref = child.get(SOURCE_REF_ATTRIBUTE)
+            if source_ref in placeholder_refs:
+                item = copy.deepcopy(child)
+                _merge_group_inheritance(slide_root, item)
+                source_placeholder_elements[source_ref] = item
+                continue
+            item = copy.deepcopy(child)
+            _merge_group_inheritance(slide_root, item)
+            if _is_full_canvas_rect(item, width, height):
+                item.set("id", item.get("id") or f"slide-{slide['index']}-background")
+                item.set("data-pptx-layer", "slide")
+                item.set("data-pptx-editable", "false")
+                slide_backgrounds.append(item)
+            else:
+                item.set("id", item.get("id") or f"slide-{slide['index']}-node-{index + 1}")
+                # A source line can have a zero-width/height frame. Publish its
+                # single geometry atom; a content group requires positive bounds.
+                if _local_name(item.tag) == "g" and item.get("data-pptx-prst") == "line":
+                    atoms = _flatten_fixed_group(item, context=f"Slide {slide['index']} line")
+                    if len(atoms) == 1:
+                        atoms[0].set("id", item.get("id"))
+                        item = atoms[0]
+                if _local_name(item.tag) == "g" and _visible_leaf(item):
+                    bounds = _frame(item)
+                    if bounds is None:
+                        raise MirrorMaterializationError(
+                            f"Slide {slide['index']} root group "
+                            f"{item.get('id')!r} has no positive source frame"
+                        )
+                    item.set(
+                        "data-pptx-bounds",
+                        " ".join(format_coordinate(value) for value in bounds),
+                    )
+                slide_content.append(item)
+        if len(slide_backgrounds) > 1:
+            raise MirrorMaterializationError(
+                f"Slide {slide['index']} has more than one full-canvas solid background"
+            )
+
+    layout_placeholders = {
+        str(item["shapeId"]): item
+        for item in layout.get("placeholders", [])
+        if isinstance(item, dict) and item.get("shapeId") is not None
+    }
+    master_placeholders = [
