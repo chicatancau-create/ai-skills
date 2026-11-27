@@ -145,10 +145,18 @@ description: 本机（这台 Windows）《AI本地使用手册》（G:\AIrenwu\�
 | 面板显存数据源取不到时显示 `--`/0%（＝无数据≠用量 0）；任务管理器表头那个 0% 是**网络**列。只认两条：进程命令行有没有 `-ngl`；`Get-Counter '\GPU Process Memory(*)\Local Usage'` 按 PID 取值。利用率要在生成中采样 | `踩坑-应用面板显存0%与任务管理器无GPU列-判走没走GPU的两条硬判据.md` |
 | `clocks_throttle_reasons=0x400`(SW Power Cap) 而温度仅 52℃；只在**同一时段做 A/B**（实测新件 29.4@106W vs 原件 15.4@73W）。`BatteryStatus=2` 与 `PowerAC=True` 会同时出现 | `踩坑-笔记本功耗封顶让同一配置吞吐差十倍-tok每秒不能当基线.md` |
 | 新版 Codex 删 `wire_api="chat"`；宿主网关有 `/v1/responses` 却**吞掉 tools**，且 `/v1/completions` 回 200 空 body；转发 SSE 不逐块 flush 会让客户端报 stream disconnected（首块 6.5s vs 0.29s）；`requires_openai_auth=true` 把 key 送去 api.openai.com；`env_key` 只认环境变量；真 500 源于模板要求 system 消息唯一且在首位 | `踩坑-Codex接本地OpenAI兼容网关的六道关-协议tools被吞SSE不flush与system消息顺序.md` |
+
+**构建与工程化**（`01-前端/08-构建与工程化/`）
+
+| 症状 / 场景 | 记录 |
+|---|---|
+| `npm run dev` / `npm run build` 报 `error:0308010C:digital envelope routines::unsupported`（`ERR_OSSL_EVP_UNSUPPORTED`）；怀疑 vue-cli / webpack 老项目跑不了新 Node | `踩坑-Node17以上跑vue-cli4报ERR_OSSL_EVP_UNSUPPORTED-用fnm双版本并在项目内固化16.md`（`verified` 2026-11-27：根因＝Node 17 起 OpenSSL 3 把 MD4 归 legacy provider，webpack 4 仍调 md4；一行判据 `node -e "require('crypto').createHash('md4')"` 成功=能用旧 webpack、抛 0308010C=必须降到 16。修法三层＝fnm 双版本 + 项目内 `.node-version` + `.vscode/settings.json` 的 `terminal.integrated.env.windows` 前置 16 的 PATH；**只靠 fnm 的 use-on-cd 不够**（VSCode 直接以项目 cwd 起终端、不执行 `cd`），profile 必须额外调 `Set-FnmOnLoad` 且 `fnm env` 显式带 `--fnm-dir`；机器级 default 不能降到 16（DSH 的 billion-context 要求 engines≥20 且带 sharp 原生模块） |
+
 **工程规范与安全**（`03-通用/04-工程规范与安全/`）
 
 | 症状 / 场景 | 记录 |
 |---|---|
+| 卸载 MSI 版 Node 后 `npm`/`npx` 报找不到 `npm-cli.js`；`npm ls -g` 全局包全空但文件还在 `%APPDATA%\npm`；改过 npm 前缀的机器 | `踩坑-卸载MSI版Node24后npm包装器死链与全局前缀丢失.md`（`verified` 2026-11-27：两处影子副本不随卸载走——①`D:\node-global\{npm,npx,corepack}` 手改包装器里硬编码的安装路径（`_prog` 有 IF EXIST 回退、`_cli` 没有→死链）；②安装在 `D:\Node.js\node_modules\npm\npmrc` 里的 `prefix=${APPDATA}\npm` 被一起删→prefix 回落到新 node 目录。修法＝六个包装器改指**不被卸载的 junction** `D:\nodejs-current` + 用户级 `~/.npmrc` 写死 prefix + 计划任务 Execute 路径一并改（`Set-ScheduledTask` 非提权可用）；踩坑：`Set-Content -Encoding ascii` 写中文注释会全变 `?`，.cmd 注释必须全英文；MSI 留下的 `<hash>.rbf` 被运行中旧进程锁住删不掉是正常的，查 `PendingFileRenameOperations` 即可） |
 | `.ps1` 含中文报假语法错、乱码 | `踩坑-PowerShell5.1读无BOM的UTF8脚本中文变乱码.md` |
 | `Get-Content` 回显 UTF-8 中文乱码、疑似文件写坏 | `踩坑-GetContent默认按代码页解码致UTF8中文回显乱码.md` |
 | `Get-Content x -Raw \| python` 报 JSON 语法错（缺逗号/非法控制字符），文件本身合法 | `踩坑-pwsh管道喂python把UTF8中文重编码致JSON假错.md` |
