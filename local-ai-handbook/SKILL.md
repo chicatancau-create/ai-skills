@@ -98,6 +98,9 @@ description: 本机（这台 Windows）《AI本地使用手册》（G:\AIrenwu\�
 | 强杀 FlClash 后全机断网、端口不监听 | `踩坑-FlClash强杀后停未运行不自动起核心且系统代理悬空致全机断网.md` |
 | 关掉 FlClash/开机后全机断网、系统代理开关悬空指死端口 | `修复-FlClash关闭后悬空系统代理的常驻守卫与自动运行.md` |
 | 想一键修复网络／想安全关掉 FlClash 又怕断网（脚本写死旧端口与服务） | `工具-网络一键修复v2与安全关闭VPN脚本.md`（`verified`：判端口死活只用真 TCP，`Get-NetTCPConnection` 的 `State` 会有 `空/0` 伪行按它过滤必假报端口死；端口没通时**不许**把 `ProxyEnable` 写 1） |
+| 想从 DeskBox 盒子里一键开/关 VPN、或脚本入口要带自定义图标 | `工具-网络工具箱四脚本与DeskBox图标入口.md`（`verified`：开代理必须先验端口活着才写 `ProxyEnable=1`，关代理必须先把开关置 0 再停进程；cmd 里的中文 `.ps1` 路径在 GBK 代码页必失败，一律用 ASCII 名；`.ps1` 无 BOM 提权时连日志都不写；ICO 不能写 PNG 帧；DeskBox 不监听目录变化，新建条目要重启 DeskBox） |
+| IPv6 能解析出 AAAA 但完全连不通、`ping -6` 报 General failure | `踩坑-IPv6有AAAA无通路的真开关是网卡绑定而非Tcpip6服务.md`（`verified`：真开关是网卡 `ms_tcpip6` 绑定，`Tcpip6` 服务 Stopped/Manual 是正常态；`DisabledComponents=0x8` 不禁用原生 IPv6） |
+| 程序报「无法连接服务器」但 ping 正常、Tcpip 事件 4231 短端口耗尽 | `踩坑-临时端口耗尽4231真因是动态池16384加TIME_WAIT120秒.md`（`verified`：动态池 16384 + TIME_WAIT 120 秒所致，不是连接泄漏；四条 dynamicport 一起扩到 10000 起 55536 个 + `TcpTimedWaitDelay=30`；别设 `MaxUserPort`） |
 | FlClash 升级后 sc 报 1060 服务未安装、allow-lan=false 写了但 LAN 仍可连 | `踩坑-FlClash升级0.9.5删helper服务与allow-lan覆写键未生效.md` |
 | 防火墙三个 profile 全关想开启、又怕断远程/断局域网 | `修复-Windows防火墙长期全关后安全开启与远程工具放行.md`（`verified`：`state on`+`firewallpolicy blockinbound,allowoutbound`+按程序/接口放行+开丢包日志；`logging blocked` 参数名是错的，正确 `droppedconnections`；杀软在跑≠接管防火墙） |
 | Postman「Something went wrong」崩溃屏、网络恢复后仍不复活 | `踩坑-Postman启动瞬间云端断网致崩溃屏且网络自愈后不自恢复须重启.md` |
