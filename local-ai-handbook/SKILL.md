@@ -217,6 +217,7 @@ description: 本机（这台 Windows）《AI本地使用手册》（G:\AIrenwu\�
 | 代码里写了路由，浏览器/接口仍 404 `Cannot GET /` | `02-后端/02-API与接口设计/踩坑-Express改了代码浏览器仍404先查未保存缓冲与旧进程.md`（`verified`：编辑器缓冲没落盘 + 端口上是旧进程；判据是 curl 真实响应体 + `Win32_Process` 的 CreationDate，本机别用 `-State Listen`） |
 | `SyntaxError: await is only valid in async functions and the top level bodies of modules` | `02-后端/01-架构与项目结构/踩坑-CommonJS目录下js顶层await报SyntaxError.md`（`verified`：目录 package.json `"type":"commonjs"`；包 async IIFE，别整体改 `"module"`） |
 | Spring Boot jar 连 MySQL8 启动失败 `Public Key Retrieval is not allowed`（mysqld 重启后首连、useSSL=false） | `02-后端/04-数据库与ORM/踩坑-MySQL8重启后JDBC首连报PublicKeyRetrievalNotAllowed须allowPublicKeyRetrieval.md`（`verified`：caching_sha2 缓存空需取 RSA 公钥；JDBC URL 加 `allowPublicKeyRetrieval=true` 即好，A/B 实测） |
+| 接口响应 500，日志含 `Expression #1 of SELECT list is not in GROUP BY clause ... this is incompatible with sql_mode=only_full_group_by`；或「改完 `SET GLOBAL sql_mode` 但仍报错」 | `03-通用/03-调试与验证/踩坑-MySQL8的ONLY_FULL_GROUP_BY让GROUP BY非聚合列查询报500且连接池不刷新全局sql_mode.md`（`verified`：MySQL8 默认开 `ONLY_FULL_GROUP_BY` 而 SQL 写 `SELECT a,b,c GROUP BY a`；**`SET GLOBAL` 只影响新建会话，Druid 池长连接不刷新、`KILL` 也会被立刻重建** ⇒ 必须改 `my.ini` 第 113 行 `sql-mode` 去掉该项后 `Restart-Service MySQL80 -Force`；非提权 `Restart-Service` 报 `Cannot open 'MySQL80' service` 但实际已重启成功，用 `Get-Service`+`SELECT @@global.sql_mode` 复核；ProgramData 下 `my.ini` 要提权写；修后接口 total=31/33） |
 
 ## 本机环境速查（来自 `~/.dsh/AGENTS.md`，细节查正文）
 
