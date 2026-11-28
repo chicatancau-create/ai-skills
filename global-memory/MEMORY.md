@@ -154,3 +154,6 @@
 
 - [feedback-cleanup-git-pollution-not-untracked-workdirs](feedback-cleanup-git-pollution-not-untracked-workdirs.md)：清理 git 污染勿删白名单外真实未跟踪工作目录（2026-11-26 误删事故教训）。
 - [rule-uninstall-clean-all-remnants-shortcuts](rule-uninstall-clean-all-remnants-shortcuts.md)：用户长期规则（2026-11-26）——卸载/删除软件必须连快捷方式（开始菜单两根/桌面/任务栏 Quick Launch/DeskBox 格子 E:\DeskBox\<格子名>\，按名字+lnk 目标双匹配）与全部残留（AppData 数据目录/注册表/服务/计划任务/自建备份）一起清干净，删后复扫 0 命中才算完；事由＝Everything 手写卸载脚本漏快捷方式步骤留下死 lnk。
+
+- [rule-video-editing-assets-and-outputs](rule-video-editing-assets-and-outputs.md)：用户长期规则（2026-11-28 m03336）——剪辑工具/素材/venv/模型/渲染中间产物全放 D 盘（`D:\AI-Tool-State\<任务>\`），**成品视频放 H 盘 `H:\视频\CopCut\<项目名>\`**（本机既有习惯，H 盘并无名为「剪映」「成品」的目录），拷完 MD5 双向一致后删原地 mp4，只留 ass/srt/timeline/audit/封面/片头片尾模板等可复用小资产；别误删 CapCut 草稿引用的源媒体与 `_env` venv。
+- [reference-capcut-not-jianying-paths](reference-capcut-not-jianying-paths.md)：本机**没装剪映**只装 CapCut 9.8.0.4213（`D:\CapCut\CapCut.exe`）；草稿库 `E:\CopCut\草稿\CapCut Drafts`、素材 `E:\剪影\素材\CapCut Materials`、预存 `E:\剪影\预存\JianyingPro Presets`、缓存全在 `%LOCALAPPDATA%\CapCut\User Data\Cache`、导出成片习惯落 `H:\视频\CopCut\`；JianyingHubMCP 存在不代表装了剪映。
